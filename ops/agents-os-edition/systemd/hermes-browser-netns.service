@@ -74,24 +74,29 @@ User=root
 # CAP_NET_ADMIN:  ip link, ip addr, ip route, nft (reglas en el namespace).
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN
 
-# ── Verificación de módulos kernel (belt-and-suspenders) ──────────────────────
-# nf_conntrack y nf_log_syslog deben estar cargados antes de que nft intente
-# registrar expresiones `ct state` y `log level warn` dentro del netns.
-# Normalmente los carga systemd-modules-load.service vía
-# /etc/modules-load.d/hermes-netfilter.conf (After= garantiza el orden).
-# Este ExecStartPre es la red de seguridad: si por cualquier razón los módulos
-# no están cargados (imagen antigua, modules-load deshabilitado, etc.), la unit
-# falla AQUÍ con un mensaje claro — NO con el críptico 255/EXCEPTION del nft.
-# Fail-closed: sin módulos → sin jaula → navegador no se lanza.
+# ── Verificación de módulos kernel ────────────────────────────────────────────
+# nf_conntrack es OBLIGATORIO: las reglas `ct state` no se registran sin él →
+# sin jaula → fail-closed (exit 1). Normalmente lo carga systemd-modules-load
+# vía /etc/modules-load.d/hermes-netfilter.conf.
+# nf_log_syslog es OPCIONAL: sólo aporta el backend de LOGGING para las reglas
+# `log level warn`. En kernels modernos nft REGISTRA esas reglas aunque el módulo
+# falte (el logger se resuelve al pasar el paquete, no al cargar) — el `drop`
+# sigue aplicando, sólo no se emite el log. Algunas VMs minimalistas (p.ej. la de
+# podman en macOS) no traen el módulo y no se puede modprobe (no hay /lib/modules
+# del kernel del host dentro del contenedor). Por eso: lo intentamos cargar y, si
+# no está, AVISAMOS y seguimos — el bloqueo del netns no depende de él.
 ExecStartPre=/bin/sh -c '\
-    for mod in nf_conntrack nf_log_syslog; do \
-        if ! grep -q "^$mod " /proc/modules 2>/dev/null; then \
-            echo "hermes-browser-netns: módulo requerido no cargado: $mod" >&2; \
-            echo "  Asegúrese de que /etc/modules-load.d/hermes-netfilter.conf está horneado en la imagen." >&2; \
-            exit 1; \
-        fi; \
-    done; \
-    echo "hermes-browser-netns: módulos nf_conntrack + nf_log_syslog verificados OK"'
+    if ! grep -q "^nf_conntrack " /proc/modules 2>/dev/null; then \
+        echo "hermes-browser-netns: módulo requerido no cargado: nf_conntrack" >&2; \
+        echo "  Asegúrese de que /etc/modules-load.d/hermes-netfilter.conf está horneado en la imagen." >&2; \
+        exit 1; \
+    fi; \
+    grep -q "^nf_log_syslog " /proc/modules 2>/dev/null || modprobe nf_log_syslog 2>/dev/null || true; \
+    if grep -q "^nf_log_syslog " /proc/modules 2>/dev/null; then \
+        echo "hermes-browser-netns: módulos nf_conntrack + nf_log_syslog verificados OK"; \
+    else \
+        echo "hermes-browser-netns: WARN nf_log_syslog ausente — el bloqueo del netns sigue ACTIVO; sólo se omite el logging de paquetes denegados (típico en la VM de podman en macOS)" >&2; \
+    fi'
 
 # ── Crear netns (idempotente) ─────────────────────────────────────────────────
 ExecStart=/bin/sh -c 'ip netns add hermes-browser 2>/dev/null || true'
