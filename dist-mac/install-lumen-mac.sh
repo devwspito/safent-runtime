@@ -62,20 +62,27 @@ podman system connection default lumen-machine-root 2>/dev/null \
   || podman system connection default lumen-machine 2>/dev/null || true
 
 # ── 2. image: BUILD from source (default, self-contained) OR pull (if LUMEN_IMAGE) ─
+# ALWAYS build (do not skip on "image exists") — the fixes are BAKED into the image, so a
+# stale image must be replaced. podman reuses cached layers, so an unchanged tree rebuilds
+# in seconds; only changed layers (and everything after) re-run.
 if [ -n "${LUMEN_IMAGE:-}" ]; then
   say "Pulling prebuilt image: $LUMEN_IMAGE"
   echo "   (auth: podman login ghcr.io -u <your-github-user>  then re-run)"
   podman pull "$LUMEN_IMAGE"
   podman tag "$LUMEN_IMAGE" "$LOCAL_TAG"
-elif podman image exists "$LOCAL_TAG"; then
-  say "Image $LOCAL_TAG already present — skipping build."
 else
   # The wheel is built INSIDE the container (Containerfile), so no host python is needed —
   # this avoids the old macOS system python (3.9) mis-building the wheel as UNKNOWN-0.0.0.
-  say "Building Lumen from source (one-time, ~15-20 min — pulls the Playwright base + npm + pip)…"
+  say "Building Lumen from source (podman reuses cached layers — fast if nothing changed; full ~15-20 min on a cold cache)…"
   ( cd "$HERE" && podman build -f ops/container/Containerfile -t "$LOCAL_TAG" . ) \
     || die "build failed — see the output above."
 fi
+
+# ── 2b. assert the macOS cage fixes actually got baked (catches a stale tree / bad cache) ─
+if ! podman run --rm --entrypoint /bin/sh "$LOCAL_TAG" -c 'test -f /etc/systemd/system.conf.d/10-no-mempressure.conf'; then
+  die "the built image is MISSING the macOS fixes (memory.pressure drop-in). Your checkout is stale — run:  git pull  (and confirm 'git log -1' shows the rootful/memory.pressure/nf_log_syslog commits), then re-run this script."
+fi
+say "✓ macOS cage fixes baked into the image (memory.pressure off + nf_log_syslog optional)."
 
 # ── 3. run (canonical flags) ─────────────────────────────────────────────────
 say "Starting Lumen…"
