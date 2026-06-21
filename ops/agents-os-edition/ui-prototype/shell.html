@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark" data-accent="amber">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agents OS — Shell</title>
+<style>
+/* ============================================================================
+   Agents OS · Shell "Sereno" — prototipo premium del escritorio completo.
+   Single-file. Cero dependencias. Cero rastro de Fedora/GNOME.
+   El agente ES el sistema operativo.
+   ============================================================================ */
+@import url('https://rsms.me/inter/inter.css');
+
+:root{
+  --font: 'Inter', -apple-system, system-ui, sans-serif;
+  --font-display: 'Inter', system-ui, sans-serif;
+  /* radii */
+  --r-sm:10px; --r:16px; --r-lg:22px; --r-xl:30px;
+  /* motion */
+  --ease: cubic-bezier(.22,.8,.18,1);
+  --ease-out: cubic-bezier(.16,1,.3,1);
+  --spring: cubic-bezier(.34,1.56,.64,1);
+}
+/* ── Accents (hot-swappable) ─────────────────────────────────────────────── */
+[data-accent="amber"]{ --acc:#EFA45C; --acc-2:#E2864B; --acc-soft:rgba(239,164,92,.16); --acc-glow:rgba(239,164,92,.42); }
+[data-accent="iris"]{  --acc:#8C9BFF; --acc-2:#6E7BF0; --acc-soft:rgba(140,155,255,.16); --acc-glow:rgba(140,155,255,.42); }
+[data-accent="mint"]{  --acc:#5FD1A8; --acc-2:#3FB389; --acc-soft:rgba(95,209,168,.16); --acc-glow:rgba(95,209,168,.40); }
+[data-accent="rose"]{  --acc:#F08AA6; --acc-2:#E2698A; --acc-soft:rgba(240,138,166,.16); --acc-glow:rgba(240,138,166,.42); }
+
+/* ── Dark "Sereno" (default) ─────────────────────────────────────────────── */
+[data-theme="dark"]{
+  --bg-0:#0B0C0F; --bg-1:#101218; --ink:#F4F5F7; --ink-2:#B6BAC4; --ink-3:#7C8190;
+  --glass:rgba(24,27,34,.62); --glass-2:rgba(30,34,43,.74); --hair:rgba(255,255,255,.08);
+  --hair-2:rgba(255,255,255,.045); --shadow:0 24px 70px -20px rgba(0,0,0,.7), 0 8px 24px -12px rgba(0,0,0,.5);
+  --shadow-sm:0 6px 20px -8px rgba(0,0,0,.6); --hi:rgba(255,255,255,.06);
+}
+[data-theme="light"]{
+  --bg-0:#EDEAE3; --bg-1:#F6F4EF; --ink:#1A1B1E; --ink-2:#54585F; --ink-3:#8A8E98;
+  --glass:rgba(255,255,255,.66); --glass-2:rgba(255,255,255,.8); --hair:rgba(20,20,25,.08);
+  --hair-2:rgba(20,20,25,.05); --shadow:0 24px 70px -22px rgba(40,34,28,.4), 0 8px 22px -12px rgba(40,34,28,.18);
+  --shadow-sm:0 6px 18px -8px rgba(40,34,28,.22); --hi:rgba(255,255,255,.7);
+}
+
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;overflow:hidden}
+body{
+  font-family:var(--font); color:var(--ink); background:var(--bg-0);
+  -webkit-font-smoothing:antialiased; letter-spacing:-.011em;
+  font-feature-settings:'cv02','cv03','cv04','cv11','ss01';
+}
+
+/* ── Wallpaper: ambient depth, mesh glow, grain ──────────────────────────── */
+.wallpaper{position:fixed;inset:0;z-index:0;overflow:hidden}
+.wallpaper::before{
+  content:'';position:absolute;inset:-30%;
+  background:
+    radial-gradient(40% 50% at 22% 18%, var(--acc-glow), transparent 60%),
+    radial-gradient(46% 56% at 82% 28%, rgba(120,140,255,.30), transparent 62%),
+    radial-gradient(50% 60% at 60% 96%, rgba(95,209,168,.16), transparent 60%);
+  filter:blur(40px) saturate(1.1);
+  animation:drift 26s var(--ease) infinite alternate;
+}
+[data-theme="dark"] .wallpaper{background:radial-gradient(120% 120% at 50% 0%, #15171E 0%, #0B0C0F 60%)}
+[data-theme="light"] .wallpaper{background:radial-gradient(120% 120% at 50% 0%, #F7F4EE 0%, #E8E4DB 60%)}
+.wallpaper::after{
+  content:'';position:absolute;inset:0;opacity:.04;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+@keyframes drift{0%{transform:translate(0,0) scale(1)}100%{transform:translate(-3%,2%) scale(1.06)}}
+
+/* ── Top bar ─────────────────────────────────────────────────────────────── */
+.topbar{
+  position:fixed;top:0;left:0;right:0;height:42px;z-index:40;
+  display:flex;align-items:center;gap:14px;padding:0 16px;
+  background:linear-gradient(180deg, rgba(0,0,0,.18), transparent);
+}
+[data-theme="light"] .topbar{background:linear-gradient(180deg, rgba(255,255,255,.3), transparent)}
+.tb-brand{display:flex;align-items:center;gap:9px;font-weight:650;font-size:13.5px}
+.tb-logo{width:18px;height:18px;border-radius:6px;background:
+  radial-gradient(circle at 32% 28%, #fff5, transparent 60%),
+  linear-gradient(135deg, var(--acc), var(--acc-2));
+  box-shadow:0 0 16px var(--acc-glow), inset 0 0 0 1px rgba(255,255,255,.2)}
+.tb-sep{width:1px;height:14px;background:var(--hair)}
+.tb-status{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);font-weight:500}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--acc);box-shadow:0 0 10px var(--acc-glow);position:relative}
+.dot::after{content:'';position:absolute;inset:-4px;border-radius:50%;border:1px solid var(--acc);opacity:.4;animation:pulse 2.4s var(--ease) infinite}
+@keyframes pulse{0%{transform:scale(1);opacity:.5}100%{transform:scale(2.2);opacity:0}}
+.tb-spacer{flex:1}
+.tb-tray{display:flex;align-items:center;gap:6px}
+.tray-btn{display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:8px;font-size:12px;font-weight:540;color:var(--ink-2);cursor:pointer;transition:.2s var(--ease)}
+.tray-btn:hover{background:var(--glass);color:var(--ink)}
+.tray-btn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.7}
+.tb-clock{font-variant-numeric:tabular-nums;font-weight:600;font-size:12.5px;color:var(--ink);letter-spacing:.01em}
+
+/* ── Desktop stage ───────────────────────────────────────────────────────── */
+.stage{position:fixed;inset:42px 0 0 0;z-index:10;display:flex;align-items:center;justify-content:center}
+
+/* glass surface base */
+.glass{
+  background:var(--glass);backdrop-filter:blur(40px) saturate(1.6);-webkit-backdrop-filter:blur(40px) saturate(1.6);
+  border:1px solid var(--hair);box-shadow:var(--shadow);
+  position:relative;
+}
+.glass::before{content:'';position:absolute;inset:0;border-radius:inherit;padding:1px;
+  background:linear-gradient(180deg, var(--hi), transparent 40%);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none}
+
+/* ── Command Center (the agent IS the centerpiece) ───────────────────────── */
+.command{
+  width:min(720px,84vw);border-radius:var(--r-xl);overflow:hidden;
+  display:flex;flex-direction:column;max-height:74vh;
+  animation:rise .7s var(--ease-out) both;
+}
+@keyframes rise{from{opacity:0;transform:translateY(26px) scale(.97)}to{opacity:1;transform:none}}
+.cmd-head{display:flex;align-items:center;gap:13px;padding:18px 22px 14px}
+.cmd-avatar{width:38px;height:38px;border-radius:12px;flex:none;position:relative;
+  background:radial-gradient(circle at 32% 28%, #fff6, transparent 55%),linear-gradient(135deg, var(--acc), var(--acc-2));
+  box-shadow:0 8px 24px -6px var(--acc-glow), inset 0 0 0 1px rgba(255,255,255,.22)}
+.cmd-avatar::after{content:'';position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:var(--acc);border:2.5px solid var(--glass-2);box-shadow:0 0 8px var(--acc-glow)}
+.cmd-id b{font-size:15px;font-weight:650;display:block}
+.cmd-id span{font-size:12px;color:var(--ink-3);font-weight:500}
+.cmd-head-r{margin-left:auto;display:flex;gap:6px}
+.ico{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;color:var(--ink-2);cursor:pointer;transition:.2s var(--ease)}
+.ico:hover{background:var(--hair);color:var(--ink)}
+.ico svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.7}
+
+.cmd-thread{flex:1;overflow-y:auto;padding:6px 22px 8px;display:flex;flex-direction:column;gap:16px}
+.cmd-thread::-webkit-scrollbar{width:7px}.cmd-thread::-webkit-scrollbar-thumb{background:var(--hair);border-radius:4px}
+.msg{display:flex;gap:11px;max-width:88%;animation:msgin .5s var(--ease-out) both}
+@keyframes msgin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.msg.me{align-self:flex-end;flex-direction:row-reverse}
+.m-av{width:26px;height:26px;border-radius:8px;flex:none}
+.msg.them .m-av{background:radial-gradient(circle at 32% 28%, #fff6, transparent 55%),linear-gradient(135deg,var(--acc),var(--acc-2))}
+.msg.me .m-av{background:linear-gradient(135deg,#54585F,#3a3d44)}
+[data-theme="light"] .msg.me .m-av{background:linear-gradient(135deg,#c9c4ba,#aaa498)}
+.bubble{padding:11px 15px;border-radius:16px;font-size:13.5px;line-height:1.5;color:var(--ink)}
+.msg.them .bubble{background:var(--glass-2);border:1px solid var(--hair);border-top-left-radius:5px}
+.msg.me .bubble{background:var(--acc);color:#1a1206;font-weight:500;border-top-right-radius:5px;box-shadow:0 8px 22px -8px var(--acc-glow)}
+[data-accent="iris"] .msg.me .bubble,[data-accent="rose"] .msg.me .bubble{color:#0c0e1a}
+
+/* live activity card — the agent working (browser/task) */
+.act{margin-top:2px;border-radius:14px;overflow:hidden;border:1px solid var(--hair);background:var(--glass-2)}
+.act-bar{display:flex;align-items:center;gap:8px;padding:8px 11px;border-bottom:1px solid var(--hair-2);font-size:11.5px;color:var(--ink-2)}
+.act-dots{display:flex;gap:5px}.act-dots i{width:9px;height:9px;border-radius:50%}
+.act-dots i:nth-child(1){background:#ff5f57}.act-dots i:nth-child(2){background:#febc2e}.act-dots i:nth-child(3){background:#28c840}
+.act-url{flex:1;text-align:center;font-variant-numeric:tabular-nums;opacity:.8}
+.act-live{display:flex;align-items:center;gap:5px;color:var(--acc);font-weight:600}
+.act-live i{width:5px;height:5px;border-radius:50%;background:var(--acc);animation:pulse2 1.4s infinite}
+@keyframes pulse2{0%,100%{opacity:.3}50%{opacity:1}}
+.act-body{height:128px;background:linear-gradient(135deg, #1b1e26, #14161c);position:relative;overflow:hidden}
+[data-theme="light"] .act-body{background:linear-gradient(135deg,#fff,#efece5)}
+.act-skel{position:absolute;inset:14px;display:flex;flex-direction:column;gap:9px}
+.act-skel span{height:9px;border-radius:5px;background:var(--hair);position:relative;overflow:hidden}
+.act-skel span::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,var(--hi),transparent);animation:shim 1.8s infinite}
+@keyframes shim{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+.act-skel span:nth-child(1){width:62%}.act-skel span:nth-child(2){width:88%}.act-skel span:nth-child(3){width:74%}.act-skel span:nth-child(4){width:46%}
+
+/* thinking */
+.thinking{display:flex;align-items:center;gap:7px;color:var(--ink-3);font-size:13px;padding-left:37px}
+.thinking i{width:5px;height:5px;border-radius:50%;background:currentColor;animation:td 1.2s infinite}
+.thinking i:nth-child(2){animation-delay:.18s}.thinking i:nth-child(3){animation-delay:.36s}
+@keyframes td{0%,60%,100%{opacity:.25;transform:translateY(0)}30%{opacity:1;transform:translateY(-4px)}}
+
+/* composer */
+.composer{padding:14px 18px 18px;display:flex;align-items:center;gap:11px;border-top:1px solid var(--hair-2)}
+.composer-field{flex:1;display:flex;align-items:center;gap:10px;background:var(--bg-1);border:1px solid var(--hair);border-radius:15px;padding:0 6px 0 16px;height:48px;transition:.25s var(--ease)}
+.composer-field:focus-within{border-color:var(--acc);box-shadow:0 0 0 4px var(--acc-soft)}
+.composer-field input{flex:1;background:none;border:none;outline:none;color:var(--ink);font-family:var(--font);font-size:14px}
+.composer-field input::placeholder{color:var(--ink-3)}
+.send{width:36px;height:36px;border-radius:11px;border:none;cursor:pointer;display:grid;place-items:center;
+  background:linear-gradient(135deg,var(--acc),var(--acc-2));box-shadow:0 6px 18px -6px var(--acc-glow);transition:.2s var(--spring)}
+.send:hover{transform:scale(1.07)}.send svg{width:18px;height:18px;stroke:#1a1206;fill:none;stroke-width:2.2}
+.mini{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;color:var(--ink-3);cursor:pointer;transition:.2s}
+.mini:hover{color:var(--ink);background:var(--hair)}.mini svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7}
+
+/* ── Floating window (the agent's browser, governed) ─────────────────────── */
+.window{position:fixed;right:46px;top:96px;width:330px;border-radius:var(--r-lg);overflow:hidden;z-index:20;
+  animation:rise .8s .15s var(--ease-out) both}
+.win-bar{display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid var(--hair-2);font-size:12.5px;font-weight:600}
+.win-bar .pill{margin-left:auto;font-size:10.5px;font-weight:600;color:var(--acc);background:var(--acc-soft);padding:3px 8px;border-radius:20px}
+.win-body{padding:14px}
+.appcard{display:flex;align-items:center;gap:11px;padding:9px;border-radius:12px;transition:.2s var(--ease);cursor:pointer}
+.appcard:hover{background:var(--hair)}
+.appcard .gico{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;flex:none;background:var(--glass-2);border:1px solid var(--hair)}
+.appcard .gico svg{width:18px;height:18px;stroke:var(--acc);fill:none;stroke-width:1.8}
+.appcard b{font-size:13px;display:block}.appcard small{font-size:11.5px;color:var(--ink-3)}
+.appcard .chev{margin-left:auto;color:var(--ink-3)}
+
+/* ── Notification toast ──────────────────────────────────────────────────── */
+.toast{position:fixed;right:46px;top:96px;width:330px;z-index:60;border-radius:18px;padding:14px 16px;display:flex;gap:12px;
+  animation:toastin .7s .9s var(--spring) both}
+@keyframes toastin{from{opacity:0;transform:translateX(40px) scale(.94)}to{opacity:1;transform:none}}
+.toast .t-ico{width:34px;height:34px;border-radius:10px;flex:none;display:grid;place-items:center;background:var(--acc-soft)}
+.toast .t-ico svg{width:18px;height:18px;stroke:var(--acc);fill:none;stroke-width:2}
+.toast b{font-size:13px;display:block;margin-bottom:2px}
+.toast p{font-size:12px;color:var(--ink-2);line-height:1.45}
+.toast-actions{display:flex;gap:7px;margin-top:9px}
+.t-btn{font-size:11.5px;font-weight:600;padding:5px 12px;border-radius:9px;border:none;cursor:pointer;transition:.18s}
+.t-btn.ok{background:var(--acc);color:#1a1206}.t-btn.ok:hover{filter:brightness(1.08)}
+.t-btn.no{background:var(--hair);color:var(--ink-2)}.t-btn.no:hover{color:var(--ink)}
+
+/* ── Dock ────────────────────────────────────────────────────────────────── */
+.dock{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:50;
+  display:flex;align-items:flex-end;gap:7px;padding:9px 12px;border-radius:22px;
+  animation:dockin .9s .3s var(--ease-out) both}
+@keyframes dockin{from{opacity:0;transform:translate(-50%,30px)}to{opacity:1;transform:translateX(-50%)}}
+.dock-app{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;cursor:pointer;position:relative;
+  background:var(--glass-2);border:1px solid var(--hair);transition:.28s var(--spring)}
+.dock-app svg{width:23px;height:23px;stroke:var(--ink-2);fill:none;stroke-width:1.7;transition:.2s}
+.dock-app:hover{transform:translateY(-12px) scale(1.12)}
+.dock-app:hover svg{stroke:var(--acc)}
+.dock-app.active::after{content:'';position:absolute;bottom:-5px;left:50%;transform:translateX(-50%);width:5px;height:5px;border-radius:50%;background:var(--acc);box-shadow:0 0 8px var(--acc-glow)}
+.dock-app .tip{position:absolute;bottom:58px;left:50%;transform:translateX(-50%) translateY(6px);background:var(--glass-2);border:1px solid var(--hair);backdrop-filter:blur(20px);color:var(--ink);font-size:11.5px;font-weight:600;padding:5px 10px;border-radius:9px;white-space:nowrap;opacity:0;pointer-events:none;transition:.2s var(--ease);box-shadow:var(--shadow-sm)}
+.dock-app:hover .tip{opacity:1;transform:translateX(-50%)}
+.dock-sep{width:1px;height:34px;background:var(--hair);margin:0 4px;align-self:center}
+
+/* ── Settings flyout (theme/accent — "haz tuyo el SO") ───────────────────── */
+.flyout{position:fixed;top:48px;right:14px;width:268px;border-radius:var(--r-lg);z-index:80;padding:16px;opacity:0;transform:translateY(-10px) scale(.97);pointer-events:none;transition:.28s var(--ease)}
+.flyout.open{opacity:1;transform:none;pointer-events:auto}
+.fly-title{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin:2px 0 11px}
+.seg{display:flex;background:var(--bg-1);border:1px solid var(--hair);border-radius:12px;padding:3px;gap:3px;margin-bottom:16px}
+.seg button{flex:1;height:32px;border:none;background:none;border-radius:9px;font-family:var(--font);font-size:12.5px;font-weight:600;color:var(--ink-2);cursor:pointer;transition:.2s}
+.seg button.on{background:var(--glass-2);color:var(--ink);box-shadow:var(--shadow-sm)}
+.accents{display:flex;gap:10px}
+.acc-chip{width:34px;height:34px;border-radius:11px;cursor:pointer;position:relative;transition:.2s var(--spring);border:2px solid transparent}
+.acc-chip:hover{transform:scale(1.1)}
+.acc-chip.on{border-color:var(--ink)}
+.acc-chip[data-a="amber"]{background:linear-gradient(135deg,#EFA45C,#E2864B)}
+.acc-chip[data-a="iris"]{background:linear-gradient(135deg,#8C9BFF,#6E7BF0)}
+.acc-chip[data-a="mint"]{background:linear-gradient(135deg,#5FD1A8,#3FB389)}
+.acc-chip[data-a="rose"]{background:linear-gradient(135deg,#F08AA6,#E2698A)}
+
+.hint{position:fixed;left:18px;bottom:20px;z-index:90;font-size:11.5px;color:var(--ink-3);background:var(--glass);backdrop-filter:blur(20px);border:1px solid var(--hair);padding:7px 12px;border-radius:10px}
+.hint b{color:var(--ink-2)}
+</style>
+</head>
+<body>
+
+<div class="wallpaper"></div>
+
+<!-- TOP BAR -->
+<div class="topbar">
+  <div class="tb-brand"><div class="tb-logo"></div>Agents&nbsp;OS</div>
+  <div class="tb-sep"></div>
+  <div class="tb-status"><span class="dot"></span> Hermes · trabajando</div>
+  <div class="tb-spacer"></div>
+  <div class="tb-tray">
+    <div class="tray-btn"><svg viewBox="0 0 24 24"><path d="M5 13a10 10 0 0 1 14 0M8.5 16.5a5 5 0 0 1 7 0M12 20h.01"/></svg></div>
+    <div class="tray-btn"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4zM15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14"/></svg></div>
+    <div class="tray-btn" onclick="toggleFly(event)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.3l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2.3-1.3L13.8 2h-3.6l-.5 2.5a7 7 0 0 0-2.3 1.3l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .9.1 1.3l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2.3 1.3l.5 2.5h3.6l.5-2.5a7 7 0 0 0 2.3-1.3l2.3 1 2-3.4-2-1.5z"/></svg></div>
+    <div class="tb-clock" id="clock">9:41</div>
+  </div>
+</div>
+
+<!-- SETTINGS FLYOUT -->
+<div class="flyout glass" id="fly">
+  <div class="fly-title">Apariencia</div>
+  <div class="seg" id="themeSeg">
+    <button onclick="setTheme('light')">Claro</button>
+    <button class="on" onclick="setTheme('dark')">Oscuro</button>
+  </div>
+  <div class="fly-title">Acento</div>
+  <div class="accents" id="accents">
+    <div class="acc-chip on" data-a="amber" onclick="setAccent('amber')"></div>
+    <div class="acc-chip" data-a="iris" onclick="setAccent('iris')"></div>
+    <div class="acc-chip" data-a="mint" onclick="setAccent('mint')"></div>
+    <div class="acc-chip" data-a="rose" onclick="setAccent('rose')"></div>
+  </div>
+</div>
+
+<!-- DESKTOP -->
+<div class="stage">
+  <!-- COMMAND CENTER -->
+  <div class="command glass">
+    <div class="cmd-head">
+      <div class="cmd-avatar"></div>
+      <div class="cmd-id"><b>Hermes</b><span>Tu agente · trabajando para ti</span></div>
+      <div class="cmd-head-r">
+        <div class="ico" title="Historial"><svg viewBox="0 0 24 24"><path d="M12 8v4l3 2M21 12a9 9 0 1 1-9-9 9 9 0 0 1 9 9z"/></svg></div>
+        <div class="ico" title="Nuevo"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+      </div>
+    </div>
+
+    <div class="cmd-thread" id="thread">
+      <div class="msg me"><div class="m-av"></div><div class="bubble">Resérvame mesa para 2 mañana a las 21h en algún italiano bien valorado del centro.</div></div>
+      <div class="msg them"><div class="m-av"></div><div>
+        <div class="bubble">Voy. Busco italianos del centro con buena nota y disponibilidad para mañana 21:00 (2 personas). Te muestro lo que veo en directo 👇</div>
+        <div class="act">
+          <div class="act-bar"><div class="act-dots"><i></i><i></i><i></i></div><div class="act-url">thefork.es · resultados</div><div class="act-live"><i></i>EN VIVO</div></div>
+          <div class="act-body"><div class="act-skel"><span></span><span></span><span></span><span></span></div></div>
+        </div>
+      </div></div>
+      <div class="thinking">Comparando 6 opciones<i></i><i></i><i></i></div>
+    </div>
+
+    <div class="composer">
+      <div class="mini"><svg viewBox="0 0 24 24"><path d="M21.4 11.05 12.25 20.2a5 5 0 0 1-7.07-7.07l9.19-9.2a3 3 0 0 1 4.24 4.25l-8.49 8.49a1 1 0 0 1-1.42-1.42l7.43-7.42"/></svg></div>
+      <div class="composer-field">
+        <input placeholder="Pídele cualquier cosa a Hermes…" />
+        <div class="mini"><svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v4"/></svg></div>
+      </div>
+      <button class="send"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+    </div>
+  </div>
+</div>
+
+<!-- HITL APPROVAL TOAST (the agent asks; governed) -->
+<div class="toast glass" id="toast">
+  <div class="t-ico"><svg viewBox="0 0 24 24"><path d="M9 12l2 2 4-4M12 3l8 4v5c0 5-3.4 8.5-8 10-4.6-1.5-8-5-8-10V7z"/></svg></div>
+  <div>
+    <b>Hermes pide permiso</b>
+    <p>Quiere <b>confirmar la reserva</b> en TheFork (acción real). ¿Lo autorizo?</p>
+    <div class="toast-actions">
+      <button class="t-btn ok" onclick="document.getElementById('toast').style.display='none'">Permitir</button>
+      <button class="t-btn no" onclick="document.getElementById('toast').style.display='none'">Ahora no</button>
+    </div>
+  </div>
+</div>
+
+<!-- DOCK -->
+<div class="dock glass">
+  <div class="dock-app active"><span class="tip">Hermes</span><svg viewBox="0 0 24 24"><path d="M12 2a4 4 0 0 1 4 4c0 1.5-1 3-1 3h-6s-1-1.5-1-3a4 4 0 0 1 4-4zM7 12h10l1 8H6z"/></svg></div>
+  <div class="dock-app"><span class="tip">Navegador</span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/></svg></div>
+  <div class="dock-app"><span class="tip">Tareas</span><svg viewBox="0 0 24 24"><path d="M9 11l3 3 8-8M5 12l3 3M3 17h7"/></svg></div>
+  <div class="dock-app"><span class="tip">Skills</span><svg viewBox="0 0 24 24"><path d="M12 2l2.4 7.4H22l-6 4.5 2.3 7.1L12 16.7 5.7 21l2.3-7.1-6-4.5h7.6z"/></svg></div>
+  <div class="dock-app"><span class="tip">Ficheros</span><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
+  <div class="dock-sep"></div>
+  <div class="dock-app"><span class="tip">Permisos</span><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 19 4M16 7l2.5-2.5M14 9l1.5-1.5"/></svg></div>
+  <div class="dock-app"><span class="tip">Auditoría</span><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4zM8 9h8M8 13h8M8 17h5"/></svg></div>
+  <div class="dock-sep"></div>
+  <div class="dock-app" onclick="toggleFly(event)"><span class="tip">Ajustes</span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.9 7.9 0 0 0 .1-2l2-1.5-2-3.4-2.4 1a8 8 0 0 0-1.7-1l-.4-2.6h-4l-.4 2.6a8 8 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.5a7.9 7.9 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a8 8 0 0 0 1.7 1l.4 2.6h4l.4-2.6a8 8 0 0 0 1.7-1l2.4 1 2-3.4z"/></svg></div>
+</div>
+
+<div class="hint">Prototipo del shell · <b>cero Fedora</b> · temas y acento en caliente arriba a la derecha ⚙</div>
+
+<script>
+const $ = s => document.querySelector(s);
+function setTheme(t){ document.documentElement.dataset.theme=t;
+  document.querySelectorAll('#themeSeg button').forEach(b=>b.classList.toggle('on', b.textContent.toLowerCase().startsWith(t==='dark'?'osc':'cla'))); }
+function setAccent(a){ document.documentElement.dataset.accent=a;
+  document.querySelectorAll('.acc-chip').forEach(c=>c.classList.toggle('on', c.dataset.a===a)); }
+function toggleFly(e){ e.stopPropagation(); $('#fly').classList.toggle('open'); }
+document.addEventListener('click', ()=> $('#fly').classList.remove('open'));
+$('#fly').addEventListener('click', e=>e.stopPropagation());
+// live clock
+function tick(){ const d=new Date(); $('#clock').textContent = d.getHours()+':'+String(d.getMinutes()).padStart(2,'0'); }
+tick(); setInterval(tick, 10000);
+</script>
+</body>
+</html>

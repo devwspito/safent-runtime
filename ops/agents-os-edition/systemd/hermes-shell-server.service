@@ -1,0 +1,67 @@
+# hermes-shell-server.service — backend local de la Hermes Shell.
+# system-level (no per-user) — escucha SOLO localhost.
+
+[Unit]
+Description=Hermes Shell — local backend (FastAPI)
+# T023 — hermes-runtime.service DEBE estar activo antes de arrancar el
+# shell-server porque el server encola tareas vía D-Bus al daemon.
+# Sin el daemon activo el shell-server arrancaría pero sus endpoints
+# devolverían 503 desde el primer request — mejor fallar el arranque
+# explícitamente que degradar en silencio.
+#
+# Requires (no Wants): si el daemon falla, el shell-server falla también.
+# Esto evita que el frontend muestre un backend "up" sin agente real.
+After=network-online.target dbus.socket hermes-keygen.service hermes-runtime.service
+Wants=network-online.target hermes-keygen.service
+Requires=hermes-runtime.service
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+# In group hermes-egress so the elevation API (/api/v1/egress/domains) + boot-apply
+# may PUSH the owner's allow-list to the proxy control socket (group hermes-egress).
+# The agent's sandboxed processes (hermes-sandbox) cannot. (Red-team finding 2026-06-18.)
+# hermes-work: read+manage the agent's deliverables under /var/lib/hermes/workspace
+# (group hermes-work, written by the agent's hermes-sandbox exec). (2026-06-19.)
+SupplementaryGroups=hermes-egress hermes-work
+# Producción: 127.0.0.1 (loopback-only). Para QEMU dev, añadir un drop-in
+# override en /etc/systemd/system/hermes-shell-server.service.d/qemu-dev.conf
+# con Environment=HERMES_SHELL_BIND_HOST=0.0.0.0 — ese archivo NO se baquea
+# en la imagen de producción.
+Environment=HERMES_SHELL_BIND_HOST=127.0.0.1
+# El SDK de Composio exige un directorio de caché ESCRIBIBLE al importarse
+# ($HOME/.composio por defecto). Con ProtectHome=yes el HOME del servicio está
+# enmascarado, así que `import composio` lanza RuntimeError y el servicio entra
+# en crash-loop (nunca sirve → sin onboarding, "Sin modelo", connection refused).
+# Lo redirigimos a /var/lib/hermes (que sí está en ReadWritePaths=).
+Environment=COMPOSIO_CACHE_DIR=/var/lib/hermes/composio-cache
+# SECURITY (Finding 4 — auditable jail activation):
+# HERMES_BROWSER_JAIL=1 activates the root launcher path for browser spawns.
+# Explicit here so it appears in `systemctl show hermes-shell-server` and journal.
+Environment=HERMES_BROWSER_JAIL=1
+# Baked OS removes the bundled Playwright Chromium; use the system Chromium.
+Environment=HERMES_CHROMIUM_EXECUTABLE=/usr/bin/chromium-browser
+ExecStart=/usr/bin/python3 -m hermes.shell_server.main
+Restart=always
+RestartSec=2
+
+Slice=agents-os.slice
+MemoryMax=256M
+OOMScoreAdjust=-100
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/hermes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

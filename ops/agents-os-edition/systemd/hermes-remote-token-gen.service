@@ -1,0 +1,43 @@
+# hermes-remote-token-gen.service — genera /etc/hermes/remote-token en PRIMER BOOT.
+#
+# SECURITY FIX (finding #1 — CVE-class: secret baked in image layer):
+# El token NO se genera en el Containerfile (RUN …/dev/urandom) porque eso produce
+# un secreto IDÉNTICO en cada descarga de la imagen (una sola capa OCI compartida).
+# Se genera aquí, al primer boot, de forma que cada instancia tiene su propio token.
+#
+# Idempotente: ConditionPathExists=! evita regenerar el token en reboots
+# posteriores (regenerarlo invalidaría sesiones de mirror en curso).
+# Precede a hermes-mirror.service (user session).
+
+[Unit]
+Description=Hermes — Remote mirror token generation (first boot)
+After=systemd-tmpfiles-setup.service local-fs.target
+ConditionPathExists=!/etc/hermes/remote-token
+RequiresMountsFor=/etc/hermes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=root
+
+# Genera 24 caracteres base-58 (sin 0/O/I/l) desde /dev/urandom y los escribe
+# en /etc/hermes/remote-token con permisos 0600 root:hermes.
+# La línea de shell replica exactamente el charpool que usaba el RUN eliminado.
+ExecStart=/bin/sh -c '\
+    mkdir -p /etc/hermes && \
+    tr -dc "A-HJ-NP-Za-km-z2-9" < /dev/urandom | head -c 24 > /etc/hermes/remote-token && \
+    chown root:hermes /etc/hermes/remote-token && \
+    chmod 0640 /etc/hermes/remote-token'
+
+# Hardening: solo necesita escribir /etc/hermes, cero capabilities extra.
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+ReadWritePaths=/etc/hermes
+
+[Install]
+WantedBy=multi-user.target

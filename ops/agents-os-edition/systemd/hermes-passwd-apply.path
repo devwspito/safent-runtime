@@ -1,0 +1,28 @@
+# hermes-passwd-apply.path — watches for a staged password-change request
+# from the compositor (User=hermes-user, non-root) and immediately triggers
+# the privileged password-apply service.
+#
+# The compositor cannot call chpasswd directly (not root,
+# CapabilityBoundingSet=).  It writes a validated request to
+# /run/hermes/remote-control/passwd-request.json (mode 0600,
+# owner hermes-user).
+# The remote-control/ subdir is 0700 hermes-user:hermes-user (tmpfiles),
+# isolating the staged request from other processes including the daemon.
+#
+# The staged file contains 'current' and 'new' passwords. Both are:
+#   - PAM-verified (current) / validated (new) by the root helper before use.
+#   - Shredded immediately after use — they exist on disk only for milliseconds.
+#
+# The .path unit is root-owned and starts as root, ensuring the triggered
+# service also runs as root.
+
+[Unit]
+Description=Hermes — watch for staged password-change request
+Documentation=man:systemd.path(5)
+
+[Path]
+PathExists=/run/hermes/remote-control/passwd-request.json
+Unit=hermes-passwd-apply.service
+
+[Install]
+WantedBy=multi-user.target

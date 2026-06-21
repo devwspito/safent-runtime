@@ -1,0 +1,43 @@
+# hermes-clipboard-bridge.service (USER) — puente HTTP en-sesión para el portapapeles Wayland.
+#
+# Corre como servicio de USUARIO (hermes-user, uid 1000) dentro de la sesión
+# gráfica — igual que hermes-grd-init.service — para que WAYLAND_DISPLAY y
+# XDG_RUNTIME_DIR del entorno de sesión estén disponibles y wl-copy/wl-paste
+# puedan acceder al portapapeles de la sesión.
+#
+# NO usa [Service] User= porque ya es un unit de usuario ($HOME propio).
+#
+# Habilitado con: systemctl --global enable hermes-clipboard-bridge.service
+# (se graba en /etc/systemd/user/default.target.wants/).
+#
+# Puerto: 127.0.0.1:7519
+# Exposición requerida: ver src/hermes/clipboard_bridge/__main__.py
+
+[Unit]
+Description=Hermes Clipboard Bridge (puente portapapeles noVNC ↔ Wayland)
+# Arrancar después de que la sesión gráfica esté lista.  gnome-session.service
+# aparece en el bus de usuario cuando el compositor está vivo.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# Bind del bridge. Appliance/VM single-tenant (postura del security review):
+# 0.0.0.0 para que el remoto lo alcance (QEMU hostfwd apunta a la NIC del guest,
+# NO a loopback). El bridge solo toca el portapapeles del propio operador y el
+# dispositivo es de un único dueño. ENDURECIMIENTO para red no confiable /
+# multi-tenant: volver a 127.0.0.1 + exponer por ingress del túnel (/cb → 7519).
+Environment=HERMES_CLIPBOARD_BRIDGE_HOST=0.0.0.0
+ExecStart=/usr/bin/python3 -m hermes.clipboard_bridge
+Restart=on-failure
+RestartSec=3
+
+# Hardening — servicios de usuario no pueden elevar privilegios.
+NoNewPrivileges=yes
+
+# El servicio NO necesita acceso a /home ni /tmp ajenos.
+# PrivateTmp no está disponible en units de usuario en todas las distros —
+# se omite intencionadamente para compatibilidad con el user manager de Fedora.
+
+[Install]
+WantedBy=default.target

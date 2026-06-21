@@ -1,0 +1,120 @@
+# hermes-browser-launcher.service — Root helper that launches the confined browser.
+#
+# The unprivileged hermes daemon cannot call systemd-run --scope to create a
+# scope in a named netns (needs CAP_NET_ADMIN + CAP_SYS_ADMIN). This service
+# runs as root with a minimal bounding set and exposes a HARDCODED template:
+# the daemon can only supply session_name + domains_whitelist; all systemd-run
+# -p properties are fixed server-side — the caller cannot widen its own scope.
+#
+# Socket: /run/hermes/browser-launch.sock (root:hermes, 0660, SO_PEERCRED auth).
+# Protocol: 4-byte big-endian length-prefix + UTF-8 JSON (mirrors session-bridge).
+#
+# SAFETY: failing this service does NOT block OS boot — hermes-runtime.service
+# does NOT depend on it. If it is down while HERMES_BROWSER_JAIL=1, browser
+# launches hard-fail in the daemon (no bare-argv fallback).
+#
+# Design: specs/009-radiografia-os/kernel-browser-confinement-design.md §B
+
+[Unit]
+Description=Hermes — Root browser-launcher helper (privilege bridge for netns scope)
+Documentation=file:///usr/libexec/hermes/hermes-browser-launcher
+# Debe arrancar DESPUÉS de que el netns exista y los dirs tmpfiles estén listos.
+After=hermes-browser-netns.service systemd-tmpfiles-setup.service
+# Wants (not Requires): si el netns no está listo, el launcher arranca de todas
+# formas y fallará de forma segura (jail verifica /run/netns/hermes-browser).
+# BindsTo se excluye deliberadamente: si el netns muere, el launcher no se para
+# (ya está haciendo fail-closed por diseño). No usar PartOf aquí tampoco:
+# PartOf causaba que un fallo del launcher propagara stop al workspace target,
+# que a su vez paraba el netns (ExecStop: ip netns del), lo que competía con
+# el nft exec en curso del propio arranque del netns → race EACCES.
+Wants=hermes-browser-netns.service
+# NO PartOf=hermes-workspace.target — el launcher es un helper long-running;
+# su fallo no debe afectar al ciclo de vida del netns ni del target.
+# WantedBy es suficiente: el target lo activa pero no le propaga paradas.
+
+[Service]
+Type=simple
+# Root required for CAP_NET_ADMIN (netns) + CAP_SYS_ADMIN (scope creation) +
+# CAP_SYS_RESOURCE (cgroup/memory tuning via systemd-run -p MemoryMax).
+User=root
+Group=root
+# Join group hermes so the root launcher can create/unlink its control socket in
+# /run/hermes (0770 hermes:hermes). The CapabilityBoundingSet intentionally omits
+# CAP_DAC_OVERRIDE (least privilege), so without this group the bind() fails with
+# EACCES and the socket never appears → the daemon can't launch the jailed browser.
+# The socket is then chowned root:hermes 0660 by the launcher (daemon connects via
+# group hermes).
+# Also join hermes-work: the launcher creates the per-session profile dir under
+# /var/lib/hermes/browser-sessions (2770 hermes:hermes-work). Without DAC_OVERRIDE,
+# root needs the group write bit to mkdir it (teaching-* dirs have no other creator,
+# unlike exec-* which the daemon's execution-context factory pre-creates as hermes).
+SupplementaryGroups=hermes hermes-work
+
+ExecStart=/usr/libexec/hermes/hermes-browser-launcher
+
+# Restart=on-failure con parámetros conservadores para no generar storm:
+# - RestartSec=5: ventana suficiente para que el netns y tmpfiles estén listos.
+# - StartLimitBurst=3 en 120s: 3 fallos en 2 minutos → parar e ir a failed.
+#   Así el launcher no alimenta el restart-storm del netns via Wants.
+# - StartLimitAction=none: cuando se excede el burst, la unit va a failed pero
+#   NO propaga el fallo al target (no hay PartOf que propague).
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=3
+StartLimitIntervalSec=120
+StartLimitAction=none
+
+# ── Capabilities (minimal for privilege model) ────────────────────────────────
+# CAP_NET_ADMIN: required to put a scope into NetworkNamespacePath= (netns join).
+# CAP_SYS_ADMIN: required by systemd-run --scope to create the transient scope unit.
+# CAP_SYS_RESOURCE: allows systemd-run to set MemoryMax/CPUWeight on the scope.
+# Everything else is dropped — the launcher does NOT need network, fs, or device caps.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_RESOURCE
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_RESOURCE
+
+# ── Hardening (everything root doesn't strictly need is locked) ───────────────
+NoNewPrivileges=no
+# Note: NoNewPrivileges=yes would prevent the forked systemd-run from setting
+# capabilities on the spawned scope. The fork-exec path needs the ambient caps.
+# The launcher itself does not spawn setuid binaries — only systemd-run.
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# ── PASS-5 C4 (CLASS FIX: non-native-arch namespace-pivot bypass) ─────────────
+# SystemCallArchitectures=native installs a seccomp filter that KILLS any syscall
+# issued on a non-native ABI (i386 int 0x80 / x32 on x86_64) for THIS process and
+# its fork+exec descendants. SCOPE LIMIT (do NOT over-claim): the confined browser
+# is launched as a SEPARATE systemd-run TRANSIENT SERVICE created by PID 1 (see
+# scripts/hermes-browser-launcher: systemd-run --unit=...), NOT as a fork-child of
+# this unit — so this directive does NOT propagate into the Chromium process. It
+# only hardens the launcher itself + the short-lived systemd-run client. The
+# non-native-arch class is actually closed FOR CHROMIUM by the kernel-level kargs
+# (ia32_emulation=0 + syscall.x32=n in Containerfile.terminal), which remove the
+# i386 AND x32 entry points box-wide regardless of inheritance. Keeping this
+# directive here is cheap defense-in-depth for the privileged launcher. The
+# launcher is a native binary, so this never fires in normal operation; aarch64
+# native path unaffected.
+SystemCallArchitectures=native
+# Allow only the socket families needed: AF_UNIX (the launch socket) +
+# AF_NETLINK (systemd-run communicates with the kernel via netlink for cgroup).
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+# The launcher socket lives in /run/hermes (created by tmpfiles).
+# Browser session dirs under /var/lib/hermes/browser-sessions must be writable
+# so that systemd-run --scope can pass ReadWritePaths to the scope unit.
+ReadWritePaths=/run/hermes /var/lib/hermes/browser-sessions
+
+# No network access for the launcher itself — it only forks systemd-run.
+# The spawned scope (hermes-browser-*.scope) is what goes into the netns.
+IPAddressDeny=any
+
+[Install]
+WantedBy=hermes-workspace.target

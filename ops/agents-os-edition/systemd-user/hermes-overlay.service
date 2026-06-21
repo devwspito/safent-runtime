@@ -1,0 +1,66 @@
+# hermes-overlay.service (USER) — Hermes Spotlight overlay (layer-shell).
+#
+# Keeps the overlay process resident so re-invocation is sub-100 ms
+# (NFR-006: p95 ≤ 300 ms). The process hides its window on ESC/send
+# rather than exiting; the extension triggers systemctl --user start
+# (idempotent if already running).
+#
+# A crash of this unit does NOT affect the GNOME desktop (PartOf=
+# graphical-session.target, not a dependency). The extension falls back
+# to re-spawning via Gio.Subprocess if the unit is not running.
+#
+# Security:
+#   - NoNewPrivileges=yes
+#   - Runs as hermes-user (session service, uid 1000).
+#   - QT_QPA_PLATFORM=wayland: overlay is a Wayland-only client.
+#   - HERMES_TASKS_SOCK pointed at the daemon's AF_UNIX stream socket;
+#     peer-cred auth inside the daemon authorizes uid 1000 only.
+#   - No ProtectHome restriction: the overlay reads QML from
+#     /usr/lib/python3.*/site-packages/hermes/lumen/qml/ (read-only /usr).
+#
+# Enable (bake into image):
+#   systemctl --global enable hermes-overlay.service
+# Or per-user:
+#   systemctl --user enable hermes-overlay.service
+
+[Unit]
+Description=Hermes Overlay (Spotlight-style layer-shell invocation surface)
+Documentation=https://hermes.os/docs/overlay
+After=graphical-session.target hermes-session-input.service
+PartOf=graphical-session.target
+# Do not bring the desktop down if the overlay crashes.
+# PartOf ensures we stop when the session ends, without being a hard dep.
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m hermes.lumen.overlay
+
+# Wayland backend con fallback a xcb. NO forzamos QT_WAYLAND_SHELL_INTEGRATION
+# aquí: el plugin layer-shell de Qt6 NO se empaqueta en Fedora, y forzarlo en el
+# env hace que QGuiApplication crashee al init (antes de llegar al fallback de
+# Python). El overlay (__main__) detecta _has_qt_layer_shell() y solo entonces lo
+# activa; si no, degrada a ventana frameless (Path C-lite, válido en noVNC).
+Environment=QT_QPA_PLATFORM=wayland;xcb
+
+# Point at the daemon's AF_UNIX task stream socket.
+# The daemon creates /run/hermes/tasks.sock owned by hermes:hermes (0660).
+# hermes-user (uid 1000) is in group hermes, so it can connect.
+Environment=HERMES_TASKS_SOCK=/run/hermes/tasks.sock
+
+# Restart on crash (not on clean exit — the process exits when the session ends).
+# Delay prevents flapping if the overlay crashes on startup repeatedly.
+Restart=on-failure
+RestartSec=2
+# Cap restarts: after 5 failures in 60 s, stop restarting (don't loop forever).
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Hardening
+NoNewPrivileges=yes
+# The overlay reads from /usr (QML, icons) and /run/hermes (sockets).
+# It does not write persistent state.
+ReadWritePaths=/run/hermes
+# Do not restrict /tmp — Qt needs it for Wayland socket files.
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,23 @@
+# /usr/lib/bootc/kargs.d/01-hermes-lsm.toml
+#
+# Kernel arguments horneados en la imagen OCI para Agents OS Edition.
+# Copiado en Containerfile.base → /usr/lib/bootc/kargs.d/01-hermes-lsm.toml
+#
+# Cierra el gap: bib-config.toml ponía lsm=landlock solo para el path bib;
+# el kickstart `bootc install` no lo llevaba → nodo kickstart sin Landlock.
+# Con kargs.d, TODAS las rutas de instalación (bib qcow2, ISO anaconda,
+# bootc install directo) heredan estos argumentos del kernel.
+#
+# Diseño: specs/009-radiografia-os/kernel-browser-confinement-design.md §5
+# Referencia: https://docs.fedoraproject.org/en-US/bootc/kernel-arguments/
+#
+# lsm=landlock,lockdown,yama,bpf — activa el stack LSM completo.
+#   landlock: confinamiento FS por-proceso (hermes-browser-jail).
+#   lockdown: evita root escapar restricciones del kernel (integrity mode).
+#   yama:     ptrace scope (evita que procesos espíen lateralmente).
+#   bpf:      permite BPF privilegiado (seccomp BPF de systemd).
+# audit=1          — subsistema de auditoría activo (log de reglas nft con prefix).
+# init_on_alloc=1  — ceros en páginas nuevas (mitiga lectura de datos residuales).
+# init_on_free=1   — ceros en páginas liberadas (mitiga UAF de datos sensibles).
+
+kargs = ["lsm=landlock,lockdown,yama,bpf", "audit=1", "init_on_alloc=1", "init_on_free=1"]

@@ -1,0 +1,119 @@
+# hermes-netns-setup.service — Crea network namespaces y carga reglas nftables.
+# Ref: P0-3 (backlog.md), FR-056, research §3
+#
+# PROPÓSITO: Este oneshot es la pieza que faltaba para hacer REAL el confinamiento
+# de red. Sin él, los NetworkNamespacePath= de las units dependientes apuntan a
+# namespaces inexistentes y el egress anti-exfil no existe en el kernel.
+#
+# NAMESPACES creados:
+#   hermes-outbound — para hermes-runtime.service (egress: LLM provider + Composio + TSA).
+#   hermes-whisper  — para hermes-whisper.service (loopback only; defensa en profundidad).
+#
+# REGLAS cargadas (default-deny en cada ns):
+#   /etc/nftables/hermes/outbound.nft → table inet hermes_outbound
+#   /etc/nftables/hermes/whisper.nft  → table inet hermes_whisper
+#
+# IDEMPOTENCIA: `ip netns add X 2>/dev/null || true` — no falla si el ns ya existe
+# (p.ej. en un restart del servicio). `nft flush ruleset` se omite: el exec de nft
+# con el fichero completo hace flush implícito de la tabla declarada.
+#
+# ORDENACIÓN:
+#   Before=hermes-runtime.service hermes-whisper.service
+#   → los namespaces + reglas EXISTEN antes de que las units los referencien.
+#
+# HARDENING: root necesario para ip netns (CAP_SYS_ADMIN) + nft (CAP_NET_ADMIN).
+# Type=oneshot + RemainAfterExit=yes: systemd considera el servicio activo mientras
+# el sistema esté corriendo; una dependencia failing-after-start lo detecta.
+
+[Unit]
+Description=Hermes — creación de network namespaces y carga de reglas nftables
+Documentation=file:///etc/nftables/hermes/
+# Necesitamos que la red del host esté inicializada pero no necesitamos
+# network-online — solo creamos namespaces aislados del host network.
+After=systemd-tmpfiles-setup.service
+Before=hermes-runtime.service hermes-whisper.service
+# Parte del target del workspace; si la configuración de red falla,
+# el workspace no debe arrancar con confinamiento incompleto (fail-closed).
+PartOf=hermes-workspace.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Identidad: root necesario para ip netns add (CAP_SYS_ADMIN) y nft (CAP_NET_ADMIN).
+# Las capabilities se reducen al mínimo necesario post-exec.
+User=root
+
+# ── Crear namespaces (idempotente) ──────────────────────────────────────────
+# `2>/dev/null || true` — no falla si el ns ya existe (restart del servicio).
+# El namespace hermes-whisper refuerza el PrivateNetwork=yes de la unit Whisper
+# con reglas nft explícitas (defensa en profundidad).
+ExecStart=/bin/sh -c '\
+    ip netns add hermes-outbound 2>/dev/null || true && \
+    ip netns add hermes-whisper  2>/dev/null || true'
+
+# ── Cargar reglas nftables en cada namespace ────────────────────────────────
+# `nft -f` con un fichero que declara `table inet X { ... }` hace flush+load
+# de esa tabla en el namespace actual — idempotente en re-runs.
+# Ejecutar dentro del namespace con `ip netns exec <ns> nft -f <file>`.
+ExecStart=/bin/sh -c '\
+    ip netns exec hermes-outbound nft -f /etc/nftables/hermes/outbound.nft && \
+    ip netns exec hermes-whisper  nft -f /etc/nftables/hermes/whisper.nft'
+
+# ── Sembrar IPs permitidas en hermes-outbound ────────────────────────────────
+# Las IPs en @allowed_egress_ips se leen de /etc/hermes/egress-allowlist.conf
+# (líneas con formato: <ipv4> # comentario opcional).
+# Si el fichero no existe (primer boot sin configuración) el set queda vacío:
+# hermes-runtime no puede salir a internet hasta que se configure. Esto es
+# fail-closed correcto — el daemon arranca en modo sano-idle sin red.
+#
+# Para añadir IPs manualmente (debug/provisioning):
+#   ip netns exec hermes-outbound nft add element inet hermes_outbound \
+#     allowed_egress_ips { 1.2.3.4 }
+#
+# NOTA: El proceso hermes-runtime (User=hermes, CapabilityBoundingSet=) NO puede
+# actualizar el set en runtime (requiere CAP_NET_ADMIN). Las IPs deben pre-sembrarse
+# aquí (root, CAP_NET_ADMIN) o vía un helper privilegiado separado (P1 follow-up).
+ExecStart=/bin/sh -c '\
+    if [ -f /etc/hermes/egress-allowlist.conf ]; then \
+        grep -E "^[0-9]" /etc/hermes/egress-allowlist.conf | \
+        while IFS=" " read -r ip rest; do \
+            ip netns exec hermes-outbound nft add element inet hermes_outbound \
+                allowed_egress_ips "{ $ip }" 2>/dev/null || true; \
+        done; \
+        echo "hermes-netns-setup: egress-allowlist.conf sembrado en hermes-outbound"; \
+    else \
+        echo "hermes-netns-setup: /etc/hermes/egress-allowlist.conf no existe — hermes-outbound arranca sin IPs (fail-closed)"; \
+    fi'
+
+# ── Cleanup al parar el target ──────────────────────────────────────────────
+# Los namespaces se eliminan cuando el sistema se apaga o se reinicia el target.
+# `2>/dev/null || true` — no falla si ya fueron eliminados.
+ExecStop=/bin/sh -c '\
+    ip netns del hermes-outbound 2>/dev/null || true && \
+    ip netns del hermes-whisper  2>/dev/null || true'
+
+# ── Hardening mínimo compatible con las operaciones de red requeridas ───────
+# No new privileges tras el fork.
+NoNewPrivileges=yes
+
+# CAP_SYS_ADMIN: requerido por ip netns add (crea un nuevo net namespace).
+# CAP_NET_ADMIN: requerido por nft (manipula reglas nftables en el namespace).
+# CapabilityBoundingSet restringe el conjunto de capabilities disponibles incluso
+# para root — el proceso sigue siendo UID 0 pero solo puede ejercer estas dos.
+# AmbientCapabilities no aplica a root (root hereda caps via bounding set),
+# pero se lista explícitamente para documentar la intención.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN
+
+# Sistema de ficheros: solo necesitamos acceso a los binarios y las reglas.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# Las reglas nft se leen de /etc/nftables/hermes/ (ReadOnlyPaths implícito en strict).
+# No se necesitan paths de escritura.
+
+# Los namespaces de kernel no se crean dentro del servicio (se crean en el host ns).
+RestrictNamespaces=no
+
+[Install]
+WantedBy=hermes-workspace.target

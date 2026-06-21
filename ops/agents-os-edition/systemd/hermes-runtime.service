@@ -1,0 +1,260 @@
+# hermes-runtime.service — T016 — FR-043 (Restart=always + WatchdogSec).
+# Heredado de spec 002 + endurecido para Agents OS Edition.
+# El daemon arranca sano-idle sin modelo preconfigurado; el usuario
+# configura su LLM provider (cloud o local) en el wizard de onboarding.
+
+[Unit]
+Description=Hermes Runtime (agente core — todos los perfiles)
+After=dbus.socket
+# network-online.target removed: nothing in the pre-READY path makes network
+# calls.  Composio SDK (network) is imported lazily POST-READY; TSA anchoring
+# is fail-open and deferred to the first audit append (also POST-READY).
+# Waiting for network-online blocked boot 30-90 s on DHCP/WiFi systems.
+# Wants= (not Requires=): if the MCP launcher is down, the daemon starts anyway
+# and MCP spawns degrade to McpLauncherUnavailable (fail-soft). No PartOf on the
+# launcher — its failure must not propagate to the workspace target lifecycle.
+Wants=hermes-mcp-launcher.service
+# Ordering para el self-check de confinamiento (_assert_confinement_active):
+# el daemon verifica `systemctl is-active hermes-browser-netns/egress` al arrancar.
+# After= asegura que esos servicios YA hayan asentado (el netns es oneshot →
+# After= espera a que complete; active ⟺ reglas nft cargadas) antes del check,
+# evitando un falso "inactive" que brickearía el boot. Wants= (no Requires=) los
+# tira pero NO acopla teardown (el netns es infra de kernel persistente); si
+# fallan, el self-check fail-closed decide (sys.exit), que es la postura deseada.
+Wants=hermes-browser-netns.service hermes-egress-proxy.service
+After=hermes-browser-netns.service hermes-egress-proxy.service
+PartOf=hermes-workspace.target
+StartLimitBurst=10
+StartLimitIntervalSec=60
+
+[Service]
+Type=notify
+# T024 / CTRL-P1-17 — NotifyAccess=main restringe quién puede enviar
+# sd_notify(READY=1/WATCHDOG=1) al PID principal del servicio.
+# Sin esta directiva, el default de systemd es =none (lo que en la práctica
+# muchas distribuciones elevan a =main automáticamente, pero no es garantizado).
+# NotifyAccess=all permitiría que cualquier proceso hijo —incluido código
+# de terceros ejecutado por el agente— falsificara READY=1 o WATCHDOG=1
+# para evitar el timeout de liveness (vector de escape del gate de boot).
+# main = solo el PID 1 del servicio puede enviar notificaciones. Esto sella
+# el anti-spoof de READY=1 (G3).
+NotifyAccess=main
+User=hermes
+Group=hermes
+# In group hermes-egress so the daemon's browser flow may PUSH egress policy to the
+# proxy control socket (group hermes-egress 0660). The agent's sandboxed terminal/
+# browser run as hermes-sandbox (NOT hermes-egress) → cannot push → cannot widen their
+# own egress jail. (Red-team finding 2026-06-18.)
+# hermes-work: read+manage the agent's deliverables under /var/lib/hermes/workspace
+# (group hermes-work, written by the agent's hermes-sandbox exec). (2026-06-19.)
+SupplementaryGroups=hermes-egress hermes-work
+# SECURITY FIX (finding #5 — Landlock assert):
+# kargs/01-hermes-lsm.toml hornea lsm=landlock,lockdown,yama,bpf en TODAS las rutas
+# de instalación (bib qcow2, anaconda-iso, bootc install). El assert ya es seguro.
+#
+# El assert NO bloquea el boot del daemon si Landlock falta: en hardware donde el
+# cmdline no se aplicó (VM antigua, UEFI que ignoró kargs), el daemon arranca en
+# modo degradado MUY visible (journal ERROR + variable de entorno que deshabilita
+# las tareas con credenciales). El JAIL (hermes-browser-jail) sigue siendo
+# fail-closed para sesiones con credenciales independientemente de esta unit.
+#
+# Fail-closed Landlock assert: sin guion → si hermes-landlock-assert sale ≠ 0
+# (Landlock no disponible en el kernel, karg ausente o módulo deshabilitado) el
+# daemon NO arranca. Esto garantiza que el browser confinado NUNCA corre sin
+# Landlock activo en producción.
+#
+# VERIFICAR EN VM: systemctl status hermes-runtime debe mostrar Active=active.
+# Si falla con "landlock-assert returned non-zero exit status", confirmar que:
+#   1. El kernel fue compilado con CONFIG_SECURITY_LANDLOCK=y.
+#   2. El karg lsm=... incluye landlock (por defecto en fedora 38+).
+#   3. hermes-landlock-assert está instalado en /usr/bin/ (bakeado en la imagen).
+# Para despliegues en hosts sin Landlock (dev/CI), añadir un drop-in:
+#   /etc/systemd/system/hermes-runtime.service.d/landlock-optional.conf
+#     [Service]
+#     ExecStartPre=-/usr/bin/hermes-landlock-assert
+ExecStartPre=/usr/bin/hermes-landlock-assert
+ExecStart=/usr/bin/hermes-runtime --systemd-notify
+# WorkingDirectory: el Cerebro escribe ficheros relativos (write_file, terminal,
+# documentos generados) aquí por defecto. /var/lib/hermes/workspace está en
+# ReadWritePaths=/var/lib/hermes → ProtectSystem=strict no lo bloquea.
+# 0770 hermes:hermes (tmpfiles hermes.conf) → el daemon escribe; el compositor
+# (hermes-user, grupo hermes) puede leer → sin tocar hermes-home (secretos, 0750).
+WorkingDirectory=/var/lib/hermes/workspace
+
+# El SDK de Composio (importado al usar herramientas Composio) exige un cache
+# dir escribible; con ProtectHome=yes el HOME está enmascarado → redirigir a
+# /var/lib/hermes (ya en ReadWritePaths=) para que `import composio` no lance.
+# F5/F6 — motor Nous (producción). El código default es litellm; este env var
+# lo sobreescribe en la unit de producción. Si se quiere revertir a litellm
+# (fallback de emergencia), eliminar esta línea o hacer override con un drop-in:
+#   /etc/systemd/system/hermes-runtime.service.d/engine-override.conf
+#     [Service]
+#     Environment=HERMES_ENGINE=litellm
+Environment=HERMES_ENGINE=nous
+# MCP launcher path activation (fix MCP "Connection closed", 2026-06-12):
+# HERMES_MCP_LAUNCHER=1 routes all MCP stdio spawns through hermes-mcp-launcher
+# (runs outside the daemon's Landlock+seccomp sandbox) instead of spawning
+# directly (which inherits the daemon's confinement and kills uvx/npx/node).
+# Set to "0" only in CI environments (no hermes-mcp-launcher.service).
+# Declared explicit here so it appears in `systemctl show hermes-runtime`.
+Environment=HERMES_MCP_LAUNCHER=1
+# SECURITY (Finding 4 — auditable jail activation):
+# HERMES_BROWSER_JAIL=1 activates the root launcher path for all browser spawns.
+# Explicit here so it appears in `systemctl show hermes-runtime` and the journal.
+# Set to "0" only in CI environments (no systemd); never in production images.
+Environment=HERMES_BROWSER_JAIL=1
+# Baked OS removes the bundled Playwright Chromium (dedup vs system RPM); the
+# Playwright/MCP browser tiers must use the system Chromium binary.
+Environment=HERMES_CHROMIUM_EXECUTABLE=/usr/bin/chromium-browser
+# computer_use NATIVO (control GUI: click/type/screenshot por Hermes): el backend
+# Linux/Wayland de LumenSO. hermes-agent lo lanza como `$HERMES_CUA_DRIVER_CMD mcp`
+# (servidor MCP stdio) y reenvía la inyección al compositor vía SessionInputBridge.
+Environment=HERMES_CUA_DRIVER_CMD=/usr/libexec/lumen-cua-driver
+# Navegador AGÉNTICO (browser_navigate) en HEADLESS: el daemon corre sin $DISPLAY,
+# y agent-browser solo auto-inyecta estos flags si es root/AppArmor (no es el caso
+# aquí: User=hermes en Fedora) → sin esto Chrome arranca headed y muere con
+# "Missing X server or $DISPLAY". --no-sandbox: necesario sin user-namespace en el
+# daemon. (El navegador VISIBLE del usuario va por activate_app, no por aquí.)
+Environment=AGENT_BROWSER_ARGS=--headless=new,--no-sandbox,--disable-dev-shm-usage
+# POSTURA: autónomo en lo seguro, HITL nativo de Hermes cuando hay TAINT (P0-1,
+# red-team W23). El gate del Cerebro son CUATRO capas:
+#   1. hook pre_tool_call (security_hook.py) → kill-switch + suelo hardline nativo
+#      (detect_hardline_command, DIRECTO) + check_all_command_guards (= aprobación
+#      NATIVA de Hermes para terminal/code: hardline+patrones+smart+gateway HITL).
+#   2. TAINT-GATE (Hermes-nativo): el engine hace enable_session_yolo() por defecto
+#      (autónomo); en cuanto un ciclo ingiere contenido externo no confiable
+#      (browser/web/Composio/fichero) → disable_session_yolo() → la aprobación
+#      nativa de Hermes se ACTIVA para los siguientes terminal/code. write_file lo
+#      cubre el confinamiento (Landlock workspace); send_message/computer_use un
+#      taint-gate mínimo del SO (red/GUI que el FS-confinement no cubre).
+#   3. CapabilityBroker → kill-switch + denylist anti-autopirateo + audit firmado.
+#   4. CONFINAMIENTO KERNEL (Landlock/netns/egress/cgroups) = la frontera real e
+#      inviolable; el self-check de arranque exige que esté ENFORZANDO en release.
+# TWO-MODE SECURITY KERNEL (spec 015 — wired 2026-06-14):
+# HERMES_YOLO_MODE=1 ELIMINADO. El modo por defecto es "Modo Guardado":
+#   - comandos peligrosos pasan por el gateway HITL nativo de Hermes
+#     (check_all_command_guards → tarjeta ApprovalRequested en el compositor).
+#   - El hardline floor (detect_hardline_command) es incondicional en AMBOS modos.
+# HERMES_EXEC_ASK=1: engages the gateway HITL headless path in tools.approval
+#   (is_cli OR is_gateway OR is_ask — necesario para el daemon sin TTY).
+# Modo AUTO: togglable via D-Bus SetAutoMode(b) + persiste en settings.json.
+#   En AUTO el ciclo llama enable_session_yolo(session_key) → full autonomy.
+#   En Guardado (default) llama disable_session_yolo(session_key) → prompts.
+# NUNCA usar HERMES_YOLO_MODE=1 en producción: congela el gateway globalmente.
+Environment=HERMES_EXEC_ASK=1
+Environment=COMPOSIO_CACHE_DIR=/var/lib/hermes/composio-cache
+# Runners de servidores MCP (npx/uvx) lanzados POR el daemon: npm exige un
+# cache escribible ($HOME/.npm da EACCES — /var/home/hermes tiene ficheros
+# root-owned del bake) y uv igual. Mismo patrón que COMPOSIO_CACHE_DIR.
+Environment=npm_config_cache=/var/lib/hermes/npm-cache
+Environment=UV_CACHE_DIR=/var/lib/hermes/uv-cache
+# hermes_cli (resolve_runtime_provider + AIAgent) persiste config/.env/auth.json
+# bajo $HERMES_HOME (default ~/.hermes). Con ProtectHome=yes el HOME está
+# enmascarado → PermissionError al resolver/llamar al modelo (rompe TestProvider
+# Y el chat real). Redirigir a /var/lib/hermes (ya en ReadWritePaths=) para que
+# Nous pueda escribir su config y hacer llamadas LLM reales a CUALQUIERA de los
+# 37 providers. Verificado en VM: con esto el modelo responde de verdad.
+Environment=HERMES_HOME=/var/lib/hermes/hermes-home
+# uvx (servidores MCP Python git-backed, p.ej. Serena) escribe el ENTORNO-HERRAMIENTA
+# (venv + build del clone) en su DATA DIR, no en UV_CACHE_DIR. Con HOME no escribible
+# (ProtectSystem=strict + usuario --no-create-home), uvx muere con EROFS en
+# ~/.local/share/uv ANTES del handshake MCP → "Connection closed". Redirigir HOME +
+# data dirs a /var/lib/hermes (RW). Ver fix MCP 2026-06-12.
+Environment=HOME=/var/lib/hermes/hermes-home
+Environment=XDG_DATA_HOME=/var/lib/hermes/xdg-data
+Environment=XDG_CACHE_HOME=/var/lib/hermes/xdg-cache
+Environment=UV_TOOL_DIR=/var/lib/hermes/uv-tools
+Environment=UV_PYTHON_INSTALL_DIR=/var/lib/hermes/uv-python
+Environment=TMPDIR=/var/lib/hermes/tmp
+# Operador del SO = el dueño del dispositivo (hermes-user, uid 1000). Sin esto,
+# _resolve_operator_id() devuelve None y el BROKER bloquea TODA escritura
+# fail-closed (CTRL-13) → el agente puede chatear pero NO puede abrir/operar apps
+# ni el navegador (las acciones nunca llegan a mirar el consent). El valor es
+# UUID(int=1000) = el MISMO operador para el que el seed siembra los consents por
+# defecto (consent_seed.done operator=...03e8), de modo que broker y consents casan.
+# Esto NO es "inventar" un operador anónimo: es configurar EXPLÍCITAMENTE al dueño
+# único de esta edición personal — el propio código documenta que arrancar con
+# HERMES_OPERATOR_ID configurado es legítimo (nous_engine spec 014, CTRL-13).
+Environment=HERMES_OPERATOR_ID=00000000-0000-0000-0000-0000000003e8
+# Tools de Composio se recargan dinámicamente (sin reiniciar el daemon). TTL del
+# cache: tras conectar una integración (Gmail, etc.) el agente la tiene en el
+# próximo chat pasados ~10s. Más bajo = más fresco pero más llamadas a Composio.
+Environment=HERMES_COMPOSIO_TOOLS_TTL_S=10
+# P2 — FS allowlist: restringe qué rutas del filesystem puede leer/escribir el
+# agente en tool-calls de file I/O. El default del código es ["/var/lib/hermes","/tmp"]
+# (no /home). Lo declaramos explícito aquí para que sea auditable en
+# `systemctl show hermes-runtime` y en el journal de arranque.
+Environment=HERMES_FS_ALLOWLIST=/var/lib/hermes/workspace,/tmp
+
+# ── Watchdog ────────────────────────────────────────────────────────────────────
+# Worst-case per loop turn: HERMES_TIMEOUT_SECONDS (default 180s from user config)
+# + I/O overhead (10s) + idle_poll (30s) = 220s. 10s margin → 210s.
+#
+# The daemon emits sd_notify WATCHDOG=1 at the start of each loop turn
+# (hermes-runtime.__main__ run_forever). A separate asyncio task emits it
+# during long LLM calls so the watchdog is never starved mid-cycle.
+#
+# To override for a slower/faster model: drop a systemd override at
+#   /etc/systemd/system/hermes-runtime.service.d/watchdog-override.conf
+#     [Service]
+#     WatchdogSec=<HERMES_TIMEOUT_SECONDS + 40>
+WatchdogSec=210
+Restart=always
+RestartSec=2
+
+# Cgroups v2 — research §9.
+Slice=agents-os.slice
+# F-03 (security review concurrencia): al morir el daemon, systemd mata TODO el
+# control-group → reapea los procesos agent-browser/Chromium hijos en vez de
+# dejarlos huérfanos (RAM + cookies/credenciales vivas). Es el default, pero lo
+# fijamos explícito porque las sesiones de navegador concurrentes lo necesitan.
+KillMode=control-group
+MemoryMin=512M
+MemoryHigh=80%
+MemoryMax=6G
+CPUWeight=200
+OOMScoreAdjust=-500
+
+# Hardening heredado de spec 002 + FR-039 (Landlock, seccomp aparte).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/hermes /run/hermes
+# El agente NO debe poder ni siquiera ESCRIBIR una petición al gate de acceso
+# remoto (defensa en profundidad: aunque el gate ya exige la contraseña del
+# dispositivo, le quitamos al agente la posibilidad de intentar/brute-forcear).
+# /run/hermes sigue escribible (tasks.sock); solo este subdir queda inaccesible.
+InaccessiblePaths=/run/hermes/remote-control
+# NOTA P0-3 (Finding E — hermes-netns-setup.service ELIMINADO):
+# El daemon corre en la red del HOST (NetworkNamespacePath= AUSENTE por diseño).
+# El anti-exfil correcto confina el NAVEGADOR (no el daemon):
+#   hermes-browser-netns.service — crea netns+veth+NAT
+#   hermes-egress-proxy.service  — proxy filtrante SNI/Host
+#   hermes-browser-launcher.service — helper root para systemd-run --scope
+# hermes-netns-setup.service fue retirado (movido a systemd.disabled/):
+# confinaba el PID equivocado (daemon) sin veth/NAT → daemon sin ruta al LLM.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Seccomp (P0-1) — antes el daemon solo tenía el filtro implícito de systemd; el
+# perfil estricto vivía en ops/hermes-os/ pero NO se cableaba a la imagen que
+# arranca ("escrito pero no cargado", el patrón teatro del red-team). Copiado de
+# ops/hermes-os/systemd/hermes-runtime.service. allow-list @system-service + los
+# syscalls que el daemon necesita (io_uring de asyncio 3.13, landlock_* del assert,
+# getrandom, clone3, pidfd). EPERM (no SIGKILL): un syscall denegado NO mata el
+# daemon — degrada con error, nunca crashea el boot.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @network-io @io-event io_uring_enter io_uring_register io_uring_setup landlock_add_rule landlock_create_ruleset landlock_restrict_self memfd_create getrandom clone3 pidfd_open pidfd_send_signal
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=hermes-workspace.target

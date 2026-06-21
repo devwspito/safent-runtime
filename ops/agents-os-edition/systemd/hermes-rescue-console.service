@@ -1,0 +1,31 @@
+# hermes-rescue-console.service — T026 — getty AUTENTICADO para hermes-rescue.target
+#
+# Proporciona una TTY con login normal (no autologin, no root sin contraseña).
+# El operador debe autenticarse con hermes-user + password o recovery key.
+#
+# NOTA: Este servicio es arrancado ÚNICAMENTE por hermes-rescue.target.
+# No se instala en multi-user.target ni en ningún target normal.
+
+[Unit]
+Description=Hermes Rescue — consola autenticada en TTY2
+# Sólo tiene sentido si el target de rescate está activo.
+PartOf=hermes-rescue.target
+After=hermes-rescue.target
+
+[Service]
+# ExecStart usa agetty con --login-program /bin/login (default) y
+# sin --autologin → el operador debe introducir usuario + contraseña.
+# -o "" deshabilita el pre-relleno de usuario (sin magic autologin).
+ExecStart=-/sbin/agetty --noclear --keep-baud tty2 115200,38400,9600 $TERM
+Type=idle
+Restart=no
+# Terminar cuando el usuario hace logout (no reiniciar la consola).
+KillMode=process
+
+# Hardening mínimo — necesitamos acceso a TTY y PAM.
+PrivateTmp=no
+ProtectSystem=no
+ProtectHome=no
+
+[Install]
+WantedBy=hermes-rescue.target

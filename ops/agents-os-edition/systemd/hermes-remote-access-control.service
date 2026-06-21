@@ -1,0 +1,71 @@
+# hermes-remote-access-control.service — root oneshot that reads the staged
+# remote-access control request, verifies the password (disable action), and
+# starts/stops the three remote-access services via systemctl.
+#
+# This service runs as root.  Security notes:
+#   - NoNewPrivileges=no: PAM verification runs directly as root; no setuid
+#     helper escalation needed.  Running as root IS the privilege — there is
+#     no further escalation to worry about.  This is the same tradeoff as
+#     hermes-account-apply.service (which also calls PAM tools as root).
+#   - The staged file is shredded in a finally block (always, even on error).
+#   - The password is never logged (the script logs only action and outcome).
+#   - ProtectSystem=strict + ReadWritePaths restricts writes to only the
+#     paths this script legitimately needs.
+#   - RestrictAddressFamilies=AF_UNIX prevents network connections from this
+#     root process — systemctl communicates over AF_UNIX with systemd.
+#   - /run/hermes is tmpfs — the staged file is RAM-only.
+
+[Unit]
+Description=Hermes — apply staged remote-access control request (privileged)
+Documentation=man:systemd.service(5)
+# Only triggered by the .path unit; not started independently.
+RefuseManualStart=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/libexec/hermes/remote-access-control
+
+User=root
+Group=root
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-remote-access-control
+
+# --------------------------------------------------------------------------
+# Hardening
+# --------------------------------------------------------------------------
+
+# NoNewPrivileges=no: running as root already — PAM verify is direct, no
+# setuid escalation.  Same reasoning as hermes-account-apply.service.
+NoNewPrivileges=no
+
+# ProtectSystem=strict makes / read-only by default.
+# ReadWritePaths grants the minimal set:
+#   /run/hermes/remote-control — read + shred the staged request
+#   /etc/hermes — escribir/borrar remote-display.env (flag QT_QPA del compositor)
+ProtectSystem=strict
+ReadWritePaths=/run/hermes/remote-control /etc/hermes
+
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+# systemctl communicates over AF_UNIX (D-Bus socket to systemd).
+# PAM also uses AF_UNIX (unix_chkpwd socket, if python-pam).
+# No TCP/UDP needed.
+RestrictAddressFamilies=AF_UNIX
+
+# Capabilities: running as root gives us everything; we bound to only what
+# is needed.
+#   CAP_DAC_OVERRIDE — read /etc/shadow for PAM verify (root-only, mode 000/640)
+#   CAP_SYS_ADMIN    — needed for systemctl to communicate with systemd PID 1
+#   CAP_SETUID/CAP_SETGID — PAM helpers may perform uid transitions internally
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID
+
+# [Install] intentionally omitted — triggered exclusively by the .path unit.

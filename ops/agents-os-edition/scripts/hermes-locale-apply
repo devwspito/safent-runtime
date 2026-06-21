@@ -1,0 +1,130 @@
+#!/usr/bin/python3
+# hermes-locale-apply — root oneshot that reads a staged locale/keymap request
+# and applies it to the OS. Triggered by hermes-locale-apply.path when the
+# shell-server (non-root) writes /run/hermes/setup/locale-request.json.
+#
+# Security: reads the staged file with O_NOFOLLOW, verifies owner/mode, RE-
+# VALIDATES locale+keymap (never trusts the staging layer), writes only the
+# locale/keymap config files, and unlinks the request. No secrets involved.
+# Re-appliable (no sentinel) so the user can change language later.
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+logging.basicConfig(
+    level=logging.INFO, format="%(levelname)s hermes-locale-apply: %(message)s"
+)
+logger = logging.getLogger("hermes-locale-apply")
+
+_STAGE_FILE = Path(
+    os.environ.get("HERMES_ACCOUNT_STAGE_DIR", "/run/hermes/setup")
+) / "locale-request.json"
+
+_LOCALE_RE = re.compile(r"^[a-z]{2}_[A-Z]{2}\.UTF-8$")
+_KEYMAP_RE = re.compile(r"^[a-z0-9_-]{1,16}$")
+
+
+def _read_staged() -> dict | None:
+    """Read the staged request with O_NOFOLLOW; reject symlinks/foreign owners."""
+    try:
+        fd = os.open(_STAGE_FILE, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.error("cannot open staged file: %s", type(exc).__name__)
+        return None
+    try:
+        st = os.fstat(fd)
+        # Owner must be hermes (the shell-server uid) — reject anything else.
+        if st.st_uid != _hermes_uid():
+            logger.error("staged file has unexpected owner uid=%s — refusing", st.st_uid)
+            return None
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.error("cannot read staged file: %s", type(exc).__name__)
+        return None
+
+
+def _hermes_uid() -> int:
+    try:
+        import pwd
+
+        return pwd.getpwnam("hermes").pw_uid
+    except Exception:  # noqa: BLE001
+        return -1
+
+
+def _apply(locale: str, keymap: str) -> bool:
+    ok = True
+    # 1) System locale → /etc/locale.conf (read by systemd + the session).
+    try:
+        Path("/etc/locale.conf").write_text(f"LANG={locale}\n", encoding="utf-8")
+        logger.info("locale set: %s", locale)
+    except OSError as exc:
+        logger.error("locale.conf write failed: %s", exc)
+        ok = False
+    # 2) Console keymap → /etc/vconsole.conf.
+    try:
+        Path("/etc/vconsole.conf").write_text(f"KEYMAP={keymap}\n", encoding="utf-8")
+    except OSError as exc:
+        logger.error("vconsole.conf write failed: %s", exc)
+        ok = False
+    # 3) Graphical keymap → /etc/X11/xorg.conf.d/00-keyboard.conf (XKB layout).
+    try:
+        xkb_dir = Path("/etc/X11/xorg.conf.d")
+        xkb_dir.mkdir(parents=True, exist_ok=True)
+        (xkb_dir / "00-keyboard.conf").write_text(
+            'Section "InputClass"\n'
+            '        Identifier "system-keyboard"\n'
+            '        MatchIsKeyboard "on"\n'
+            f'        Option "XkbLayout" "{keymap}"\n'
+            "EndSection\n",
+            encoding="utf-8",
+        )
+        logger.info("keymap set: %s", keymap)
+    except OSError as exc:
+        logger.error("xkb keyboard conf write failed: %s", exc)
+        ok = False
+    # 4) Best-effort: ask localed too (no-op if unavailable). Never blocks.
+    try:
+        subprocess.run(
+            ["/usr/bin/localectl", "set-locale", f"LANG={locale}"],
+            timeout=10, capture_output=True, check=False,
+        )
+        subprocess.run(
+            ["/usr/bin/localectl", "set-x11-keymap", keymap],
+            timeout=10, capture_output=True, check=False,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return ok
+
+
+def main() -> int:
+    staged = _read_staged()
+    if staged is None:
+        return 0  # nothing to do (file vanished or unreadable)
+    try:
+        locale = str(staged.get("locale", ""))
+        keymap = str(staged.get("keymap", ""))
+        if not _LOCALE_RE.match(locale) or not _KEYMAP_RE.match(keymap):
+            logger.error("invalid locale/keymap in staged request — refusing")
+            return 1
+        _apply(locale, keymap)
+        return 0
+    finally:
+        try:
+            _STAGE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    sys.exit(main())

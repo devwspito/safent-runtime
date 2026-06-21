@@ -1,0 +1,5448 @@
+"""DBus runtime service — interfaz local org.hermes.Runtime1.
+
+Exposes el estado del runtime al panel agéntico GTK4 + CLI sin
+exponer puerto TCP. Solo accesible vía system bus para el grupo
+`hermes`.
+
+Esta es la capa stub que NO importa dbus-python en tiempo de import —
+el adapter real lo hace lazy. Permite testear el contrato de la API.
+
+Clases:
+  InMemoryRuntimeService  — fake para tests + panel sin runtime real.
+  DbusRuntimeServiceWiring — cablea los puertos reales (AgentStatePort +
+      ApprovalGatePort) con authZ verificada del sender del bus (T048).
+      El binding D-Bus real vive en DbusAdapter (carga lazy — solo en
+      personal-desktop); esta clase es testeable sin D-Bus.
+
+Métodos (org.hermes.Runtime1):
+  GetStatus() → {state, active_tasks, sandboxes, last_audit_head}
+  RequestPause(reason: str, sender_uid: int) → bool
+  RequestResume(sender_uid: int) → bool
+  ApproveAction(proposal_id: str, sender_uid: int) → str  [approval_token]
+  RejectAction(proposal_id: str, reason: str, sender_uid: int) → bool
+  GetActiveConsents() → list[Capability]
+  GetTelemetryEnabled() → bool
+  SetTelemetryEnabled(value: bool, authorizing_user: str) → bool
+
+AuthZ (CTRL-12/KILL-1, CWE-862):
+  El sender_uid procede del bus (resuelto por DbusAdapter antes de
+  llamar a esta clase) — NUNCA del payload del cliente. El wiring
+  lo verifica contra `authorized_uids`. Fail-closed: UID no autorizado
+  ⇒ DbusAuthorizationError (no ejecuta, no degrada).
+
+Señales:
+  TaskStarted(task_id, surface_kind)
+  TaskCompleted(task_id, outcome)
+  ConsentRequested(consent_id, capability, requestor)
+  RemoteControlSessionAccepted(session_id, operator_id)
+
+Wiring D-Bus real:
+  El binding al bus (sd-bus / dbus-fast / dasbus) vive en el adapter
+  cargado lazily en personal-desktop. Este módulo define solo la lógica
+  verificable en CI. Ver `tests/security/test_dbus_wiring.py`.
+
+Diseño de enqueue (Issue 2 / CTRL-P1-6):
+  DbusRuntimeServiceWiring.enqueue() DELEGA en ControlPlaneService.enqueue().
+  El Wiring convierte sender_uid (int del bus) en AuthenticatedChannel y
+  llama al service. Esto garantiza que la ruta de producción (D-Bus) aplica
+  el mismo rate-limit, PII-tokenization y audit que la ruta testeable.
+  No hay duplicación de _uid_to_uuid / _tokenize_pii / _emit_accepted_audit.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from uuid import UUID
+
+from hermes.agents_os.application.audit_hash_chain import AuditHashChainSigner
+from hermes.agents_os.application.consent_manager import Capability
+
+if TYPE_CHECKING:
+    from hermes.agents_os.application.audit_hash_chain import AuditEntry
+    from hermes.capabilities.domain.ports import ApprovalGatePort
+    from hermes.shell_server.security.operator_token import OperatorTokenVerifier
+    from hermes.tasks.control_plane.application.control_plane_service import ControlPlaneService
+    from hermes.tasks.control_plane.domain.ports import EnqueueResult
+    from hermes.tasks.domain.ports import AgentStatePort, WorkQueuePort
+
+logger = logging.getLogger("hermes.agents_os.dbus_runtime_service")
+
+
+class RuntimeStateError(RuntimeError):
+    pass
+
+
+@dataclass(slots=True)
+class RuntimeStatusSnapshot:
+    state: str
+    active_task_count: int
+    sandbox_count: int
+    last_audit_head_hex: str
+    telemetry_enabled: bool
+    captured_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
+
+
+@runtime_checkable
+class RuntimeServicePort(Protocol):
+    """Puerto contra el runtime; usado por el panel y por dbus_adapter."""
+
+    def get_status(self) -> RuntimeStatusSnapshot: ...
+
+    def request_pause(self, *, reason: str, authorizing_user_id: UUID) -> None: ...
+
+    def request_resume(self, *, authorizing_user_id: UUID) -> None: ...
+
+    def get_active_consents(self) -> tuple[Capability, ...]: ...
+
+    def set_telemetry_enabled(
+        self, *, value: bool, authorizing_user_id: UUID
+    ) -> None: ...
+
+
+class InMemoryRuntimeService:
+    """Implementación para tests + para el panel mientras no hay runtime.
+
+    NO se conecta al dbus — eso lo hace el `DBusRuntimeAdapter` real que
+    se carga solo en personal-desktop / server.
+    """
+
+    def __init__(
+        self,
+        *,
+        audit_signer: AuditHashChainSigner,
+        telemetry_enabled: bool = False,
+    ) -> None:
+        self._state = "idle"
+        self._active_tasks = 0
+        self._sandboxes = 0
+        self._audit = audit_signer
+        self._telemetry = telemetry_enabled
+        self._consents: set[Capability] = set()
+
+    def get_status(self) -> RuntimeStatusSnapshot:
+        return RuntimeStatusSnapshot(
+            state=self._state,
+            active_task_count=self._active_tasks,
+            sandbox_count=self._sandboxes,
+            last_audit_head_hex=self._audit.head_hash_hex,
+            telemetry_enabled=self._telemetry,
+        )
+
+    def request_pause(self, *, reason: str, authorizing_user_id: UUID) -> None:  # noqa: ARG002
+        if self._state == "paused":
+            return
+        if self._state not in ("idle", "running"):
+            raise RuntimeStateError(
+                f"cannot pause from state={self._state}"
+            )
+        self._state = "paused"
+
+    def request_resume(self, *, authorizing_user_id: UUID) -> None:  # noqa: ARG002
+        if self._state != "paused":
+            raise RuntimeStateError(
+                f"cannot resume from state={self._state}"
+            )
+        self._state = "idle"
+
+    def get_active_consents(self) -> tuple[Capability, ...]:
+        return tuple(sorted(self._consents, key=str))
+
+    def add_consent(self, capability: Capability) -> None:
+        self._consents.add(capability)
+
+    def revoke_consent(self, capability: Capability) -> None:
+        self._consents.discard(capability)
+
+    def set_telemetry_enabled(
+        self, *, value: bool, authorizing_user_id: UUID  # noqa: ARG002
+    ) -> None:
+        # FR-061 (BLOQUEANTE telemetría pura): solo flip por humano local
+        # autenticado. La verificación TOTP la hace el CLI antes de
+        # invocarnos.
+        self._telemetry = bool(value)
+
+    def mark_task_started(self) -> None:
+        self._active_tasks += 1
+        self._state = "running"
+
+    def mark_task_completed(self) -> None:
+        self._active_tasks = max(0, self._active_tasks - 1)
+        if self._active_tasks == 0:
+            self._state = "idle"
+
+    def set_sandbox_count(self, n: int) -> None:
+        if n < 0:
+            raise ValueError("sandbox_count debe ser ≥ 0")
+        self._sandboxes = n
+
+
+# ---------------------------------------------------------------------------
+# T048 — DbusRuntimeServiceWiring
+# ---------------------------------------------------------------------------
+
+
+class DbusAuthorizationError(PermissionError):
+    """Sender UID no autorizado para esta operación (CWE-862 / CTRL-12/KILL-1)."""
+
+
+@dataclass(frozen=True, slots=True)
+class HitlApprovalResult:
+    """Resultado de ApproveAction — token opaco + operador verificado."""
+
+    approval_token: str
+    approved_by: UUID
+
+
+class DbusRuntimeServiceWiring:
+    """Capa de lógica pura que cablea los puertos reales con authZ del bus.
+
+    Diseño (T048 / CTRL-12 / KILL-1 / SC-004 / CWE-862):
+    - `sender_identity` (UID del proceso caller) lo resuelve el DbusAdapter
+      desde el bus ANTES de invocar estos métodos — NUNCA viene del payload
+      del cliente.
+    - Solo los UIDs en `authorized_uids` pueden pausar/reanudar/aprobar/encolar.
+    - Fail-closed: UID no autorizado ⇒ DbusAuthorizationError; no ejecuta.
+    - `approved_by` / `changed_by` / `enqueued_by` = identidad verificada del
+      sender, no del payload.
+    - ApproveAction/RejectAction NO disparan run_cycle — solo resuelven la
+      aprobación; el loop retoma la tarea pendiente (NFR-001).
+    - `control_plane_service` (requerido para Enqueue): la ruta D-Bus DELEGA
+      en ControlPlaneService para que rate-limit + PII + audit sean los mismos
+      controles que en la ruta testeable (CWE-770 / CTRL-P1-6, Issue 2).
+
+    Confused-deputy hybrid model (security-hardening):
+    - Direct operator calls (GTK shell → D-Bus, uid=hermes-user) continue
+      unchanged: sender_uid ∈ authorized_uids → authorized, operator_id
+      derived from sender_uid.
+    - Proxied calls (shell-server → D-Bus, uid=hermes process) MUST supply
+      a valid OperatorToken in the `operator_token` argument. The token is
+      verified by `operator_token_verifier` (HMAC-SHA256 over master.key
+      subkey). operator_id is taken from the token, never from the proxy uid.
+    - Proxy uid NOT in authorized_uids + no token → DbusAuthorizationError.
+    - Token expired/forged → DbusAuthorizationError.
+    - Read-only methods (get_status, list_*) do not require a token.
+
+    Testeable sin D-Bus: inyecta fakes de AgentStatePort + ApprovalGatePort +
+    ControlPlaneService y pasa sender_uid directamente. El DbusAdapter real
+    resuelve el UID del bus y delega aquí.
+    """
+
+    def __init__(
+        self,
+        *,
+        agent_state: AgentStatePort,
+        approval_gate: ApprovalGatePort,
+        authorized_uids: frozenset[int],
+        work_queue: WorkQueuePort | None = None,
+        wake_signal: Any | None = None,  # WorkerWakeSignal | None (CTRL-P1-12)
+        control_plane_service: ControlPlaneService | None = None,
+        trigger_repo: Any | None = None,   # SqliteAuthorizedTriggerRepository | None
+        agent_registry: Any | None = None,  # AgentRegistryPort (roster multi-agente)
+        skill_governance: Any | None = None,  # SkillGovernancePort (P0-1)
+        platform_model_registry: Any | None = None,  # SqlitePlatformModelRegistry (F010)
+        platform_model_signer: Any | None = None,   # PlatformModelSigner (security hardening)
+        capability_binding_repo: Any | None = None,   # SqliteCapabilityBindingRepo (F010)
+        provider_repo: Any | None = None,   # SQLiteProviderRepository (GATE 0 / M1: providers OS-nativos)
+        conversation_repo: Any | None = None,  # SQLiteConversationRepository (GATE 0 / M2: chat OS-nativo)
+        tenant_id: str = "",  # tenant scope for platform reads (F010)
+        # Confused-deputy hybrid model (security-hardening):
+        # UID of the proxy process (shell-server). When a call arrives from
+        # this uid, a valid operator_token is required. Set to None to disable
+        # the proxy path entirely (direct-only mode).
+        proxy_uid: int | None = None,
+        # OperatorTokenVerifier built from SecretsVault.derive_subkey(
+        #   label="operator-token"). Required when proxy_uid is set.
+        operator_token_verifier: OperatorTokenVerifier | None = None,
+        # T017 — desktop overlay (spec 014-agentic-desktop):
+        # ContextSnapshotComposer for RequestContextSnapshot (read-only).
+        # None → method returns a "not-configured" stub JSON.
+        context_snapshot_composer: Any | None = None,
+        # AuditHashChainSigner for GetAuditChainHead (read-only head hash).
+        # None → method returns integrity="unknown".
+        audit_signer: Any | None = None,
+        # spec 014 increment 3 — FR-013 operator consent control:
+        # ConsentManager for GrantConsent/RevokeConsent/ListConsents.
+        # None → methods return "not_configured" error (honest degradation).
+        consent_manager: Any | None = None,  # ConsentManager | None
+        # MCP Apps: McpServerManager del daemon (conexiones vivas). None →
+        # los verbos MCP devuelven "not_configured" (degradación honesta).
+        mcp_server_manager: Any | None = None,
+        # ActiveProviderService — único punto de resolución del provider activo.
+        # None → get_active_provider cae al camino legacy (_read_native_active +
+        # provider_repo), igual que antes (degradación honesta).
+        active_provider_service: Any | None = None,  # ActiveProviderService | None
+        # Security Center scan service (lazy-init if None).
+        # Injected here so tests can supply a fake; production uses the lazy
+        # factory inside _scan_service_lazy().
+        scan_service: Any | None = None,  # ScanService | None
+        # Callback invoked after a successful scan to emit D-Bus signals.
+        # Signature: (scan_id: str, verdict: str, scan_data_json: str) → None.
+        # Injected by DbusRuntimeAdapter after bus start.
+        scan_signal_emitter: Any | None = None,  # callable | None
+        # FR-013 consent subject alignment: the OWNER operator UUID
+        # (HERMES_OPERATOR_ID, resolved at daemon boot via _resolve_operator_id).
+        # When set, all consent verbs operate on this fixed owner rather than
+        # deriving the subject from sender_uid.  This ensures the UI, the seed,
+        # and the broker all address the same operator record.
+        # Fallback to _uid_to_uuid(sender_uid) when None (CI/test/backward-compat).
+        operator_id: "UUID | None" = None,
+    ) -> None:
+        self._state = agent_state
+        self._gate = approval_gate
+        self._authorized_uids = authorized_uids
+        self._queue = work_queue
+        self._wake_signal = wake_signal  # inyectado en composición daemon
+        self._cp_service = control_plane_service
+        self._trigger_repo = trigger_repo  # para AuthorizeTrigger/RevokeTrigger
+        self._agent_registry = agent_registry  # gobernanza del roster (List/Create/...)
+        self._skill_governance = skill_governance  # gobernanza de skills (P0-1)
+        self._platform_model_registry = platform_model_registry  # gobernanza plataformas (F010)
+        self._platform_model_signer = platform_model_signer  # firma/verificación modelos (hardening)
+        self._capability_binding_repo = capability_binding_repo  # asignación capacidades (F010)
+        self._provider_repo = provider_repo  # GATE 0 / M1: providers OS-nativos (D-Bus, no HTTP)
+        self._conversation_repo = conversation_repo  # GATE 0 / M2: chat OS-nativo (D-Bus, no HTTP)
+        self._tenant_id = tenant_id  # tenant scope para lecturas de plataforma (F010)
+        self._proxy_uid = proxy_uid
+        self._token_verifier = operator_token_verifier
+        # T017 — desktop overlay (spec 014-agentic-desktop)
+        self._context_snapshot_composer = context_snapshot_composer  # ContextSnapshotComposer | None
+        self._audit_signer = audit_signer  # AuditHashChainSigner | None
+        # spec 014 increment 3 — FR-013 operator consent control
+        self._consent_manager = consent_manager  # ConsentManager | None
+        # MCP Apps (gestión de servidores MCP por el operador)
+        self._mcp_manager = mcp_server_manager
+        # Único punto de resolución del provider activo (caché LRU 30s).
+        self._active_provider_svc = active_provider_service  # ActiveProviderService | None
+        # Security Center: pre-built ScanService (or None → lazy init on first use).
+        self._scan_service = scan_service  # ScanService | None
+        # Callback (scan_id, verdict, scan_data_json) emitted after scanning.
+        # Injected by DbusRuntimeAdapter; None in test environments.
+        self._scan_signal_emitter = scan_signal_emitter  # callable | None
+        # In-memory audit accumulator — tests check via audit_entries_emitted()
+        self._audit_entries: list[AuditEntry] = []
+        # FR-013: owner operator UUID for consent subject alignment (see _consent_operator).
+        self._operator_id: "UUID | None" = operator_id
+
+    # ------------------------------------------------------------------
+    # Kill-switch (CTRL-12 / KILL-1)
+    # ------------------------------------------------------------------
+
+    async def request_pause(
+        self,
+        *,
+        reason: str,
+        sender_uid: int,
+        operator_token: str | None = None,
+    ) -> None:
+        """Pausa el agente. sender_uid resuelto por el bus (CWE-862).
+
+        operator_token required when sender_uid == proxy_uid (confused-deputy
+        remediation). operator_id derived from token, not from proxy uid.
+
+        Raises:
+            DbusAuthorizationError: UID del sender no está autorizado o token inválido.
+        """
+        operator_id = self._authorize_and_resolve(
+            sender_uid, operation="request_pause", operator_token=operator_token
+        )
+        await self._state.pause(by=operator_id, reason=reason)
+        logger.info(
+            "hermes.dbus.agent_paused",
+            extra={"by_uid": sender_uid, "reason": reason},
+        )
+
+    async def request_resume(
+        self,
+        *,
+        sender_uid: int,
+        operator_token: str | None = None,
+    ) -> None:
+        """Reanuda el agente. sender_uid resuelto por el bus (CWE-862).
+
+        operator_token required when sender_uid == proxy_uid.
+
+        Raises:
+            DbusAuthorizationError: UID del sender no está autorizado o token inválido.
+        """
+        operator_id = self._authorize_and_resolve(
+            sender_uid, operation="request_resume", operator_token=operator_token
+        )
+        await self._state.resume(by=operator_id)
+        logger.info(
+            "hermes.dbus.agent_resumed",
+            extra={"by_uid": sender_uid},
+        )
+
+    # ------------------------------------------------------------------
+    # Gobernanza del roster multi-agente (estado NATIVO del daemon, Principio 0)
+    #   - Lecturas: supervisión, sin authZ.
+    #   - Mutadores: autoría por sender_uid del bus (CWE-862), fail-closed.
+    # ------------------------------------------------------------------
+    def _require_registry(self):
+        if self._agent_registry is None:
+            raise RuntimeError("agent_registry no inyectado en el wiring")
+        return self._agent_registry
+
+    def list_agents(self) -> list[dict]:
+        from hermes.agents.application.serialization import agent_to_dict  # noqa: PLC0415
+
+        if self._agent_registry is None:
+            return []
+        return [agent_to_dict(a) for a in self._agent_registry.list_agents()]
+
+    def get_active_agent(self) -> str:
+        if self._agent_registry is None:
+            return ""
+        return self._agent_registry.active_agent_id()
+
+    async def set_active_agent(self, *, agent_id: str, sender_uid: int) -> None:
+        self._authorize(sender_uid, operation="set_active_agent")
+        self._require_registry().set_active_agent(agent_id)
+        logger.info("hermes.dbus.agent_activated", extra={"by_uid": sender_uid})
+
+    async def create_agent(self, *, draft, sender_uid: int) -> dict:
+        from hermes.agents.application.serialization import agent_to_dict  # noqa: PLC0415
+
+        self._authorize(sender_uid, operation="create_agent")
+        agent = self._require_registry().create_agent(draft)
+        logger.info("hermes.dbus.agent_created", extra={"by_uid": sender_uid})
+        return agent_to_dict(agent)
+
+    async def update_agent(self, *, agent_id: str, draft, sender_uid: int) -> dict:
+        from hermes.agents.application.serialization import agent_to_dict  # noqa: PLC0415
+
+        self._authorize(sender_uid, operation="update_agent")
+        agent = self._require_registry().update_agent(agent_id, draft)
+        logger.info("hermes.dbus.agent_updated", extra={"by_uid": sender_uid})
+        return agent_to_dict(agent)
+
+    async def delete_agent(self, *, agent_id: str, sender_uid: int) -> None:
+        self._authorize(sender_uid, operation="delete_agent")
+        self._require_registry().delete_agent(agent_id)
+        logger.info("hermes.dbus.agent_deleted", extra={"by_uid": sender_uid})
+
+    # ------------------------------------------------------------------
+    # Gobernanza de skills (Principio 0 / P0-1):
+    #   - Lecturas: supervisión, sin authZ.
+    #   - Mutadores: autoría por sender_uid del bus (CWE-862), fail-closed.
+    # ------------------------------------------------------------------
+
+    def _require_skill_governance(self) -> Any:
+        if self._skill_governance is None:
+            raise RuntimeError("skill_governance no inyectado en el wiring")
+        return self._skill_governance
+
+    # ------------------------------------------------------------------
+    # GATE 0 / M1 — Providers OS-nativos (D-Bus, ya no HTTP shell-server).
+    # El daemon POSEE la tabla providers + SecretsVault (las usa para resolver
+    # el modelo activo). Lecturas: sin authZ. Mutadores: sender_uid del operador.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _provider_to_dict(p: Any) -> dict:
+        """Misma forma que ProviderResponse.from_provider (paridad con el HTTP)."""
+        return {
+            "provider_id": str(p.provider_id),
+            "alias": p.alias,
+            "kind": p.kind.value,
+            "base_url": p.base_url,
+            "default_model": p.default_model,
+            "enabled": bool(p.enabled),
+            "is_active": bool(p.is_active),
+            "has_api_key": bool(p.has_api_key),
+            "connectivity": p.connectivity.value,
+            "last_checked_at": p.last_checked_at.isoformat() if p.last_checked_at else None,
+            "created_at": p.created_at.isoformat() if getattr(p, "created_at", None) else "",
+        }
+
+    def list_providers(self) -> list[dict]:
+        """Lista providers (read-only)."""
+        if self._provider_repo is None:
+            return []
+        return [self._provider_to_dict(p) for p in self._provider_repo.list_all()]
+
+    def get_active_provider(self) -> dict:
+        """Provider activo, o {} si no hay (read-only).
+
+        Delega en ActiveProviderService (caché LRU 30s, cascade nativo→SQL→env).
+        Si el servicio no está inyectado, cae al camino legacy (_read_native_active
+        + provider_repo) para compatibilidad hacia atrás.
+        """
+        if self._active_provider_svc is not None:
+            return self._active_provider_svc.get_active_metadata()
+        # Legacy fallback (sin ActiveProviderService inyectado).
+        native = _read_native_active()
+        if native:
+            return native
+        if self._provider_repo is None:
+            return {}
+        p = self._provider_repo.get_active()
+        return self._provider_to_dict(p) if p is not None else {}
+
+    def add_provider(self, *, draft_json: str, sender_uid: int) -> dict:
+        """Crea provider. draft: {kind, alias, default_model, base_url, api_key, set_active}."""
+        self._authorize_and_resolve(sender_uid, operation="add_provider")
+        if self._provider_repo is None:
+            raise RuntimeError("provider_repo no inyectado en el daemon")
+        from hermes.shell_server.providers.domain import (  # noqa: PLC0415
+            ProviderKind,
+            new_provider,
+        )
+
+        d = json.loads(draft_json)
+        api_key = d.get("api_key") or None
+        provider = new_provider(
+            alias=d["alias"],
+            kind=ProviderKind(d["kind"]),
+            default_model=d.get("default_model", ""),
+            base_url=d.get("base_url") or None,
+            has_api_key=api_key is not None,
+        )
+        saved = self._provider_repo.add(provider=provider, api_key=api_key)
+        if d.get("set_active"):
+            self._provider_repo.set_active(provider_id=saved.provider_id)
+            saved.is_active = True
+        return self._provider_to_dict(saved)
+
+    def update_provider(self, *, provider_id: str, draft_json: str, sender_uid: int) -> dict:
+        """Actualiza alias/default_model/base_url/enabled/api_key."""
+        self._authorize_and_resolve(sender_uid, operation="update_provider")
+        from uuid import UUID as _UUID  # noqa: PLC0415
+
+        pid = _UUID(provider_id)
+        current = self._provider_repo.get(provider_id=pid)
+        d = json.loads(draft_json)
+        if d.get("alias") is not None:
+            current.alias = d["alias"]
+        if d.get("default_model") is not None:
+            current.default_model = d["default_model"]
+        if d.get("base_url") is not None:
+            current.base_url = d["base_url"]
+        if d.get("enabled") is not None:
+            current.enabled = bool(d["enabled"])
+        self._provider_repo.update(provider=current, api_key=d.get("api_key") or None)
+        return self._provider_to_dict(self._provider_repo.get(provider_id=pid))
+
+    def delete_provider(self, *, provider_id: str, sender_uid: int) -> bool:
+        self._authorize_and_resolve(sender_uid, operation="delete_provider")
+        from uuid import UUID as _UUID  # noqa: PLC0415
+
+        self._provider_repo.delete(provider_id=_UUID(provider_id))
+        return True
+
+    def set_active_provider(self, *, provider_id: str, sender_uid: int) -> dict:
+        self._authorize_and_resolve(sender_uid, operation="set_active_provider")
+        from uuid import UUID as _UUID  # noqa: PLC0415
+
+        pid = _UUID(provider_id)
+        self._provider_repo.set_active(provider_id=pid)
+        if self._active_provider_svc is not None:
+            self._active_provider_svc.force_refresh()
+        return self._provider_to_dict(self._provider_repo.get(provider_id=pid))
+
+    async def test_provider(self, *, provider_id: str, sender_uid: int) -> dict:
+        """Valida el provider a través del runtime REAL (Nous), no de un dialecto
+        paralelo: resuelve el ModelConfig como el daemon + una completion mínima
+        por hermes-agent. {ok, error}. Mantiene 'idioma de Hermes'."""
+        self._authorize_and_resolve(sender_uid, operation="test_provider")
+        from uuid import UUID as _UUID  # noqa: PLC0415
+
+        pid = _UUID(provider_id)
+        provider = self._provider_repo.get(provider_id=pid)
+        api_key = self._provider_repo.reveal_api_key(provider_id=pid)
+        try:
+            ok, err = await _nous_validate_provider(provider, api_key)
+        except Exception as exc:  # noqa: BLE001
+            ok, err = False, f"{type(exc).__name__}: {str(exc)[:300]}"
+        from hermes.shell_server.providers.domain import ProviderConnectivity  # noqa: PLC0415
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        provider.connectivity = (
+            ProviderConnectivity.REACHABLE if ok else ProviderConnectivity.UNREACHABLE
+        )
+        provider.last_checked_at = datetime.now(tz=timezone.utc)
+        self._provider_repo.update(provider=provider)
+        return {"ok": ok, "error": err}
+
+    # ------------------------------------------------------------------
+    # GATE 0 / M2 — Conversaciones (chat) OS-nativas por D-Bus.
+    # Lecturas (list/get): supervisión read-only, sin authZ. Delete: muta →
+    # authZ por sender_uid (CWE-862). El daemon ES dueño del store; el stream
+    # de respuesta ya viaja por el socket AF_UNIX (no HTTP).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _conversation_summary_to_dict(c: Any) -> dict:
+        return {
+            "conversation_id": str(c.conversation_id),
+            "title": c.title,
+            "provider_alias": c.provider_alias,
+            "model": c.model,
+            "started_at": c.started_at.isoformat(),
+            "last_msg_at": c.last_msg_at.isoformat(),
+            "message_count": c.message_count,
+            "agent_id": c.agent_id,
+        }
+
+    def list_conversations(self, *, agent_id: str | None = None) -> list[dict]:
+        """Recientes (read-only). agent_id='' → todas; si no, filtra por agente."""
+        if self._conversation_repo is None:
+            return []
+        items = self._conversation_repo.list_summaries(agent_id=agent_id or None)
+        return [self._conversation_summary_to_dict(c) for c in items]
+
+    def get_conversation(self, *, conversation_id: str) -> dict:
+        """Detalle con mensajes (read-only). {} si no existe."""
+        if self._conversation_repo is None:
+            return {}
+        from uuid import UUID as _UUID  # noqa: PLC0415
+
+        try:
+            d = self._conversation_repo.get_detail(conversation_id=_UUID(conversation_id))
+        except Exception:
+            return {}
+        return {
+            "conversation_id": str(d.conversation_id),
+            "title": d.title,
+            "provider_alias": d.provider_alias,
+            "model": d.model,
+            "started_at": d.started_at.isoformat(),
+            "messages": [{"role": m.role, "content": m.content} for m in d.messages],
+        }
+
+    def delete_conversation(self, *, conversation_id: str, sender_uid: int) -> bool:
+        """Borra una conversación. Muta → authZ por sender_uid (CWE-862)."""
+        self._authorize_and_resolve(sender_uid, operation="delete_conversation")
+        if self._conversation_repo is None:
+            return False
+        from uuid import UUID as _UUID  # noqa: PLC0415
+
+        try:
+            self._conversation_repo.delete(conversation_id=_UUID(conversation_id))
+        except Exception:
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # GATE 0 / M7 — Cuenta de SO (onboarding) OS-nativa por D-Bus.
+    # Reemplaza POST /api/v1/setup/account. El daemon (User=hermes) DEJA un fichero
+    # staged en /run/hermes/setup; el path-unit root hermes-account-apply lo aplica
+    # (crea el usuario). One-time (sentinel). REUSE de shell_server.setup.api
+    # (validación + escritura atómica), no reimplementar.
+    # ------------------------------------------------------------------
+
+    def stage_account(self, *, username: str, password: str, sender_uid: int) -> dict:
+        """Valida y deja staged las credenciales de la cuenta de SO. {staged, error}."""
+        self._authorize_and_resolve(sender_uid, operation="stage_account")
+        from hermes.shell_server.setup.api import (  # noqa: PLC0415
+            _DEFAULT_SENTINEL_FILE,
+            _DEFAULT_STAGE_DIR,
+            _validate_password,
+            _validate_username,
+            _write_staged_request,
+        )
+
+        if _DEFAULT_SENTINEL_FILE.exists():
+            return {"staged": False, "error": "already_configured"}
+        if not _validate_username(username):
+            return {"staged": False, "error": "invalid_username"}
+        if not _validate_password(password):
+            return {"staged": False, "error": "invalid_password"}
+        try:
+            _write_staged_request(
+                username=username, password=password, stage_dir=_DEFAULT_STAGE_DIR
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.stage_account_failed: %s", exc)
+            return {"staged": False, "error": "stage_failed"}
+        return {"staged": True, "error": None}
+
+    def set_locale_keymap(self, *, locale: str, keymap: str, sender_uid: int) -> dict:
+        """Stagea idioma + teclado del SO. El root oneshot hermes-locale-apply los
+        aplica con localectl. {staged, error}. Validación estricta (allow-list de
+        caracteres); el helper root NO confía en esta capa y revalida."""
+        self._authorize_and_resolve(sender_uid, operation="set_locale_keymap")
+        import json as _json  # noqa: PLC0415
+        import os as _os  # noqa: PLC0415
+        import re as _re  # noqa: PLC0415
+        import stat as _stat  # noqa: PLC0415
+        from datetime import UTC, datetime  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        if not _re.match(r"^[a-z]{2}_[A-Z]{2}\.UTF-8$", locale or ""):
+            return {"staged": False, "error": "invalid_locale"}
+        if not _re.match(r"^[a-z0-9_-]{1,16}$", keymap or ""):
+            return {"staged": False, "error": "invalid_keymap"}
+        stage_dir = Path(_os.environ.get("HERMES_ACCOUNT_STAGE_DIR", "/run/hermes/setup"))
+        try:
+            stage_dir.mkdir(mode=0o700, exist_ok=True)
+            target = stage_dir / "locale-request.json"
+            tmp = target.with_suffix(".tmp")
+            payload = {
+                "locale": locale,
+                "keymap": keymap,
+                "requested_at": datetime.now(tz=UTC).isoformat(),
+            }
+            tmp.write_text(_json.dumps(payload), encoding="utf-8")
+            _os.chmod(tmp, _stat.S_IRUSR | _stat.S_IWUSR)
+            tmp.rename(target)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.set_locale_keymap_failed: %s", exc)
+            return {"staged": False, "error": "stage_failed"}
+        return {"staged": True, "error": None}
+
+    # ------------------------------------------------------------------
+    # OAuth device-code de providers nativos (suscripciones sin clave API).
+    # REUSE del patrón de hermes_cli/web_server.py (_start_device_code_flow +
+    # _nous_poller): helpers puros de hermes_cli + poller en thread daemon.
+    # Las credenciales se persisten en el auth-store de hermes_cli bajo
+    # HERMES_HOME (= /var/lib/hermes/hermes-home), que es EXACTAMENTE donde
+    # resolve_runtime_provider("nous") las lee al resolver el motor.
+    # ------------------------------------------------------------------
+
+    def start_provider_oauth(self, *, provider_id: str, sender_uid: int) -> dict:
+        """Inicia el flow device-code. Devuelve {session_id, user_code,
+        verification_url, expires_in, poll_interval} o {error}.
+
+        Bloquea ~1 request HTTP (15s timeout) — el adapter D-Bus lo ejecuta
+        en executor para no bloquear el event loop del daemon.
+        """
+        self._authorize_and_resolve(sender_uid, operation="start_provider_oauth")
+        import os  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+        import time as _time  # noqa: PLC0415
+        import uuid as _uuid  # noqa: PLC0415
+
+        # xAI (SuperGrok): OAuth de NAVEGADOR (loopback PKCE). El daemon levanta
+        # un callback server local + construye la authorize URL; la UI la abre en
+        # chromium; al volver, el worker intercambia el code y persiste. Port de
+        # hermes_cli/web_server.py::_start_xai_loopback + _xai_loopback_worker.
+        if provider_id == "xai-oauth":
+            try:
+                from hermes_cli import auth as hauth  # noqa: PLC0415
+            except Exception as exc:  # noqa: BLE001
+                return {"error": f"hermes_cli no disponible: {exc}"}
+            try:
+                discovery = hauth._xai_oauth_discovery()
+                server, thr, cb_result, redirect_uri = hauth._xai_start_callback_server()
+                hauth._xai_validate_loopback_redirect_uri(redirect_uri)
+                verifier = hauth._oauth_pkce_code_verifier()
+                challenge = hauth._oauth_pkce_code_challenge(verifier)
+                import secrets as _secrets  # noqa: PLC0415
+                state = _secrets.token_hex(16)
+                authorize_url = hauth._xai_oauth_build_authorize_url(
+                    authorization_endpoint=discovery["authorization_endpoint"],
+                    redirect_uri=redirect_uri, code_challenge=challenge,
+                    state=state, nonce=_secrets.token_hex(16),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("hermes.dbus.xai_oauth_start_failed: %s", exc)
+                return {"error": f"xai start: {exc}"}
+            sid = _uuid.uuid4().hex
+            with _OAUTH_SESSIONS_LOCK:
+                _OAUTH_SESSIONS[sid] = {
+                    "status": "pending", "provider_id": "xai-oauth",
+                    "server": server, "thread": thr, "callback_result": cb_result,
+                    "redirect_uri": redirect_uri, "verifier": verifier,
+                    "challenge": challenge, "state": state,
+                    "token_endpoint": discovery["token_endpoint"],
+                    "discovery": discovery, "error_message": None,
+                }
+            threading.Thread(
+                target=_xai_loopback_worker, args=(sid,), daemon=True,
+                name=f"oauth-xai-{sid[:6]}",
+            ).start()
+            return {"session_id": sid, "flow": "loopback", "auth_url": authorize_url,
+                    "expires_in": 600}
+
+        # OpenAI Codex (ChatGPT OAuth, suscripción): device-code propio de OpenAI
+        # (no el endpoint estándar). El worker porta hermes_cli/web_server.py.
+        if provider_id == "openai-codex":
+            sid = _uuid.uuid4().hex
+            with _OAUTH_SESSIONS_LOCK:
+                _OAUTH_SESSIONS[sid] = {
+                    "status": "pending", "provider_id": "openai-codex",
+                    "user_code": "", "verification_url": "", "error_message": None,
+                }
+            threading.Thread(
+                target=_codex_oauth_worker, args=(sid,), daemon=True,
+                name=f"oauth-codex-{sid[:6]}",
+            ).start()
+            # Esperar a que el worker publique el user_code (step 1) ~10s.
+            deadline = _time.monotonic() + 10
+            while _time.monotonic() < deadline:
+                with _OAUTH_SESSIONS_LOCK:
+                    s = _OAUTH_SESSIONS.get(sid, {})
+                if s.get("user_code") or s.get("status") in ("error", "approved"):
+                    break
+                _time.sleep(0.2)
+            with _OAUTH_SESSIONS_LOCK:
+                s = _OAUTH_SESSIONS.get(sid, {})
+            if s.get("status") == "error":
+                return {"error": s.get("error_message") or "codex device-auth falló"}
+            if not s.get("user_code"):
+                return {"error": "codex: timeout esperando user_code"}
+            return {
+                "session_id": sid, "flow": "device_code",
+                "user_code": s["user_code"],
+                "verification_url": s["verification_url"],
+                "expires_in": int(s.get("expires_in") or 900),
+                "poll_interval": int(s.get("interval") or 5),
+            }
+
+        if provider_id != "nous":
+            return {"error": f"oauth_unsupported_provider:{provider_id}"}
+        try:
+            import httpx  # noqa: PLC0415
+            from hermes_cli.auth import (  # noqa: PLC0415
+                PROVIDER_REGISTRY,
+                _request_device_code,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.oauth_unavailable: %s", exc)
+            return {"error": "hermes_cli_unavailable"}
+
+        pconfig = PROVIDER_REGISTRY["nous"]
+        portal_base_url = (
+            os.getenv("HERMES_PORTAL_BASE_URL")
+            or os.getenv("NOUS_PORTAL_BASE_URL")
+            or pconfig.portal_base_url
+        ).rstrip("/")
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(15.0), headers={"Accept": "application/json"}
+            ) as client:
+                device_data = _request_device_code(
+                    client=client,
+                    portal_base_url=portal_base_url,
+                    client_id=pconfig.client_id,
+                    scope=pconfig.scope,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.oauth_device_request_failed: %s", exc)
+            return {"error": f"device_request_failed: {exc}"}
+
+        sid = _uuid.uuid4().hex
+        sess = {
+            "status": "pending",
+            "provider_id": "nous",
+            "device_code": str(device_data["device_code"]),
+            "interval": int(device_data["interval"]),
+            "expires_at": _time.time() + int(device_data["expires_in"]),
+            "portal_base_url": portal_base_url,
+            "client_id": pconfig.client_id,
+            "scope": pconfig.scope,
+            "error_message": None,
+        }
+        with _OAUTH_SESSIONS_LOCK:
+            _OAUTH_SESSIONS[sid] = sess
+        threading.Thread(
+            target=_nous_oauth_poller, args=(sid,), daemon=True,
+            name=f"oauth-poll-{sid[:6]}",
+        ).start()
+        return {
+            "session_id": sid,
+            "flow": "device_code",
+            "user_code": str(device_data["user_code"]),
+            "verification_url": str(device_data["verification_uri_complete"]),
+            "expires_in": int(device_data["expires_in"]),
+            "poll_interval": int(device_data["interval"]),
+        }
+
+    def get_provider_oauth_status(self, *, session_id: str) -> dict:
+        """Estado del flow: {status: pending|approved|error, error_message}."""
+        with _OAUTH_SESSIONS_LOCK:
+            sess = _OAUTH_SESSIONS.get(session_id)
+        if sess is None:
+            return {"status": "unknown"}
+        return {
+            "status": sess["status"],
+            "error_message": sess.get("error_message") or "",
+        }
+
+    # ------------------------------------------------------------------
+    # MCP Apps — gestión de servidores MCP por el operador (SO-nativo).
+    # El pipeline de ejecución YA existe (McpServerManager → capability
+    # registry → surface adapter → broker → mcp_tool_specs → LLM); esto añade
+    # la pieza que faltaba: configurar/persistir/conectar servidores.
+    # Persistencia: mcp-servers.json junto a la DB del daemon (daemon-owned).
+    # ------------------------------------------------------------------
+
+    async def list_mcp_servers(self) -> list[dict]:
+        """Servidores MCP configurados + salud + nº tools (read-only)."""
+        out = []
+        for entry in _load_mcp_config():
+            sid = entry["server_id"]
+            health = "disconnected"
+            tools = 0
+            if self._mcp_manager is not None:
+                try:
+                    health = self._mcp_manager.health(_mcp_id(sid))
+                    if health == "healthy":
+                        tools = len(await self._mcp_manager.list_tools(_mcp_id(sid)))
+                except Exception:  # noqa: BLE001 — server no conectado
+                    health = "disconnected"
+            out.append({**entry, "health": health, "tool_count": tools})
+        return out
+
+    async def add_mcp_server(self, *, draft_json: str, sender_uid: int) -> dict:
+        """Configura + conecta un servidor MCP stdio. Muta → authZ operador.
+
+        draft: {server_id, label, argv: [comando, ...], env?: {KEY: VALUE}}.
+        SEGURIDAD: el comando (argv[0]) debe estar en la allowlist de runners
+        (npx/uvx/node/python3) — el servidor corre como el usuario del daemon;
+        no se permite un binario arbitrario. El argv viene del OPERADOR por
+        D-Bus (nunca del LLM — Transport docstring lo exige).
+
+        env (BYOK): diccionario opcional de variables de entorno BYOK para el
+        servidor. Solo se permiten claves en _MCP_BYOK_ENV_KEYS; claves
+        arbitrarias son rechazadas (no silenciadas) para evitar inyección.
+        OD_DAEMON_URL se valida como URL http(s). El token OD_API_TOKEN se
+        persiste cifrado en la config y nunca se registra en claro en logs.
+        """
+        self._authorize_and_resolve(sender_uid, operation="add_mcp_server")
+        if self._mcp_manager is None:
+            return {"ok": False, "error": "mcp_not_configured"}
+        try:
+            d = json.loads(draft_json)
+        except (ValueError, TypeError) as exc:
+            return {"ok": False, "error": f"draft_json inválido: {exc}"}
+        sid = str(d.get("server_id") or "").strip()
+        argv = [str(a) for a in (d.get("argv") or []) if str(a).strip()]
+        import re as _re  # noqa: PLC0415
+        if not _re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", sid):
+            return {"ok": False, "error": "server_id inválido (minúsculas/dígitos/guiones, patrón ServerSlug)"}
+        if not argv:
+            return {"ok": False, "error": "argv vacío"}
+        runner = argv[0].rsplit("/", 1)[-1]
+        if runner not in _MCP_ALLOWED_RUNNERS:
+            return {
+                "ok": False,
+                "error": f"runner '{runner}' no permitido "
+                         f"(allowlist: {sorted(_MCP_ALLOWED_RUNNERS)})",
+            }
+        # SECURITY-FIRST (C2): el scanner SÓLO puede analizar código que pueda
+        # descargar de un registro (npm/PyPI). Si este argv no resuelve a una
+        # coordenada descargable (p.ej. 'npx ./local.js', 'uvx --from /ruta'),
+        # el scan no inspeccionaría nada y el install pasaría con CERO análisis.
+        # Sin análisis ⇒ no PASS ⇒ rechazo explícito (no un near-PASS).
+        if not _scanner_can_analyze_argv(argv):
+            return {
+                "ok": False,
+                "error": (
+                    "argv no resuelve a un paquete publicado descargable "
+                    "(npm vía npx / PyPI vía uvx|pipx). El Centro de Seguridad no "
+                    "puede analizar código que no esté en un registro; publica el "
+                    "servidor MCP para poder verificarlo antes de instalarlo."
+                ),
+            }
+        # Validate BYOK env — reject unknown keys loudly (security: no injection).
+        raw_env = d.get("env") or {}
+        try:
+            byok_env: dict[str, str] = _validate_mcp_env(raw_env)
+        except ValueError as exc:
+            return {"ok": False, "error": f"env inválido: {exc}"}
+        # Centro de Seguridad (antivirus agéntico): TODO MCP pasa por el scan
+        # antes de conectar. FAIL con política auto_block → no se conecta. El
+        # score se emite por señal → el modal InstallReview lo muestra. Defensa
+        # en profundidad: aunque la UI no pre-escanee, este gate bloquea lo grave.
+        scan_result = self._scan_install_target(
+            "mcp_server", sid, argv=argv, emit_signals=False,
+        )
+        if scan_result is not None and scan_result.get("blocked"):
+            return scan_result  # ya incluye ok:False + blocked + error
+        # C1 PASS-3: PRE-FETCH the scanned package into the shared runner cache NOW, in
+        # this trusted install path (daemon, host netns). The MCP RUNTIME then spawns
+        # OFFLINE from that cache in its default-deny netns — no registry network at
+        # runtime (closes the npm-PUT exfil residual). FAIL-CLOSED: a prefetch failure
+        # aborts the add, so we never persist a server the offline runtime couldn't run.
+        # Blocking subprocess → run off the event loop.
+        try:
+            import asyncio as _asyncio_pf  # noqa: PLC0415
+            await _asyncio_pf.get_running_loop().run_in_executor(
+                None, _prefetch_mcp_package, sid, argv
+            )
+        except RuntimeError as exc:
+            logger.warning("hermes.dbus.mcp_prefetch_failed server=%s error=%s", sid, exc)
+            return {"ok": False, "error": f"prefetch falló: {exc}"}
+        try:
+            server = await _mcp_connect(self._mcp_manager, sid, argv, env=byok_env)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"conexión falló: {exc}"}
+        entries = [e for e in _load_mcp_config() if e["server_id"] != sid]
+        entry: dict = {
+            "server_id": sid,
+            "label": str(d.get("label") or sid),
+            "argv": argv,
+        }
+        if byok_env:
+            entry["env"] = byok_env
+        entries.append(entry)
+        _save_mcp_config(entries)
+        # Log connection without exposing secret values.
+        _log_env_keys = sorted(byok_env.keys())
+        logger.info(
+            "hermes.dbus.mcp_connected server=%s runner=%s byok_keys=%s",
+            sid, runner, _log_env_keys,
+        )
+        return {"ok": True, "tool_count": len(server.tools)}
+
+    async def remove_mcp_server(self, *, server_id: str, sender_uid: int) -> dict:
+        """Desconecta + borra de la config. Muta → authZ operador."""
+        self._authorize_and_resolve(sender_uid, operation="remove_mcp_server")
+        if self._mcp_manager is not None:
+            try:
+                await self._mcp_manager.disconnect(_mcp_id(server_id))
+            except Exception:  # noqa: BLE001 — ya desconectado
+                pass
+        _save_mcp_config(
+            [e for e in _load_mcp_config() if e["server_id"] != server_id]
+        )
+        return {"ok": True}
+
+    async def search_mcp_registry(self, *, query: str, limit: int) -> list[dict]:
+        """Busca en el MCP Registry oficial y normaliza al formato de add_mcp_server.
+
+        Read-only, sin authZ (mismo patrón que list_mcp_servers).
+        Fail-soft: excepciones → [] con warning (no debe tumbar el daemon).
+        """
+        try:
+            from hermes.mcp.infrastructure.registry_client import (  # noqa: PLC0415
+                McpRegistryError,
+                search_servers,
+            )
+            raw_entries = await search_servers(query=query, limit=limit or 20)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.mcp_registry_search_failed: %s", exc)
+            return []
+
+        results: list[dict] = []
+        for item in raw_entries:
+            try:
+                results.append(_normalize_registry_entry(item))
+            except Exception as exc:  # noqa: BLE001 — entry malformada, skip
+                logger.warning(
+                    "hermes.dbus.mcp_registry_normalize_failed entry=%s err=%s",
+                    item.get("server", {}).get("name", "?"),
+                    exc,
+                )
+        return results
+
+    # ------------------------------------------------------------------
+    # Skill Hub de Hermes (hermes_cli/skills_hub + tools/skills_hub).
+    # Búsqueda unificada multi-fuente + install/uninstall + instaladas.
+    # Las skills del hub aterrizan en $HERMES_HOME/skills (las carga el
+    # motor Nous directamente). REUSE de las funciones del CLI — el SO no
+    # inventa un hub paralelo.
+    # ------------------------------------------------------------------
+
+    def search_skills_hub(
+        self, *, query: str, source: str, limit: int, query_id: str = ""
+    ) -> dict:
+        """Busca en el hub (GitHub + fuentes configuradas). Read-only, red.
+
+        BLOQUEA hasta 30s (timeout de unified_search) — el adapter lo corre
+        en executor. Acepta un query_id para cancel-check: si el caller llamó
+        cancel_skills_hub_search(query_id) antes de que esta función termine,
+        devuelve {cancelled: true, query_id, results: []} en lugar del batch.
+        """
+        qid = (query_id or "").strip()
+        cancel_event = _hub_search_get_cancel_event(qid) if qid else None
+
+        try:
+            from tools.skills_hub import create_source_router, unified_search  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.skills_hub_unavailable: %s", exc)
+            return {"query_id": qid, "results": [], "cancelled": False}
+
+        metas = unified_search(
+            (query or "").strip(),
+            create_source_router(),
+            source_filter=source or "all",
+            limit=min(max(int(limit or 20), 1), 50),
+        )
+
+        if cancel_event is not None and cancel_event.is_set():
+            logger.debug("hermes.dbus.hub_search_cancelled query_id=%s", qid)
+            return {"query_id": qid, "results": [], "cancelled": True}
+
+        results = [
+            {
+                "name": m.name,
+                "description": m.description,
+                "source": m.source,
+                "identifier": m.identifier,
+                "trust_level": m.trust_level,
+                "repo": m.repo,
+                "tags": list(m.tags or []),
+            }
+            for m in metas
+        ]
+        return {"query_id": qid, "results": results, "cancelled": False}
+
+    def cancel_skills_hub_search(self, *, query_id: str) -> dict:
+        """Señaliza la cancelación de una búsqueda en vuelo. No-op si ya terminó."""
+        qid = (query_id or "").strip()
+        if not qid:
+            return {"ok": False, "error": "query_id vacío"}
+        _hub_search_cancel(qid)
+        logger.debug("hermes.dbus.hub_search_cancel_requested query_id=%s", qid)
+        return {"ok": True}
+
+    def list_hub_skills(self) -> list[dict]:
+        """Skills del hub instaladas (lockfile .hub/lock.json). Read-only."""
+        try:
+            from tools.skills_hub import HubLockFile  # noqa: PLC0415
+            return HubLockFile().list_installed()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.hub_lockfile_unreadable: %s", exc)
+            return []
+
+    def _scan_service_lazy(self):
+        """Lazy-constructed ScanService with all 5 scanners and SQLite repos.
+
+        Uses the pre-injected instance when available (tests / explicit DI).
+        Falls back to building the full production composition root on first
+        call. Import is deferred so the scanner infra is never loaded unless
+        the scan path is actually exercised.
+
+        Returns None if hermes.security_center is not installed (scan is
+        additive/optional — must never crash the install path).
+        """
+        if self._scan_service is not None:
+            return self._scan_service
+        try:
+            from hermes.security_center.application.scan_service import ScanService  # noqa: PLC0415
+            from hermes.security_center.infrastructure.composio_allowlist import (  # noqa: PLC0415
+                ComposioAllowlistScanner,
+            )
+            from hermes.security_center.infrastructure.heuristic_fallback import (  # noqa: PLC0415
+                HeuristicFallbackScanner,
+            )
+            from hermes.security_center.infrastructure.mcp_tool_linter import (  # noqa: PLC0415
+                McpToolLinter,
+            )
+            from hermes.security_center.infrastructure.package_content_scanner import (  # noqa: PLC0415
+                PackageContentScanner,
+            )
+            from hermes.security_center.infrastructure.provenance_scanner import (  # noqa: PLC0415
+                ProvenanceScanner,
+            )
+            from hermes.security_center.infrastructure.skill_signature_check import (  # noqa: PLC0415
+                SkillSignatureCheck,
+            )
+            from hermes.security_center.infrastructure.sqlite_scan_repo import (  # noqa: PLC0415
+                SQLitePolicyRepo,
+                SQLiteScanRepo,
+            )
+        except ImportError:
+            logger.warning(
+                "hermes.dbus.security_center_unavailable — scan es no-op "
+                "(instalar hermes.security_center para habilitar)"
+            )
+            return None
+        self._scan_service = ScanService(
+            # INVARIANTE (load-bearing): _run_scan_sync corre el scan en un HILO
+            # aparte con su PROPIO loop cuando el loop del daemon ya gira (ver
+            # _run_scan_sync) — por eso PackageContentScanner SÍ puede hacer red
+            # ACOTADA (fetch + análisis estático del artefacto publicado; HTTP
+            # timeout 20 s, descarga topada). Es el scanner que cierra el agujero
+            # C2 (el scan dejaba pasar 'npx -y evil-data-stealer-mcp' con score
+            # casi-PASS porque nadie miraba el contenido). Los otros cuatro siguen
+            # siendo puros/CPU-local. NO añadir aquí Trivy (120 s) sin moverlo al
+            # camino async — su timeout es demasiado largo para el hilo del gate.
+            scanners=[
+                PackageContentScanner(),
+                HeuristicFallbackScanner(),
+                ProvenanceScanner(),
+                McpToolLinter(),
+                SkillSignatureCheck(),
+                ComposioAllowlistScanner(),
+            ],
+            history_repo=SQLiteScanRepo(),
+            policy_repo=SQLitePolicyRepo(),
+        )
+        return self._scan_service
+
+    def _run_scan_sync(self, target: "Any") -> "Any":
+        """Run scan_service.scan(target) synchronously, desde CUALQUIER contexto.
+
+        CRÍTICO: muchos verbos del gate (add_mcp_server, install_package,
+        scan_install_draft) son async / corren EN el event loop del daemon. Crear
+        ahí un `new_event_loop().run_until_complete()` lanza "Cannot run the event
+        loop while another loop is running" → el scan revienta. Antes eso caía a
+        fail-open (None) y el scan NUNCA corría para MCP/Apps (gate de teatro);
+        con fail-closed bloqueaba TODO. Fix: si ya hay un loop corriendo, ejecutar
+        el scan en un HILO aparte con su propio loop (el scan es local y rápido —
+        Trivy se salta si no está). Si no hay loop (hub-op worker threads de
+        skills), usar un loop propio directo.
+        """
+        import asyncio as _asyncio  # noqa: PLC0415
+
+        def _run_in_fresh_loop() -> "Any":
+            loop = _asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(self._scan_service_lazy().scan(target))
+            finally:
+                loop.close()
+
+        try:
+            _asyncio.get_running_loop()
+        except RuntimeError:
+            # Sin loop corriendo (hilo worker): loop propio directo.
+            return _run_in_fresh_loop()
+        # Loop del daemon corriendo: offload a un hilo con su propio loop para no
+        # anidar loops. Bloquea brevemente (scan local, sin red).
+        import concurrent.futures as _futures  # noqa: PLC0415
+
+        with _futures.ThreadPoolExecutor(max_workers=1) as _ex:
+            return _ex.submit(_run_in_fresh_loop).result()
+
+    @staticmethod
+    def _serialize_scan_record(record: "Any") -> str:
+        """Serialize a ScanRecord to the JSON string expected by InstallReview QML.
+
+        Maps evidence_ref → evidence to match the QML field name.
+        """
+        risks = [
+            {
+                "severity": r.severity.value,
+                "scanner": r.category,
+                "message": r.message,
+                "evidence": r.evidence_ref,  # QML reads 'evidence', domain has 'evidence_ref'
+            }
+            for r in record.score.risks
+        ]
+        return json.dumps({
+            "scan_id": str(record.id),
+            "identifier": record.target.identifier,
+            "kind": record.target.kind,
+            "score": record.score.value,
+            "verdict": record.verdict.value,
+            "risks": risks,
+        })
+
+    def install_hub_skill(self, *, identifier: str, sender_uid: int) -> dict:
+        """Instala una skill del hub (clona + valida). Muta → authZ operador.
+
+        Operación de red/git potencialmente larga → corre en thread y se
+        sondea con get_hub_op_status(op_id). Mismo patrón que el OAuth.
+
+        Security: runs a ScanService scan BEFORE do_install. Fail-safe: if
+        the scan raises, a WARNING is logged and the install proceeds normally
+        (scan is additive; must never block the install path). If the scan
+        verdict is FAIL and policy.auto_block_fail is True, the install is
+        blocked and a ScanCompleted + InstallReviewRequested signal is emitted.
+        """
+        self._authorize_and_resolve(sender_uid, operation="install_hub_skill")
+        ident = (identifier or "").strip()
+        if not ident:
+            return {"error": "identifier vacío"}
+        scan_result = self._scan_hub_target(ident)
+        if scan_result is not None and scan_result.get("blocked"):
+            return scan_result
+        return _start_hub_op("install", ident, scan_record=scan_result.get("record") if scan_result else None, signal_emitter=self._scan_signal_emitter)
+
+    def uninstall_hub_skill(self, *, name: str, sender_uid: int) -> dict:
+        """Desinstala una skill del hub. Muta → authZ operador."""
+        self._authorize_and_resolve(sender_uid, operation="uninstall_hub_skill")
+        nm = (name or "").strip()
+        if not nm:
+            return {"error": "name vacío"}
+        return _start_hub_op("uninstall", nm)
+
+    def get_hub_op_status(self, *, op_id: str) -> dict:
+        """Estado de una operación del hub: {status: pending|done|error}."""
+        with _HUB_OPS_LOCK:
+            op = _HUB_OPS.get(op_id)
+        if op is None:
+            return {"status": "unknown"}
+        return {"status": op["status"], "error_message": op.get("error_message") or ""}
+
+    def _scan_hub_target(self, identifier: str) -> dict | None:
+        """Pre-install scan for a hub skill (defensa en profundidad en install_hub_skill).
+
+        emit_signals=False: la UI gated (beginGatedInstall→scan_install_draft) ya
+        muestra el modal y graba la decisión; este scan interno sólo bloquea en
+        FAIL, sin emitir un segundo modal informativo.
+        """
+        return self._scan_install_target("skill", identifier, emit_signals=False)
+
+    def _scan_install_target(
+        self,
+        kind: str,
+        identifier: str,
+        *,
+        argv: "list[str] | None" = None,
+        source_url: str = "",
+        emit_signals: bool = True,
+        allow_warn: bool = False,
+    ) -> dict | None:
+        """Run a pre-install security scan for ANY install kind.
+
+        The Security Center is the SO's "antivirus" — system threats (kind
+        "package": CVE/provenance) and AGENTIC threats (kind "skill"/"mcp_server":
+        tool linter, signature, prompt-injection heuristics) share one gate.
+
+        Returns:
+          None                    — scanner NO desplegado (operador optó por no
+                                    instalarlo): se procede (fail-open consciente).
+          {"record": record}      — PASS only (or WARN cuando allow_warn=True):
+                                    install may proceed.
+          {"blocked": True, ...}  — FAIL (auto_block), WARN sin override, O error
+                                    inesperado del scanner desplegado: caller MUST
+                                    abort.
+
+        Gate WARN (alineado con el revisor de terminal): por defecto WARN BLOQUEA.
+        El revisor de terminal (SecurityCenterInstallReviewer) ya auto-deniega
+        cualquier cosa que no sea un PASS limpio; este gate de daemon era más
+        débil (dejaba pasar WARN), una incoherencia explotable. Ahora WARN sólo
+        procede con allow_warn=True (override explícito del dueño, p.ej. una
+        confirmación de usuario ya registrada por la UI gated).
+
+        Postura: si el scanner NO está (ImportError / no construible), fail-OPEN
+        (None) — es decisión de despliegue. Si el scanner SÍ está pero revienta en
+        runtime, fail-CLOSED (blocked) — un SO público no instala sin un veredicto
+        de seguridad fiable. argv (linter de runner MCP) y source_url (procedencia
+        de paquete) alimentan los scanners.
+        """
+        try:
+            from hermes.security_center.domain.install_target import InstallTarget  # noqa: PLC0415
+            from hermes.security_center.application.scan_service import ScanBlockedError  # noqa: PLC0415
+        except ImportError:
+            logger.warning(
+                "hermes.dbus.security_center_unavailable — _scan_install_target es no-op"
+            )
+            return None
+        if self._scan_service_lazy() is None:
+            return None
+
+        target = InstallTarget(
+            kind=kind,
+            identifier=identifier,
+            source_url=source_url or "",
+            argv=list(argv or []),
+        )
+        try:
+            record = self._run_scan_sync(target)
+        except ScanBlockedError as exc:
+            logger.warning(
+                "hermes.dbus.install_scan_blocked kind=%s identifier=%s: %s",
+                kind, identifier, exc,
+            )
+            scan_data = self._serialize_scan_record_from_blocked(identifier)
+            if emit_signals:
+                self._emit_scan_signals(str(exc), "FAIL", scan_data)
+            return {"ok": False, "blocked": True,
+                    "error": f"Instalación bloqueada por política de seguridad: {exc}"}
+        except Exception as exc:  # noqa: BLE001 — scanner desplegado que revienta → fail-CLOSED
+            logger.error(
+                "hermes.dbus.install_scan_errored kind=%s identifier=%s: %s "
+                "(fail-closed: instalación denegada por precaución)",
+                kind, identifier, exc,
+            )
+            scan_data = self._serialize_scan_record_from_blocked(identifier)
+            if emit_signals:
+                self._emit_scan_signals(f"scan-error-{identifier}", "FAIL", scan_data)
+            return {
+                "ok": False,
+                "blocked": True,
+                "error": "No se pudo verificar la seguridad (el análisis falló); "
+                         "instalación denegada por precaución.",
+            }
+
+        scan_data = self._serialize_scan_record(record)
+        if emit_signals:
+            self._emit_scan_signals(str(record.id), record.verdict.value, scan_data)
+
+        verdict = record.verdict.value if hasattr(record.verdict, "value") else str(record.verdict)
+        # WARN-gate: alinear con el revisor de terminal. WARN bloquea salvo
+        # override explícito del dueño (allow_warn). Sin esto, el gate del daemon
+        # era más laxo que el de terminal (incoherencia explotable).
+        if verdict == "WARN" and not allow_warn:
+            logger.warning(
+                "hermes.dbus.install_scan_warn_blocked kind=%s identifier=%s score=%s "
+                "(WARN bloquea sin override del dueño)",
+                kind, identifier, record.score.value,
+            )
+            return {
+                "ok": False,
+                "blocked": True,
+                "warn": True,
+                "scan_id": str(record.id),
+                "score": record.score.value,
+                "error": (
+                    "El Centro de Seguridad marcó este install como DUDOSO "
+                    f"(WARN, score={record.score.value}). Requiere confirmación "
+                    "explícita del dueño para continuar."
+                ),
+            }
+        return {"record": record}
+
+    def _serialize_scan_record_from_blocked(self, identifier: str) -> str:
+        """Minimal JSON for a blocked install when we have no ScanRecord object."""
+        import uuid as _uuid  # noqa: PLC0415
+        return json.dumps({
+            "scan_id": _uuid.uuid4().hex,
+            "identifier": identifier,
+            "score": 0,
+            "verdict": "FAIL",
+            "risks": [],
+        })
+
+    def _emit_scan_signals(self, scan_id: str, verdict: str, scan_data_json: str) -> None:
+        """Invoke the injected signal emitter if available. Fire-and-forget."""
+        if self._scan_signal_emitter is None:
+            return
+        try:
+            self._scan_signal_emitter(scan_id, verdict, scan_data_json)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.scan_signal_emit_failed: %s", exc)
+
+    def scan_install(self, *, kind: str, identifier: str) -> str:
+        """On-demand scan without installing. Returns serialized scan JSON.
+
+        Fail-safe: returns an error JSON on any exception so the caller always
+        gets a valid string response.
+        """
+        from hermes.security_center.domain.install_target import InstallTarget  # noqa: PLC0415
+        from hermes.security_center.application.scan_service import ScanBlockedError  # noqa: PLC0415
+
+        k = (kind or "skill").strip()
+        ident = (identifier or "").strip()
+        if not ident:
+            return json.dumps({"error": "identifier vacío"})
+        target = InstallTarget(kind=k, identifier=ident)
+        try:
+            record = self._run_scan_sync(target)
+        except ScanBlockedError as exc:
+            # Policy auto-blocked: still return the score so the UI can show it.
+            logger.info("hermes.dbus.scan_install_blocked identifier=%s: %s", ident, exc)
+            return self._serialize_scan_record_from_blocked(ident)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.scan_install_failed identifier=%s: %s", ident, exc)
+            return json.dumps({"error": str(exc)})
+        scan_data = self._serialize_scan_record(record)
+        self._emit_scan_signals(str(record.id), record.verdict.value, scan_data)
+        return scan_data
+
+    def scan_install_draft(self, *, draft_json: str) -> str:
+        """Pre-install scan from a full draft (kind + identifier + argv/source_url).
+
+        This is the UI's gate: the install button calls this FIRST (it scans but
+        does NOT install). El resultado se DEVUELVE al llamante (correlado por el
+        reqId de la llamada), y la UI conduce el modal InstallReview desde esa
+        respuesta — NO desde la señal global InstallReviewRequested. Esto evita
+        que un scan bajo demanda (Centro de Seguridad) abra el gate de instalación
+        con un pendingInstall ajeno (bypass CRÍTICO). Por eso emit_signals=False
+        aquí. Sólo tras la confirmación del usuario la UI llama al verbo real
+        (add_mcp_server / install_package / install_hub_skill). Honra el invariante:
+        todo Skill/MCP/App pasa el Centro de Seguridad → score → el usuario decide.
+        Read-only/no authZ (mismo patrón que scan_install).
+
+        draft: {kind, identifier, argv?, source_url?}.
+        Returns the serialized scan JSON (score/verdict/risks) — error JSON on any
+        failure so la UI siempre recibe un string válido (y muestra el error).
+        """
+        try:
+            d = json.loads(draft_json or "{}")
+        except (ValueError, TypeError) as exc:
+            return json.dumps({"error": f"draft inválido: {exc}"})
+        kind = str(d.get("kind") or "skill").strip()
+        ident = str(d.get("identifier") or "").strip()
+        if not ident:
+            return json.dumps({"error": "identifier vacío"})
+        argv = [str(a) for a in (d.get("argv") or []) if str(a).strip()]
+        source_url = str(d.get("source_url") or "")
+        # READ-ONLY display path: allow_warn=True para DEVOLVER el record real
+        # (score/verdict/risks) y que la UI muestre WARN con sus hallazgos. El
+        # bloqueo de WARN se aplica en los verbos mutadores reales
+        # (add_mcp_server / install_hub_skill / install_package), no aquí: si lo
+        # ocultáramos como "blocked" perderíamos el detalle que el usuario debe
+        # ver para decidir (rompería el modelo scan→score→usuario-decide).
+        result = self._scan_install_target(
+            kind, ident, argv=argv, source_url=source_url,
+            emit_signals=False, allow_warn=True,
+        )
+        if result is None:
+            # security_center ausente/no-op → PASS implícito para no bloquear la UI.
+            return json.dumps({
+                "scan_id": "", "identifier": ident, "score": 100,
+                "verdict": "PASS", "risks": [],
+            })
+        if result.get("blocked"):
+            return self._serialize_scan_record_from_blocked(ident)
+        return self._serialize_scan_record(result["record"])
+
+    # ------------------------------------------------------------------
+    # Package Store — store de apps Linux (Flatpak + RPM).
+    # NUNCA instala pip — eso es para el daemon de skills.
+    # Lecturas (list/search) son read-only. install/uninstall requieren
+    # authZ de operador (mismo gate que add_mcp_server).
+    # ------------------------------------------------------------------
+
+    def _package_store_service(self):
+        """Lazy-constructed PackageStoreService (subprocess adapters)."""
+        if not hasattr(self, "_pkg_store_svc"):
+            from hermes.package_store.application.package_store_service import (  # noqa: PLC0415
+                PackageStoreService,
+            )
+            from hermes.package_store.infrastructure.subprocess_catalog import (  # noqa: PLC0415
+                SubprocessPackageCatalog,
+            )
+            from hermes.package_store.infrastructure.subprocess_manager import (  # noqa: PLC0415
+                SubprocessPackageManager,
+            )
+            self._pkg_store_svc = PackageStoreService(
+                catalog=SubprocessPackageCatalog(),
+                manager=SubprocessPackageManager(),
+            )
+        return self._pkg_store_svc
+
+    def list_installed_packages(self, *, source: str) -> list[dict]:
+        """Paquetes instalados por source ('flatpak' | 'rpm'). Read-only."""
+        try:
+            return self._package_store_service().list_installed(source=source)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.pkg_store.list_installed_failed: %s", exc)
+            return []
+
+    def search_packages(self, *, query: str, source: str) -> list[dict]:
+        """Busca paquetes en Flathub y/o dnf. Read-only, bloqueante (≤30s)."""
+        try:
+            return self._package_store_service().search(query=query, source=source)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.pkg_store.search_failed: %s", exc)
+            return []
+
+    def install_package(self, *, source: str, package_id: str, sender_uid: int) -> dict:
+        """Inicia instalación async. Muta → authZ operador. Devuelve {op_id}.
+
+        Centro de Seguridad (antivirus de SISTEMA): toda App pasa por el scan
+        (CVE/procedencia) antes de instalar. FAIL con política auto_block → no
+        se instala; el score se emite por señal → modal InstallReview.
+        """
+        self._authorize_and_resolve(sender_uid, operation="install_package")
+        scan_result = self._scan_install_target(
+            "package", package_id, source_url=source, emit_signals=False,
+        )
+        if scan_result is not None and scan_result.get("blocked"):
+            return scan_result
+        try:
+            return self._package_store_service().start_install(
+                source=source, package_id=package_id
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+    def uninstall_package(self, *, source: str, package_id: str, sender_uid: int) -> dict:
+        """Inicia desinstalación async. Muta → authZ operador. Devuelve {op_id}."""
+        self._authorize_and_resolve(sender_uid, operation="uninstall_package")
+        try:
+            return self._package_store_service().start_uninstall(
+                source=source, package_id=package_id
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+    def get_pkg_op_status(self, *, op_id: str) -> dict:
+        """Estado de una operación de install/uninstall: {status, log_tail, error_message}."""
+        try:
+            return self._package_store_service().get_op_status(op_id=op_id)
+        except Exception as exc:  # noqa: BLE001
+            return {"op_id": op_id, "status": "unknown", "error_message": str(exc)}
+
+    def configure_native_provider(
+        self, *, provider_id: str, api_key: str, model: str,
+        base_url: str, sender_uid: int,
+    ) -> dict:
+        """Configura un provider NATIVO de hermes_cli por su id real (api-key).
+
+        Camino NATIVO (no la abstracción shell_server/kinds): escribe la clave en
+        HERMES_HOME/.env bajo la env var REAL del provider (p.ej. OPENAI_API_KEY
+        para `openai-api`) + fija model.{provider,default} en config.yaml. El
+        motor (resolve_runtime_provider) lo lee directo — igual que
+        `hermes auth add` + `hermes --provider <id>`. Soporta CUALQUIER provider
+        api-key de la tabla (openai-api directo, gemini, deepseek, groq, mistral,
+        copilot…). Para OAuth/suscripción → start_provider_oauth.
+        """
+        self._authorize_and_resolve(sender_uid, operation="configure_native_provider")
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.native_cfg_unavailable: %s", exc)
+            return {"ok": False, "error": "hermes_cli no disponible"}
+        cfg = PROVIDER_REGISTRY.get(provider_id)
+        if cfg is None:
+            return {"ok": False, "error": f"provider desconocido: {provider_id}"}
+        if getattr(cfg, "auth_type", "api_key") != "api_key":
+            return {"ok": False, "error": "oauth_required",
+                    "auth_type": getattr(cfg, "auth_type", "")}
+        key = (api_key or "").strip()
+        if not key:
+            return {"ok": False, "error": "api_key vacía"}
+        env_vars = getattr(cfg, "api_key_env_vars", ()) or ()
+        if not env_vars:
+            return {"ok": False, "error": f"{provider_id} no declara env var de clave"}
+        try:
+            _write_hermes_env(env_vars[0], key)
+            bu = (base_url or "").strip()
+            if bu and getattr(cfg, "base_url_env_var", ""):
+                _write_hermes_env(cfg.base_url_env_var, bu)
+            _write_hermes_model_config(provider_id, (model or "").strip(), bu)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.native_cfg_write_failed: %s", exc)
+            return {"ok": False, "error": f"no se pudo escribir config: {exc}"}
+        # Carga la API-key recién escrita al os.environ del proceso vivo. El
+        # resolver POR CICLO (provider_config_source._load_native_model_config)
+        # lee la key de PROVIDER_REGISTRY[pid].api_key_env_vars; sin esta línea,
+        # esa env-var no existe en el daemon ya arrancado y el primer chat tras
+        # "Configurar" iría sin key (401). El model/provider los lee del
+        # config.yaml directo (no necesita reload).
+        try:
+            import os as _os  # noqa: PLC0415
+            _os.environ[env_vars[0]] = key
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.env_load_failed: %s", exc)
+        logger.info("hermes.dbus.native_provider_configured id=%s", provider_id)
+        if self._active_provider_svc is not None:
+            self._active_provider_svc.force_refresh()
+        return {"ok": True}
+
+    def get_native_active(self) -> dict:
+        """Provider nativo activo según config.yaml ({} si ninguno). Read-only."""
+        return _read_native_active()
+
+    # ------------------------------------------------------------------
+    # Web search backend keys (Brave/Tavily/Exa) — mejora de web_search.
+    # ------------------------------------------------------------------
+    _WEB_SEARCH_ENV = {  # noqa: RUF012
+        "brave": "BRAVE_SEARCH_API_KEY",
+        "tavily": "TAVILY_API_KEY",
+        "exa": "EXA_API_KEY",
+    }
+
+    async def set_web_search_api_key(
+        self, *, provider: str, api_key: str, sender_uid: int
+    ) -> dict:
+        """Configura la API key de un backend de búsqueda web (Brave/Tavily/Exa).
+
+        Mismo patrón que configure_native_provider: escribe la env var REAL en
+        HERMES_HOME/.env (persistente — la carga el env_loader al arrancar) Y la
+        inyecta en os.environ del proceso vivo, para que web_search empiece a usar
+        ese backend SIN reiniciar (el plugin lee la key con os.getenv; p.ej.
+        brave_free → BRAVE_SEARCH_API_KEY). El orden por defecto del registry
+        (exa→searxng→brave-free→ddgs) lo prioriza automáticamente; ddgs queda de
+        fallback keyless.
+        """
+        self._authorize_and_resolve(sender_uid, operation="set_web_search_api_key")
+        env_var = self._WEB_SEARCH_ENV.get((provider or "").strip().lower())
+        if env_var is None:
+            return {"ok": False, "error": f"proveedor de búsqueda desconocido: {provider}"}
+        key = (api_key or "").strip()
+        if not key:
+            return {"ok": False, "error": "api_key vacía"}
+        try:
+            import os as _os  # noqa: PLC0415
+            _write_hermes_env(env_var, key)
+            _os.environ[env_var] = key
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.web_search_key_write_failed: %s", exc)
+            return {"ok": False, "error": f"no se pudo escribir: {exc}"}
+        logger.info("hermes.dbus.web_search_key_set provider=%s", provider)
+        return {"ok": True, "provider": provider, "configured": True}
+
+    def get_web_search_status(self) -> dict:
+        """Backends de búsqueda web con key configurada (read-only)."""
+        import os as _os  # noqa: PLC0415
+        return {
+            "brave": bool(_os.getenv("BRAVE_SEARCH_API_KEY", "").strip()),
+            "tavily": bool(_os.getenv("TAVILY_API_KEY", "").strip()),
+            "exa": bool(_os.getenv("EXA_API_KEY", "").strip()),
+            "ddgs_fallback": True,
+        }
+
+    def list_native_providers(self) -> list[dict]:
+        """Catálogo NATIVO de providers de Hermes (hermes_cli.auth.PROVIDER_REGISTRY).
+
+        37+ providers incluyendo suscripciones (Nous Portal, OpenAI Codex, xAI
+        SuperGrok, Copilot, Gemini OAuth…). El SO DIBUJA este catálogo — no
+        inventa uno paralelo. Read-only, sin authZ.
+        """
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.native_providers_unavailable: %s", exc)
+            return []
+        out = []
+        seen = set()
+        for pid, cfg in PROVIDER_REGISTRY.items():
+            name = getattr(cfg, "name", pid)
+            if name in seen:  # alias duplicados (novita x3)
+                continue
+            seen.add(name)
+            out.append({
+                "id": pid,
+                "name": name,
+                "auth_type": getattr(cfg, "auth_type", "api_key"),
+                "base_url": getattr(cfg, "inference_base_url", "") or "",
+                "env_vars": list(getattr(cfg, "api_key_env_vars", ()) or ()),
+            })
+        return out
+
+    # ------------------------------------------------------------------
+    # Acceso remoto (Settings → toggle): espejo noVNC con URL pública
+    # individual. El daemon NO toca systemd (User=hermes, sandbox): escribe el
+    # staged request (REUSE shell_server.remote_access_tunnel.api) y el root
+    # helper (hermes-remote-access-control, vía .path unit) verifica la
+    # contraseña por PAM y arranca/para túnel + novnc + relanza el compositor
+    # en modo espejo (QT_QPA_PLATFORM=vnc). SO-nativo: gobernanza por D-Bus.
+    # ------------------------------------------------------------------
+
+    def enable_remote_access(self, *, password: str, sender_uid: int) -> dict:
+        """Activa el acceso remoto (password del dispositivo = consentimiento).
+
+        Expone el escritorio a internet → exige la MISMA verificación PAM que
+        desactivar (root helper, finding #6). Devuelve {staged: true}; la UI
+        sondea get_remote_access_status hasta ver active+url.
+        """
+        self._authorize_and_resolve(sender_uid, operation="enable_remote_access")
+        return self._stage_remote_access_request("enable", password)
+
+    def disable_remote_access(self, *, password: str, sender_uid: int) -> dict:
+        """Desactiva el acceso remoto (password del dispositivo, PAM en root helper)."""
+        self._authorize_and_resolve(sender_uid, operation="disable_remote_access")
+        return self._stage_remote_access_request("disable", password)
+
+    def _stage_remote_access_request(self, action: str, password: str) -> dict:
+        pw = (password or "").strip()
+        if not pw:
+            return {"ok": False, "error": "se requiere la contraseña del dispositivo"}
+        try:
+            from pathlib import Path as _Path  # noqa: PLC0415
+
+            from hermes.shell_server.remote_access_tunnel.api import (  # noqa: PLC0415
+                _DEFAULT_CONTROL_DIR,
+                _write_staged_request,
+            )
+            _write_staged_request(
+                action, password=pw, control_dir=_Path(_DEFAULT_CONTROL_DIR)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.remote_access_stage_failed: %s", exc)
+            return {"ok": False, "error": f"no se pudo registrar la petición: {exc}"}
+        logger.info("hermes.dbus.remote_access_staged action=%s", action)
+        return {"ok": True, "staged": True}
+
+    def get_remote_access_status(self) -> dict:
+        """Estado del acceso remoto: {active, url}. Read-only, sin authZ.
+
+        `active` se deriva del flag /var/lib/hermes/remote-active (0644),
+        escrito por el root helper hermes-remote-access-control al activar y
+        borrado al desactivar. El daemon (User=hermes, sandbox con
+        SystemCallFilter+RestrictNamespaces) no puede ejecutar systemctl, por lo
+        que derivar el estado de is-active no funciona desde este proceso.
+        /var/lib/hermes está en ReadWritePaths del daemon → lectura siempre OK.
+
+        url solo aparece cuando el túnel ya publicó la URL efímera
+        (/var/lib/hermes/remote-url, escrita por hermes-remote-quicktunnel).
+        """
+        from pathlib import Path as _Path  # noqa: PLC0415
+        active = _Path("/var/lib/hermes/remote-active").exists()
+        url = ""
+        try:
+            url_file = _Path("/var/lib/hermes/remote-url")
+            if url_file.exists():
+                url = url_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+        return {"active": active, "url": url}
+
+    # ------------------------------------------------------------------
+    # Composio (SO-nativo, Principio 0): el daemon POSEE la credencial
+    # (SQLiteIntegrationsRepository + SecretsVault) y CONSUME Composio Cloud
+    # dinámicamente (toolkits + cuentas conectadas + OAuth Connect Link).
+    # CERO catálogo hardcodeado, CERO HTTP nuestro: verbos D-Bus.
+    # Lecturas: sin authZ. Mutadores: sender_uid del bus (CWE-862).
+    # ------------------------------------------------------------------
+
+    def _composio_db_path(self):
+        # Mismo shell-state.db que el resto de repos daemon-owned. Lo tomamos
+        # del repo ya inyectado (ambos guardan _db_path); evita re-plumbing.
+        for repo in (self._conversation_repo, self._provider_repo):
+            p = getattr(repo, "_db_path", None)
+            if p:
+                return p
+        raise RuntimeError("db_path no resoluble para Composio (repos no inyectados)")
+
+    def _require_trigger_repo(self):
+        """Devuelve el repo de triggers, AUTO-CONSTRUYÉNDOLO lazy si el
+        composition root no lo inyectó. Antes los verbos de scheduled-tasks
+        lanzaban NotImplementedError porque el wiring se construye ANTES que el
+        trigger_repo de las trigger-sources (orden de init). Resolverlo aquí (mismo
+        shell-state.db que el resto de repos daemon-owned) hace los verbos
+        funcionar sin re-plumbing del arranque. Singleton perezoso por instancia.
+        """
+        if self._trigger_repo is not None:
+            return self._trigger_repo
+        import sqlite3  # noqa: PLC0415
+
+        from hermes.tasks.infrastructure.schema import ensure_tasks_schema  # noqa: PLC0415
+        from hermes.tasks.triggers.infrastructure.sqlite_authorized_trigger_repository import (  # noqa: PLC0415
+            SqliteAuthorizedTriggerRepository,
+        )
+        db_path = self._composio_db_path()  # resuelve el shell-state.db
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        ensure_tasks_schema(conn)
+        self._trigger_repo = SqliteAuthorizedTriggerRepository(conn)
+        logger.info("hermes.dbus.trigger_repo_lazy_built db=%s", db_path)
+        return self._trigger_repo
+
+    def _composio_integrations_repo(self):
+        from hermes.shell_server.integrations.repo import (  # noqa: PLC0415
+            SQLiteIntegrationsRepository,
+        )
+        from hermes.shell_server.security.secrets import SecretsVault  # noqa: PLC0415
+
+        return SQLiteIntegrationsRepository(
+            db_path=self._composio_db_path(), vault=SecretsVault()
+        )
+
+    def _composio_client(self):
+        from hermes.runtime.composio_config_source import (  # noqa: PLC0415
+            load_composio_credential,
+        )
+
+        cred = load_composio_credential(self._composio_db_path())
+        if cred is None:
+            return None, None
+        from hermes.integrations.composio.composio_client import ComposioClient  # noqa: PLC0415
+
+        return ComposioClient(cred.api_key), cred.entity_id
+
+    @staticmethod
+    def _composio_to_dict(obj: Any) -> dict:
+        import dataclasses  # noqa: PLC0415
+
+        if dataclasses.is_dataclass(obj):
+            return dataclasses.asdict(obj)
+        return {k: v for k, v in vars(obj).items() if not k.startswith("_")}
+
+    def get_composio_status(self) -> dict:
+        """{configured, enabled, entity_id} — sin exponer jamás la key."""
+        try:
+            from hermes.runtime.composio_config_source import (  # noqa: PLC0415
+                load_composio_credential,
+            )
+
+            cred = load_composio_credential(self._composio_db_path())
+            if cred is None:
+                return {"configured": False}
+            return {"configured": True, "entity_id": cred.entity_id}
+        except Exception as exc:  # noqa: BLE001
+            return {"configured": False, "error": str(exc)[:200]}
+
+    async def set_composio_api_key(self, *, api_key: str, sender_uid: int) -> dict:
+        """Guarda la key de Composio en el vault — VALIDÁNDOLA antes contra
+        el Cloud (list_toolkits). Una key revocada daba catálogos vacíos sin
+        explicación (la UI mostraba (0) y el 401 moría en el journal); ahora
+        el error vuelve al operador y NO se guarda una credencial muerta.
+        """
+        self._authorize_and_resolve(sender_uid, operation="set_composio_api_key")
+        key = api_key.strip()
+        if not key:
+            return {"ok": False, "error": "api_key vacía"}
+        try:
+            from hermes.integrations.composio.composio_client import (  # noqa: PLC0415
+                ComposioClient,
+            )
+            toolkits = await ComposioClient(key).list_toolkits()
+        except Exception as exc:  # noqa: BLE001 — el detalle va al operador
+            detail = str(exc)
+            if "401" in detail or "Unauthorized" in detail:
+                return {"ok": False, "error": "Key inválida o revocada (Composio 401). Genera una nueva en composio.dev → Settings → API Keys."}
+            return {"ok": False, "error": f"No se pudo validar contra Composio Cloud: {detail[:200]}"}
+        self._composio_integrations_repo().set_credential(
+            kind="composio", api_key=key
+        )
+        logger.info(
+            "hermes.dbus.composio_key_set", extra={"by_uid": sender_uid, "toolkits": len(toolkits)}
+        )
+        return {"ok": True, "toolkits": len(toolkits)}
+
+    async def list_composio_apps(self) -> list[dict]:
+        """Catálogo DINÁMICO de toolkits desde Composio Cloud (read-only).
+
+        Limitado a integraciones con OAuth simple (un clic en el navegador): es la
+        política compartida SO/TUI/agente. Las que exigen API key/credenciales se
+        ocultan hasta que las soportemos.
+        """
+        client, _entity = self._composio_client()
+        if client is None:
+            return []
+        toolkits = await client.list_toolkits()
+        return [self._composio_to_dict(t) for t in toolkits if getattr(t, "oauth_simple", True)]
+
+    async def list_composio_connections(self) -> list[dict]:
+        """Cuentas CONECTADAS del usuario, dinámico desde Cloud + alias locales."""
+        client, entity = self._composio_client()
+        if client is None:
+            return []
+        accounts = await client.list_connected_accounts(entity)
+        aliases = self._composio_connection_repo().get_aliases()
+        result = []
+        for a in accounts:
+            d = self._composio_to_dict(a)
+            d["alias"] = aliases.get(a.id, "")
+            result.append(d)
+        return result
+
+    def _composio_connection_repo(self):
+        """Devuelve el repo de conexiones Composio (lazy, mismo shell-state.db)."""
+        if not hasattr(self, "_conn_repo_instance"):
+            from hermes.platforms.infrastructure.sqlite_agent_composio_connection_repo import (  # noqa: PLC0415
+                SqliteAgentComposioConnectionRepo,
+            )
+            self._conn_repo_instance = SqliteAgentComposioConnectionRepo(
+                db_path=self._composio_db_path()
+            )
+        return self._conn_repo_instance
+
+    async def set_composio_connection_alias(
+        self, *, connected_account_id: str, alias: str, sender_uid: int
+    ) -> bool:
+        """Asigna un alias humano a una cuenta Composio. Requiere authZ."""
+        self._authorize(sender_uid, operation="set_composio_connection_alias")
+        if not connected_account_id.strip():
+            return False
+        alias_clean = alias.strip()[:200]
+        self._composio_connection_repo().set_alias(
+            connected_account_id, alias_clean, sender_uid
+        )
+        logger.info(
+            "hermes.dbus.composio_alias_set",
+            extra={"by_uid": sender_uid},
+        )
+        return True
+
+    async def bind_composio_connection_to_agent(
+        self,
+        *,
+        agent_id: str,
+        connected_account_id: str,
+        toolkit_slug: str,
+        tenant_id: str,
+        sender_uid: int,
+    ) -> bool:
+        """Asigna una cuenta Composio a un agente. Idempotente. Requiere authZ."""
+        self._authorize(sender_uid, operation="bind_composio_connection_to_agent")
+        if not agent_id or not connected_account_id or not toolkit_slug:
+            return False
+        repo = self._composio_connection_repo()
+        existing = repo.find_active(agent_id, connected_account_id, tenant_id)
+        if existing is not None:
+            logger.info(
+                "hermes.dbus.composio_bind.idempotent",
+                extra={
+                    "agent_id": agent_id,
+                    "by_uid": sender_uid,
+                },
+            )
+            return True
+        from hermes.capabilities.domain.agent_composio_connection import (  # noqa: PLC0415
+            AgentComposioConnection,
+        )
+        binding = AgentComposioConnection.create(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            connected_account_id=connected_account_id,
+            toolkit_slug=toolkit_slug,
+            bound_by=sender_uid,
+        )
+        repo.save(binding)
+        logger.info(
+            "hermes.dbus.composio_bound",
+            extra={
+                "binding_id": binding.binding_id,
+                "agent_id": agent_id,
+                "toolkit_slug": toolkit_slug,
+                "by_uid": sender_uid,
+            },
+        )
+        return True
+
+    async def unbind_composio_connection_from_agent(
+        self,
+        *,
+        agent_id: str,
+        connected_account_id: str,
+        tenant_id: str,
+        sender_uid: int,
+    ) -> bool:
+        """Revoca el binding de una cuenta Composio de un agente. Requiere authZ."""
+        self._authorize(sender_uid, operation="unbind_composio_connection_from_agent")
+        changed = self._composio_connection_repo().unbind(
+            agent_id, connected_account_id, tenant_id
+        )
+        logger.info(
+            "hermes.dbus.composio_unbound",
+            extra={
+                "agent_id": agent_id,
+                "changed": changed,
+                "by_uid": sender_uid,
+            },
+        )
+        return changed
+
+    def list_agent_composio_connections(
+        self, agent_id: str, tenant_id: str
+    ) -> list[str]:
+        """IDs de cuentas Composio asignadas al agente (read-only)."""
+        bindings = self._composio_connection_repo().list_by_agent(agent_id, tenant_id)
+        return [b.connected_account_id for b in bindings]
+
+    async def connect_composio_app(self, *, toolkit_slug: str, sender_uid: int) -> dict:
+        """Inicia OAuth (Connect Link). Devuelve {redirect_url} para el navegador."""
+        self._authorize_and_resolve(sender_uid, operation="connect_composio_app")
+        client, entity = self._composio_client()
+        if client is None:
+            return {"ok": False, "error": "Composio no configurado (falta la key)"}
+        # Política compartida SO/TUI/agente: solo OAuth simple por ahora.
+        try:
+            await client.assert_oauth_simple(toolkit_slug)
+        except Exception as exc:  # noqa: BLE001 — ComposioApiError u otro
+            return {"ok": False, "error": str(exc)}
+        result = await client.initiate_connection(
+            toolkit_slug=toolkit_slug, entity_id=entity
+        )
+        out = self._composio_to_dict(result)
+        out["ok"] = True
+        logger.info(
+            "hermes.dbus.composio_connect_initiated",
+            extra={"toolkit": toolkit_slug, "by_uid": sender_uid},
+        )
+        return out
+
+    def list_skills(self) -> list[dict]:
+        """Lista skills (read-only). No requiere authZ.
+
+        Merges two sources:
+          1. DB (skill_packages_view) — skills created via SkillStoreAdapter
+             (broker-gated, signed, versioned).
+          2. On-disk SKILL.md files in $HERMES_HOME/skills/ — skills written
+             directly by hermes-agent's skill_manage tool. These are NOT in
+             the DB; we surface them so the UI shows them instead of "No hay skills".
+
+        DB entries take precedence: on-disk skills with the same name are skipped.
+
+        The native scan only runs when HERMES_HOME is explicitly set in env
+        (the daemon always sets it; tests and CI do not).
+        """
+        db_skills: list[dict] = []
+        if self._skill_governance is not None:
+            db_skills = self._skill_governance.list_skills()
+
+        native_skills = _list_native_hermes_agent_skills(db_skills)
+        return db_skills + native_skills
+
+    async def promote_skill(self, *, package_id: str, sender_uid: int) -> dict:
+        """Promueve una skill VALIDATED → AUTONOMOUS. by = UID del bus (CWE-862).
+
+        Raises:
+            DbusAuthorizationError: UID no autorizado.
+            RuntimeError: skill_governance no inyectado.
+        """
+        self._authorize(sender_uid, operation="promote_skill")
+        result = await self._require_skill_governance().promote_skill(
+            package_id=package_id,
+            promoted_by=_uid_to_uuid(sender_uid),
+        )
+        logger.info(
+            "hermes.dbus.skill_promoted",
+            extra={"package_id": package_id, "by_uid": sender_uid},
+        )
+        return result
+
+    async def deprecate_skill(self, *, package_id: str, sender_uid: int) -> dict:
+        """Depreca una skill. by = UID del bus (CWE-862).
+
+        Raises:
+            DbusAuthorizationError: UID no autorizado.
+            RuntimeError: skill_governance no inyectado.
+        """
+        self._authorize(sender_uid, operation="deprecate_skill")
+        result = await self._require_skill_governance().deprecate_skill(
+            package_id=package_id,
+            deprecated_by=_uid_to_uuid(sender_uid),
+        )
+        logger.info(
+            "hermes.dbus.skill_deprecated",
+            extra={"package_id": package_id, "by_uid": sender_uid},
+        )
+        return result
+
+    async def sign_composio_skill(
+        self,
+        *,
+        draft_json: str,
+        sender_uid: int,
+    ) -> dict:
+        """Crea y firma una skill Composio. by = UID del bus (CWE-862).
+
+        El draft_json contiene {skill_name, toolkit_slug, intent_text}.
+        La autoría (sender_uid) queda registrada en los logs de auditoría.
+
+        Raises:
+            DbusAuthorizationError: UID no autorizado.
+            RuntimeError: skill_governance no inyectado.
+            ValueError: draft_json malformado.
+        """
+        import json as _json  # noqa: PLC0415
+
+        self._authorize(sender_uid, operation="sign_composio_skill")
+        try:
+            draft = _json.loads(draft_json)
+        except _json.JSONDecodeError as exc:
+            raise ValueError(f"draft_json inválido: {exc}") from exc
+
+        result = await self._require_skill_governance().sign_composio_skill(
+            skill_name=draft.get("skill_name", ""),
+            toolkit_slug=draft.get("toolkit_slug", ""),
+            intent_text=draft.get("intent_text", ""),
+            author_uid=sender_uid,
+        )
+        logger.info(
+            "hermes.dbus.skill_composio_signed",
+            extra={
+                "package_id": result.get("package_id"),
+                "skill_name": draft.get("skill_name"),
+                "by_uid": sender_uid,
+            },
+        )
+        return result
+
+    # ------------------------------------------------------------------
+    # HITL supervisión (SC-004 / T043/T044 re-enrutado a D-Bus)
+    # ------------------------------------------------------------------
+
+    async def approve_action(
+        self,
+        *,
+        proposal_id: UUID,
+        sender_uid: int,
+        operator_token: str | None = None,
+    ) -> HitlApprovalResult:
+        """Aprueba una acción HIGH pendiente y re-encola la tarea (FR-015).
+
+        `approved_by` = identidad verificada del sender del bus (direct) o del
+        token (proxy). NUNCA del payload del cliente (SC-004 / CWE-862).
+
+        Secuencia:
+          1. Autoriza al sender (DbusAuthorizationError si no autorizado).
+          2. Minta el approval_token vía gate.approve (CTRL-1 / SC-004).
+          3. Recupera el work_item_id asociado a la proposal (registro canónico
+             en pending_approvals — el gate es el único dueño de este mapping).
+          4. Re-encola la tarea: PENDING_APPROVAL → PENDING (FR-015).
+             NO dispara run_cycle directamente — el loop autónomo la recoge en
+             el próximo ciclo de drenado (NFR-001: coordinación vía cola).
+
+        Raises:
+            DbusAuthorizationError: UID del sender no está autorizado o token inválido.
+        """
+        approved_by = self._authorize_and_resolve(
+            sender_uid, operation="approve_action", operator_token=operator_token
+        )
+        token = await self._gate.approve(
+            proposal_id=proposal_id,
+            approved_by=approved_by,
+        )
+        logger.info(
+            "hermes.dbus.hitl_approved",
+            extra={"proposal_id": str(proposal_id), "by_uid": sender_uid},
+        )
+
+        # FR-015: re-encolar la tarea para que el loop la procese con el token.
+        # Solo si la queue está inyectada (degradación honesta: sin queue, solo
+        # se emite el evento de aprobación).
+        if self._queue is not None:
+            work_item_id = await self._gate.work_item_id_for_proposal(proposal_id)
+            if work_item_id is not None:
+                try:
+                    await self._queue.re_enqueue_after_approval(work_item_id)
+                    logger.info(
+                        "hermes.dbus.hitl_requeued",
+                        extra={
+                            "proposal_id": str(proposal_id),
+                            "work_item_id": str(work_item_id),
+                        },
+                    )
+                except ValueError as exc:
+                    # La tarea ya fue re-encolada (idempotente) o no existe.
+                    # No fatal: el token ya fue emitido; el loop lo encontrará
+                    # si la tarea aparece de nuevo.
+                    logger.warning(
+                        "hermes.dbus.hitl_reenqueue_skipped: %s", exc
+                    )
+            else:
+                logger.warning(
+                    "hermes.dbus.hitl_approved_no_work_item: proposal_id=%s — "
+                    "work_item_id no encontrado en el gate; la tarea no se re-encola.",
+                    proposal_id,
+                )
+        else:
+            logger.warning(
+                "hermes.dbus.hitl_approved_no_queue: proposal_id=%s — "
+                "work_queue no inyectada; la tarea no se re-encola.",
+                proposal_id,
+            )
+
+        return HitlApprovalResult(approval_token=token, approved_by=approved_by)
+
+    async def reject_action(
+        self,
+        *,
+        proposal_id: UUID,
+        reason: str,
+        sender_uid: int,
+        operator_token: str | None = None,
+    ) -> None:
+        """Rechaza una acción HIGH pendiente. NO dispara run_cycle (NFR-001).
+
+        `rejected_by` = identidad verificada del sender del bus (direct) o del
+        token (proxy) — nunca del payload del cliente (SC-004 / CWE-862).
+
+        Raises:
+            DbusAuthorizationError: UID del sender no está autorizado o token inválido.
+        """
+        rejected_by = self._authorize_and_resolve(
+            sender_uid, operation="reject_action", operator_token=operator_token
+        )
+        await self._gate.reject(
+            proposal_id=proposal_id,
+            rejected_by=rejected_by,
+            reason=reason,
+        )
+        logger.info(
+            "hermes.dbus.hitl_rejected",
+            extra={"proposal_id": str(proposal_id), "by_uid": sender_uid},
+        )
+
+    async def list_hitl_pending(self, *, limit: int = 50) -> list[dict]:
+        """Propuestas HITL pendientes de aprobación humana (CTRL-P1-5).
+
+        Lee directamente de la tabla `pending_approvals` del gate vía duck-type
+        sobre `_db_path` (mismo patrón que _composio_db_path). Read-only —
+        solo metadatos (proposal_id, tool_name, justification, risk); sin
+        payload ni credenciales.
+
+        Retorna [] si el gate no expone _db_path (degradación honesta).
+        """
+        import sqlite3 as _sqlite3  # noqa: PLC0415
+
+        db_path = getattr(self._gate, "_db_path", None)
+        if db_path is None:
+            logger.warning("hermes.dbus.list_hitl_pending: gate sin _db_path — vacío honesto")
+            return []
+        try:
+            conn = _sqlite3.connect(str(db_path), isolation_level=None)
+            conn.row_factory = _sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=3000")
+            rows = conn.execute(
+                """
+                SELECT proposal_id, risk, tool_name, justification, created_at
+                FROM pending_approvals
+                WHERE status = 'pending'
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (max(1, min(limit, 200)),),
+            ).fetchall()
+            conn.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.list_hitl_pending_error: %s", exc)
+            return []
+        return [
+            {
+                "proposal_id": row["proposal_id"],
+                # REAL tool name (was aliased to risk — that defeated the MFA
+                # delicacy ladder; red-team 2026-06-19). Fallback to risk only for
+                # legacy rows written before the tool_name column existed.
+                "tool_name": (row["tool_name"] or row["risk"]),
+                "justification": row["justification"] or "",
+                "risk": row["risk"],
+                "created_at": row["created_at"] or "",
+            }
+            for row in rows
+        ]
+
+    # ------------------------------------------------------------------
+    # T039b — Queue methods (Enqueue / read-only supervision)
+    # ------------------------------------------------------------------
+
+    async def enqueue(
+        self,
+        *,
+        trigger_kind: str,
+        text: str,
+        priority: int,
+        dedup_key: str | None,
+        sender_uid: int,
+        conversation_id: str | None = None,
+        operator_token: str | None = None,
+    ) -> EnqueueResult:
+        """Encola un WorkItem delegando en ControlPlaneService (Issue 2 / CTRL-P1-6).
+
+        DELEGACIÓN: convierte operator_id verificado en AuthenticatedChannel y
+        llama a ControlPlaneService.enqueue(), que aplica:
+          - rate-limit (CWE-770 / CTRL-P1-6).
+          - PII tokenization (CTRL-P1-25).
+          - AuditEntry WORKITEM_ACCEPTED síncrono (CTRL-P1-4).
+          - enqueued_by = verified operator_id, NUNCA del payload (CTRL-P1-3).
+          - commit-then-wake ordering (CTRL-P1-12).
+
+        Confused-deputy remediation: operator_id comes from the verified source:
+          - Direct call (sender_uid ∈ authorized_uids): derived from sender_uid.
+          - Proxy call (sender_uid == proxy_uid): extracted from operator_token.
+        The AuthenticatedChannel carries the verified operator uid so that
+        ControlPlaneService.enqueue() attributes the work to the human, not
+        the proxy.
+
+        CWE-862: _authorize_and_resolve() comprueba ANTES de llamar al service.
+
+        Raises:
+            DbusAuthorizationError: UID no autorizado o token inválido.
+            NotImplementedError: si control_plane_service no fue inyectado.
+        """
+        operator_id = self._authorize_and_resolve(
+            sender_uid, operation="enqueue", operator_token=operator_token
+        )
+        if self._cp_service is None:
+            raise NotImplementedError(
+                "control_plane_service no inyectado en DbusRuntimeServiceWiring; "
+                "inyéctalo en la composición del daemon para habilitar Enqueue."
+            )
+        from hermes.tasks.control_plane.domain.ports import AuthenticatedChannel  # noqa: PLC0415
+
+        # Use the verified operator's uid, not the proxy uid. This ensures
+        # that ControlPlaneService.enqueue() records enqueued_by = operator.
+        # _uid_from_uuid is the inverse of _uid_to_uuid.
+        operator_uid = operator_id.int
+        channel = AuthenticatedChannel(sender_uid=operator_uid)
+        result = await self._cp_service.enqueue(
+            channel=channel,
+            trigger_kind=trigger_kind,
+            text=text,
+            priority=priority,
+            dedup_key=dedup_key,
+            conversation_id=conversation_id,
+        )
+        # GATE 0 / M2 — el daemon ES dueño del store de conversaciones. Persiste el
+        # mensaje del usuario AQUÍ (movido del shell-server) para que la historia
+        # exista sin pasar por HTTP. Best-effort: un fallo aquí NO rompe el chat
+        # (ya está encolado). La respuesta del asistente se transmite por el socket
+        # AF_UNIX (stream); su persistencia es un follow-up del orchestrator.
+        if (
+            trigger_kind == "chat_message"
+            and conversation_id
+            and self._conversation_repo is not None
+        ):
+            try:
+                from uuid import UUID as _UUID  # noqa: PLC0415
+
+                conv_uuid = _UUID(conversation_id)
+                active_agent = (
+                    self._agent_registry.active_agent_id()
+                    if self._agent_registry is not None
+                    else None
+                )
+                self._conversation_repo.create_or_touch(
+                    conversation_id=conv_uuid,
+                    first_user_message=text,
+                    agent_id=active_agent,
+                )
+                self._conversation_repo.append_message(
+                    conversation_id=conv_uuid, role="user", content=text
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("hermes.dbus.chat.persist_user_failed: %s", exc)
+        # Replicar las AuditEntries del service a este acumulador (tests que
+        # usan audit_entries_emitted() sobre el Wiring).
+        new_entries = self._cp_service.audit_entries_emitted()
+        if new_entries:
+            self._audit_entries.append(new_entries[-1])
+        return result
+
+    async def get_queue_status(self) -> dict:
+        """Snapshot read-only de la cola (CTRL-P1-5: solo metadatos).
+
+        No altera estado. No requiere authZ (lectura).
+        """
+        # Implementación mínima — el adapter real delegará a SqliteWorkQueue
+        return {
+            "state": "active",
+            "pending": 0,
+            "in_progress": 0,
+            "pending_approval": 0,
+            "last_audit_head_hex": "",
+        }
+
+    async def list_pending(self, *, limit: int = 50) -> list[dict]:
+        """Items PENDING por prioridad desc (CTRL-P1-5: metadatos, nunca payload)."""
+        if self._cp_service is None:
+            return []
+        rows = await self._cp_service.list_pending(limit=limit)
+        return [
+            {
+                "task_id": str(r.task_id),
+                "trigger_kind": r.trigger_kind,
+                "priority": r.priority,
+                "enqueued_at_iso": r.enqueued_at_iso,
+            }
+            for r in rows
+        ]
+
+    async def get_task_status(self, *, task_id: UUID) -> dict:
+        """Estado de UNA tarea (CTRL-P1-5: metadatos, nunca payload/instruction)."""
+        if self._cp_service is None:
+            return {}
+        from hermes.tasks.control_plane.domain.ports import UnknownTask  # noqa: PLC0415
+        try:
+            view = await self._cp_service.get_task_status(task_id=task_id)
+        except UnknownTask:
+            return {}
+        return {
+            "task_id": str(view.task_id),
+            "status": view.status,
+            "attempts": view.attempts,
+            "stream_path": view.stream_path,
+        }
+
+    async def list_configured_tasks(self, *, limit: int = 200) -> list[dict]:
+        """Configured tasks dashboard (one row per authorized trigger).
+
+        Read-only supervision — no authZ required (CTRL-P1-5).
+        Returns only trigger metadata + last-run info; no payload, no credentials.
+
+        Usa el MISMO trigger_repo que create_scheduled_task (lazy del wiring) para
+        garantizar coherencia create↔list. El cp_service del composition root se
+        construyó sin trigger_repo → su list_configured_tasks devolvía siempre ()
+        (tablero vacío aunque se crearan tareas). Reusamos la lógica de vistas
+        (next_run_at + recurrence_human) de control_plane_service.
+        """
+        try:
+            repo = self._require_trigger_repo()
+        except Exception as exc:  # noqa: BLE001 — read-only: vacío honesto
+            logger.warning("hermes.dbus.list_configured_tasks_no_repo: %s", exc)
+            return []
+        from datetime import UTC, datetime  # noqa: PLC0415
+
+        from hermes.tasks.control_plane.application.control_plane_service import (  # noqa: PLC0415
+            _build_configured_task_view,
+        )
+        rows = repo.list_triggers_with_last_run(limit=limit)
+        now = datetime.now(tz=UTC)
+        views = [
+            _build_configured_task_view(trigger, last_run_at, last_status, now)
+            for trigger, last_run_at, last_status in rows
+        ]
+        return [_configured_task_to_dict(v) for v in views]
+
+    async def list_recent_tasks(self, *, limit: int = 50) -> list[dict]:
+        """Recent work items across all statuses (activity log).
+
+        Read-only supervision — no authZ required (CTRL-P1-5).
+        instruction_truncated capped at 120 chars; no full payload exposed.
+        """
+        if self._cp_service is None:
+            return []
+        rows = await self._cp_service.list_recent_tasks(limit=limit)
+        return [
+            {
+                "task_id": r.task_id,
+                "label": r.label,
+                "status": r.status,
+                "trigger_kind": r.trigger_kind,
+                "enqueued_at": r.enqueued_at,
+                "claimed_at": r.claimed_at,
+            }
+            for r in rows
+        ]
+
+    # ------------------------------------------------------------------
+    # T007 — Trigger management (AuthorizeTrigger / RevokeTrigger / List)
+    # ------------------------------------------------------------------
+
+    async def authorize_trigger(
+        self,
+        *,
+        trigger_type: str,
+        scope_value: str,
+        allowed_capabilities: tuple[str, ...],
+        risk_ceiling: str,
+        approval_signature: str,
+        sender_uid: int,
+        hourly_budget: int = 10,
+    ) -> dict:
+        """Autoriza un origen de auto-disparo (CTRL-P2-9/FR-013).
+
+        La identidad del admin se toma del sender UID del bus (canal
+        autenticado), NUNCA del contenido del payload (CWE-290/CTRL-P2-9).
+
+        Raises:
+            DbusAuthorizationError: UID no autorizado.
+            NotImplementedError: si trigger_repo no fue inyectado.
+        """
+        self._authorize(sender_uid, operation="authorize_trigger")
+        self._require_trigger_repo()
+
+        from hermes.tasks.triggers.domain.authorized_trigger_ports import (  # noqa: PLC0415
+            AuthorizedTriggerType,
+            RiskCeiling,
+        )
+        admin_uuid = _uid_to_uuid(sender_uid)
+        trigger = await self._trigger_repo.authorize(
+            trigger_type=AuthorizedTriggerType(trigger_type),
+            scope_value=scope_value,
+            allowed_capabilities=tuple(allowed_capabilities),
+            risk_ceiling=RiskCeiling(risk_ceiling),
+            admin_uuid=admin_uuid,
+            approval_signature=approval_signature,
+            hourly_budget=hourly_budget,
+        )
+        logger.info(
+            "hermes.dbus.trigger_authorized",
+            extra={
+                "trigger_type": trigger_type,
+                "instance_id": str(trigger.trigger_instance_id),
+                "by_uid": sender_uid,
+            },
+        )
+        return {
+            "instance_id": str(trigger.trigger_instance_id),
+            "trigger_type": trigger_type,
+            "scope_value": scope_value,
+            "authorized_by": str(admin_uuid),
+        }
+
+    async def revoke_trigger(
+        self,
+        *,
+        trigger_instance_id: str,
+        sender_uid: int,
+    ) -> None:
+        """Revoca un origen autorizado (FR-018/CTRL-P2-15).
+
+        La identidad del admin se toma del sender UID del bus.
+
+        Raises:
+            DbusAuthorizationError: UID no autorizado.
+            NotImplementedError: si trigger_repo no fue inyectado.
+        """
+        self._authorize(sender_uid, operation="revoke_trigger")
+        self._require_trigger_repo()
+
+        admin_uuid = _uid_to_uuid(sender_uid)
+        await self._trigger_repo.revoke(
+            trigger_instance_id=UUID(trigger_instance_id),
+            admin_uuid=admin_uuid,
+        )
+        logger.info(
+            "hermes.dbus.trigger_revoked",
+            extra={"instance_id": trigger_instance_id, "by_uid": sender_uid},
+        )
+
+    async def list_authorized_triggers(self) -> list[dict]:
+        """Lista los orígenes autorizados activos (supervisión, no requiere authZ).
+
+        Retorna solo metadatos (no payload ni instrucciones — CTRL-P1-5 style).
+        """
+        try:
+            self._require_trigger_repo()
+        except Exception as exc:  # noqa: BLE001 — read-only: vacío honesto si no resoluble
+            logger.warning("hermes.dbus.trigger_repo_unavailable: %s", exc)
+            return []
+        triggers = await self._trigger_repo.list_enabled()
+        return [
+            {
+                "instance_id": str(t.trigger_instance_id),
+                "trigger_type": str(t.trigger_type),
+                "scope_value": t.scope_value,
+                "risk_ceiling": str(t.risk_ceiling),
+                "authorized_by": str(t.created_by_admin_uuid),
+                "authorized_at": t.authorized_at.isoformat(),
+            }
+            for t in triggers
+        ]
+
+    # ------------------------------------------------------------------
+    # Calendario de tareas per-agent (P3: feat scheduled-tasks).
+    # create_scheduled_task / delete_scheduled_task / set_scheduled_task_enabled.
+    # REUSE de trigger_repo.authorize (ya existente), extendido con los campos P3.
+    # Mutadores: authZ operador (sender_uid del bus, CWE-862), fail-closed.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_cron(cron: str) -> bool:
+        """Validates that `cron` is a 5-field cron expression (basic check).
+
+        Accepts standard 5-field cron: min hr dom mon dow.
+        Each field may be *, a number, a range (n-m), a step (*/n), or a list.
+        Does NOT validate field ranges — a full parser (croniter) is not required.
+        Returns True if the shape is valid, False otherwise.
+        """
+        import re  # noqa: PLC0415
+        _CRON_FIELD = r"(?:\*(?:/\d+)?|\d+(?:-\d+)?(?:/\d+)?(?:,\d+(?:-\d+)?(?:/\d+)?)*)"
+        pattern = rf"^{_CRON_FIELD}(?:\s+{_CRON_FIELD}){{4}}$"
+        return bool(re.match(pattern, cron.strip()))
+
+    async def create_scheduled_task(
+        self,
+        *,
+        draft_json: str,
+        sender_uid: int,
+    ) -> dict:
+        """Crea una tarea programada firmada en authorized_trigger_instances.
+
+        REUSA trigger_repo.authorize (el único canal de escritura en la allow-list).
+        Extiende la fila con los campos P3: target_agent_id, task_instruction,
+        one_shot, title. La firma (approval_signature) se genera con hmac del
+        contenido del draft para mantener no-repudio sin requerir una clave
+        externa — igual que el patrón usado en auth_trigger del wiring existente
+        donde el caller genera la firma; aquí la generamos internamente porque
+        este es un verbo de gobernanza de usuario (no de un admin externo).
+
+        draft: {title, target_agent_id, task_instruction, cron, one_shot, risk_ceiling}
+
+        Raises:
+            DbusAuthorizationError: UID no autorizado.
+            NotImplementedError: trigger_repo no inyectado.
+        """
+        self._authorize_and_resolve(sender_uid, operation="create_scheduled_task")
+        self._require_trigger_repo()
+
+        try:
+            draft = json.loads(draft_json)
+        except (json.JSONDecodeError, TypeError) as exc:
+            return {"ok": False, "error": f"draft_json inválido: {exc}"}
+
+        cron = str(draft.get("cron") or "").strip()
+        if not cron or not self._validate_cron(cron):
+            return {"ok": False, "error": "cron inválido — debe ser una expresión de 5 campos"}
+
+        title = str(draft.get("title") or "").strip()[:256]
+        target_agent_id = (draft.get("target_agent_id") or None)
+        if target_agent_id is not None:
+            target_agent_id = str(target_agent_id).strip() or None
+        task_instruction = str(draft.get("task_instruction") or "").strip()
+        one_shot = bool(draft.get("one_shot", False))
+        risk_ceiling_raw = str(draft.get("risk_ceiling") or "low").lower()
+        if risk_ceiling_raw not in ("low", "high"):
+            return {"ok": False, "error": "risk_ceiling debe ser 'low' o 'high'"}
+
+        from hermes.tasks.triggers.domain.authorized_trigger_ports import (  # noqa: PLC0415
+            AuthorizedTriggerType,
+            RiskCeiling,
+        )
+
+        admin_uuid = _uid_to_uuid(sender_uid)
+        # Approval signature: HMAC-SHA256 over the canonical draft fields.
+        # This satisfies the NOT NULL constraint and provides basic non-repudiation
+        # (the signature binds the admin identity + content at creation time).
+        approval_signature = _sign_scheduled_task_draft(
+            admin_uuid=admin_uuid,
+            cron=cron,
+            task_instruction=task_instruction,
+            title=title,
+        )
+
+        trigger = await self._trigger_repo.authorize(
+            trigger_type=AuthorizedTriggerType.TIMER,
+            scope_value=cron,
+            allowed_capabilities=(),
+            risk_ceiling=RiskCeiling(risk_ceiling_raw),
+            admin_uuid=admin_uuid,
+            approval_signature=approval_signature,
+        )
+
+        # Persist the P3 metadata fields directly on the newly-created row.
+        # trigger_repo.authorize() inserts the core fields; we patch the extras.
+        await _patch_trigger_p3_fields(
+            repo=self._trigger_repo,
+            instance_id=trigger.trigger_instance_id,
+            target_agent_id=target_agent_id,
+            task_instruction=task_instruction,
+            one_shot=one_shot,
+            title=title,
+        )
+
+        logger.info(
+            "hermes.dbus.scheduled_task_created",
+            extra={
+                "trigger_id": str(trigger.trigger_instance_id),
+                "cron": cron,
+                "one_shot": one_shot,
+                "by_uid": sender_uid,
+            },
+        )
+        return {"ok": True, "trigger_id": str(trigger.trigger_instance_id)}
+
+    async def delete_scheduled_task(
+        self,
+        *,
+        trigger_id: str,
+        sender_uid: int,
+    ) -> dict:
+        """Revoca (soft-delete) un trigger de la allow-list. No borrado físico.
+
+        Marca enabled=0 + revoked_at (preserva auditoría, I11 del esquema).
+        REUSA trigger_repo.revoke — mismo mecanismo que el revoke manual.
+
+        Raises:
+            DbusAuthorizationError: UID no autorizado.
+            NotImplementedError: trigger_repo no inyectado.
+        """
+        self._authorize_and_resolve(sender_uid, operation="delete_scheduled_task")
+        self._require_trigger_repo()
+
+        from uuid import UUID as _UUID  # noqa: PLC0415
+        try:
+            tid = _UUID(trigger_id)
+        except ValueError:
+            return {"ok": False, "error": f"trigger_id inválido: {trigger_id!r}"}
+
+        await self._trigger_repo.revoke(
+            trigger_instance_id=tid,
+            admin_uuid=_uid_to_uuid(sender_uid),
+        )
+        logger.info(
+            "hermes.dbus.scheduled_task_deleted",
+            extra={"trigger_id": trigger_id, "by_uid": sender_uid},
+        )
+        return {"ok": True}
+
+    async def set_scheduled_task_enabled(
+        self,
+        *,
+        trigger_id: str,
+        enabled: bool,
+        sender_uid: int,
+    ) -> dict:
+        """Toggle del kill-switch por-trigger (enabled / disabled).
+
+        enabled=True  → reactiva el trigger (enabled=1, revoked_at=NULL).
+        enabled=False → lo suspende (enabled=0, revoked_at=ahora).
+        Preserva la invariante I11 del esquema (enabled ↔ revoked_at coherencia).
+
+        Raises:
+            DbusAuthorizationError: UID no autorizado.
+            NotImplementedError: trigger_repo no inyectado.
+        """
+        self._authorize_and_resolve(sender_uid, operation="set_scheduled_task_enabled")
+        self._require_trigger_repo()
+
+        from uuid import UUID as _UUID  # noqa: PLC0415
+        try:
+            tid = _UUID(trigger_id)
+        except ValueError:
+            return {"ok": False, "error": f"trigger_id inválido: {trigger_id!r}"}
+
+        await _set_trigger_enabled(
+            repo=self._trigger_repo,
+            trigger_instance_id=tid,
+            enabled=enabled,
+            admin_uuid=_uid_to_uuid(sender_uid),
+        )
+        logger.info(
+            "hermes.dbus.scheduled_task_enabled_set",
+            extra={"trigger_id": trigger_id, "enabled": enabled, "by_uid": sender_uid},
+        )
+        return {"ok": True}
+
+    # ------------------------------------------------------------------
+    # Gobernanza de plataformas (feature 010, Principio 0):
+    #   - Lecturas: supervisión, sin authZ.
+    #   - Mutadores: autoría por sender_uid del bus (CWE-862), fail-closed.
+    #
+    # Injected via __init__ kwargs:
+    #   platform_model_registry — SqlitePlatformModelRegistry | None
+    #   capability_binding_repo — SqliteCapabilityBindingRepo | None
+    # ------------------------------------------------------------------
+
+    def _require_platform_registry(self):
+        if self._platform_model_registry is None:
+            raise RuntimeError("platform_model_registry no inyectado en el wiring")
+        return self._platform_model_registry
+
+    def _require_binding_repo(self):
+        if self._capability_binding_repo is None:
+            raise RuntimeError("capability_binding_repo no inyectado en el wiring")
+        return self._capability_binding_repo
+
+    # --- Read-only platform supervision (no authZ) ---
+
+    def list_platform_models(self, tenant_id: str) -> list[dict]:
+        """Returns summary list for the tenant (no PII, no selectors)."""
+        if self._platform_model_registry is None:
+            return []
+        models = self._platform_model_registry.list_by_tenant(tenant_id)
+        return [m.to_summary_dict() for m in models]
+
+    def get_platform_model_summary(self, model_id: str, tenant_id: str) -> dict:
+        """Returns detail summary (areas, entities, rules, zones with is_stale)."""
+        registry = self._require_platform_registry()
+        from hermes.platforms.domain.ports import PlatformModelNotFound  # noqa: PLC0415
+        try:
+            model = registry.get(model_id, tenant_id)
+        except PlatformModelNotFound:
+            return {}
+        return model.to_detail_dict()
+
+    def list_agent_capabilities(self, agent_id: str, tenant_id: str) -> list[dict]:
+        """Returns capability list for the agent (no PII, no credentials)."""
+        if self._capability_binding_repo is None:
+            return []
+        bindings = self._capability_binding_repo.list_by_agent(agent_id, tenant_id)
+        return [
+            {
+                "capability_kind": b.capability.kind,
+                "capability_id": b.capability.capability_id,
+                "capability_version": b.capability.version,
+                "bound_at": b.bound_at.isoformat(),
+            }
+            for b in bindings
+        ]
+
+    def list_model_gaps(self, model_id: str) -> list[dict]:
+        """Returns open/covered gap metadata (no PII)."""
+        if self._platform_model_registry is None:
+            return []
+        gaps = self._platform_model_registry.list_gaps(model_id)
+        return [
+            {
+                "gap_id": g.gap_id,
+                "missing_descriptor": g.missing_descriptor,
+                "state": str(g.state),
+                "detected_at": g.detected_at.isoformat(),
+            }
+            for g in gaps
+        ]
+
+    # --- Mutating platform governance (authZ required) ---
+
+    async def enable_platform_model(self, *, model_id: str, tenant_id: str, sender_uid: int) -> bool:
+        """aprendida → habilitada. Fail-closed on needs_label (FR-013).
+
+        Security gate: if a PlatformModelSigner is configured, verifies the
+        model signature before enabling. A model without a valid v2 signature
+        cannot be enabled (CTRL-5, Principio 0). If no signer is configured
+        (legacy/test environments without master.key), proceeds without
+        verification and logs a warning.
+        """
+        self._authorize(sender_uid, operation="enable_platform_model")
+        registry = self._require_platform_registry()
+        from hermes.platforms.domain.ports import PlatformModelNotFound  # noqa: PLC0415
+        from hermes.platforms.domain.platform_model import ModelHasUnlabeledAreas  # noqa: PLC0415
+        model = registry.get(model_id, tenant_id)
+        _assert_platform_model_signature(model, self._platform_model_signer, operation="enable")
+        enabled = model.enable()
+        registry.save(enabled)
+        logger.info(
+            "hermes.dbus.platform_model_enabled",
+            extra={"model_id": model_id, "by_uid": sender_uid},
+        )
+        return True
+
+    async def disable_platform_model(self, *, model_id: str, tenant_id: str, sender_uid: int) -> bool:
+        """habilitada → aprendida."""
+        self._authorize(sender_uid, operation="disable_platform_model")
+        registry = self._require_platform_registry()
+        model = registry.get(model_id, tenant_id)
+        disabled = model.disable()
+        registry.save(disabled)
+        logger.info(
+            "hermes.dbus.platform_model_disabled",
+            extra={"model_id": model_id, "by_uid": sender_uid},
+        )
+        return True
+
+    async def deprecate_platform_model(self, *, model_id: str, tenant_id: str, sender_uid: int) -> bool:
+        """Deprecate/forget a model (GDPR cascade)."""
+        self._authorize(sender_uid, operation="deprecate_platform_model")
+        registry = self._require_platform_registry()
+        model = registry.get(model_id, tenant_id)
+        deprecated = model.deprecate()
+        registry.save(deprecated)
+        logger.info(
+            "hermes.dbus.platform_model_deprecated",
+            extra={"model_id": model_id, "by_uid": sender_uid},
+        )
+        return True
+
+    async def confirm_platform_model(
+        self, *, model_id: str, tenant_id: str, corrections: list, sender_uid: int
+    ) -> dict:
+        """provisional → aprendida with operator corrections (FR-011, FR-032).
+
+        Corrections are applied as domain commands (rename/discard/relabel).
+        Returns the updated model summary.
+
+        Security gate: same signature verification as enable_platform_model.
+        The model must have a valid v2 signature to be confirmed.
+        """
+        self._authorize(sender_uid, operation="confirm_platform_model")
+        registry = self._require_platform_registry()
+        model = registry.get(model_id, tenant_id)
+        _assert_platform_model_signature(model, self._platform_model_signer, operation="confirm")
+        # Apply corrections (best-effort: unknown ops are logged and ignored).
+        updated_model = _apply_corrections(model, corrections)
+        confirmed = updated_model.confirm()
+        registry.save(confirmed)
+        logger.info(
+            "hermes.dbus.platform_model_confirmed",
+            extra={"model_id": model_id, "by_uid": sender_uid},
+        )
+        return confirmed.to_summary_dict()
+
+    # --- Tour lifecycle stubs (US1 — not yet wired, documented NotImplementedError) ---
+
+    async def start_platform_tour(
+        self,
+        *,
+        site_ref: str,
+        origin: str,
+        modality: str,
+        tenant_id: str,
+        sender_uid: int,
+    ) -> str:
+        """Open a learning tour.
+
+        STUB for US1 (T030/T031): the tour object and context isolation are
+        implemented in Phase 3. This stub persists a minimal tour record
+        and returns the tour_id so callers have a valid handle.
+        """
+        self._authorize(sender_uid, operation="start_platform_tour")
+        from uuid import uuid4  # noqa: PLC0415
+        from hermes.platforms.domain.platform_learning_tour import PlatformLearningTour  # noqa: PLC0415
+        from hermes.platforms.domain.value_objects import TourOrigin, TeachingModality  # noqa: PLC0415
+        tour_id = uuid4().hex
+        try:
+            registry = self._require_platform_registry()
+            tour = PlatformLearningTour(
+                tour_id=tour_id,
+                tenant_id=tenant_id,
+                target_site_ref=site_ref,
+                origin=TourOrigin(origin),
+                modality=TeachingModality(modality),
+                operator_attribution=sender_uid,
+            )
+            registry.save_tour(tour)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.start_platform_tour.stub_persist_failed: %s", exc)
+        logger.info(
+            "hermes.dbus.platform_tour_started",
+            extra={"tour_id": tour_id, "site_ref": site_ref, "by_uid": sender_uid},
+        )
+        return tour_id
+
+    async def close_platform_tour(self, *, tour_id: str, tenant_id: str, sender_uid: int) -> str:
+        """Close tour and compile model.
+
+        STUB for US1 (T031): real compilation (TourCompilerPort) implemented in Phase 3.
+        Returns a placeholder model_json to indicate the tour was closed.
+        """
+        self._authorize(sender_uid, operation="close_platform_tour")
+        # Stub: mark tour closed in storage if registry available
+        try:
+            registry = self._require_platform_registry()
+            tour = registry.get_tour(tour_id)
+            closed = tour.close()
+            registry.save_tour(closed)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.close_platform_tour.stub_persist_failed: %s", exc)
+        logger.info(
+            "hermes.dbus.platform_tour_closed",
+            extra={"tour_id": tour_id, "by_uid": sender_uid},
+        )
+        # Compilation (TourCompilerPort) wired in US1. Return empty model for now.
+        import json as _json  # noqa: PLC0415
+        return _json.dumps({"tour_id": tour_id, "state": "closed", "model_compiled": False})
+
+    # --- Capability binding (fully functional — fundación, FR-037) ---
+
+    async def bind_capability_to_agent(
+        self,
+        *,
+        agent_id: str,
+        capability_kind: str,
+        capability_id: str,
+        capability_version: str,
+        tenant_id: str,
+        sender_uid: int,
+    ) -> dict:
+        """Assign a global capability to an agent. Idempotent. by = sender_uid."""
+        self._authorize(sender_uid, operation="bind_capability_to_agent")
+        repo = self._require_binding_repo()
+        from hermes.platforms.domain.value_objects import CapabilityRef  # noqa: PLC0415
+        from hermes.capabilities.domain.agent_capability_binding import AgentCapabilityBinding  # noqa: PLC0415
+        cap = CapabilityRef(
+            kind=capability_kind,
+            capability_id=capability_id,
+            version=capability_version,
+        )
+        # Idempotent: if already bound, return the existing binding.
+        existing = repo.find_active(agent_id, capability_kind, capability_id, tenant_id)
+        if existing is not None:
+            logger.info(
+                "hermes.dbus.bind_capability.idempotent",
+                extra={"agent_id": agent_id, "capability": str(cap), "by_uid": sender_uid},
+            )
+            return existing.to_dict()
+        binding = AgentCapabilityBinding.create(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            capability=cap,
+            bound_by=sender_uid,
+        )
+        repo.save(binding)
+        logger.info(
+            "hermes.dbus.capability_bound",
+            extra={
+                "binding_id": binding.binding_id,
+                "agent_id": agent_id,
+                "capability": str(cap),
+                "by_uid": sender_uid,
+            },
+        )
+        return binding.to_dict()
+
+    async def unbind_capability_from_agent(
+        self,
+        *,
+        agent_id: str,
+        capability_kind: str,
+        capability_id: str,
+        tenant_id: str,
+        sender_uid: int,
+    ) -> bool:
+        """Revoke a capability assignment. Idempotent (no-op if not bound)."""
+        self._authorize(sender_uid, operation="unbind_capability_from_agent")
+        repo = self._require_binding_repo()
+        changed = repo.unbind(agent_id, capability_kind, capability_id, tenant_id)
+        logger.info(
+            "hermes.dbus.capability_unbound",
+            extra={
+                "agent_id": agent_id,
+                "capability_kind": capability_kind,
+                "capability_id": capability_id,
+                "changed": changed,
+                "by_uid": sender_uid,
+            },
+        )
+        return changed
+
+    async def set_agent_house_rule(
+        self,
+        *,
+        agent_id: str,
+        model_id: str,
+        rule: dict,
+        tenant_id: str,
+        sender_uid: int,
+    ) -> bool:
+        """Add/update a per-agent house-rule overlay (FR-037)."""
+        self._authorize(sender_uid, operation="set_agent_house_rule")
+        repo = self._require_binding_repo()
+        from uuid import uuid4  # noqa: PLC0415
+        from hermes.platforms.domain.platform_model import HouseRule, HouseRuleKind  # noqa: PLC0415
+        from hermes.platforms.domain.agent_house_rule_overlay import AgentHouseRuleOverlay  # noqa: PLC0415
+        house_rule = HouseRule(
+            rule_id=rule.get("rule_id", uuid4().hex),
+            kind=HouseRuleKind(rule["kind"]),
+            target_area_ref=rule["target_area_ref"],
+            phrasing=rule["phrasing"],
+        )
+        overlay = AgentHouseRuleOverlay(
+            overlay_id=uuid4().hex,
+            agent_id=agent_id,
+            platform_model_id=model_id,
+            house_rule=house_rule,
+        )
+        repo.save_overlay(overlay)
+        logger.info(
+            "hermes.dbus.agent_house_rule_set",
+            extra={"agent_id": agent_id, "model_id": model_id, "by_uid": sender_uid},
+        )
+        return True
+
+    # ------------------------------------------------------------------
+    # T047 — Memory read-only verbs (spec 014-agentic-desktop, increment 2)
+    # Read-only: no broker, no effector, no state mutation.
+    # Authorship by sender_uid patrón de list_* existentes.
+    # PII: el contenido de memoria puede incluir datos sensibles —
+    #   nunca se loguea; se trunca antes de cruzar el bus.
+    # ------------------------------------------------------------------
+
+    _MEMORY_CONTENT_TRUNCATE = 200  # chars — protege PII en el bus D-Bus
+
+    def list_memory(self, *, limit: int) -> str:
+        """Lista las entradas de memoria del agente (read-only). JSON → cliente.
+
+        Devuelve una lista de {id, target, content_truncated, entry_index}.
+        Si el store no está disponible devuelve [] (la app muestra estado honesto,
+        nunca mock). PII: content truncado a _MEMORY_CONTENT_TRUNCATE chars.
+        """
+        import json as _json  # noqa: PLC0415
+
+        entries = self._read_all_memory_entries(limit=limit)
+        return _json.dumps(entries)
+
+    def search_memory(self, *, query: str, limit: int) -> str:
+        """Busca en la memoria del agente (read-only, case-insensitive). JSON → cliente.
+
+        Devuelve las entradas cuyo content_truncated contiene la query.
+        Si el store no está disponible devuelve []. PII: content truncado.
+        """
+        import json as _json  # noqa: PLC0415
+
+        if not query or not query.strip():
+            return _json.dumps([])
+        needle = query.strip().lower()
+        all_entries = self._read_all_memory_entries(limit=None)
+        matched = [e for e in all_entries if needle in e["content_truncated"].lower()]
+        return _json.dumps(matched[:limit] if limit else matched)
+
+    def _read_all_memory_entries(self, *, limit: int | None) -> list[dict]:
+        """Lee todos los targets del store y ensambla la lista de entradas.
+
+        Fail-open: si el store no está disponible devuelve [].
+        PII: content_truncated capado en _MEMORY_CONTENT_TRUNCATE — NUNCA logueado.
+        """
+        try:
+            from hermes.memory.infrastructure.tenant_memory_store import (  # noqa: PLC0415
+                TenantMemoryStore,
+            )
+            from hermes.memory.infrastructure.nous_memory_bridge import (  # noqa: PLC0415
+                _DEFAULT_MEMORY_ROOT,
+                _SNAPSHOT_TARGETS,
+            )
+            from hermes.runtime.__main__ import _resolve_tenant_id  # noqa: PLC0415
+        except Exception:  # noqa: BLE001
+            return []
+
+        try:
+            tenant_id = _resolve_tenant_id()
+            store = TenantMemoryStore(root=_DEFAULT_MEMORY_ROOT, tenant_id=tenant_id)
+        except Exception:  # noqa: BLE001
+            return []
+
+        result: list[dict] = []
+        entry_idx = 0
+        for target in _SNAPSHOT_TARGETS:
+            try:
+                raw_entries = store.read(target)
+            except Exception:  # noqa: BLE001
+                continue
+            for i, content in enumerate(raw_entries):
+                # PII: truncate; NEVER log content
+                result.append({
+                    "id": f"{target}:{i}",
+                    "target": target,
+                    "content_truncated": content[:self._MEMORY_CONTENT_TRUNCATE],
+                    "entry_index": i,
+                })
+                entry_idx += 1
+                if limit is not None and entry_idx >= limit:
+                    return result
+        return result
+
+    # ------------------------------------------------------------------
+    # T017 — Desktop overlay methods (spec 014-agentic-desktop)
+    # ------------------------------------------------------------------
+
+    def open_overlay(self, *, sender_uid: int) -> bool:
+        """Idempotent signal that the overlay should come to front.
+
+        No state mutation, no run_cycle, no effector. Returns True so the
+        gnome-shell extension can confirm the daemon is alive.
+        The OverlayRequested signal is emitted by the D-Bus adapter layer
+        (Runtime1ServiceInterface.OverlayRequested) — this method is the
+        pure-wiring side; it only authorizes and logs.
+
+        sender_uid derived from the bus by the adapter (CWE-862).
+        """
+        self._authorize_and_resolve(sender_uid, operation="open_overlay")
+        logger.info(
+            "hermes.dbus.overlay_requested",
+            extra={"by_uid": sender_uid},
+        )
+        return True
+
+    async def enqueue_from_overlay(
+        self,
+        *,
+        text: str,
+        conversation_id: str | None,
+        sender_uid: int,
+    ) -> EnqueueResult:
+        """Overlay chat → enqueue delegation. Reuses existing enqueue exactly.
+
+        trigger_kind is fixed to "chat_message" — the overlay is a chat surface.
+        Authorship is derived from sender_uid (confused-deputy path:
+        sender_uid == operator_uid 1000, no proxy token needed for direct calls).
+        NEVER bypasses rate-limit / PII tokenization in ControlPlaneService.
+        """
+        return await self.enqueue(
+            trigger_kind="chat_message",
+            text=text,
+            priority=5,
+            dedup_key=None,
+            sender_uid=sender_uid,
+            conversation_id=conversation_id,
+            operator_token=None,
+        )
+
+    def request_context_snapshot(self, *, sender_uid: int) -> str:
+        """Return JSON snapshot of the active desktop app. READ-ONLY.
+
+        Delegates to ContextSnapshotComposer — no broker, no effector.
+        PII fields (window_title) are marked but not tokenized here: the
+        overlay UI is responsible for tokenizing before sending to the LLM
+        boundary (Constitution III). The snapshot is composed on-demand and
+        NEVER persisted by this method.
+
+        sender_uid is required for the SCREEN_CAPTURE consent check inside
+        the composer (screenshot is only included when the operator has an
+        active consent for Capability.SCREEN_CAPTURE).
+
+        Returns JSON string (dict). Always succeeds: missing AT-SPI → no-app
+        snapshot.
+        """
+        import json as _json  # noqa: PLC0415
+
+        if self._context_snapshot_composer is None:
+            return _json.dumps({
+                "active_application": None,
+                "window_title": None,
+                "screenshot_available": False,
+                "captured_at": None,
+                "error": "context_snapshot_not_configured",
+            })
+        snapshot = self._context_snapshot_composer.compose()
+        return _json.dumps(
+            self._context_snapshot_composer.to_json_safe_dict(snapshot)
+        )
+
+    def get_audit_chain_head(self, *, sender_uid: int) -> str:  # noqa: ARG002
+        """Return JSON summary of the audit chain head. READ-ONLY.
+
+        Used by the Security/Audit app to display chain integrity status.
+        No authZ required (read-only metadata, same policy as list_*).
+        sender_uid is accepted but not used (kept for uniform signature and
+        future rate-limiting).
+
+        Returns JSON string:
+          {entry_id, head_hash, integrity, captured_at}
+        where integrity is:
+          "present"  — head hash exists; chain NOT verified (expensive, out-of-band).
+          "empty"    — all-zeros sentinel (no entries recorded yet).
+          "unknown"  — audit_signer not injected.
+        "verified" is NEVER emitted here — full chain verification is a separate
+        operation and must not be implied by this read-only head query.
+        """
+        import json as _json  # noqa: PLC0415
+
+        if self._audit_signer is None:
+            return _json.dumps({
+                "entry_id": None,
+                "head_hash": None,
+                "integrity": "unknown",
+                "captured_at": None,
+            })
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        head_hash = self._audit_signer.head_hash_hex
+        # "present" = head hash exists but chain NOT verified (expensive — done
+        # out-of-band by the audit verifier). "empty" = all-zeros sentinel.
+        # NEVER report "ok"/"verified" here: this endpoint only reads the
+        # in-memory head, it does not traverse or verify the chain.
+        integrity = "empty" if head_hash == ("00" * 32) else "present"
+        return _json.dumps({
+            "entry_id": None,
+            "head_hash": head_hash,
+            "integrity": integrity,
+            "captured_at": datetime.now(tz=timezone.utc).isoformat(),
+        })
+
+    # ------------------------------------------------------------------
+    # spec 014 increment 3 — FR-013 operator consent control (D-Bus)
+    #
+    # GrantConsent / RevokeConsent: mutators — authZ by sender_uid (CWE-862).
+    # ListConsents: read-only — no authZ required (same policy as list_*).
+    #
+    # _consent_operator() resolves the SUBJECT of every consent operation.
+    # In a single-owner OS the subject is always the owner (self._operator_id),
+    # not the caller: the authorized caller (the compositor / shell) manages
+    # consents ON BEHALF of the owner.  Using the caller's UID as subject would
+    # break when the call is proxied (proxy_uid ≠ hermes-user uid) or when the
+    # compositor uid differs from the uid used during seed/broker construction.
+    # This does NOT widen the attack surface: authZ still blocks unauthorized
+    # callers via _authorize(); only the subject changes, not the gating.
+    # Fallback to _uid_to_uuid(sender_uid) preserves CI/test/backward-compat.
+    # ------------------------------------------------------------------
+
+    def _consent_operator(self, sender_uid: int) -> "UUID":
+        """Return the owner UUID that is the SUBJECT of consent operations.
+
+        Single-owner invariant: the consent subject is always self._operator_id
+        (the daemon owner resolved at boot).  Fallback to _uid_to_uuid(sender_uid)
+        when operator_id was not injected (CI / test / backward-compat).
+        """
+        return self._operator_id if self._operator_id is not None else _uid_to_uuid(sender_uid)
+
+    def grant_consent(
+        self,
+        *,
+        capability: str,
+        scope: str,
+        sender_uid: int,
+    ) -> dict:
+        """Grant a capability consent to the calling operator (FR-013).
+
+        capability: string matching Capability enum value (e.g. "documents").
+        scope: "session" | "once" | "persistent" (ConsentScope).
+        sender_uid: UID from the D-Bus bus (CWE-862 — server-side, never payload).
+        human_operator_id = UUID(int=sender_uid).
+
+        Returns consent dict on success, {"error": reason} on failure.
+
+        Raises:
+            DbusAuthorizationError: sender not in authorized_uids.
+        """
+        from hermes.agents_os.application.consent_manager import (  # noqa: PLC0415
+            Capability as _Capability,
+            ConsentScope as _ConsentScope,
+        )
+
+        self._authorize(sender_uid, operation="grant_consent")
+
+        if self._consent_manager is None:
+            return {"error": "consent_manager_not_configured"}
+
+        try:
+            cap = _Capability(capability)
+        except ValueError:
+            valid = [c.value for c in _Capability]
+            return {"error": f"capability inválida: {capability!r}. Válidas: {valid}"}
+
+        try:
+            scope_enum = _ConsentScope(scope)
+        except ValueError:
+            valid_scopes = [s.value for s in _ConsentScope]
+            return {"error": f"scope inválido: {scope!r}. Válidos: {valid_scopes}"}
+
+        tenant_id = _resolve_tenant_id_from_wiring(self._tenant_id)
+        # Subject = owner, not caller (see _consent_operator docstring).
+        human_operator_id = self._consent_operator(sender_uid)
+
+        consent = self._consent_manager.grant(
+            tenant_id=tenant_id,
+            human_operator_id=human_operator_id,
+            capability=cap,
+            scope=scope_enum,
+        )
+        logger.info(
+            "hermes.dbus.consent_granted",
+            extra={
+                "capability": cap.value,
+                "scope": scope_enum.value,
+                "operator_id": str(human_operator_id),
+                "consent_id": str(consent.consent_id),
+                "by_uid": sender_uid,
+            },
+        )
+        return _consent_to_dict(consent)
+
+    def revoke_consent(
+        self,
+        *,
+        capability: str,
+        sender_uid: int,
+    ) -> dict:
+        """Revoke a capability consent for the calling operator (FR-013).
+
+        capability: string matching Capability enum value.
+        sender_uid: UID from the D-Bus bus (CWE-862 — server-side, never payload).
+        human_operator_id = UUID(int=sender_uid).
+
+        Returns {"revoked": true} if revoked, {"revoked": false} if none was active.
+
+        Raises:
+            DbusAuthorizationError: sender not in authorized_uids.
+        """
+        from hermes.agents_os.application.consent_manager import (  # noqa: PLC0415
+            Capability as _Capability,
+        )
+
+        self._authorize(sender_uid, operation="revoke_consent")
+
+        if self._consent_manager is None:
+            return {"error": "consent_manager_not_configured"}
+
+        try:
+            cap = _Capability(capability)
+        except ValueError:
+            valid = [c.value for c in _Capability]
+            return {"error": f"capability inválida: {capability!r}. Válidas: {valid}"}
+
+        # Subject = owner, not caller (see _consent_operator docstring).
+        human_operator_id = self._consent_operator(sender_uid)
+        revoked = self._consent_manager.revoke(
+            human_operator_id=human_operator_id, capability=cap
+        )
+        logger.info(
+            "hermes.dbus.consent_revoked",
+            extra={
+                "capability": cap.value,
+                "operator_id": str(human_operator_id),
+                "revoked": revoked is not None,
+                "by_uid": sender_uid,
+            },
+        )
+        if revoked is not None:
+            return {"revoked": True, **_consent_to_dict(revoked)}
+        return {"revoked": False}
+
+    def list_consents(self, *, sender_uid: int) -> str:
+        """List active consents for the calling operator (read-only).
+
+        Returns JSON list of active consent dicts.
+        No authZ required — read-only, same policy as list_*.
+        sender_uid is used to scope the list to the calling operator.
+        """
+        if self._consent_manager is None:
+            return json.dumps([])
+
+        # Subject = owner, not caller (see _consent_operator docstring).
+        human_operator_id = self._consent_operator(sender_uid)
+        consents = self._consent_manager.list_active(
+            human_operator_id=human_operator_id
+        )
+        return json.dumps([_consent_to_dict(c) for c in consents])
+
+    # ------------------------------------------------------------------
+    # Test helper — audit entries emitted in this session
+    # ------------------------------------------------------------------
+
+    def audit_entries_emitted(self) -> list[AuditEntry]:
+        """Devuelve las AuditEntry emitidas (para tests). Producción usa repositorio real."""
+        return list(self._audit_entries)
+
+    # ------------------------------------------------------------------
+    # Private — authorization helpers
+    # ------------------------------------------------------------------
+
+    def _authorize_and_resolve(
+        self,
+        sender_uid: int,
+        *,
+        operation: str,
+        operator_token: str | None = None,
+    ) -> UUID:
+        """Authorize the call and return the verified operator UUID.
+
+        Two paths (hybrid confused-deputy model):
+          1. Direct (sender_uid ∈ authorized_uids):
+               operator_id = _uid_to_uuid(sender_uid) — no token needed.
+          2. Proxy (sender_uid == proxy_uid, NOT in authorized_uids):
+               operator_token REQUIRED; operator_id extracted from token.
+               Token must be valid, unexpired, and for this operation.
+
+        Fail-closed: any other case raises DbusAuthorizationError.
+
+        Returns:
+            UUID of the verified human operator (used for audit attribution).
+
+        Raises:
+            DbusAuthorizationError: authorization denied.
+        """
+        if sender_uid in self._authorized_uids:
+            return _uid_to_uuid(sender_uid)
+
+        if self._proxy_uid is not None and sender_uid == self._proxy_uid:
+            return self._authorize_via_token(operator_token, operation=operation)
+
+        logger.warning(
+            "hermes.dbus.authz_denied",
+            extra={"operation": operation, "sender_uid": sender_uid},
+        )
+        raise DbusAuthorizationError(
+            f"UID {sender_uid} no autorizado para '{operation}' "
+            "(CTRL-12/KILL-1, CWE-862)"
+        )
+
+    def _authorize_via_token(
+        self, operator_token: str | None, *, operation: str
+    ) -> UUID:
+        """Verify the operator token and extract the operator UUID.
+
+        Requires operator_token_verifier to be configured. Fail-closed on
+        any verification failure: missing token, expired, or forged.
+
+        Returns:
+            UUID of the operator extracted from the verified token.
+
+        Raises:
+            DbusAuthorizationError: token missing, expired, or verification failed.
+        """
+        from hermes.shell_server.security.operator_token import OperatorTokenError  # noqa: PLC0415
+
+        if operator_token is None:
+            logger.warning(
+                "hermes.dbus.proxy_token_missing",
+                extra={"operation": operation},
+            )
+            raise DbusAuthorizationError(
+                f"Proxy call to '{operation}' requires an operator token "
+                "(confused-deputy remediation, CWE-862). No token provided."
+            )
+        if self._token_verifier is None:
+            logger.warning(
+                "hermes.dbus.token_verifier_not_configured",
+                extra={"operation": operation},
+            )
+            raise DbusAuthorizationError(
+                f"Proxy call to '{operation}' rejected: no operator_token_verifier "
+                "configured. Inject one at wiring construction time."
+            )
+        try:
+            claims = self._token_verifier.verify(
+                operator_token, expected_operation=operation
+            )
+        except OperatorTokenError as exc:
+            logger.warning(
+                "hermes.dbus.proxy_token_invalid",
+                extra={"operation": operation, "reason": type(exc).__name__},
+            )
+            raise DbusAuthorizationError(
+                f"Proxy call to '{operation}' rejected: operator token invalid "
+                f"({type(exc).__name__}). (CWE-862)"
+            ) from exc
+
+        try:
+            operator_uuid = UUID(claims.operator_id)
+        except ValueError as exc:
+            raise DbusAuthorizationError(
+                f"Operator token claims.operator_id is not a valid UUID: "
+                f"{claims.operator_id!r}"
+            ) from exc
+
+        logger.info(
+            "hermes.dbus.proxy_token_verified",
+            extra={"operation": operation, "operator_id": str(operator_uuid)},
+        )
+        return operator_uuid
+
+    def _authorize(self, sender_uid: int, *, operation: str) -> None:
+        """Legacy single-path authorize (direct-only, no token support).
+
+        Kept for backward compatibility with callers that were not updated to
+        pass operator_token. Only used by governance methods that are not yet
+        exposed via the proxy path. Prefer _authorize_and_resolve().
+
+        Fail-closed: UID not in authorized_uids raises DbusAuthorizationError.
+        """
+        if sender_uid not in self._authorized_uids:
+            logger.warning(
+                "hermes.dbus.authz_denied",
+                extra={"operation": operation, "sender_uid": sender_uid},
+            )
+            raise DbusAuthorizationError(
+                f"UID {sender_uid} no autorizado para '{operation}' "
+                "(CTRL-12/KILL-1, CWE-862)"
+            )
+
+    # ------------------------------------------------------------------
+    # Security Center — policy + install-review audit (Grupo C wiring).
+    # Persistencia: shell-state.db (mismo que el resto de repos daemon-owned).
+    # Las tablas se crean idempotentemente (CREATE TABLE IF NOT EXISTS) en la
+    # primera llamada; no requieren migración externa.
+    # ------------------------------------------------------------------
+
+    def _security_db_conn(self):
+        """Lazy SQLite connection al shell-state.db. Singleton por instancia."""
+        if not hasattr(self, "_sec_conn"):
+            import sqlite3 as _sqlite3  # noqa: PLC0415
+
+            db_path = self._composio_db_path()
+            self._sec_conn = _sqlite3.connect(str(db_path), check_same_thread=False)
+            self._sec_conn.row_factory = _sqlite3.Row
+            self._sec_conn.executescript("""
+                CREATE TABLE IF NOT EXISTS security_policy (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    policy_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE TABLE IF NOT EXISTS install_reviews (
+                    scan_id     TEXT PRIMARY KEY,
+                    identifier  TEXT NOT NULL DEFAULT '',
+                    kind        TEXT NOT NULL DEFAULT '',
+                    score       INTEGER NOT NULL DEFAULT -1,
+                    verdict     TEXT NOT NULL DEFAULT '',
+                    decision    TEXT NOT NULL DEFAULT '',
+                    risks_json  TEXT NOT NULL DEFAULT '[]',
+                    timestamp   INTEGER NOT NULL DEFAULT 0
+                );
+            """)
+            self._sec_conn.commit()
+        return self._sec_conn
+
+    def get_security_policy(self) -> dict:
+        """Lee la política de seguridad persitida (read-only). {} = valores por defecto."""
+        try:
+            conn = self._security_db_conn()
+            row = conn.execute("SELECT policy_json FROM security_policy WHERE id = 1").fetchone()
+            if row is None:
+                return {}
+            return json.loads(row["policy_json"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.security_policy_read_failed: %s", exc)
+            return {}
+
+    def set_security_policy(self, *, policy_json: str, sender_uid: int) -> dict:
+        """Persiste la política de seguridad. Muta → authZ por sender_uid (CWE-862)."""
+        self._authorize_and_resolve(sender_uid, operation="set_security_policy")
+        policy_str = (policy_json or "").strip()
+        if not policy_str:
+            return {"ok": False, "error": "policy_json vacío"}
+        try:
+            json.loads(policy_str)  # valida JSON antes de persistir
+        except ValueError as exc:
+            return {"ok": False, "error": f"JSON inválido: {exc}"}
+        try:
+            conn = self._security_db_conn()
+            conn.execute(
+                "INSERT INTO security_policy (id, policy_json) VALUES (1, ?)"
+                " ON CONFLICT(id) DO UPDATE SET policy_json = excluded.policy_json",
+                (policy_str,),
+            )
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.security_policy_write_failed: %s", exc)
+            return {"ok": False, "error": f"no se pudo guardar: {exc}"}
+        logger.info("hermes.dbus.security_policy_saved", extra={"by_uid": sender_uid})
+        return {"ok": True}
+
+    def list_recent_scans(self, *, limit: int = 50) -> list[dict]:
+        """Lista los escaneos de instalación recientes (read-only). [] si no hay tabla."""
+        try:
+            conn = self._security_db_conn()
+            rows = conn.execute(
+                "SELECT scan_id, identifier, kind, score, verdict, decision,"
+                "       risks_json, timestamp"
+                "  FROM install_reviews"
+                " ORDER BY timestamp DESC"
+                " LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+            return [
+                {
+                    "scan_id":    r["scan_id"],
+                    "identifier": r["identifier"],
+                    "kind":       r["kind"],
+                    "score":      r["score"],
+                    "verdict":    r["verdict"],
+                    "decision":   r["decision"],
+                    "risks":      json.loads(r["risks_json"] or "[]"),
+                    "timestamp":  r["timestamp"],
+                }
+                for r in rows
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.list_recent_scans_failed: %s", exc)
+            return []
+
+    def record_install_decision(
+        self,
+        *,
+        scan_id: str,
+        decision: str,
+        identifier: str = "",
+        kind: str = "",
+        score: int = -1,
+        verdict: str = "",
+        risks_json: str = "[]",
+        sender_uid: int,
+    ) -> dict:
+        """Persiste la decisión del usuario (allow/block/cancelled/installed).
+
+        Muta → authZ por sender_uid (CWE-862). El scan_id es opaco para este
+        método — cualquier cadena no vacía es válida. Si el scan_id ya existe
+        actualiza la decisión (idempotente).
+        """
+        self._authorize_and_resolve(sender_uid, operation="record_install_decision")
+        sid = (scan_id or "").strip()
+        if not sid:
+            return {"ok": False, "error": "scan_id vacío"}
+        dec = (decision or "").strip()
+        if not dec:
+            return {"ok": False, "error": "decision vacía"}
+        import time as _time  # noqa: PLC0415
+        ts = int(_time.time())
+        try:
+            risks_str = (risks_json or "[]").strip() or "[]"
+            json.loads(risks_str)  # valida JSON
+        except ValueError:
+            risks_str = "[]"
+        try:
+            conn = self._security_db_conn()
+            conn.execute(
+                "INSERT INTO install_reviews"
+                " (scan_id, identifier, kind, score, verdict, decision, risks_json, timestamp)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(scan_id) DO UPDATE SET"
+                "   decision  = excluded.decision,"
+                "   timestamp = excluded.timestamp",
+                (sid, identifier or "", kind or "", int(score), verdict or "",
+                 dec, risks_str, ts),
+            )
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.record_install_decision_failed: %s", exc)
+            return {"ok": False, "error": f"no se pudo guardar: {exc}"}
+        logger.info(
+            "hermes.dbus.install_decision_recorded",
+            extra={"scan_id": sid, "decision": dec, "by_uid": sender_uid},
+        )
+        # Override SOBERANO del dueño (modelo "todo elevable"): si APRUEBA, conecta la
+        # decisión al GATE de instalación — marca scan_records.decision=ALLOWED en
+        # scans.db para que ScanService deje pasar ESTE target aunque el veredicto sea
+        # FAIL. Sin esto la aprobación quedaba en install_reviews (shell-state.db) y el
+        # gate (scans.db) no la veía. Best-effort: si falla, la decisión queda registrada
+        # pero el gate seguiría bloqueando (fail-closed, seguro).
+        if dec.lower() in ("allow", "approve", "allowed", "allow_once", "install", "installed"):
+            try:
+                from uuid import UUID as _UUID  # noqa: PLC0415
+                from hermes.security_center.infrastructure.sqlite_scan_repo import (  # noqa: PLC0415
+                    SQLiteScanRepo,
+                )
+                from hermes.security_center.domain.scan_record import ScanDecision  # noqa: PLC0415
+                SQLiteScanRepo().update_decision(_UUID(sid), ScanDecision.ALLOWED)
+                logger.warning(
+                    "hermes.dbus.scan_decision_allowed scan_id=%s by_uid=%s — "
+                    "instalación elevada por decisión SOBERANA del dueño (gate respetará ALLOWED)",
+                    sid, sender_uid,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "hermes.dbus.scan_decision_allow_failed scan_id=%s: %s "
+                    "(decisión registrada; el gate seguirá fail-closed)", sid, exc,
+                )
+        return {"ok": True}
+
+    # ------------------------------------------------------------------
+    # Two-mode security kernel (spec 015)
+    # ------------------------------------------------------------------
+
+    def resolve_approval(self, *, request_id: str, choice: str) -> str:
+        """Resolve a pending gateway approval from the compositor.
+
+        Delegates to approval_gateway.resolve_approval which calls the native
+        resolve_gateway_approval(session_key, choice). The session_key was
+        registered by register_gateway_notify_callback at daemon startup.
+
+        choice ∈ {once, session, always, deny}. Unknown → deny (fail-closed).
+        Returns JSON string: {"ok": true} or {"ok": false, "error": reason}.
+        """
+        from hermes.runtime.approval_gateway import resolve_approval as _resolve  # noqa: PLC0415
+
+        return _resolve(request_id=request_id, choice=choice)
+
+    def set_auto_mode(self, *, enabled: bool) -> str:
+        """Persist the AUTO mode flag and log the change.
+
+        Returns JSON: {"ok": true, "auto_mode": <bool>} or {"ok": false, "error"}.
+        """
+        from hermes.runtime.approval_gateway import save_auto_mode  # noqa: PLC0415
+
+        try:
+            save_auto_mode(enabled)
+        except OSError as exc:
+            logger.error(
+                "hermes.dbus.set_auto_mode_write_failed: %s", exc
+            )
+            return json.dumps({"ok": False, "error": str(exc)})
+
+        logger.info(
+            "hermes.dbus.auto_mode_set",
+            extra={"auto_mode": enabled},
+        )
+        return json.dumps({"ok": True, "auto_mode": enabled})
+
+    def get_auto_mode(self) -> str:
+        """Return the current security mode as JSON (read-only).
+
+        Returns JSON: {"auto_mode": bool}.
+        """
+        from hermes.runtime.approval_gateway import load_auto_mode  # noqa: PLC0415
+
+        return json.dumps({"auto_mode": load_auto_mode()})
+
+
+async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[bool, str | None]":
+    """Valida un provider EJECUTANDO el runtime real (hermes-agent) en el daemon.
+
+    Mismo camino que el chat: resolve_runtime_provider (idioma de Hermes) + una
+    completion mínima sin tools. NO litellm, NO shell-server. Corre en el daemon
+    (6G, sin OOM). Devuelve (ok, error_real_del_proveedor).
+
+    Migrado (spec 016): usa el catálogo unificado vía nous_request_from_model_config
+    en lugar del antiguo _HERMES_SLUG_BY_PREFIX (que tenía 'openai'→'openai-api',
+    slug inválido que causaba AuthError).
+    """
+    import asyncio  # noqa: PLC0415
+
+    from hermes.shell_server.providers.domain import litellm_model_string  # noqa: PLC0415
+    from hermes.runtime.model_config import ModelConfig  # noqa: PLC0415
+    from hermes.providers.infrastructure.nous_provider_adapter import (  # noqa: PLC0415
+        nous_request_from_model_config,
+    )
+
+    model = litellm_model_string(provider, provider.default_model)
+    # Build a temporary ModelConfig to reuse nous_request_from_model_config.
+    # api_key comes from the caller (already decrypted by the D-Bus handler).
+    temp_config = ModelConfig.from_provider(
+        model=model,
+        api_key=api_key,
+        base_url=provider.base_url or None,
+    )
+    req, bare = nous_request_from_model_config(temp_config)
+
+    def _run() -> str:
+        from hermes_cli.runtime_provider import resolve_runtime_provider  # noqa: PLC0415
+        from run_agent import AIAgent  # noqa: PLC0415
+
+        rt = resolve_runtime_provider(
+            requested=req.requested,
+            explicit_api_key=req.explicit_api_key,
+            explicit_base_url=req.explicit_base_url,
+            target_model=req.target_model,
+        )
+        agent = AIAgent(
+            api_key=rt.get("api_key"),
+            base_url=rt.get("base_url"),
+            provider=rt.get("provider"),
+            api_mode=rt.get("api_mode"),
+            model=bare,
+            credential_pool=rt.get("credential_pool"),
+            enabled_toolsets=[],
+            max_iterations=2,
+            save_trajectories=False,
+            quiet_mode=True,
+        )
+        r = agent.run_conversation("OK")
+        return str(r.get("final_response") if isinstance(r, dict) else r or "")
+
+    loop = asyncio.get_event_loop()
+    resp = await loop.run_in_executor(None, _run)
+    if resp and resp.strip():
+        return True, None
+    return False, "el modelo no devolvió respuesta"
+
+
+def _uid_to_uuid(uid: int) -> UUID:
+    """Convierte un UID POSIX a UUID determinista para usarlo como operator_id."""
+    return UUID(int=uid)
+
+
+def _resolve_tenant_id_from_wiring(tenant_id_str: str) -> UUID:
+    """Convierte el tenant_id string almacenado en el wiring a UUID.
+
+    El wiring almacena tenant_id como str (compat F010). Si está vacío o inválido,
+    usa el mismo fallback que _resolve_tenant_id() del daemon (hostname-hash).
+    """
+    import hashlib  # noqa: PLC0415
+    import os as _os  # noqa: PLC0415
+
+    if tenant_id_str:
+        try:
+            return UUID(tenant_id_str)
+        except ValueError:
+            pass
+    hostname = _os.uname().nodename if hasattr(_os, "uname") else "hermes-local"
+    digest = hashlib.sha256(hostname.encode()).digest()
+    return UUID(bytes=digest[:16], version=5)
+
+
+def _consent_to_dict(consent: object) -> dict:
+    """Serializa un Consent a dict para JSON transport. Sin PII sensible."""
+    return {
+        "consent_id": str(getattr(consent, "consent_id", "")),
+        "capability": str(getattr(consent, "capability", "")),
+        "scope": str(getattr(consent, "scope", "")),
+        "granted_at": (
+            getattr(consent, "granted_at").isoformat()
+            if getattr(consent, "granted_at", None) else None
+        ),
+        "expires_at": (
+            getattr(consent, "expires_at").isoformat()
+            if getattr(consent, "expires_at", None) else None
+        ),
+        "revoked_at": (
+            getattr(consent, "revoked_at").isoformat()
+            if getattr(consent, "revoked_at", None) else None
+        ),
+        "usage_count": getattr(consent, "usage_count", 0),
+    }
+
+
+def _assert_platform_model_signature(model: Any, signer: Any, *, operation: str) -> None:
+    """Verifica la firma del PlatformModel antes de una transición de ciclo de vida.
+
+    Fail-closed: si el modelo tiene firma Y el signer está configurado, la firma
+    DEBE verificar. Si no verifica, lanza InvalidModelSignature.
+
+    Si el modelo NO tiene firma y el signer está configurado → lanza RuntimeError
+    (el modelo debió firmarse al compilar).
+
+    Si el signer es None (entorno sin master.key, e.g. CI) → warning + continúa.
+    Esto permite que los tests pasen sin master.key; en producción el signer
+    siempre está configurado (hermes-keygen.service Before= el runtime).
+
+    Args:
+        model: PlatformModel instance.
+        signer: PlatformModelSigner | None — None solo en test/legacy.
+        operation: 'enable' | 'confirm' — para el mensaje de error.
+
+    Raises:
+        InvalidModelSignature: si la firma no verifica (via signer.verify).
+        RuntimeError: si el modelo no tiene firma y el signer está configurado.
+    """
+    if signer is None:
+        logger.warning(
+            "hermes.dbus.platform_model_signer_not_configured",
+            extra={
+                "operation": operation,
+                "model_id": str(model.platform_model_id),
+                "note": (
+                    "No PlatformModelSigner configured — skipping signature "
+                    "verification. In production, inject a signer derived from "
+                    "master.key via SecretsVault.derive_subkey."
+                ),
+            },
+        )
+        return
+
+    if model.signature is None:
+        raise RuntimeError(
+            f"PlatformModel {model.platform_model_id}: no tiene firma — "
+            f"el modelo debe firmarse con PlatformModelSigner.sign() antes de "
+            f"poder ser {operation}d (CTRL-5, Principio 0)."
+        )
+
+    signer.verify(model.signature)
+
+
+def _apply_corrections(model, corrections: list):
+    """Apply operator corrections (rename/discard/relabel) to a PlatformModel.
+
+    Corrections schema: [{op: "rename"|"discard"|"relabel", target_ref, new_value?}].
+    Unknown ops are logged and skipped (fail-soft for unknown future ops).
+    """
+    import dataclasses  # noqa: PLC0415
+    from hermes.platforms.domain.value_objects import DomainName  # noqa: PLC0415
+    from hermes.platforms.domain.platform_model import PlatformArea  # noqa: PLC0415
+
+    areas = list(model.areas)
+    for correction in corrections:
+        op = correction.get("op", "")
+        target = correction.get("target_ref", "")
+        new_value = correction.get("new_value")
+        if op == "relabel":
+            areas = [
+                dataclasses.replace(a, domain_name=DomainName(new_value), needs_label=False)
+                if a.area_id == target else a
+                for a in areas
+            ]
+        elif op == "discard":
+            areas = [a for a in areas if a.area_id != target]
+        elif op == "rename":
+            areas = [
+                dataclasses.replace(a, domain_name=DomainName(new_value))
+                if a.area_id == target and new_value else a
+                for a in areas
+            ]
+        else:
+            logger.warning("hermes.dbus.unknown_correction_op", extra={"op": op})
+    return dataclasses.replace(model, areas=tuple(areas))
+
+
+def _configured_task_to_dict(view: Any) -> dict:
+    """Serialize a ConfiguredTaskView to a plain dict for D-Bus / JSON transport.
+
+    P3 fields (target_agent_id, task_instruction, one_shot, title) included;
+    defaults to empty/False when the view was built from a pre-P3 row.
+    """
+    return {
+        "trigger_id": view.trigger_id,
+        "label": view.label,
+        "trigger_type": view.trigger_type,
+        "recurrence": view.recurrence,
+        # Descripción legible de la recurrencia ("Todos los lunes a las 09:00").
+        # La UI la muestra en vez del cron crudo (regla: nada de jerga técnica).
+        "recurrence_human": getattr(view, "recurrence_human", "") or "",
+        "enabled": view.enabled,
+        "risk_ceiling": view.risk_ceiling,
+        "last_run_at": view.last_run_at or "",
+        "last_status": view.last_status or "",
+        "next_run_at": view.next_run_at or "",
+        # P3 fields
+        "target_agent_id": getattr(view, "target_agent_id", None) or "",
+        "task_instruction": getattr(view, "task_instruction", "") or "",
+        "one_shot": bool(getattr(view, "one_shot", False)),
+        "title": getattr(view, "title", "") or "",
+    }
+
+
+# ---------------------------------------------------------------------------
+# P3 helper: signature + repo patch + enable-toggle
+# ---------------------------------------------------------------------------
+
+
+def _sign_scheduled_task_draft(
+    *,
+    admin_uuid: UUID,
+    cron: str,
+    task_instruction: str,
+    title: str,
+) -> str:
+    """HMAC-SHA256 over the canonical draft fields for non-repudiation.
+
+    Uses a deterministic byte representation so the same draft always yields
+    the same signature for the same admin. The key is derived from a constant
+    label (not a secret key) — this provides content-integrity and identity
+    binding, not confidentiality. A full PKI signature is a follow-up (P4).
+    """
+    import hashlib  # noqa: PLC0415
+    import hmac as _hmac  # noqa: PLC0415
+
+    payload = f"{admin_uuid}|{cron}|{task_instruction}|{title}".encode("utf-8")
+    # Key = stable HMAC key derived from the process-constant label.
+    # This binds the signature to this daemon installation (not exportable).
+    key_material = b"hermes:scheduled-task:v1:" + str(admin_uuid).encode()
+    sig = _hmac.new(key_material, payload, hashlib.sha256).hexdigest()
+    return f"hmac-sha256:{sig}"
+
+
+async def _patch_trigger_p3_fields(
+    *,
+    repo: Any,
+    instance_id: UUID,
+    target_agent_id: str | None,
+    task_instruction: str,
+    one_shot: bool,
+    title: str,
+) -> None:
+    """UPDATE the P3 columns on an existing trigger row.
+
+    Called right after trigger_repo.authorize() creates the core row.
+    Uses the repo's SQLite connection directly (same pattern as revoke).
+    No-op if the columns do not exist yet (schema older than P3).
+    """
+    try:
+        conn = repo._conn  # noqa: SLF001 — internal repo coupling, documented
+        conn.execute(
+            """
+            UPDATE authorized_trigger_instances
+            SET target_agent_id   = ?,
+                task_instruction  = ?,
+                one_shot          = ?,
+                title             = ?,
+                updated_at        = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            WHERE instance_id = ?
+            """,
+            (
+                target_agent_id,
+                task_instruction,
+                1 if one_shot else 0,
+                title,
+                str(instance_id),
+            ),
+        )
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        # Columns may not exist on an older DB (migration not yet run). Log and
+        # continue — the trigger is already created with the core fields.
+        logger.warning(
+            "hermes.dbus.patch_trigger_p3_failed instance_id=%s err=%s",
+            instance_id, exc,
+        )
+
+
+async def _set_trigger_enabled(
+    *,
+    repo: Any,
+    trigger_instance_id: UUID,
+    enabled: bool,
+    admin_uuid: UUID,
+) -> None:
+    """Toggle the kill-switch on a trigger preserving I11 (enabled ↔ revoked_at).
+
+    enabled=True  → enabled=1, revoked_at=NULL, revoked_by_admin_uuid=NULL.
+    enabled=False → enabled=0, revoked_at=now,  revoked_by_admin_uuid=admin.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    now_iso = datetime.now(tz=UTC).isoformat()
+    if enabled:
+        repo._conn.execute(  # noqa: SLF001
+            """
+            UPDATE authorized_trigger_instances
+            SET enabled = 1,
+                revoked_at = NULL,
+                revoked_by_admin_uuid = NULL,
+                updated_at = ?
+            WHERE instance_id = ?
+            """,
+            (now_iso, str(trigger_instance_id)),
+        )
+    else:
+        repo._conn.execute(  # noqa: SLF001
+            """
+            UPDATE authorized_trigger_instances
+            SET enabled = 0,
+                revoked_at = ?,
+                revoked_by_admin_uuid = ?,
+                updated_at = ?
+            WHERE instance_id = ?
+            """,
+            (now_iso, str(admin_uuid), now_iso, str(trigger_instance_id)),
+        )
+    repo._conn.commit()  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# OAuth device-code: sesiones en memoria + poller (REUSE de hermes_cli).
+# El estado vive en el proceso del daemon (igual que en hermes_cli/web_server);
+# un reinicio del daemon invalida sesiones pendientes — el operador relanza el
+# flow desde la UI. Las credenciales completadas SÍ persisten (auth-store).
+# ---------------------------------------------------------------------------
+import threading as _oauth_threading  # noqa: E402
+
+_OAUTH_SESSIONS: dict[str, dict] = {}
+_OAUTH_SESSIONS_LOCK = _oauth_threading.Lock()
+
+
+def _nous_oauth_poller(session_id: str) -> None:
+    """Lleva el device-code de Nous a término y persiste credenciales.
+
+    Port directo de hermes_cli/web_server.py::_nous_poller — mismos helpers
+    (_poll_for_token + refresh_nous_oauth_from_state + persist_nous_credentials),
+    mismo estado final que `hermes auth add nous`.
+    """
+    import time as _time  # noqa: PLC0415
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    with _OAUTH_SESSIONS_LOCK:
+        sess = _OAUTH_SESSIONS.get(session_id)
+    if not sess:
+        return
+    try:
+        import httpx  # noqa: PLC0415
+        from hermes_cli.auth import (  # noqa: PLC0415
+            _poll_for_token,
+            persist_nous_credentials,
+            refresh_nous_oauth_from_state,
+        )
+
+        expires_in = max(60, int(sess["expires_at"] - _time.time()))
+        with httpx.Client(
+            timeout=httpx.Timeout(15.0), headers={"Accept": "application/json"}
+        ) as client:
+            token_data = _poll_for_token(
+                client=client,
+                portal_base_url=sess["portal_base_url"],
+                client_id=sess["client_id"],
+                device_code=sess["device_code"],
+                expires_in=expires_in,
+                poll_interval=sess["interval"],
+            )
+        now = datetime.now(timezone.utc)
+        token_ttl = int(token_data.get("expires_in") or 0)
+        auth_state = {
+            "portal_base_url": sess["portal_base_url"],
+            "inference_base_url": token_data.get("inference_base_url"),
+            "client_id": sess["client_id"],
+            "scope": token_data.get("scope") or sess.get("scope"),
+            "token_type": token_data.get("token_type", "Bearer"),
+            "access_token": token_data["access_token"],
+            "refresh_token": token_data.get("refresh_token"),
+            "obtained_at": now.isoformat(),
+            "expires_at": (
+                datetime.fromtimestamp(
+                    now.timestamp() + token_ttl, tz=timezone.utc
+                ).isoformat()
+                if token_ttl
+                else None
+            ),
+            "expires_in": token_ttl,
+        }
+        full_state = refresh_nous_oauth_from_state(
+            auth_state, timeout_seconds=15.0, force_refresh=False
+        )
+        persist_nous_credentials(full_state)
+        # NATIVO: fija el provider activo en config.yaml para que el motor
+        # resuelva Nous directo (suscripción), sin vault ni catálogo.
+        _write_hermes_model_config("nous", "hermes-4-405b")
+        with _OAUTH_SESSIONS_LOCK:
+            sess["status"] = "approved"
+        logger.info("hermes.dbus.oauth_nous_approved session=%s", session_id[:8])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "hermes.dbus.oauth_nous_poll_failed session=%s: %s", session_id[:8], exc
+        )
+        with _OAUTH_SESSIONS_LOCK:
+            sess["status"] = "error"
+            sess["error_message"] = str(exc)
+
+
+def _xai_loopback_worker(session_id: str) -> None:
+    """Espera el callback loopback de xAI, intercambia el code y persiste.
+    Port de hermes_cli/web_server.py::_xai_loopback_worker. Al aprobar fija
+    config.yaml provider=xai-oauth (suscripción SuperGrok nativa).
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+    try:
+        from hermes_cli import auth as hauth  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        with _OAUTH_SESSIONS_LOCK:
+            s = _OAUTH_SESSIONS.get(session_id)
+            if s:
+                s["status"] = "error"; s["error_message"] = str(exc)
+        return
+    with _OAUTH_SESSIONS_LOCK:
+        sess = _OAUTH_SESSIONS.get(session_id)
+    if not sess:
+        return
+
+    def _fail(msg: str) -> None:
+        with _OAUTH_SESSIONS_LOCK:
+            s = _OAUTH_SESSIONS.get(session_id)
+            if s:
+                s["status"] = "error"; s["error_message"] = msg
+
+    try:
+        callback = hauth._xai_wait_for_callback(
+            sess["server"], sess["thread"], sess["callback_result"],
+            timeout_seconds=600,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _fail(f"xAI: timeout autorización: {exc}"); return
+    if callback.get("error"):
+        _fail(f"xAI: {callback.get('error_description') or callback['error']}"); return
+    if callback.get("state") != sess["state"]:
+        _fail("xAI: state mismatch"); return
+    code = str(callback.get("code") or "").strip()
+    if not code:
+        _fail("xAI: sin authorization code"); return
+    try:
+        import os as _os  # noqa: PLC0415
+        payload = hauth._xai_oauth_exchange_code_for_tokens(
+            token_endpoint=sess["token_endpoint"], code=code,
+            redirect_uri=sess["redirect_uri"], code_verifier=sess["verifier"],
+            code_challenge=sess["challenge"],
+        )
+        access_token = str(payload.get("access_token", "") or "").strip()
+        refresh_token = str(payload.get("refresh_token", "") or "").strip()
+        if not access_token or not refresh_token:
+            _fail("xAI: token exchange incompleto"); return
+        last_refresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        hauth._save_xai_oauth_tokens(
+            {
+                "access_token": access_token, "refresh_token": refresh_token,
+                "id_token": str(payload.get("id_token", "") or "").strip(),
+                "expires_in": payload.get("expires_in"),
+                "token_type": str(payload.get("token_type") or "Bearer").strip() or "Bearer",
+            },
+            discovery=sess.get("discovery"), redirect_uri=sess["redirect_uri"],
+            last_refresh=last_refresh,
+        )
+        _write_hermes_model_config("xai-oauth", "grok-4")
+        with _OAUTH_SESSIONS_LOCK:
+            _OAUTH_SESSIONS[session_id]["status"] = "approved"
+        logger.info("hermes.dbus.oauth_xai_approved session=%s", session_id[:8])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.dbus.oauth_xai_failed session=%s: %s", session_id[:8], exc)
+        _fail(str(exc))
+
+
+def _codex_oauth_worker(session_id: str) -> None:
+    """Device-code de OpenAI Codex (ChatGPT OAuth). Port directo de
+    hermes_cli/web_server.py::_codex_full_login_worker — endpoints propios de
+    OpenAI + intercambio PKCE. Publica user_code en step 1, persiste tokens y
+    fija config.yaml provider=openai-codex al aprobar (suscripción nativa).
+    """
+    import time as _time  # noqa: PLC0415
+    try:
+        import httpx  # noqa: PLC0415
+        from hermes_cli.auth import (  # noqa: PLC0415
+            CODEX_OAUTH_CLIENT_ID,
+            CODEX_OAUTH_TOKEN_URL,
+            _save_codex_tokens,
+        )
+        issuer = "https://auth.openai.com"
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            resp = client.post(
+                f"{issuer}/api/accounts/deviceauth/usercode",
+                json={"client_id": CODEX_OAUTH_CLIENT_ID},
+                headers={"Content-Type": "application/json"},
+            )
+        if resp.status_code != 200:
+            raise RuntimeError(f"deviceauth/usercode {resp.status_code}")
+        d = resp.json()
+        user_code = d.get("user_code", "")
+        device_auth_id = d.get("device_auth_id", "")
+        poll_interval = max(3, int(d.get("interval", "5")))
+        if not user_code or not device_auth_id:
+            raise RuntimeError("respuesta sin user_code/device_auth_id")
+        with _OAUTH_SESSIONS_LOCK:
+            s = _OAUTH_SESSIONS.get(session_id)
+            if not s:
+                return
+            s["user_code"] = user_code
+            s["verification_url"] = f"{issuer}/codex/device"
+            s["interval"] = poll_interval
+            s["expires_in"] = 15 * 60
+        deadline = _time.monotonic() + 15 * 60
+        code_resp = None
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            while _time.monotonic() < deadline:
+                _time.sleep(poll_interval)
+                poll = client.post(
+                    f"{issuer}/api/accounts/deviceauth/token",
+                    json={"device_auth_id": device_auth_id, "user_code": user_code},
+                    headers={"Content-Type": "application/json"},
+                )
+                if poll.status_code == 200:
+                    code_resp = poll.json()
+                    break
+                if poll.status_code in {403, 404}:
+                    continue
+                raise RuntimeError(f"deviceauth/token {poll.status_code}")
+        if code_resp is None:
+            with _OAUTH_SESSIONS_LOCK:
+                _OAUTH_SESSIONS[session_id]["status"] = "error"
+                _OAUTH_SESSIONS[session_id]["error_message"] = "código expirado"
+            return
+        auth_code = code_resp.get("authorization_code", "")
+        verifier = code_resp.get("code_verifier", "")
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            tok = client.post(
+                CODEX_OAUTH_TOKEN_URL,
+                data={
+                    "grant_type": "authorization_code", "code": auth_code,
+                    "redirect_uri": f"{issuer}/deviceauth/callback",
+                    "client_id": CODEX_OAUTH_CLIENT_ID, "code_verifier": verifier,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+        if tok.status_code != 200:
+            raise RuntimeError(f"token exchange {tok.status_code}")
+        tokens = tok.json()
+        if not tokens.get("access_token"):
+            raise RuntimeError("sin access_token")
+        _save_codex_tokens({
+            "access_token": tokens["access_token"],
+            "refresh_token": tokens.get("refresh_token", ""),
+        })
+        _write_hermes_model_config("openai-codex", "gpt-5-codex")
+        with _OAUTH_SESSIONS_LOCK:
+            _OAUTH_SESSIONS[session_id]["status"] = "approved"
+        logger.info("hermes.dbus.oauth_codex_approved session=%s", session_id[:8])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.dbus.oauth_codex_failed session=%s: %s", session_id[:8], exc)
+        with _OAUTH_SESSIONS_LOCK:
+            s = _OAUTH_SESSIONS.get(session_id)
+            if s:
+                s["status"] = "error"
+                s["error_message"] = str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Providers NATIVOS — escritura directa en HERMES_HOME (.env + config.yaml).
+# Es el camino que lee resolve_runtime_provider: cero abstracción, cero vault.
+# ---------------------------------------------------------------------------
+def _hermes_home():
+    import os as _os  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+    return _Path(_os.environ.get("HERMES_HOME") or (_Path.home() / ".hermes"))
+
+
+def _write_hermes_env(var: str, value: str) -> None:
+    """Upsert VAR=value en HERMES_HOME/.env (0600). Fuente de claves nativa."""
+    import os as _os  # noqa: PLC0415
+    env_path = _hermes_home() / ".env"
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lines, found = [], False
+    if env_path.exists():
+        for ln in env_path.read_text(encoding="utf-8").splitlines():
+            if ln.strip().startswith(f"{var}="):
+                lines.append(f"{var}={value}"); found = True
+            else:
+                lines.append(ln)
+    if not found:
+        lines.append(f"{var}={value}")
+    tmp = env_path.with_suffix(".env.tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _os.chmod(tmp, 0o600)
+    _os.replace(tmp, env_path)
+
+
+def _write_hermes_model_config(provider_id: str, model: str, base_url: str = "") -> None:
+    """Fija model.{provider,default,base_url} en config.yaml — TRIGGER del path
+    nativo: si está, el motor resuelve por hermes_cli (no por vault/catálogo)."""
+    from hermes_cli.config import load_config, save_config  # noqa: PLC0415
+    cfg = load_config() or {}
+    m = dict(cfg.get("model") or {})
+    m["provider"] = provider_id
+    if model:
+        m["default"] = model
+    if base_url:
+        m["base_url"] = base_url
+    cfg["model"] = m
+    save_config(cfg)
+
+
+def _read_native_active() -> dict:
+    """Provider nativo activo según config.yaml ({} si no hay model.provider)."""
+    try:
+        from hermes_cli.config import load_config  # noqa: PLC0415
+        m = (load_config() or {}).get("model") or {}
+        pid = (m.get("provider") or "").strip()
+        if not pid or pid == "auto":
+            return {}
+        name = pid
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
+            pc = PROVIDER_REGISTRY.get(pid)
+            if pc is not None:
+                name = getattr(pc, "name", pid)
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "provider_id": pid, "alias": name, "kind": pid,
+            "default_model": (m.get("default") or m.get("model") or ""),
+            "base_url": (m.get("base_url") or ""), "enabled": True,
+            "is_active": True, "native": True,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.dbus.native_active_read_failed: %s", exc)
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# MCP Apps — persistencia de servidores configurados + reconexión al boot.
+# ---------------------------------------------------------------------------
+# Runners permitidos para servidores MCP stdio. El proceso corre como el
+# usuario del daemon: un binario arbitrario sería ejecución de código sin
+# gate. SECURITY-FIRST (C2): la allow-list está alineada EXACTAMENTE con lo que
+# PackageContentScanner sabe descargar y analizar — npx → npm, uvx/pipx → PyPI.
+# `node`/`python3` se EXCLUYEN a propósito: ejecutan un script local que no vive
+# en ningún registro, así que el scanner no puede inspeccionar su código y el
+# install puntuaría PASS con CERO análisis. Sin análisis ⇒ no PASS ⇒ rechazo
+# (no near-PASS). Un MCP local debe publicarse (npm/PyPI) para pasar el gate.
+_MCP_ALLOWED_RUNNERS = frozenset({"npx", "uvx", "pipx"})
+
+# ── C2 PASS-5 — STRICT ARGV-SHAPE ALLOWLIST (mirror of PackageContentScanner) ────
+# Defense-in-depth gate, independent of whether security_center is importable. The
+# polarity is POSITIVE: an npx/uvx/pipx argv is analyzable ONLY if it matches an exact
+# allowed shape — after optional leading boolean flags, the FIRST non-flag token is a
+# published package SPEC ('[@scope/]name[@version]'), never an interpreter/command and
+# never preceded by a package-source / inline-exec option. Everything else is
+# non-fetchable ⇒ REJECT. This closes the WHOLE class of interpreter-as-command forms
+# ('npx node -e', 'npx bash -c', 'npx -p X sh -c', …) in one rule instead of chasing
+# each variant. Kept byte-for-byte aligned with PackageContentScanner so the two gates
+# never drift; if the scanner is importable the gate ALSO delegates to it.
+
+# Interpreters / shells / language launchers that, as the first positional, mean the
+# runner executes inline/off-registry code rather than a published package. Matched on
+# basename. Mirrors PackageContentScanner._INTERPRETER_COMMANDS.
+# All entries are lowercase; the membership test lowercases the token basename first,
+# so the allowlist is case-insensitive (npx NODE -e / uvx PYTHON3 -c cannot bypass it).
+_INTERPRETER_COMMANDS = frozenset({
+    "node", "nodejs", "deno", "bun", "ts-node", "tsx",
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "busybox",
+    "python", "python2", "python3", "py", "pypy", "pypy3",
+    "ruby", "perl", "php", "lua", "rscript", "osascript",
+    "env", "eval", "exec", "command", "nohup", "xargs", "time", "watch",
+    "sudo", "gdb",
+})
+
+# Options that select WHERE the executed code comes from (separate package / local dir /
+# inline command). Before the first positional they break the strict shape.
+_PACKAGE_SOURCE_OPTS = frozenset({"--package", "-p", "--from", "--with"})
+_INLINE_EXEC_OPTS = frozenset({"--call", "-c", "-e", "--eval", "--exec"})
+
+# Boolean (value-less) flags each runner accepts BEFORE the package token. Only these may
+# precede the first positional in a valid shape.
+_NPX_LEADING_BOOL_FLAGS = frozenset({"-y", "--yes", "--quiet", "-q", "--prefer-offline", "--offline"})
+_UVX_LEADING_BOOL_FLAGS = frozenset({"-q", "--quiet", "--offline", "--no-cache", "--native-tls"})
+
+# A published package SPEC token: optional '@scope/', a name, optional '@version' / PEP 508
+# specifier. No path separators beyond the scoped-name slash, no leading dot/tilde.
+_LOCAL_PATH_HINT = re.compile(r"^[./~]|/|\\")
+_PKG_NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+_PKG_SPEC_RE = re.compile(rf"^(@{_PKG_NAME}/)?{_PKG_NAME}([@=<>!~].*)?$")
+# Chars that begin a version / PEP 508 / extras suffix on a package name token.
+_VERSION_SUFFIX_CHARS = "@=<>!~["
+
+
+def _bare_pkg_name(tok: str) -> str:
+    """Return the bare package NAME from a spec token (suffix + scope stripped).
+
+    Strips the leading '@scope/' (keeping the basename after the slash) and cuts the
+    token at the first version / PEP 508 / extras separator. So 'node@18' → 'node',
+    'python3==1' → 'python3', '@scope/pkg@1.2' → 'pkg', 'requests[extras]' → 'requests'.
+    """
+    name = tok.rsplit("/", 1)[-1]  # drop '@scope/' (and any path-ish prefix)
+    for idx, ch in enumerate(name):
+        if ch in _VERSION_SUFFIX_CHARS:
+            return name[:idx]
+    return name
+
+
+def _is_published_pkg_spec(tok: str) -> bool:
+    """True iff `tok` is a published-package SPEC and NOT an interpreter/command."""
+    if not tok or (_LOCAL_PATH_HINT.search(tok) and not tok.startswith("@")):
+        return False
+    # Strip the version / PEP 508 / extras suffix FIRST, then run the interpreter check
+    # on the BARE name — else 'node@18' (basename 'node@18') slips past and npx fetches
+    # the real 'node' package to exec inline code.
+    if _bare_pkg_name(tok).lower() in _INTERPRETER_COMMANDS:
+        return False
+    return _PKG_SPEC_RE.match(tok) is not None
+
+
+def _npm_argv_matches_shape(argv: list[str]) -> bool:
+    """True iff an npx argv matches the strict published-package shape."""
+    for tok in argv[1:]:
+        if tok.startswith("-"):
+            base = tok.split("=", 1)[0]
+            if base in _PACKAGE_SOURCE_OPTS or base in _INLINE_EXEC_OPTS:
+                return False
+            if tok in _NPX_LEADING_BOOL_FLAGS:
+                continue
+            return False
+        return _is_published_pkg_spec(tok)
+    return False
+
+
+def _pypi_argv_matches_shape(argv: list[str]) -> bool:
+    """True iff a uvx/pipx argv matches the strict published-package shape.
+
+    Accepts a published positional, or '--from/--with <published-pkg>'. A local-path or
+    git value on --from/--with is NOT accepted here (git+https is handled separately as a
+    first-class path in _scanner_can_analyze_argv, BEFORE this is consulted).
+    """
+    rest = argv[1:]
+    i, n = 0, len(rest)
+    while i < n:
+        tok = rest[i]
+        if not tok.startswith("-"):
+            if tok == "run":  # 'pipx run pkg'
+                i += 1
+                continue
+            return _is_published_pkg_spec(tok)
+        base, eq, inline_val = tok.partition("=")
+        if base in ("--from", "--with"):
+            val = inline_val if eq else (rest[i + 1] if i + 1 < n else "")
+            return _is_published_pkg_spec(val)
+        if base in _INLINE_EXEC_OPTS or base in ("-p", "--package", "-e", "--editable"):
+            return False
+        if tok in _UVX_LEADING_BOOL_FLAGS:
+            i += 1
+            continue
+        return False
+    return False
+
+# ── C1 PASS-4 — git-based MCP servers (uvx --from git+https://…) ─────────────────────
+# Some MCP servers are distributed ONLY as a git repo, not a published registry package
+# (e.g. `uvx --from git+https://github.com/oraios/serena serena`). PASS-3 broke these at
+# prefetch: resolve_coordinate() returns None for a git spec (the URL's '/' looks like a
+# local path) → RuntimeError → ok:False. The fix: recognise git+https specs as a FIRST-
+# CLASS install path. At install time (trusted daemon, host netns) we let `uv` CLONE +
+# build the tool into UV_CACHE_DIR with network access to ONLY the git host (github.com,
+# gitlab.com, …) — granted for the install FETCH only — then the RUNTIME spawns OFFLINE
+# from that warm cache exactly like a registry package. The MCP runtime netns stays
+# default-deny (the git host is NOT added to the runtime egress; the clone already
+# happened at install time). Security note: a git repo is not in a package registry, so
+# the registry content-scan cannot inspect it the same way; git MCPs are an explicit
+# owner-approved install path (the operator chose the repo URL via D-Bus, never the LLM).
+#
+# Only git+https is accepted — NOT git+ssh / git:// / git+file:// (no host auth surface /
+# local-path / unauthenticated transport). The scheme is matched on the --from value.
+_GIT_HTTPS_PREFIX = "git+https://"
+
+
+def _git_spec_from_argv(argv: list[str]) -> str | None:
+    """Return the git+https spec from a `--from`/`--with` value, or None if not git-based.
+
+    Handles both '--from VALUE' and '--from=VALUE'. Only git+https is recognised; any
+    other git transport (ssh/file/plain git) returns None so the normal (registry) gate
+    rejects it — we do not fetch over unauthenticated/local transports.
+    """
+    rest = argv[1:]
+    expect_value = False
+    for tok in rest:
+        if expect_value:
+            expect_value = False
+            if tok.startswith(_GIT_HTTPS_PREFIX):
+                return tok
+            continue
+        if "=" in tok:
+            key, _, val = tok.partition("=")
+            if key in ("--from", "--with") and val.startswith(_GIT_HTTPS_PREFIX):
+                return val
+            continue
+        if tok in ("--from", "--with"):
+            expect_value = True
+    return None
+
+
+def _git_host_from_spec(spec: str) -> str | None:
+    """Extract the bare hostname from a git+https spec (for the install-fetch grant).
+
+    'git+https://github.com/oraios/serena@v1' → 'github.com'. Returns None if the host
+    cannot be parsed (→ reject; we never fetch from an unparseable URL).
+    """
+    from urllib.parse import urlsplit  # noqa: PLC0415
+
+    https_url = spec[len("git+"):]  # strip the 'git+' VCS prefix → plain https URL
+    host = urlsplit(https_url).hostname
+    return host.lower() if host else None
+
+
+def _argv_matches_strict_shape(argv: list[str]) -> bool:
+    """True iff argv matches the strict published-package allowlist shape.
+
+    Class-level (C2 PASS-5): closes ALL interpreter-as-command + option forms in one
+    rule. The first non-flag token (after optional leading boolean flags) must be a
+    published package SPEC, never an interpreter/command, never preceded by a
+    package-source / inline-exec option. Dispatches by runner; git+https is handled
+    separately by the caller as a first-class path BEFORE this is consulted.
+    """
+    if not argv:
+        return False
+    runner = argv[0].rsplit("/", 1)[-1]
+    if runner == "npx":
+        return _npm_argv_matches_shape(argv)
+    if runner in ("uvx", "pipx"):
+        return _pypi_argv_matches_shape(argv)
+    return False
+
+
+def _scanner_can_analyze_argv(argv: list[str]) -> bool:
+    """True iff PackageContentScanner can fetch + analyze this MCP argv.
+
+    The install gate's second precondition (C2): the runner allow-list already
+    bars arbitrary binaries, but it does not, by itself, guarantee the argv
+    points at a *fetchable* registry coordinate (e.g. 'npx ./local.js' or
+    'uvx --from /opt/x'). Only the scanner knows what it can actually download
+    and inspect, so the gate delegates the decision to it — keeping the gate and
+    the scanner from drifting apart.
+
+    Fail-CLOSED: if the scanner is not importable we cannot confirm the code is
+    analyzable, so we refuse (a public OS must not install code it could not
+    have scanned). This mirrors the fail-closed posture of the scan step itself.
+
+    Defense-in-depth (C2 PASS-5): the strict argv-SHAPE allowlist is enforced here
+    directly, independent of the scanner probe, so the gate holds even if the probe
+    were ever to drift. Only a plain 'npx [-y] <pkg>' / 'uvx <pkg>' / 'uvx --from
+    <published-pkg>' / 'pipx run <pkg>' passes; every interpreter-as-command form
+    ('npx node -e', 'npx bash -c', 'npx -p X sh -c', …) and every inline-exec /
+    package-select / local-path option breaks the shape ⇒ REJECT (no analysis ⇒ no
+    PASS). git+https remains a first-class operator-chosen path, checked next.
+    """
+    # C1 PASS-4: git+https MCP (uvx --from git+https://host/owner/repo) is a FIRST-CLASS
+    # install path. The registry scanner cannot fetch a git repo, but this is an explicit
+    # operator-chosen source (argv comes from the operator over D-Bus, never the LLM): we
+    # accept it here so the gate does not reject it, and _prefetch_mcp_package CLONES it at
+    # install time (network limited to the git host) so the runtime spawns offline. Only
+    # uvx git+https — npx has no equivalent here, and other git transports are not accepted.
+    git_spec = _git_spec_from_argv(argv)
+    if git_spec is not None:
+        runner = argv[0].rsplit("/", 1)[-1]
+        if runner not in ("uvx",) or _git_host_from_spec(git_spec) is None:
+            logger.warning(
+                "hermes.dbus.mcp_argv_git_rejected — git+https sólo soportado vía uvx "
+                "con host parseable (gate C2 PASS-4)."
+            )
+            return False
+        return True
+    # STRICT ARGV-SHAPE allowlist (C2 PASS-5) — enforced BEFORE delegating to the
+    # scanner probe so the gate stays closed even if the probe drifts. Closes the whole
+    # class of interpreter-as-command + option forms in one rule.
+    if not _argv_matches_strict_shape(argv):
+        logger.warning(
+            "hermes.dbus.mcp_argv_shape_rejected — el argv no es 'npx [-y] <pkg>' / "
+            "'uvx <pkg>' / 'uvx --from <pkg-publicado>' / 'pipx run <pkg>'; un "
+            "intérprete/comando o una opción de fuente/inline (node/bash, --package/-p/"
+            "--from local/--call/-c/-e) lo hace no escaneable (gate C2 PASS-5, fail-closed)."
+        )
+        return False
+    try:
+        from hermes.security_center.infrastructure.package_content_scanner import (  # noqa: PLC0415
+            PackageContentScanner,
+        )
+    except ImportError:
+        logger.warning(
+            "hermes.dbus.mcp_argv_analyzability_uncheckable — security_center "
+            "no disponible; rechazo por precaución (fail-closed)."
+        )
+        return False
+    try:
+        return PackageContentScanner.is_fetchable_argv(list(argv))
+    except Exception as exc:  # noqa: BLE001 — un fallo del probe no debe abrir el gate
+        logger.warning("hermes.dbus.mcp_argv_probe_failed: %s (fail-closed)", exc)
+        return False
+
+# ── C1 PASS-3 — install-time package PRE-FETCH (trusted context) ─────────────────
+# DECISION (owner-approved): separate package DOWNLOAD (install-time, trusted, scanned)
+# from MCP RUNTIME (offline / default-deny). At add_mcp_server the daemon — which has
+# network in the HOST netns and is the same trusted path where the Security Center's
+# content scan ran — pre-fetches the MCP's package into the SHARED runner cache. The MCP
+# RUNTIME then spawns OFFLINE from that warm cache (npx --offline / uvx --offline) inside
+# its default-deny netns, so the runtime needs NO registry network. This closes the
+# npm-PUT exfil residual (no registry at runtime to ride a published-package upload on)
+# AND removes the need for any registry host-firewall allow (runtime needs no registry).
+#
+# Cache topology: the prefetch populates the SAME caches the launcher unit points the
+# runner at (/var/lib/hermes/npm-cache, /var/lib/hermes/uv-cache — group hermes-work, so
+# the daemon `hermes` writes them as owner and the runtime `hermes-sandbox` reads them by
+# group). Sharing the launcher's cache is what makes the offline spawn resolve: a
+# per-server cache the launcher could not locate at spawn (it only gets argv+env, never
+# the server_id) would defeat the whole point. The Security Center already scanned the
+# coordinate before this runs, so what lands in the cache is exactly what was vetted.
+#
+# FAIL-CLOSED: if the prefetch fails (registry down, bad coordinate, tool missing) the
+# MCP is NOT added — better no MCP than one that would need a runtime registry hole.
+_MCP_NPM_CACHE = "/var/lib/hermes/npm-cache"
+_MCP_UV_CACHE = "/var/lib/hermes/uv-cache"
+_MCP_PREFETCH_TIMEOUT_S = 300  # generous: a cold npm/uv resolve can be slow
+
+
+def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
+    """Download the MCP's package into the shared runner cache in the TRUSTED daemon path.
+
+    Resolves the registry coordinate (or git+https spec) from argv, then warms the shared
+    npm/uv cache with network access. The RUNTIME later spawns OFFLINE from that cache.
+    Raises RuntimeError on any failure (FAIL-CLOSED — the caller refuses to add the
+    server).
+
+    Security: this runs as the daemon (hermes), in the host netns, AFTER the install gate
+    has PASSED for the SAME argv. For registry packages the content scan ran on the same
+    coordinate; for git+https the operator chose the repo URL explicitly over D-Bus. The
+    RUNTIME never gets registry/git network — the clone/download happens only here.
+    """
+    import os as _os  # noqa: PLC0415
+    import shutil as _shutil  # noqa: PLC0415
+    import subprocess as _subprocess  # noqa: PLC0415
+
+    from hermes.security_center.domain.install_target import (  # noqa: PLC0415
+        InstallTarget,
+    )
+    from hermes.security_center.infrastructure.package_content_scanner import (  # noqa: PLC0415
+        PackageContentScanner,
+    )
+
+    # C1 PASS-4: git+https MCP — `uv tool install git+https://…` CLONES + builds the tool
+    # into UV_CACHE_DIR here (trusted daemon path, network to the git host only). The
+    # runtime then spawns `uvx --offline` from that warm cache. Handle BEFORE the registry
+    # resolver, which (correctly) returns None for a git spec.
+    git_spec = _git_spec_from_argv(argv)
+    if git_spec is not None:
+        _prefetch_git_mcp(server_id, git_spec)
+        return
+
+    coord = PackageContentScanner.resolve_coordinate(
+        InstallTarget(kind="mcp_server", identifier="argv-probe", argv=list(argv))
+    )
+    if coord is None:
+        # The gate already enforced fetchability; this is defense-in-depth.
+        raise RuntimeError("no se pudo resolver la coordenada del paquete MCP para prefetch")
+    ecosystem, name, version = coord
+    pkg_spec = f"{name}@{version}" if version else name
+
+    # Inherit the daemon's env (npm/uv config, PATH, proxy) and pin the SHARED caches the
+    # launcher unit also uses, so `npx/uvx --offline` later resolve from the same place.
+    env = dict(_os.environ)
+    env["npm_config_cache"] = _MCP_NPM_CACHE
+    env["UV_CACHE_DIR"] = _MCP_UV_CACHE
+
+    if ecosystem == "npm":
+        npm = _shutil.which("npm")
+        if not npm:
+            raise RuntimeError("npm no está disponible para prefetch del paquete MCP")
+        # `npm cache add <spec>` downloads the tarball + its dependency tree into the
+        # shared cache WITHOUT a global install. npx --prefer-offline then resolves the
+        # whole tree from this cache at runtime — no registry network needed.
+        cmd = [npm, "cache", "add", pkg_spec]
+    elif ecosystem == "pypi":
+        uv = _shutil.which("uv")
+        if not uv:
+            raise RuntimeError("uv no está disponible para prefetch del paquete MCP")
+        # `uvx --quiet <spec> --help` resolves + builds + caches the tool into
+        # UV_CACHE_DIR exactly as the runtime invocation will, so the runtime `uvx
+        # --offline` finds a complete cache entry (a bare `uv pip download` would not
+        # build the tool environment uvx needs). --help exits fast without running the
+        # server. If the package has no --help the cache is still warmed by the resolve.
+        cmd = [uv, "tool", "install", "--quiet", name]
+    else:
+        raise RuntimeError(f"ecosistema no soportado para prefetch: {ecosystem!r}")
+
+    try:
+        result = _subprocess.run(  # noqa: S603 — cmd is a fixed list, no shell
+            cmd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=_MCP_PREFETCH_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, _subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"prefetch del paquete MCP falló: {exc}") from exc
+    if result.returncode != 0:
+        # Surface the registry error tail (no secrets in these tools' output).
+        tail = (result.stderr or result.stdout or "").strip()[-500:]
+        raise RuntimeError(
+            f"prefetch del paquete MCP '{pkg_spec}' falló (rc={result.returncode}): {tail}"
+        )
+    logger.info(
+        "hermes.dbus.mcp_prefetched server=%s ecosystem=%s pkg=%s",
+        server_id, ecosystem, pkg_spec,
+    )
+
+
+def _prefetch_git_mcp(server_id: str, git_spec: str) -> None:
+    """Clone + build a git+https MCP tool into the shared uv cache (TRUSTED daemon path).
+
+    `uv tool install <git+https://…>` clones the repo over HTTPS into UV_CACHE_DIR and
+    builds the tool exactly as the runtime `uvx --offline` invocation will resolve it. The
+    network reach here is the git host only (the daemon has host-netns WAN); the RUNTIME
+    netns stays default-deny (the clone already happened — the runtime needs no git/registry
+    network). Raises RuntimeError on failure (FAIL-CLOSED — the caller refuses to add the
+    server). Never RuntimeErrors merely because the spec is git-based (the PASS-3 bug).
+    """
+    import os as _os  # noqa: PLC0415
+    import shutil as _shutil  # noqa: PLC0415
+    import subprocess as _subprocess  # noqa: PLC0415
+
+    host = _git_host_from_spec(git_spec)
+    if host is None:
+        raise RuntimeError(f"git+https sin host parseable: {git_spec!r}")
+
+    uv = _shutil.which("uv")
+    if not uv:
+        raise RuntimeError("uv no está disponible para clonar el MCP git")
+
+    env = dict(_os.environ)
+    env["UV_CACHE_DIR"] = _MCP_UV_CACHE
+
+    # `uv tool install <git-url>` clones over HTTPS + builds into the shared cache. The
+    # spec is a fixed list (no shell); the URL was gate-validated as git+https.
+    cmd = [uv, "tool", "install", "--quiet", git_spec]
+    try:
+        result = _subprocess.run(  # noqa: S603 — cmd is a fixed list, no shell
+            cmd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=_MCP_PREFETCH_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, _subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"clone del MCP git falló: {exc}") from exc
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "").strip()[-500:]
+        raise RuntimeError(
+            f"clone del MCP git '{git_spec}' falló (rc={result.returncode}): {tail}"
+        )
+    logger.info(
+        "hermes.dbus.mcp_git_prefetched server=%s git_host=%s spec=%s",
+        server_id, host, git_spec,
+    )
+
+
+# BYOK env keys permitted in MCP server entries. Mirrors _ALLOWED_ENV_KEYS in
+# hermes-mcp-launcher — both gates must stay in sync; a key allowed here but
+# not in the launcher will be silently discarded at spawn time.
+# Expanding this set is a security-posture decision: add only named, bounded
+# variables for specific published MCP servers; never allow arbitrary keys.
+_MCP_BYOK_ENV_KEYS: frozenset[str] = frozenset({
+    "OD_DAEMON_URL",
+    "OD_API_TOKEN",
+    "OD_AUTH_MODE",
+    "OD_BASIC_USER",
+    "OD_BASIC_PASS",
+    # Curated pack (published servers, named/bounded BYOK secrets — mirror in
+    # hermes-mcp-launcher._ALLOWED_ENV_KEYS):
+    # REPLICATE_API_TOKEN — Replicate MCP (replicate-mcp): imagen + vídeo.
+    # CONTEXT7_API_KEY    — Context7 MCP: docs de librerías al día para código.
+    "REPLICATE_API_TOKEN",
+    "CONTEXT7_API_KEY",
+    # Ruflo MCP (ruflo): endpoint OpenAI-compatible → enruta a nuestro LLM nativo.
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+})
+
+
+def _validate_mcp_env(raw: object) -> dict[str, str]:
+    """Validate and sanitise a caller-supplied BYOK env dict.
+
+    Returns a clean dict whose keys are a subset of _MCP_BYOK_ENV_KEYS and
+    whose values are non-empty strings. Raises ValueError on any violation.
+
+    Security invariants:
+      - Only explicitly allowlisted keys pass through; arbitrary keys are
+        rejected, not silently dropped — fail-loud on unknown keys so
+        callers notice misconfiguration rather than silently missing env.
+      - Values must be strings; empty strings are rejected (would confuse the
+        MCP server just as much as missing env vars).
+      - OD_DAEMON_URL must parse as an http(s) URL (scheme + netloc present).
+        This prevents open-design-mcp from being pointed at file://, data://, etc.
+      - OD_API_TOKEN is passed through opaquely; it MUST NOT be logged in
+        clear — callers must use the masked helpers below.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("env debe ser un diccionario str→str")
+    validated: dict[str, str] = {}
+    for key, val in raw.items():
+        if not isinstance(key, str):
+            raise ValueError(f"clave de env no es string: {key!r}")
+        if key not in _MCP_BYOK_ENV_KEYS:
+            raise ValueError(
+                f"clave de env no permitida: {key!r} "
+                f"(allowlist: {sorted(_MCP_BYOK_ENV_KEYS)})"
+            )
+        if not isinstance(val, str) or not val:
+            raise ValueError(f"valor de env para {key!r} debe ser string no vacío")
+        if key == "OD_DAEMON_URL":
+            _validate_url(val, field="OD_DAEMON_URL")
+        validated[key] = val
+    return validated
+
+
+def _validate_url(value: str, *, field: str) -> None:
+    """Raise ValueError unless value is a valid http(s) URL."""
+    from urllib.parse import urlparse as _urlparse  # noqa: PLC0415
+    try:
+        parsed = _urlparse(value)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"{field} no es una URL válida: {exc}") from exc
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"{field} debe usar http o https; esquema recibido: {parsed.scheme!r}"
+        )
+    if not parsed.netloc:
+        raise ValueError(f"{field} debe incluir un host (netloc vacío)")
+
+
+def _mcp_config_path():
+    import os as _os  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+    return _Path(
+        _os.environ.get("HERMES_MCP_CONFIG", "/var/lib/hermes/mcp-servers.json")
+    )
+
+
+def _load_mcp_config() -> list[dict]:
+    try:
+        raw = json.loads(_mcp_config_path().read_text(encoding="utf-8"))
+        return [e for e in raw if isinstance(e, dict) and e.get("server_id")]
+    except FileNotFoundError:
+        return []
+    except Exception as exc:  # noqa: BLE001 — config corrupta ≠ daemon caído
+        logger.warning("hermes.dbus.mcp_config_unreadable: %s", exc)
+        return []
+
+
+def _save_mcp_config(entries: list[dict]) -> None:
+    import os as _os  # noqa: PLC0415
+    path = _mcp_config_path()
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+    _os.replace(tmp, path)
+
+
+def _mcp_id(server_id: str):
+    from hermes.mcp.domain.value_objects import McpServerId  # noqa: PLC0415
+    return McpServerId(server_id)
+
+
+async def _mcp_connect(
+    manager,
+    server_id: str,
+    argv: list[str],
+    *,
+    env: dict[str, str] | None = None,
+):
+    from hermes.mcp.domain.value_objects import (  # noqa: PLC0415
+        McpServerId,
+        ServerSlug,
+        Transport,
+        TrustLevel,
+    )
+    # USER_ADDED = la postura más restrictiva (DEFAULT_DENY + HITL en cada
+    # tool-call): el broker ESCALA al operador, no recorta (regla de oro).
+    return await manager.connect(
+        server_id=McpServerId(server_id),
+        slug=ServerSlug(server_id),
+        transport=Transport.stdio(argv, env=env or {}),
+        trust_level=TrustLevel.USER_ADDED,
+    )
+
+
+_IDENTIFIER_RE = None
+_VERSION_RE = None
+
+
+def _compiled_identifier_re():
+    import re as _re  # noqa: PLC0415
+    global _IDENTIFIER_RE  # noqa: PLW0603
+    if _IDENTIFIER_RE is None:
+        _IDENTIFIER_RE = _re.compile(r"^[A-Za-z0-9@/._-]+$")
+    return _IDENTIFIER_RE
+
+
+def _compiled_version_re():
+    import re as _re  # noqa: PLC0415
+    global _VERSION_RE  # noqa: PLW0603
+    if _VERSION_RE is None:
+        _VERSION_RE = _re.compile(r"^[A-Za-z0-9._-]*$")
+    return _VERSION_RE
+
+
+def _build_argv_npm(identifier: str, version: str, runtime_args: list[dict]) -> list[str]:
+    """Build npx argv from an npm package entry.
+
+    Always starts with the literal string "npx" — never interpolated
+    from registry data (security: CTRL-MCP-3).
+    """
+    pkg_ref = f"{identifier}@{version}" if version else identifier
+    argv: list[str] = ["npx", "-y", pkg_ref]
+    for arg in runtime_args:
+        val = str(arg.get("value") or "").strip()
+        if not val or val == "-y":
+            continue
+        arg_type = arg.get("type", "positional")
+        if arg_type == "positional":
+            argv.append(val)
+        elif arg_type == "named":
+            argv.extend([val])  # named args include the flag name in value
+    return argv
+
+
+def _build_argv_pypi(identifier: str, version: str, runtime_args: list[dict]) -> list[str]:
+    """Build uvx argv from a pypi package entry.
+
+    Always starts with the literal string "uvx" — never interpolated
+    from registry data (security: CTRL-MCP-3).
+    """
+    pkg_ref = f"{identifier}=={version}" if version else identifier
+    argv: list[str] = ["uvx", pkg_ref]
+    for arg in runtime_args:
+        val = str(arg.get("value") or "").strip()
+        if not val:
+            continue
+        arg_type = arg.get("type", "positional")
+        if arg_type == "positional":
+            argv.append(val)
+        elif arg_type == "named":
+            argv.append(val)
+    return argv
+
+
+def _pick_installable_package(packages: list[dict]) -> dict | None:
+    """Return first npm or pypi stdio package, preferring npm."""
+    npm_pkg = next(
+        (p for p in packages
+         if p.get("registryType") == "npm"
+         and p.get("transport", {}).get("type") == "stdio"),
+        None,
+    )
+    if npm_pkg:
+        return npm_pkg
+    return next(
+        (p for p in packages
+         if p.get("registryType") == "pypi"
+         and p.get("transport", {}).get("type") == "stdio"),
+        None,
+    )
+
+
+def _normalize_env_vars(raw_vars: list[dict]) -> list[dict]:
+    return [
+        {
+            "name": str(v.get("name") or ""),
+            "description": str(v.get("description") or ""),
+            "required": bool(v.get("isRequired", False)),
+            "secret": bool(v.get("isSecret", False)),
+        }
+        for v in raw_vars
+        if v.get("name")
+    ]
+
+
+def _normalize_registry_entry(item: dict) -> dict:
+    """Normalise one raw registry entry to the shape expected by the UI / add_mcp_server.
+
+    Schema confirmed against live API 2026-06-10:
+      item = {"server": {name, description, version, repository?, packages?, remotes?},
+               "_meta": {...}}
+    """
+    server = item.get("server") or {}
+    name = str(server.get("name") or "")
+    description = str(server.get("description") or "")
+    version = str(server.get("version") or "")
+    repo_obj = server.get("repository") or {}
+    repository = str(repo_obj.get("url") or "")
+    packages: list[dict] = server.get("packages") or []
+    remotes: list[dict] = server.get("remotes") or []
+
+    first_remote_url = str(remotes[0].get("url") or "") if remotes else ""
+
+    pkg = _pick_installable_package(packages)
+
+    if pkg is None:
+        reason = "solo remote/OCI — sin paquete stdio npm/pypi" if (remotes or packages) else "sin paquetes"
+        return {
+            "name": name,
+            "description": description,
+            "version": version,
+            "repository": repository,
+            "installable": False,
+            "runner": "",
+            "argv": [],
+            "env_vars": [],
+            "remote_url": first_remote_url,
+            "unsupported_reason": reason,
+        }
+
+    identifier = str(pkg.get("identifier") or "")
+    pkg_version = str(pkg.get("version") or "")
+    runtime_args: list[dict] = pkg.get("runtimeArguments") or []
+    env_vars = _normalize_env_vars(pkg.get("environmentVariables") or [])
+
+    id_re = _compiled_identifier_re()
+    ver_re = _compiled_version_re()
+    if not id_re.match(identifier):
+        return {
+            "name": name, "description": description, "version": version,
+            "repository": repository, "installable": False,
+            "runner": "", "argv": [], "env_vars": env_vars,
+            "remote_url": first_remote_url,
+            "unsupported_reason": "identifier inválido",
+        }
+    if not ver_re.match(pkg_version):
+        return {
+            "name": name, "description": description, "version": version,
+            "repository": repository, "installable": False,
+            "runner": "", "argv": [], "env_vars": env_vars,
+            "remote_url": first_remote_url,
+            "unsupported_reason": "version inválida",
+        }
+
+    registry_type = pkg.get("registryType", "")
+    if registry_type == "npm":
+        argv = _build_argv_npm(identifier, pkg_version, runtime_args)
+        runner = "npx"
+    else:  # pypi
+        argv = _build_argv_pypi(identifier, pkg_version, runtime_args)
+        runner = "uvx"
+
+    return {
+        "name": name,
+        "description": description,
+        "version": version,
+        "repository": repository,
+        "installable": True,
+        "runner": runner,
+        "argv": argv,
+        "env_vars": env_vars,
+        "remote_url": first_remote_url,
+        "unsupported_reason": "",
+    }
+
+
+async def reconnect_persisted_mcp_servers(manager) -> None:
+    """Reconecta al boot los servidores MCP configurados (fail-soft por server).
+
+    Llamado como task asyncio desde runtime/__main__ tras construir el manager.
+    Un servidor caído NO bloquea el boot ni a los demás: queda "disconnected"
+    en ListMcpServers y el operador lo ve en la app MCP.
+
+    BYOK env: si la entrada persiste un campo "env" (p.ej. OD_DAEMON_URL para
+    open-design), se pasa a _mcp_connect para que llegue al launcher y al
+    proceso del servidor. Sin esto, servidores BYOK fallan tras reiniciar.
+    """
+    entries = _load_mcp_config()
+    if not entries:
+        return
+    for entry in entries:
+        sid = entry["server_id"]
+        stored_env: dict[str, str] = entry.get("env") or {}
+        argv = [str(a) for a in (entry.get("argv") or [])]
+        # SECURITY-FIRST (C2): re-validar el argv persistido contra la MISMA
+        # allow-list + analizabilidad del gate. Una entrada antigua (o escrita por
+        # otra vía) con un runner ya prohibido (node/python3) o con un argv que el
+        # scanner no puede analizar NO debe reconectarse al boot saltándose el gate.
+        runner = argv[0].rsplit("/", 1)[-1] if argv else ""
+        if not argv or runner not in _MCP_ALLOWED_RUNNERS or not _scanner_can_analyze_argv(argv):
+            logger.warning(
+                "hermes.dbus.mcp_reconnect_skipped server=%s runner=%s "
+                "(runner no permitido o argv no analizable — gate C2)",
+                sid, runner,
+            )
+            continue
+        try:
+            server = await _mcp_connect(manager, sid, argv, env=stored_env)
+            logger.info(
+                "hermes.dbus.mcp_reconnected server=%s tools=%d byok_keys=%s",
+                sid, len(server.tools), sorted(stored_env.keys()),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "hermes.dbus.mcp_reconnect_failed server=%s: %s", sid, exc
+            )
+
+
+# ---------------------------------------------------------------------------
+# Skill Hub — búsquedas cancelables (threading.Event por query_id).
+# ---------------------------------------------------------------------------
+_HUB_SEARCH_EVENTS: dict[str, "_oauth_threading.Event"] = {}
+_HUB_SEARCH_LOCK = _oauth_threading.Lock()
+
+
+def _hub_search_register(query_id: str) -> "_oauth_threading.Event":
+    """Registra un Event de cancelación para query_id. Devuelve el Event."""
+    ev = _oauth_threading.Event()
+    with _HUB_SEARCH_LOCK:
+        _HUB_SEARCH_EVENTS[query_id] = ev
+    return ev
+
+
+def _hub_search_get_cancel_event(
+    query_id: str,
+) -> "_oauth_threading.Event | None":
+    with _HUB_SEARCH_LOCK:
+        return _HUB_SEARCH_EVENTS.get(query_id)
+
+
+def _hub_search_cancel(query_id: str) -> None:
+    with _HUB_SEARCH_LOCK:
+        ev = _HUB_SEARCH_EVENTS.get(query_id)
+    if ev is not None:
+        ev.set()
+
+
+def _hub_search_cleanup(query_id: str) -> None:
+    with _HUB_SEARCH_LOCK:
+        _HUB_SEARCH_EVENTS.pop(query_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Skill Hub — operaciones largas (install/uninstall) en thread + estado.
+# ---------------------------------------------------------------------------
+_HUB_OPS: dict[str, dict] = {}
+_HUB_OPS_LOCK = _oauth_threading.Lock()
+
+
+def _start_hub_op(
+    kind: str,
+    target: str,
+    *,
+    scan_record: "Any | None" = None,
+    signal_emitter: "Any | None" = None,
+) -> dict:
+    """Lanza install/uninstall del hub en thread daemon. → {op_id}.
+
+    scan_record: pre-computed ScanRecord (may be None if scan was skipped).
+    signal_emitter: callable(scan_id, verdict, scan_data_json) to emit signals
+                    on install completion when a scan_record is available.
+    """
+    import uuid as _uuid  # noqa: PLC0415
+
+    op_id = _uuid.uuid4().hex
+    with _HUB_OPS_LOCK:
+        _HUB_OPS[op_id] = {"status": "pending", "kind": kind, "target": target}
+
+    def _work() -> None:
+        try:
+            if kind == "install":
+                from hermes_cli.skills_hub import do_install  # noqa: PLC0415
+                do_install(target, category="", force=False,
+                           skip_confirm=True, name_override="")
+            else:
+                from hermes_cli.skills_hub import do_uninstall  # noqa: PLC0415
+                do_uninstall(target)
+            with _HUB_OPS_LOCK:
+                _HUB_OPS[op_id]["status"] = "done"
+            logger.info("hermes.dbus.hub_op_done kind=%s target=%s", kind, target)
+        except SystemExit as exc:
+            # do_* del CLI hace sys.exit en errores — lo mapeamos a error.
+            with _HUB_OPS_LOCK:
+                _HUB_OPS[op_id]["status"] = "error"
+                _HUB_OPS[op_id]["error_message"] = f"exit={exc.code}"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.hub_op_failed kind=%s: %s", kind, exc)
+            with _HUB_OPS_LOCK:
+                _HUB_OPS[op_id]["status"] = "error"
+                _HUB_OPS[op_id]["error_message"] = str(exc)
+
+    _oauth_threading.Thread(
+        target=_work, daemon=True, name=f"hub-{kind}-{op_id[:6]}"
+    ).start()
+    return {"op_id": op_id}
+
+
+# ---------------------------------------------------------------------------
+# Native hermes-agent skill discovery (TAREA 3)
+# ---------------------------------------------------------------------------
+
+def _list_native_hermes_agent_skills(
+    db_skills: list[dict],
+    *,
+    skills_root: "Any | None" = None,
+) -> list[dict]:
+    """Return skill stubs for SKILL.md files in $HERMES_HOME/skills/ not in DB.
+
+    hermes-agent's skill_manage tool writes SKILL.md files directly to
+    $HERMES_HOME/skills/<name>/SKILL.md without registering in the DB.
+    This function surfaces them so the UI doesn't show an empty list.
+
+    Skills already in the DB (matched by skill_name) are excluded — the DB
+    entry is authoritative for signed/versioned skills.
+
+    Returns lightweight dicts compatible with SkillGovernanceService._row_to_dict
+    so the UI receives a consistent shape.
+
+    Args:
+        db_skills:   Already-fetched DB skills (for dedup by skill_name).
+        skills_root: Override the scan root. When None: uses $HERMES_HOME/skills/
+                     ONLY if HERMES_HOME is explicitly set in the environment.
+                     Falls back to nothing (not ~/.hermes) to avoid surfacing the
+                     dev machine's skills in CI/test environments.
+    """
+    import os as _os  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+
+    if skills_root is None:
+        hermes_home_env = _os.environ.get("HERMES_HOME", "")
+        if not hermes_home_env:
+            # HERMES_HOME not set — skip native scan to avoid polluting tests
+            # or dev-machine environments. The daemon ALWAYS sets this var.
+            return []
+        skills_root = _Path(hermes_home_env) / "skills"
+    else:
+        skills_root = _Path(skills_root)
+
+    if not skills_root.is_dir():
+        return []
+
+    db_names: set[str] = {s["skill_name"] for s in db_skills if s.get("skill_name")}
+    results: list[dict] = []
+
+    for skill_md in sorted(skills_root.rglob("SKILL.md")):
+        skill_name = skill_md.parent.name
+        if skill_name in db_names:
+            continue
+        signed_at = _iso_mtime(skill_md)
+        description = _extract_skill_description(skill_md)
+        # SECURITY (red-team 2026-06-19): scan the SKILL.md code blocks for trojan
+        # patterns. A hub skill is markdown instructions; a dropper in a ```bash```
+        # block is the hub equivalent of a recorded dropper. A CRITICAL match marks
+        # the skill 'blocked' + carries security_findings so the owner sees WHY (and
+        # the UI can refuse it). The agent's ACTIONS following any SKILL.md are still
+        # broker-gated (risk/HITL/install-gate/egress); this adds content visibility
+        # to the hub side, which previously only had a name/provenance scan.
+        sec_findings: list[dict] = []
+        sec_blocked = False
+        try:
+            from hermes.agents_os.domain.skill_content_scan import (  # noqa: PLC0415
+                has_blocking_finding,
+                scan_skill_markdown,
+            )
+            _md = skill_md.read_text(encoding="utf-8", errors="replace")
+            _f = scan_skill_markdown(_md)
+            sec_blocked = has_blocking_finding(_f)
+            sec_findings = [
+                {"pattern": x.pattern, "severity": x.severity.value, "message": x.message}
+                for x in _f
+            ]
+            if sec_blocked:
+                logger.warning(
+                    "hermes.dbus.hub_skill_blocked name=%s findings=%s",
+                    skill_name,
+                    [(x.pattern, x.severity.value) for x in _f if x.severity.value == "CRITICAL"],
+                )
+        except Exception as exc:  # noqa: BLE001 — scan is additive, never break listing
+            logger.debug("hub skill content scan failed name=%s: %s", skill_name, exc)
+        results.append({
+            "package_id": f"native:{skill_name}",
+            "skill_id": f"native:{skill_name}",
+            "skill_name": skill_name,
+            "version": 1,
+            "state": "blocked" if sec_blocked else "native",
+            "surface_kinds": ["skill_manage"],
+            "signed_at": signed_at,
+            "signature_short": None,
+            "validated_at": signed_at,
+            "promoted_at": None,
+            "signing_method": "none",
+            "toolkit_slug": None,
+            "description": description,
+            "source": "hermes_agent",
+            "security_blocked": sec_blocked,
+            "security_findings": sec_findings,
+        })
+
+    return results
+
+
+def _iso_mtime(path: "Any") -> str:
+    """Return the ISO-8601 mtime of a file, or empty string on error."""
+    from datetime import UTC, datetime  # noqa: PLC0415
+    try:
+        ts = path.stat().st_mtime
+        return datetime.fromtimestamp(ts, tz=UTC).isoformat()
+    except OSError:
+        return ""
+
+
+def _extract_skill_description(skill_md: "Any") -> str:
+    """Extract the 'description' field from SKILL.md YAML frontmatter.
+
+    Returns empty string if the file is missing, malformed, or has no
+    description field. Never raises — pure best-effort.
+    """
+    try:
+        text = skill_md.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+    if not text.startswith("---"):
+        return ""
+    end = text.find("---", 3)
+    if end == -1:
+        return ""
+    frontmatter = text[3:end]
+    for line in frontmatter.splitlines():
+        line = line.strip()
+        if line.startswith("description:"):
+            value = line[len("description:"):].strip().strip('"').strip("'")
+            return value[:200]
+    return ""

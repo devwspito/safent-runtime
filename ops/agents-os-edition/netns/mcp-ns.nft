@@ -1,0 +1,45 @@
+#!/usr/sbin/nft -f
+# mcp-ns.nft — nftables rules INSIDE the hermes-mcp netns.
+#
+# C1 PASS-2 (2026-06-19). Belt-and-suspenders on top of the host forward chain:
+# inside the hermes-mcp netns the MCP runner can ONLY open outbound connections to
+# the egress proxy (10.200.1.1:3128). Any direct WAN connect dies here even if the
+# host forward rules were misconfigured (defense in depth). DNS goes INSIDE the
+# CONNECT (proxy-side resolution) — no direct :53, so the MCP cannot exfiltrate
+# hostnames via raw DNS that bypass the proxy's domain filter.
+#
+# C1 PASS-3 (2026-06-19): unchanged here — this output chain still permits only →proxy.
+# What changed elsewhere: packages are prefetched + scanned at INSTALL time and the
+# runner spawns OFFLINE, so the proxy's policy for the MCP source IP is pure default-deny
+# (no registry baseline). The MCP runtime has no path to npm/PyPI — only owner-granted
+# hosts pass the proxy. This closes the npm-PUT exfil residual at the architecture level.
+#
+# Loaded by: ip netns exec hermes-mcp nft -f mcp-ns.nft
+
+table inet hermes_mcp_local {
+
+    chain output {
+        type filter hook output priority 0; policy drop;
+
+        oif "lo" accept comment "netns internal loopback"
+        ct state established,related accept comment "respuestas ct established"
+
+        # The ONLY permitted exit: the egress proxy on the host (MCP gateway).
+        ip daddr 10.200.1.1 tcp dport 3128 accept comment "mcp→proxy CONNECT (DNS via proxy)"
+
+        log prefix "hmcp NS OUT DROP: " level warn drop
+    }
+
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        iif "lo" accept comment "netns internal loopback"
+        ct state established,related accept comment "respuestas del proxy"
+
+        log prefix "hmcp NS IN DROP: " level warn drop
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+    }
+}

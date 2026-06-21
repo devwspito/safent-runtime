@@ -1,0 +1,12 @@
+# PAM service for Hermes consent gates — the SINGLE device-password check.
+# Used by every "human consent" surface (remote-access disable, etc.) so there
+# is ONE password (the device account password set at onboarding, in /etc/shadow)
+# verified ONE way everywhere.
+#
+# Minimal on purpose: only pam_unix (password vs /etc/shadow, supports yescrypt
+# via libcrypt). NO pam_securetty / pam_nologin / pam_systemd — those require a
+# tty / login session and FAIL inside a systemd oneshot (which is where the
+# verification runs as root). That tty requirement is exactly why service="login"
+# misbehaves in a non-interactive context.
+auth     required   pam_unix.so
+account  required   pam_unix.so

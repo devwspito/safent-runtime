@@ -1,0 +1,23 @@
+#!/bin/bash
+# hermes-selfcheck — auto-validación de la imagen al boot.
+# Vuelca a la consola serie (/dev/console = ttyAMA0) Y al journal: units
+# fallidas + el veredicto del broker-gate (verify-tool-gate.py). Permite validar
+# la imagen horneada SIN login (el firewall capa4 bloquea SSH; no hay getty creds).
+# Inofensivo en producción: solo lee estado y construye un GovernedAIAgent con
+# fakes (model=test/model) — no toca red, no ejecuta tools reales.
+{
+  echo ""
+  echo "########## HERMES-SELFCHECK START ##########"
+  echo "## kernel=$(uname -r)  engine=${HERMES_ENGINE:-unset}"
+  echo "## --- failed units ---"
+  systemctl --failed --no-legend --no-pager 2>&1
+  nf=$(systemctl --failed --no-legend --no-pager 2>/dev/null | grep -c .)
+  echo "## FAILED_UNITS=${nf:-unknown}"
+  echo "## --- agent services ---"
+  # GATE 0 / M8 — shell-server HTTP borrado; el daemon (hermes-runtime) es el SO.
+  systemctl is-active hermes-runtime.service gdm.service 2>&1 | tr '\n' ' '; echo ""
+  echo "## --- broker gate smoke-test (verify-tool-gate.py) ---"
+  HERMES_ENGINE=nous /usr/bin/python3 /usr/lib/hermes/validation/verify-tool-gate.py 2>&1
+  echo "## GATE_RC=$?"
+  echo "########## HERMES-SELFCHECK END ##########"
+} 2>&1 | tee /dev/console

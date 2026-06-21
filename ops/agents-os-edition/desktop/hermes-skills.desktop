@@ -1,0 +1,21 @@
+[Desktop Entry]
+# hermes-skills.desktop — T048 feature 014 (agentic desktop).
+#
+# Capability app: Habilidades del agente.
+# Governance: promote / deprecate skills via D-Bus. No effectors.
+#
+# D-Bus verbs: ListSkills, PromoteSkill, DeprecateSkill.
+# Authorship by sender_uid (CWE-862).
+Version=1.0
+Name=Habilidades — Hermes
+Name[es]=Habilidades — Hermes
+Comment=Ciclo de vida de skills del agente (promover, deprecar)
+Comment[es]=Ciclo de vida de skills del agente (promover, deprecar)
+Exec=python3 -m hermes.lumen.apps.skills
+Icon=hermes-skills
+Terminal=false
+Type=Application
+Categories=Utility;System;
+StartupNotify=true
+StartupWMClass=hermes-skills
+Keywords=hermes;skills;habilidades;agente;promover;deprecar;

@@ -1,0 +1,28 @@
+[Desktop Entry]
+# chromium-personal.desktop — T020 feature 014 (agentic desktop).
+#
+# DISTINCIÓN CRÍTICA: este lanzador es para el HUMANO, NO para el agente.
+#
+# - El HUMANO usa este Chromium: navegación libre, sin jaula, sin auditoría
+#   del agente, tal como cualquier navegador de escritorio. Es el PC del humano.
+#   La sesión de usuario de GDM (uid 1000) es la del humano; puede navegar libre.
+#
+# - El AGENTE usa un Chromium distinto, lanzado SIEMPRE por hermes-browser-launcher
+#   (el helper root que aplica la plantilla de confinamiento) dentro del netns
+#   hermes-browser (veth+NAT+nftables+egress-proxy). El agente NUNCA usa este
+#   lanzador ni este perfil de Chromium. El Capability Broker despacha al
+#   BrowserSurfaceAdapter, que invoca el launcher confinado por D-Bus.
+#
+# Instalar la distinción en el nombre/ícono es deliberado: "Personal" señala
+# que este es el navegador del humano, igual que en cualquier instalación de Linux.
+Version=1.0
+Name=Chromium (Personal)
+Comment=Navegador web para el humano (sin jaula — uso personal libre)
+Exec=/usr/bin/chromium-browser %U
+Icon=chromium-browser
+Terminal=false
+Type=Application
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+StartupNotify=true
+StartupWMClass=chromium-browser

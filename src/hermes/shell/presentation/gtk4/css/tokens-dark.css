@@ -1,0 +1,33 @@
+/*
+ * Hermes Shell — tokens semánticos (dark).
+ *
+ * Solo contiene @define-color hermes_* usados por components.css para las
+ * clases genuinamente custom (.hermes-*). NO sobreescribe los colores de
+ * superficie de Adwaita-dark (window_bg_color, view_bg_color, etc.): esos
+ * los gestiona Adwaita y son precisamente el look que queremos aprovechar.
+ *
+ * Las tres variables accent_* son la excepción oficial: libadwaita las
+ * expone como punto de extensión para que apps re-tiñan el acento en todo
+ * el tema stock sin necesidad de CSS adicional.
+ */
+
+/* ── Acento (fallback; ThemeManager lo sobreescribe en memoria) ─────── */
+
+@define-color hermes_accent        #6E56CF;
+@define-color hermes_accent_hover  #8270D9;
+@define-color hermes_accent_press  #5A44B5;
+@define-color hermes_accent_subtle alpha(#6E56CF, 0.12);
+@define-color hermes_accent_ring   alpha(#6E56CF, 0.28);
+@define-color hermes_on_accent     #FFFFFF;
+
+/* ── Punto de extensión oficial de libadwaita — re-tinte del acento ─── */
+
+@define-color accent_bg_color  #6E56CF;
+@define-color accent_fg_color  #FFFFFF;
+@define-color accent_color     #6E56CF;
+
+/* ── Estados semánticos (usados en badges/dots/spinners propios) ─────── */
+
+@define-color hermes_success  #30D158;
+@define-color hermes_warning  #FFD60A;
+@define-color hermes_danger   #FF453A;

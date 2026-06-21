@@ -1,0 +1,28 @@
+# hermes-audit-tail.service — verificación continua del hash-chain del audit local.
+
+[Unit]
+Description=Hermes Audit Chain Tailer (integrity verification)
+After=hermes-runtime.service
+
+[Service]
+Type=notify
+User=hermes
+Group=hermes
+ExecStart=/usr/bin/hermes-audit-tail --watch /var/lib/hermes/audit --systemd-notify
+WatchdogSec=120
+Restart=always
+RestartSec=5
+
+Slice=agents-os.slice
+MemoryMax=256M
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/hermes/audit
+CapabilityBoundingSet=CAP_AUDIT_READ
+AmbientCapabilities=CAP_AUDIT_READ
+
+[Install]
+WantedBy=multi-user.target

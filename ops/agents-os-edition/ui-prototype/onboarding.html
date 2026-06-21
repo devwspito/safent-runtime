@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark" data-accent="amber">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LumenSO · Bienvenido</title>
+<style>
+@import url('https://rsms.me/inter/inter.css');
+:root{--font:'Inter',-apple-system,system-ui,sans-serif;--ease:cubic-bezier(.22,.8,.18,1);--ease-out:cubic-bezier(.16,1,.3,1);--spring:cubic-bezier(.34,1.56,.64,1)}
+[data-accent="amber"]{--acc:#EFA45C;--acc-2:#E2864B;--acc-soft:rgba(239,164,92,.16);--acc-glow:rgba(239,164,92,.42);--on-acc:#1a1206}
+[data-theme="dark"]{--bg-0:#0B0C0F;--bg-1:#101218;--ink:#F4F5F7;--ink-2:#B6BAC4;--ink-3:#7C8190;--glass:rgba(24,27,34,.66);--glass-2:rgba(30,34,43,.74);--hair:rgba(255,255,255,.08);--hair-2:rgba(255,255,255,.05);--shadow:0 30px 90px -24px rgba(0,0,0,.8),0 10px 30px -14px rgba(0,0,0,.6);--hi:rgba(255,255,255,.06)}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;overflow:hidden}
+body{font-family:var(--font);color:var(--ink);background:var(--bg-0);-webkit-font-smoothing:antialiased;letter-spacing:-.012em;font-feature-settings:'cv02','cv03','cv04','cv11','ss01';display:grid;place-items:center}
+.wp{position:fixed;inset:0;z-index:0;overflow:hidden;background:radial-gradient(120% 120% at 50% 0%,#15171E 0%,#0B0C0F 60%)}
+.wp::before{content:'';position:absolute;inset:-30%;background:radial-gradient(42% 52% at 30% 24%,var(--acc-glow),transparent 60%),radial-gradient(46% 56% at 78% 30%,rgba(120,140,255,.28),transparent 62%),radial-gradient(48% 58% at 60% 92%,rgba(95,209,168,.14),transparent 60%);filter:blur(46px) saturate(1.1);animation:drift 26s var(--ease) infinite alternate}
+.wp::after{content:'';position:absolute;inset:0;opacity:.04;mix-blend-mode:overlay;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+@keyframes drift{0%{transform:translate(0,0) scale(1)}100%{transform:translate(-3%,2%) scale(1.06)}}
+
+.card{position:relative;z-index:10;width:min(520px,92vw);background:var(--glass);backdrop-filter:blur(44px) saturate(1.6);-webkit-backdrop-filter:blur(44px) saturate(1.6);border:1px solid var(--hair);box-shadow:var(--shadow);border-radius:28px;padding:40px 40px 32px;overflow:hidden}
+.card::before{content:'';position:absolute;inset:0;border-radius:inherit;padding:1px;background:linear-gradient(180deg,var(--hi),transparent 40%);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none}
+
+.logo{width:60px;height:60px;border-radius:18px;background:radial-gradient(circle at 32% 28%,#fff7,transparent 55%),linear-gradient(135deg,var(--acc),var(--acc-2));box-shadow:0 14px 40px -8px var(--acc-glow),inset 0 0 0 1px rgba(255,255,255,.22);margin-bottom:24px}
+.brand{font-size:13px;font-weight:680;letter-spacing:-.01em;color:var(--ink-3);margin-bottom:6px}
+h1{font-size:30px;font-weight:700;letter-spacing:-.03em;line-height:1.1;margin-bottom:12px}
+.lede{font-size:15px;color:var(--ink-2);line-height:1.55;margin-bottom:30px;max-width:400px}
+.lede b{color:var(--ink)}
+
+.step{display:none}.step.on{display:block;animation:rise .5s var(--ease-out)}
+@keyframes rise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+
+.field{margin-bottom:14px}
+.field label{display:block;font-size:12px;font-weight:600;color:var(--ink-2);margin-bottom:7px}
+.inp{width:100%;height:50px;background:var(--bg-1);border:1px solid var(--hair);border-radius:14px;padding:0 16px;color:var(--ink);font-family:var(--font);font-size:15px;outline:none;transition:.25s var(--ease)}
+.inp:focus{border-color:var(--acc);box-shadow:0 0 0 4px var(--acc-soft)}
+.inp::placeholder{color:var(--ink-3)}
+.pw{position:relative}.pw .eye{position:absolute;right:14px;top:50%;transform:translateY(-50%);color:var(--ink-3);cursor:pointer}.pw .eye svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8}
+
+.opt{display:flex;align-items:center;gap:13px;padding:13px 15px;border-radius:14px;background:var(--bg-1);border:1px solid var(--hair);cursor:pointer;margin-bottom:9px;transition:.2s var(--ease)}
+.opt:hover{border-color:var(--hair)}
+.opt.sel{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
+.opt .oi{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;background:var(--glass-2);border:1px solid var(--hair);flex:none}
+.opt .oi svg{width:19px;height:19px;stroke:var(--acc);fill:none;stroke-width:1.8}
+.opt b{font-size:14px;font-weight:600;display:block}.opt small{font-size:12px;color:var(--ink-3)}
+.opt .check{margin-left:auto;width:20px;height:20px;border-radius:50%;border:2px solid var(--hair);flex:none;display:grid;place-items:center}
+.opt.sel .check{border-color:var(--acc);background:var(--acc)}
+.opt.sel .check::after{content:'';width:6px;height:6px;border-radius:50%;background:var(--on-acc)}
+
+.done-ring{width:84px;height:84px;border-radius:50%;background:var(--acc-soft);display:grid;place-items:center;margin:8px auto 24px;animation:pop .6s var(--spring) both}
+.done-ring svg{width:42px;height:42px;stroke:var(--acc);fill:none;stroke-width:2.4;stroke-dasharray:48;stroke-dashoffset:48;animation:draw .6s .25s var(--ease-out) forwards}
+@keyframes pop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}
+@keyframes draw{to{stroke-dashoffset:0}}
+
+.nav{display:flex;align-items:center;gap:12px;margin-top:30px}
+.dots{display:flex;gap:7px}
+.dots i{width:7px;height:7px;border-radius:50%;background:var(--hair);transition:.3s var(--ease)}
+.dots i.on{background:var(--acc);width:22px;box-shadow:0 0 10px var(--acc-glow)}
+.btn{height:50px;padding:0 26px;border-radius:14px;border:none;font-family:var(--font);font-size:15px;font-weight:650;cursor:pointer;transition:.2s var(--spring);display:inline-flex;align-items:center;gap:9px}
+.btn.primary{background:linear-gradient(135deg,var(--acc),var(--acc-2));color:var(--on-acc);box-shadow:0 10px 26px -8px var(--acc-glow);margin-left:auto}
+.btn.primary:hover{transform:translateY(-1px)}.btn.primary svg{width:18px;height:18px;stroke:var(--on-acc);fill:none;stroke-width:2.4}
+.btn.ghost{background:transparent;color:var(--ink-3)}.btn.ghost:hover{color:var(--ink)}
+.guarantee{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-3);margin-top:18px}
+.guarantee svg{width:15px;height:15px;stroke:var(--acc);fill:none;stroke-width:1.8}
+</style>
+</head>
+<body>
+<div class="wp"></div>
+
+<div class="card">
+  <!-- 1 · WELCOME -->
+  <div class="step on" data-s="0">
+    <div class="logo"></div>
+    <div class="brand">LumenSO</div>
+    <h1>Tu inteligencia,<br>en tu propio equipo.</h1>
+    <p class="lede">Hermes, tu agente personal, <b>vive aquí — en tu máquina</b>. Trabaja para ti 24/7, opera la web como un humano, y <b>nada sale sin tu permiso</b>.</p>
+    <div class="nav"><div class="dots"><i class="on"></i><i></i><i></i><i></i></div><button class="btn primary" onclick="next()">Comenzar <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button></div>
+  </div>
+
+  <!-- 2 · CUENTA -->
+  <div class="step" data-s="1">
+    <div class="brand">Paso 1 de 3</div>
+    <h1>Crea tu cuenta</h1>
+    <p class="lede">Solo tú entras. Esta cuenta es local — <b>no hay nube, no hay nadie más</b>.</p>
+    <div class="field"><label>Nombre de usuario</label><input class="inp" value="luiscorrea" /></div>
+    <div class="field"><label>Contraseña</label><div class="pw"><input class="inp" type="password" placeholder="••••••••" /><span class="eye" onclick="togglePw(this)"><svg viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></span></div></div>
+    <div class="field"><label>Repite la contraseña</label><div class="pw"><input class="inp" type="password" placeholder="••••••••" /></div></div>
+    <div class="nav"><button class="btn ghost" onclick="prev()">Atrás</button><div class="dots"><i></i><i class="on"></i><i></i><i></i></div><button class="btn primary" onclick="next()">Siguiente <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button></div>
+  </div>
+
+  <!-- 3 · AGENTE -->
+  <div class="step" data-s="2">
+    <div class="brand">Paso 2 de 3</div>
+    <h1>Elige el cerebro</h1>
+    <p class="lede">Hermes habla con <b>42+ proveedores</b> y todos tus agentes heredan el del SO. Empieza con tu <b>suscripción</b> — sin gestionar claves.</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;max-height:50vh;overflow:auto;margin:-2px -4px 2px;padding:2px 4px">
+      <div style="grid-column:1/-1;font-size:10.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--acc,#EFA45C);margin:2px 0 -3px">Suscripción · sin clave API</div>
+      <div class="opt sel" onclick="pick(this)" style="grid-column:1/-1"><div class="oi" style="font-weight:800;font-size:16px">◆</div><div><b>Nous Portal</b><small>300+ modelos con un solo login · recomendado</small></div><div class="check"></div></div>
+      <div class="opt" onclick="pick(this)"><div class="oi" style="font-weight:800;font-size:15px">C</div><div><b>Claude Max</b><small>tu plan Anthropic · OAuth</small></div><div class="check"></div></div>
+      <div class="opt" onclick="pick(this)"><div class="oi" style="font-weight:800;font-size:14px">Co</div><div><b>GitHub Copilot</b><small>GPT-5.x · Claude · Gemini</small></div><div class="check"></div></div>
+      <div class="opt" onclick="pick(this)"><div class="oi" style="font-weight:800;font-size:15px">X</div><div><b>SuperGrok</b><small>xAI · OAuth</small></div><div class="check"></div></div>
+      <div class="opt" onclick="pick(this)"><div class="oi" style="font-weight:800;font-size:15px">G</div><div><b>Gemini</b><small>gratis · OAuth (PKCE)</small></div><div class="check"></div></div>
+      <div style="grid-column:1/-1;font-size:10.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3,#7C8190);margin:6px 0 -3px">Clave API</div>
+      <div class="opt" onclick="pick(this)"><div class="oi" style="font-weight:800;font-size:15px">O</div><div><b>OpenAI</b><small>gpt-5.4-nano</small></div><div class="check"></div></div>
+      <div class="opt" onclick="pick(this)"><div class="oi" style="font-weight:800;font-size:15px">A</div><div><b>Anthropic</b><small>claude-opus-4-5</small></div><div class="check"></div></div>
+      <div class="opt" onclick="pick(this)"><div class="oi" style="font-weight:800;font-size:15px">R</div><div><b>OpenRouter</b><small>cualquier modelo</small></div><div class="check"></div></div>
+      <div class="opt" onclick="pick(this)"><div class="oi" style="font-weight:800;font-size:15px">D</div><div><b>DeepSeek</b><small>económico</small></div><div class="check"></div></div>
+      <div class="opt" onclick="pick(this)"><div class="oi" style="font-weight:800;font-size:15px">Q</div><div><b>Groq</b><small>ultrarrápido</small></div><div class="check"></div></div>
+      <div class="opt" onclick="pick(this)"><div class="oi" style="font-weight:800;font-size:13px">+39</div><div><b>Y 39 más</b><small>Mistral · Together · Cerebras · Kimi · Qwen…</small></div><div class="check"></div></div>
+      <div style="grid-column:1/-1;font-size:10.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3,#7C8190);margin:6px 0 -3px">Local · privado total</div>
+      <div class="opt" onclick="pick(this)"><div class="oi" style="font-weight:800;font-size:15px">L</div><div><b>Ollama</b><small>sin clave · CPU/GPU</small></div><div class="check"></div></div>
+      <div class="opt" onclick="pick(this)"><div class="oi" style="font-weight:800;font-size:15px">V</div><div><b>vLLM</b><small>GPU · alto rendimiento</small></div><div class="check"></div></div>
+      <div class="opt" onclick="pick(this)" style="grid-column:1/-1"><div class="oi" style="font-weight:800;font-size:18px">+</div><div><b>OpenAI-compatible</b><small>cualquier endpoint · Azure, LM Studio, llama.cpp, SGLang…</small></div><div class="check"></div></div>
+    </div>
+    <div id="provcfg" style="display:none;flex-direction:column;gap:8px;margin-top:10px">
+      <div class="field" style="margin:0"><label id="provlabel">Clave API</label><input class="inp" id="provkey" type="password" placeholder="pega tu clave…"></div>
+      <div class="field" style="margin:0"><label>Modelo</label><input class="inp" id="provmodel" placeholder="modelo"></div>
+    </div>
+    <p id="provhint" style="font-size:12px;color:var(--ink-3,#7C8190);margin:2px 0 0;text-align:center">Routing + <b>fallback automático</b> · cambia de modelo sin perder la conversación.</p>
+    <div class="nav"><button class="btn ghost" onclick="prev()">Atrás</button><div class="dots"><i></i><i></i><i class="on"></i><i></i></div><button class="btn primary" onclick="next()">Siguiente <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button></div>
+  </div>
+
+  <!-- 4 · LISTO -->
+  <div class="step" data-s="3">
+    <div class="done-ring"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg></div>
+    <h1 style="text-align:center">Todo listo, Luis.</h1>
+    <p class="lede" style="text-align:center;margin:0 auto 4px">Hermes ya está despierto y confinado en tu equipo. Pídele lo que quieras — él te pedirá permiso cuando toque.</p>
+    <div class="guarantee" style="justify-content:center"><svg viewBox="0 0 24 24"><path d="M12 2 4 7v6c0 5 3.4 8.5 8 10 4.6-1.5 8-5 8-10V7z"/></svg> Confinamiento de kernel activo · cada acción auditada</div>
+    <div class="nav" style="justify-content:center"><button class="btn primary" style="margin:0" onclick="enter()">Entrar en LumenSO <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button></div>
+  </div>
+
+  <div class="guarantee" id="g0"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0"/></svg> Todo se ejecuta en tu equipo, bajo una jaula a nivel sistema operativo.</div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s);
+let s=0;
+function show(n){s=n;$$('.step').forEach(e=>e.classList.toggle('on',+e.dataset.s===n));$('#g0').style.display=n===0?'flex':'none'}
+function next(){if(s<3)show(s+1)}
+function prev(){if(s>0)show(s-1)}
+const CATALOG={
+  'OpenAI':{kind:'openai',model:'gpt-5.4-nano',key:1},
+  'Anthropic':{kind:'anthropic',model:'claude-opus-4-5',key:1},
+  'OpenRouter':{kind:'openrouter',model:'openai/gpt-4o-mini',key:1},
+  'DeepSeek':{kind:'deepseek',model:'deepseek-chat',key:1},
+  'Groq':{kind:'groq',model:'llama-3.3-70b-versatile',key:1},
+  'Gemini':{kind:'gemini',model:'gemini-2.0-flash',key:1},
+  'Ollama':{kind:'ollama',model:'llama3.2',url:1},
+  'vLLM':{kind:'vllm',model:'Qwen/Qwen3-8B',url:1},
+  'OpenAI-compatible':{kind:'openai_compatible',model:'',key:1},
+  'Nous Portal':{oauth:1},'Claude Max':{oauth:1},'GitHub Copilot':{oauth:1},'SuperGrok':{oauth:1}
+};
+let PICKED=null;
+function pick(el){
+  el.parentElement.querySelectorAll('.opt').forEach(o=>o.classList.remove('sel'));el.classList.add('sel');
+  const name=((el.querySelector('b')||{}).textContent||'').trim();
+  PICKED=Object.assign({label:name},CATALOG[name]||{});
+  const cfg=$('#provcfg'),hint=$('#provhint'),lab=$('#provlabel');
+  if(PICKED.key||PICKED.url){
+    cfg.style.display='flex';
+    const urlOnly=PICKED.url&&!PICKED.key;
+    lab.textContent=urlOnly?'URL del servidor':'Clave API';
+    const k=$('#provkey');k.type=urlOnly?'text':'password';k.placeholder=urlOnly?'http://localhost:11434/v1':'pega tu clave…';
+    $('#provmodel').value=PICKED.model||'';
+    hint.textContent='Esto configura TU provider en el SO. Cámbialo cuando quieras.';
+  } else if(PICKED.oauth){
+    cfg.style.display='none';
+    hint.textContent='OAuth/suscripción se conecta en breve. Por ahora elige un provider con clave API o local.';
+  } else { cfg.style.display='none'; hint.textContent='Routing + fallback automático.'; }
+}
+function togglePw(el){const i=el.previousElementSibling;i.type=i.type==='password'?'text':'password'}
+async function enter(ev){
+  const btn=(ev&&ev.target)?ev.target.closest('button'):document.querySelector('[onclick^="enter"]');
+  if(window.hermes && PICKED && (PICKED.key||PICKED.url)){
+    const v=($('#provkey')||{}).value||''; const model=($('#provmodel')||{}).value||PICKED.model||'';
+    if(!v){ show(2); const k=$('#provkey'); if(k)k.focus(); return; }
+    const urlOnly=PICKED.url&&!PICKED.key;
+    const draft={kind:PICKED.kind,alias:PICKED.label,default_model:model,base_url:urlOnly?v:null,api_key:urlOnly?null:v,set_active:true};
+    if(btn){btn.disabled=true;btn.style.opacity=.6;}
+    try{ await window.hermes('add_provider',draft); }
+    catch(e){ if(btn){btn.disabled=false;btn.style.opacity=1;} alert('No pude configurar el provider: '+e); return; }
+  }
+  const card=document.querySelector('.card');
+  card.style.transition='.5s var(--ease)';card.style.transform='scale(.96)';card.style.opacity='0';
+  setTimeout(()=>{ window.location='lumenso.html'; },520);
+}
+// arranca con OpenAI seleccionado (camino clave-API que funciona) para que se vea el campo de clave
+document.addEventListener('DOMContentLoaded',()=>{
+  document.querySelectorAll('.opt').forEach(o=>{ if(((o.querySelector('b')||{}).textContent||'').trim()==='OpenAI') pick(o); });
+});
+</script>
+</body>
+</html>

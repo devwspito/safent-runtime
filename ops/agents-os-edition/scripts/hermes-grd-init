@@ -1,0 +1,66 @@
+#!/bin/sh
+# hermes-grd-init — configura gnome-remote-desktop (backend VNC) para ESPEJAR
+# la sesión Hermes Shell viva. Corre como servicio de USUARIO (hermes-user)
+# dentro de la sesión gráfica, una vez por arranque.
+#
+# Funciona porque mutter (nuestra sesión custom) expone org.gnome.Mutter.
+# RemoteDesktop (input) + ScreenCast (pantalla) en el bus de sesión.
+#
+# SECURITY FIX (finding #2): se eliminó el fallback `|| echo "hermesrc"`.
+# Si /etc/hermes/remote-vnc-password no existe (hermes-remote-vnc-password-gen
+# no corrió), este script aborta (fail-closed) en lugar de exponer el servicio
+# con una contraseña pública y conocida.
+#
+# SECURITY FIX (finding #2): se eliminó la línea que forzaba encryption=['none'].
+# El cifrado VNC por defecto (tls-anon o el que imponga la versión de GRD) es
+# preferible a transmisión en claro. El túnel HTTPS de cloudflared añade una capa
+# adicional, pero no es razón para degradar el cifrado en el protocolo subyacente.
+
+PASS_FILE=/etc/hermes/remote-vnc-password
+
+# Fail-closed: si el archivo de contraseña no existe, abortar.
+# hermes-remote-vnc-password-gen.service debe correr antes en el primer boot.
+if [ ! -f "$PASS_FILE" ]; then
+    echo "hermes-grd-init: ERROR — $PASS_FILE no existe." >&2
+    echo "hermes-grd-init: hermes-remote-vnc-password-gen.service no corrió." >&2
+    echo "hermes-grd-init: Acceso remoto VNC NO activado (fail-closed)." >&2
+    exit 1
+fi
+
+PASS=$(cat "$PASS_FILE")
+
+if [ -z "$PASS" ]; then
+    echo "hermes-grd-init: ERROR — $PASS_FILE está vacío — acceso remoto NO activado (fail-closed)." >&2
+    exit 1
+fi
+
+# Espera a que mutter exponga RemoteDesktop en el bus de sesión (hasta 30s).
+i=0
+while [ "$i" -lt 30 ]; do
+    if busctl list 2>/dev/null | grep -q "org.gnome.Mutter.RemoteDesktop"; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+
+# NOTA: el login keyring lo crea+desbloquea pam_gnome_keyring al autologin
+# porque hermes-user es passwordless (ver bib-config). Así el secret service
+# (org.freedesktop.secrets) tiene una default collection desbloqueada y GRD
+# puede guardar/recuperar la pass VNC sin el diálogo "Choose password for new
+# keyring". NO usar `gnome-keyring-daemon --replace` aquí: mata el secret
+# service de la sesión y rompe GRD ("The name is not activatable").
+
+# Configura el backend VNC: espejo de la sesión activa, con control + password.
+# SECURITY: NO forzamos encryption=['none'] — dejamos el default de GRD (tls-anon
+# o el que empuje la versión instalada). El túnel HTTPS de cloudflared es una capa
+# adicional pero no justifica degradar el cifrado del protocolo VNC.
+grdctl vnc enable || true
+grdctl vnc disable-view-only || true
+grdctl vnc set-auth-method password || true
+grdctl vnc set-password "$PASS" || true
+
+# Arranca/reinicia el daemon GRD del usuario para que tome la config y bindee 5900.
+systemctl --user restart gnome-remote-desktop.service 2>/dev/null \
+    || systemctl --user start gnome-remote-desktop.service 2>/dev/null \
+    || true

@@ -1,0 +1,60 @@
+#!/usr/sbin/nft -f
+# host-input.nft — Firewall de host: INPUT default-deny.
+# Ref: remote-access hardening (noVNC 100%), capa 4.
+#
+# PRINCIPIO: el acceso remoto entra EXCLUSIVAMENTE por el túnel cloudflared
+# (conexión OUTBOUND del device hacia Cloudflare; el origen del proxy hacia
+# noVNC es loopback 127.0.0.1:6080). Por tanto NINGÚN puerto inbound
+# (6080 noVNC, 7519 clipboard, 5900 VNC) queda alcanzable desde la red/LAN.
+#
+# Solo se permite: loopback, respuestas a conexiones establecidas (incl. el
+# tráfico de retorno del túnel cloudflared), y ICMP (diagnóstico). Todo lo demás
+# inbound se descarta. El EGRESS no se toca aquí (las reglas de egress del
+# navegador/runtime viven en sus propios netns).
+#
+# Carga: hermes-host-firewall.service (root, CAP_NET_ADMIN) en el boot, antes de
+# que la red se configure (Before=network-pre.target). No se hace flush al parar
+# (dejar el firewall puesto es fail-safe).
+#
+# DEBUG/TEST: para abrir un puerto inbound puntual en una VM de pruebas, añadir
+# una regla en runtime (NO hornear): nft add rule inet hermes_host input tcp dport N accept
+
+table inet hermes_host {
+    chain input {
+        type filter hook input priority -10; policy drop;
+
+        ct state established,related accept comment "respuestas (incl. retorno del túnel cloudflared)"
+        ct state invalid drop comment "paquetes inválidos fuera"
+
+        iif "lo" accept comment "loopback: noVNC/clipboard/VNC + IPC local"
+
+        meta l4proto ipv6-icmp accept comment "ICMPv6 (NDP imprescindible en IPv6)"
+        ip protocol icmp accept comment "ICMP (ping/diagnóstico)"
+
+        # ⚠️ TEMPORAL-VERIFICACIÓN — SSH(22)+clipboard(7519) para verificar
+        # onboarding/login por el hostfwd de QEMU. QUITAR en la imagen final.
+        tcp dport 22 accept comment "TEMPORAL-VERIFICACIÓN ssh"
+        tcp dport 7519 accept comment "TEMPORAL-VERIFICACIÓN clipboard"
+
+        # Lumen desktop app (appliance): la app nativa arranca este VM bajo QEMU en
+        # el Mac/PC del dueño y abre la UI por hostfwd → llega al NIC del guest desde
+        # el gateway NAT de QEMU user-net (10.0.2.2/24). El NIC del guest SOLO es
+        # alcanzable por el host hipervisor (NAT de QEMU), nunca por la LAN, así que
+        # abrir :7517 a esa subred es seguro en el modelo appliance y en cloud.
+        ip saddr 10.0.2.0/24 tcp dport 7517 accept comment "Lumen UI: host hipervisor vía QEMU user-net"
+        # Apple Virtualization.framework (macOS app) usa NAT en 192.168.64.0/24 —
+        # el relay del host (lumen-vz) entra al guest desde el gateway VZ. Mismo
+        # modelo: el NIC del guest solo es alcanzable por el hipervisor del host.
+        ip saddr 192.168.64.0/24 tcp dport 7517 accept comment "Lumen UI: host hipervisor vía Apple VZ NAT"
+
+        # Navegador confinado → su proxy egress. El proxy escucha en el lado HOST
+        # del veth (10.200.0.1:3128), así que la conexión del navegador (netns,
+        # 10.200.0.2) ENTRA al host y la pillaría el policy drop. Regla estrecha:
+        # solo desde la IP del netns del navegador hacia el puerto del proxy. Sin
+        # esto el navegador no alcanza su propio proxy → net::ERR_TIMED_OUT.
+        ip saddr 10.200.0.2 ip daddr 10.200.0.1 tcp dport 3128 accept comment "browser netns → egress proxy"
+
+        # SIN dport inbound: el acceso remoto es SOLO vía el túnel cloudflared.
+        log prefix "hermes_host INPUT DROP: " level warn
+    }
+}

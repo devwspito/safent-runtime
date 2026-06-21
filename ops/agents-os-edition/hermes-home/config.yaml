@@ -1,0 +1,62 @@
+# config.yaml de hermes-agent para el daemon (HERMES_HOME=/var/lib/hermes/hermes-home).
+#
+# LATENCIA: el cliente auxiliar (title_generation, curator, compression, etc.)
+# en modo "auto" sondea openrouter/nous — proveedores que el usuario NO
+# configuró → fallan, reintentan, marcan unhealthy 60s → el ciclo tarda ~40s
+# antes de persistir la respuesta del chat. Aquí FIJAMOS cada tarea auxiliar a
+# `provider: custom` contra el endpoint OpenAI del usuario, sin sondeo.
+#
+# - base_url: el endpoint OpenAI (el daemon también exporta OPENAI_BASE_URL).
+# - api_key: vacío → cae a OPENAI_API_KEY (lo exporta el daemon en
+#   nous_engine._resolve_hermes_runtime con la key del SecretsVault).
+# - model: gpt-4o — acepta `max_tokens` (varias auxiliares lo mandan, y los
+#   modelos GPT-5/razonamiento lo rechazan); NO usamos gpt-4o-mini (regla del
+#   dueño). gpt-4o es OpenAI, vision-capable, y fiable para tareas secundarias.
+#
+# (Follow-up: hacerlo dinámico desde el daemon según el provider activo, para
+#  que valga también si el usuario cambia a Anthropic/etc.)
+auxiliary:
+  vision:            { provider: custom, base_url: "https://api.openai.com/v1", model: "gpt-4o" }
+  web_extract:       { provider: custom, base_url: "https://api.openai.com/v1", model: "gpt-4o" }
+  compression:       { provider: custom, base_url: "https://api.openai.com/v1", model: "gpt-4o" }
+  skills_hub:        { provider: custom, base_url: "https://api.openai.com/v1", model: "gpt-4o" }
+  approval:          { provider: custom, base_url: "https://api.openai.com/v1", model: "gpt-4o" }
+  mcp:               { provider: custom, base_url: "https://api.openai.com/v1", model: "gpt-4o" }
+  title_generation:  { provider: custom, base_url: "https://api.openai.com/v1", model: "gpt-4o" }
+  triage_specifier:  { provider: custom, base_url: "https://api.openai.com/v1", model: "gpt-4o" }
+  kanban_decomposer: { provider: custom, base_url: "https://api.openai.com/v1", model: "gpt-4o" }
+  profile_describer: { provider: custom, base_url: "https://api.openai.com/v1", model: "gpt-4o" }
+  curator:           { provider: custom, base_url: "https://api.openai.com/v1", model: "gpt-4o" }
+
+# ---------------------------------------------------------------------------
+# Toolsets NATIVOS de Hermes (el SO usa las tools nativas, no reinventa).
+# "hermes-cli" = el toolset completo por defecto (file/terminal/browser/web/
+# memory/skills/vision/code_execution/cronjob/delegation/...). El kernel de
+# LumenSO las GATEA por el hook pre_tool_call; no las reemplaza.
+# ---------------------------------------------------------------------------
+toolsets: ["hermes-cli"]
+
+tools:
+  # Progressive tool disclosure NATIVO: cuando las tools deferibles (MCP/plugin)
+  # superan ~10% del contexto, se reemplazan por los bridge tools
+  # tool_search/tool_describe/tool_call y se descubren bajo demanda. Esto baja
+  # drásticamente los tokens por llamada (la lentitud) sin perder capacidades.
+  tool_search:
+    enabled: auto
+
+skills:
+  # Escáner nativo de skills creadas por el agente (patrones peligrosos / exfil /
+  # injection). NO-overridable. Es el "Centro de Seguridad" de skills, nativo.
+  guard_agent_created: true
+
+approvals:
+  # TWO-MODE SECURITY KERNEL (spec 015 — 2026-06-14):
+  # mode: manual — el gateway HITL nativo de Hermes está ACTIVO por defecto.
+  # Comandos peligrosos pasan por check_all_command_guards, que bloquea hasta
+  # que resolve_gateway_approval() resuelve desde el compositor (tarjeta HITL).
+  # El hardline floor (detect_hardline_command) es incondicional en todo modo.
+  # Modo AUTO: D-Bus SetAutoMode(true) → enable_session_yolo(session_key) por
+  # ciclo → bypass del gateway (excepto hardline). Persiste en settings.json.
+  # 'never' e 'off' son INVÁLIDOS en hermes-agent — solo manual/smart/off válidos.
+  mode: manual
+  timeout: 120

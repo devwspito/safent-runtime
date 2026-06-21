@@ -1,0 +1,39 @@
+# hermes-keygen.service — genera la clave maestra de SecretsVault en primer boot.
+#
+# SecretsVault es fail-closed (finding #20): sin /var/lib/hermes/master.key,
+# shell-server / runtime / remote-control NO arrancan (RuntimeError al
+# construir el vault). Este oneshot la genera (32 bytes random, 0600
+# hermes:hermes) ANTES que cualquier consumidor.
+#
+# Idempotente: ConditionPathExists evita regenerarla en reboots posteriores
+# — regenerarla invalidaría TODOS los secretos ya cifrados.
+
+[Unit]
+Description=Hermes SecretsVault master key generation (first boot)
+After=systemd-tmpfiles-setup.service local-fs.target
+Before=hermes-shell-server.service hermes-runtime.service agents-os-remote-control.service
+ConditionPathExists=!/var/lib/hermes/master.key
+RequiresMountsFor=/var/lib/hermes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=hermes
+Group=hermes
+UMask=0077
+ExecStart=/usr/bin/python3 -c "import os; open('/var/lib/hermes/master.key','wb').write(os.urandom(32))"
+
+# Hardening — solo escribe en /var/lib/hermes, cero capabilities.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/hermes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

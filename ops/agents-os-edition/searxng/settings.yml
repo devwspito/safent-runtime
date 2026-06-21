@@ -1,0 +1,13 @@
+# Lumen local SearXNG — minimal config. JSON format is REQUIRED by the Nous
+# web_search provider (plugins/web/searxng → {url}/search?format=json).
+use_default_settings: true
+server:
+  secret_key: "lumen-searxng-local-0a84ff-do-not-expose"
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: false
+  public_instance: false
+search:
+  formats:
+    - html
+    - json

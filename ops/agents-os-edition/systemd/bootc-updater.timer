@@ -1,0 +1,12 @@
+# bootc-updater.timer — comprueba canal OTA cada 12h con jitter.
+
+[Unit]
+Description=Hermes OTA Updater periodic check
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=4h
+Persistent=yes
+
+[Install]
+WantedBy=timers.target

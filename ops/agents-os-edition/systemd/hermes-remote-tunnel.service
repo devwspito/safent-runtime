@@ -1,0 +1,79 @@
+# hermes-remote-tunnel.service — túnel SALIENTE named (cloudflared tunnel run)
+# con credencial aportada por el usuario en RUNTIME, NO horneada en la imagen.
+#
+# NAMED TUNNEL (opt-in, no quick-tunnel):
+# El túnel a internet es una decisión del operador — no se activa sin configuración
+# explícita. La URL es estable (subdomain del tunnel, no efímera trycloudflare.com).
+#
+# CÓMO APORTAR EL TOKEN (elige uno):
+#   Opción A — systemd credential (recomendado, más seguro):
+#     Deposita el token en /etc/hermes/credentials/cloudflare-tunnel.token (0600 root).
+#     La unit lo lee via LoadCredential= como variable CLOUDFLARED_TUNNEL_TOKEN.
+#
+#   Opción B — archivo plano con permisos estrictos:
+#     echo "<token>" > /etc/hermes/credentials/cloudflare-tunnel.token
+#     chmod 0600 /etc/hermes/credentials/cloudflare-tunnel.token
+#     chown root:root /etc/hermes/credentials/cloudflare-tunnel.token
+#
+# CÓMO OBTENER EL TOKEN:
+#   1. cloudflared tunnel create agents-os-<nombre>
+#   2. cloudflared tunnel token agents-os-<nombre>   (copia el JWT resultante)
+#   3. Deposita el JWT en /etc/hermes/credentials/cloudflare-tunnel.token
+#   4. Configura el ingress en el Cloudflare dashboard (o config.yml):
+#        ingress: [{hostname: <tudominio>, service: http://localhost:6080}]
+#
+# FAIL-SAFE: si el archivo de credencial NO existe, el servicio falla con
+# ConditionPathExists= → systemd lo marca como "condition not met" (no error),
+# NO abre ningún túnel, NO expone el dispositivo a internet. La sesión noVNC
+# local (LAN, puerto 6080) sigue disponible sin túnel.
+#
+# ACCESO LOCAL (LAN) sin túnel:
+#   http://<ip-local>:6080/vnc.html   (noVNC vía hermes-novnc.service)
+[Unit]
+Description=Hermes Remote Tunnel (cloudflared named tunnel — opt-in con credencial)
+After=network-online.target hermes-novnc.service
+Wants=network-online.target
+# Túnel activo solo si el operador depositó su token (opt-in explícito).
+# Sin token = sin túnel = sin exposición a internet. No es un error de servicio.
+ConditionPathExists=/etc/hermes/credentials/cloudflare-tunnel.token
+# Si el túnel cae, DEBE volver (el token sigue presente). StartLimitIntervalSec=0
+# desactiva el límite de reintentos → systemd reinicia indefinidamente.
+# Desactivar a propósito exige consentimiento humano (UI + contraseña).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Hardening idéntico al anterior (SECURITY FIX finding #8).
+DynamicUser=yes
+RuntimeDirectory=hermes-remote-tunnel
+RuntimeDirectoryMode=0700
+
+# El token se lee del archivo de credencial en /etc/hermes/credentials/ (0600 root).
+# LoadCredential= lo expone al proceso como variable de entorno CLOUDFLARED_TUNNEL_TOKEN.
+# cloudflared lee TUNNEL_TOKEN (o --token) desde el entorno — NO desde el cmdline,
+# donde sería visible en `ps aux` y en el journal (CWE-214).
+LoadCredential=cloudflare-tunnel.token:/etc/hermes/credentials/cloudflare-tunnel.token
+ExecStart=/bin/sh -c 'exec /usr/bin/cloudflared tunnel --no-autoupdate run \
+    --token "$(cat ${CREDENTIALS_DIRECTORY}/cloudflare-tunnel.token)"'
+
+Restart=always
+RestartSec=5
+
+# ── Hardening systemd (SECURITY FIX finding #8) ──────────────────────────────
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

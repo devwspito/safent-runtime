@@ -1,0 +1,7 @@
+# Agents OS — sin animaciones de UI por defecto.
+# El SO se usa casi siempre por remoto (noVNC sobre framebuffer renderizado por
+# software, sin GPU 3D). Las transiciones de libadwaita capturadas a medias por
+# VNC producen "fantasmas"/dobles. Desactivar animaciones = render limpio + más
+# fluido en remoto. El usuario puede reactivarlas si corre en hardware con GPU.
+[org.gnome.desktop.interface]
+enable-animations=false

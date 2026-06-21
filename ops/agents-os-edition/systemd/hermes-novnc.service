@@ -1,0 +1,27 @@
+# hermes-novnc.service — sirve noVNC (cliente VNC web) puenteando el VNC de GRD
+# (127.0.0.1:5900) a WebSocket + página web en 127.0.0.1:6080. Lo expone cloudflared
+# (origen loopback) tras Cloudflare Access. NUNCA directo en 0.0.0.0/LAN.
+[Unit]
+Description=Hermes noVNC (espejo de la sesión por navegador)
+After=network-online.target
+Wants=network-online.target
+
+# Acceso remoto crítico: reinicio indefinido, nunca se rinde (kill repetido
+# se recupera). Desactivar a propósito = consentimiento humano (UI + contraseña).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# SECURITY: bind explícito a 127.0.0.1 (no 0.0.0.0). Mismo data-path → latencia,
+# teclado y clipboard idénticos; solo se elimina la exposición de red directa.
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc 127.0.0.1:6080 127.0.0.1:5900
+Restart=always
+RestartSec=3
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Backend Linux/Wayland del toolset NATIVO `computer_use` de Hermes.
+# hermes-agent lo lanza como `$HERMES_CUA_DRIVER_CMD mcp` (servidor MCP stdio).
+exec /usr/bin/python3 -m hermes.lumen.cua_driver "$@"

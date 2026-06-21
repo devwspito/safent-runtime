@@ -1,0 +1,1 @@
+"""hermes-whisper service package."""

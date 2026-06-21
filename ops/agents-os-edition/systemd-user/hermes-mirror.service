@@ -1,0 +1,55 @@
+# hermes-mirror.service (USER) — espejo + control nativo de la sesión Hermes
+# Shell por WebSocket. Captura vía mutter ScreenCast + input vía mutter
+# RemoteDesktop.
+#
+# AUTH LAYERS:
+#   Layer 1 — per-session token (/etc/hermes/remote-token, ≥128-bit entropy).
+#              Generated at first boot by hermes-remote-token-gen.service.
+#              Verified with hmac.compare_digest (constant-time).
+#   Layer 2 — Cloudflare Access RS256 JWT verification.
+#              Reads /etc/hermes/cf-access.env for CF_ACCESS_TEAM_DOMAIN and
+#              CF_ACCESS_AUD. Service REFUSES to start if these are absent
+#              (fail-closed), unless HERMES_MIRROR_CF_ACCESS_BYPASS_LOCAL=true
+#              is set (local/LAN-only mode, no tunnel).
+#
+# OPERATOR SETUP (once, post-install):
+#   1. Create your Cloudflare Access application (see docs below).
+#   2. Copy the AUD tag from Access app settings.
+#   3. Write /etc/hermes/cf-access.env:
+#          CF_ACCESS_TEAM_DOMAIN=your-team.cloudflareaccess.com
+#          CF_ACCESS_AUD=<64-char AUD tag>
+#   4. Set permissions: chmod 0640 /etc/hermes/cf-access.env
+#                       chown root:hermes /etc/hermes/cf-access.env
+#   5. systemctl --user restart hermes-mirror
+#
+# Corre en la sesión hermes-user (--global enable). Lo expone cloudflared.
+[Unit]
+Description=Hermes Mirror (espejo + control de la sesión por WebSocket)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m hermes.shell_server.mirror --systemd-notify
+Restart=always
+RestartSec=3
+
+# Load CF Access config from file (operator-provided post-install).
+# The file must not exist in the baked image — it is instance-specific.
+# If the file is absent, the entrypoint checks env vars instead.
+# EnvironmentFile with a - prefix: no error if the file is absent.
+# The entrypoint's _check_cf_access_config() enforces fail-closed
+# when neither file nor env vars are set.
+EnvironmentFile=-/etc/hermes/cf-access.env
+
+# Sandboxing: mirror runs as hermes-user (session service).
+# It needs: read access to /etc/hermes (token + cf-access.env); session D-Bus
+# uses abstract UNIX sockets (no filesystem path needed). No FS writes.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+# /etc/hermes is mounted read-only under ProtectSystem=strict.
+ReadOnlyPaths=/etc/hermes
+
+[Install]
+WantedBy=default.target

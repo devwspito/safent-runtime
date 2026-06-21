@@ -1,0 +1,35 @@
+#!/bin/sh
+# hermes-tunnel-url — captura la URL pública efímera que asigna cloudflared y
+# compone la URL completa de acceso a noVNC (cliente VNC web sobre el VNC de
+# gnome-remote-desktop).
+#
+# SECURITY FIX (finding #2): la contraseña VNC ya NO va en la query string de la
+# URL. Incluirla en la URL la expone en:
+#   - logs del servidor HTTP/WebSocket (Referer, access_log)
+#   - logs del navegador del cliente
+#   - historiales de browser y URLs guardadas
+#   - el túnel cloudflared que puede ver la URL completa
+# noVNC soporta autenticación por contraseña interactiva (diálogo) sin necesidad
+# de ponerla en la URL. Se publica solo la URL base; el operador introduce la
+# contraseña manualmente o el dashboard la muestra de forma segura.
+URLF=/var/lib/hermes/remote-url
+CREDF=/var/lib/hermes/remote-access.txt
+mkdir -p /var/lib/hermes
+
+journalctl -u hermes-remote-tunnel.service -f -n 80 --output cat 2>/dev/null | while IFS= read -r line; do
+    base=$(printf '%s\n' "$line" | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | head -1)
+    [ -n "$base" ] || continue
+    # URL sin contraseña — noVNC pedirá la contraseña de forma interactiva.
+    full="$base/vnc.html?autoconnect=true&resize=scale&reconnect=true"
+    printf '%s\n' "$full" > "$URLF"
+    {
+        echo "==== Acceso remoto Hermes OS — noVNC (escritorio en vivo) ===="
+        echo "Abre en CUALQUIER navegador, en CUALQUIER red:"
+        echo "  $full"
+        echo "(noVNC sobre gnome-remote-desktop: teclado, ratón y PORTAPAPELES"
+        echo " nativos. Introduce la contraseña VNC cuando el navegador la solicite."
+        echo " La contraseña se encuentra en /etc/hermes/remote-vnc-password"
+        echo " (solo accesible con sesión local). URL efímera: cambia si"
+        echo " reinicia el túnel.)"
+    } > "$CREDF"
+done

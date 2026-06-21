@@ -1,0 +1,10 @@
+# agents-os.slice — T021 — cgroup v2 root para procesos críticos del agente.
+
+[Unit]
+Description=Agents OS slice (24/7 invariants + cgroup v2 protection)
+
+[Slice]
+MemoryMin=512M
+MemoryHigh=80%
+CPUWeight=200
+IOWeight=200

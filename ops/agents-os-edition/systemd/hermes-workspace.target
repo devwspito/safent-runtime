@@ -1,0 +1,8 @@
+# hermes-workspace.target — agrupa unidades del agente (heredado spec 002).
+
+[Unit]
+Description=Hermes Workspace (heredado spec 002)
+After=multi-user.target
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,50 @@
+# MIME default associations for LumenSO — baked into /usr/share/applications/mimeapps.list.
+# xdg-open (used by sysManager.openFile) resolves defaults from this file.
+# Priority: this system-wide file; per-user overrides in $XDG_CONFIG_HOME/mimeapps.list.
+# NOMBRES .desktop REALES (Fedora 38+): evince=org.gnome.Evince.desktop, eog=org.gnome.eog.desktop.
+[Default Applications]
+# PDF
+application/pdf=org.gnome.Evince.desktop
+
+# Office documents (LibreOffice)
+application/msword=libreoffice-writer.desktop
+application/vnd.openxmlformats-officedocument.wordprocessingml.document=libreoffice-writer.desktop
+application/vnd.ms-excel=libreoffice-calc.desktop
+application/vnd.openxmlformats-officedocument.spreadsheetml.sheet=libreoffice-calc.desktop
+application/vnd.ms-powerpoint=libreoffice-impress.desktop
+application/vnd.openxmlformats-officedocument.presentationml.presentation=libreoffice-impress.desktop
+application/vnd.oasis.opendocument.text=libreoffice-writer.desktop
+application/vnd.oasis.opendocument.spreadsheet=libreoffice-calc.desktop
+application/vnd.oasis.opendocument.presentation=libreoffice-impress.desktop
+application/vnd.oasis.opendocument.graphics=libreoffice-draw.desktop
+application/rtf=libreoffice-writer.desktop
+text/csv=libreoffice-calc.desktop
+
+# Images (eog — Eye of GNOME, lightweight, no gnome-shell dep)
+image/png=org.gnome.eog.desktop
+image/jpeg=org.gnome.eog.desktop
+image/gif=org.gnome.eog.desktop
+image/webp=org.gnome.eog.desktop
+image/svg+xml=org.gnome.eog.desktop
+image/bmp=org.gnome.eog.desktop
+image/tiff=org.gnome.eog.desktop
+image/x-png=org.gnome.eog.desktop
+
+[Added Associations]
+application/pdf=org.gnome.Evince.desktop;
+application/msword=libreoffice-writer.desktop;
+application/vnd.openxmlformats-officedocument.wordprocessingml.document=libreoffice-writer.desktop;
+application/vnd.ms-excel=libreoffice-calc.desktop;
+application/vnd.openxmlformats-officedocument.spreadsheetml.sheet=libreoffice-calc.desktop;
+application/vnd.ms-powerpoint=libreoffice-impress.desktop;
+application/vnd.openxmlformats-officedocument.presentationml.presentation=libreoffice-impress.desktop;
+application/vnd.oasis.opendocument.text=libreoffice-writer.desktop;
+application/vnd.oasis.opendocument.spreadsheet=libreoffice-calc.desktop;
+application/vnd.oasis.opendocument.presentation=libreoffice-impress.desktop;
+image/png=org.gnome.eog.desktop;
+image/jpeg=org.gnome.eog.desktop;
+image/gif=org.gnome.eog.desktop;
+image/webp=org.gnome.eog.desktop;
+image/svg+xml=org.gnome.eog.desktop;
+image/bmp=org.gnome.eog.desktop;
+image/tiff=org.gnome.eog.desktop;

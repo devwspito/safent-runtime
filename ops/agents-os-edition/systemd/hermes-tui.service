@@ -1,0 +1,72 @@
+# hermes-tui.service — Lumen Terminal on the console (terminal-only variant).
+#
+# Runs the Textual TUI as the operator (hermes-user, uid 1000) directly on
+# /dev/tty1. No compositor, no GUI: this is the appliance's whole face. The TUI
+# is a pure client of org.hermes.Runtime1 on the SYSTEM bus — the FULL security
+# kernel (daemon/broker, browser netns+egress confinement, signed audit, consent
+# gate, HITL) is identical to the desktop; only the presentation differs.
+#
+# Authorship = bus sender_uid (uid 1000), resolved server-side (CWE-862). The
+# D-Bus policy (org.hermes.Runtime1.conf) authorizes user="hermes-user" for the
+# verbs + signal receipt, exactly as it does for the QML shell.
+
+[Unit]
+Description=Lumen Terminal — Hermes TUI (consola)
+Documentation=file:///usr/share/hermes/
+# Start once the daemon is up so the first paint shows real state, not "conectando".
+After=hermes-runtime-ready.target systemd-user-sessions.service
+Wants=hermes-runtime-ready.target
+# Own tty1 instead of a login getty.
+Conflicts=getty@tty1.service
+After=getty@tty1.service
+
+[Service]
+Type=simple
+User=hermes-user
+Group=hermes
+# HOME under /var (writable, persists across ostree) — Textual caches/config.
+# Mirrors the HERMES_HOME lesson: never point HOME at a masked/read-only path.
+Environment=HOME=/var/lib/hermes/tui-home
+Environment=TERM=xterm-256color
+Environment=COLORTERM=truecolor
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/var/lib/hermes/tui-home
+
+# Bind to the console.
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal
+
+# Run as a module (python3 -m) — the bootc/pip --target install does not create
+# reliable console_scripts on PATH; the module form always resolves.
+ExecStart=/usr/bin/python3 -m hermes.tui.main
+
+# The TUI is the appliance face: if it exits, bring it back.
+Restart=always
+RestartSec=2
+
+# Hardening — least privilege for a UI client. It only needs the system bus +
+# the task socket (group hermes) and a writable HOME. No new privileges, no caps,
+# no inet sockets, read-only system. (SystemCallFilter/MemoryDenyWriteExecute are
+# intentionally omitted — they can break CPython/Textual; the rest is safe.)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hermes/tui-home
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+ProtectClock=yes
+ProtectHostname=yes
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

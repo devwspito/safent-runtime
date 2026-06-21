@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# agents-os-rdp-bootstrap — primer boot setup de XRDP.
+#
+# Ejecuta UNA VEZ (verifica flag) en el primer boot:
+#   1. Genera password aleatorio para hermes-user (PAM auth de XRDP)
+#   2. Configura sesión XFCE como default para XRDP
+#   3. Persiste credenciales + imprime banner al serial/tty1
+
+set -euo pipefail
+
+CREDS_FILE="/etc/agents-os/rdp-credentials"
+FLAG_FILE="/var/lib/agents-os/install/rdp-bootstrapped"
+USER="hermes-user"
+
+mkdir -p /etc/agents-os
+mkdir -p "$(dirname "$FLAG_FILE")"
+
+# 1) Password aleatorio (16 chars sin ambigüedades).
+PASSWORD=$(tr -dc 'A-HJ-NP-Z2-9' < /dev/urandom | head -c 16)
+echo "${USER}:${PASSWORD}" | chpasswd
+
+# 2) Configurar sesión XFCE para XRDP (Xsession script del user).
+HOME_DIR=$(getent passwd "${USER}" | cut -d: -f6)
+if [[ -d "$HOME_DIR" ]]; then
+  cat > "$HOME_DIR/.xsession" <<'XSESSION'
+#!/bin/sh
+exec /usr/bin/startxfce4
+XSESSION
+  chmod +x "$HOME_DIR/.xsession"
+  chown "${USER}:${USER}" "$HOME_DIR/.xsession"
+fi
+
+# 3) Persistir creds + banner.
+umask 077
+IP=$(hostname -I | awk '{print $1}')
+cat > "$CREDS_FILE" <<EOF
+# Agents OS Edition — RDP credentials (first boot)
+RDP_HOST=${IP}:3389
+RDP_USER=${USER}
+RDP_PASSWORD=${PASSWORD}
+GENERATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+chmod 0600 "$CREDS_FILE"
+
+BANNER="
+================================================================================
+ Agents OS Edition — Remote Desktop credentials (FIRST BOOT)
+================================================================================
+  Host       : ${IP}:3389
+  Username   : ${USER}
+  Password   : ${PASSWORD}
+
+  Connect with any RDP client (Microsoft Remote Desktop / Remmina /
+  GNOME Connections / iOS+Android RDP apps).
+
+  Credentials at ${CREDS_FILE}
+  Rotate later with: passwd ${USER}
+================================================================================
+"
+for tty in /dev/tty1 /dev/ttyAMA0 /dev/console; do
+  [[ -w "$tty" ]] && echo "$BANNER" > "$tty" 2>/dev/null || true
+done
+echo "$BANNER" >&2
+
+touch "$FLAG_FILE"
+echo "agents-os-rdp-bootstrap completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)"

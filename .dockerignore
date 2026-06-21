@@ -1,0 +1,33 @@
+# .dockerignore — mirrors .containerignore for docker build compatibility.
+# Keep in sync with .containerignore.
+
+.git/
+.gitignore
+
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.egg-info/
+**/*.egg-link
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+.venv/
+venv/
+env/
+
+build/
+*.tar.gz
+
+.env
+.env.*
+*.local
+
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+tests/

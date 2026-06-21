@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+# hermes-passwd-apply — privileged root oneshot that verifies the current
+# device password (PAM) and applies a new one on behalf of the compositor
+# (User=hermes-user, non-root).
+#
+# Triggered by hermes-passwd-apply.path watching
+# /run/hermes/remote-control/passwd-request.json.
+#
+# This script MUST run as root (hermes-passwd-apply.service).
+#
+# Security invariants:
+#   - Both 'current' and 'new' passwords are in the staged file ONLY; they
+#     are never logged, never passed as argv.
+#   - The staged file is opened with O_NOFOLLOW and fstat-verified (uid, mode,
+#     nlink) before reading — prevents symlink/substitution attacks.
+#   - 'current' is PAM-verified before any chpasswd call. FAIL-CLOSED on
+#     any error.
+#   - 'new' is validated for chpasswd safety (length + no C0/DEL control
+#     chars that could inject a second 'user:pass' entry via newline).
+#   - The staged file is shredded (overwritten + unlinked) in a finally block
+#     whether the action succeeds or fails — both passwords leave RAM only.
+#   - The action is repeatable (no sentinel): a transient failure can be
+#     retried by the user.
+#   - Unknown actions are silently rejected (shredded, no chpasswd call).
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import pwd
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+logging.basicConfig(
+    format="%(levelname)s hermes-passwd-apply: %(message)s",
+    level=logging.INFO,
+    stream=sys.stderr,
+)
+logger = logging.getLogger("hermes-passwd-apply")
+
+# --------------------------------------------------------------------------
+# Constants
+# --------------------------------------------------------------------------
+
+STAGE_DIR = Path(
+    os.environ.get("HERMES_REMOTE_CONTROL_DIR", "/run/hermes/remote-control")
+)
+STAGE_FILE = STAGE_DIR / "passwd-request.json"
+
+# The interactive login user whose password is managed here.
+# Same constant as hermes-account-apply and hermes-remote-access-control.
+LOGIN_USER = "hermes-user"
+
+_EXPECTED_FILE_MODE = 0o600
+_PASSWORD_MIN = 8
+_PASSWORD_MAX = 256
+# C0 control characters (0x00–0x1F) and DEL (0x7F) are forbidden.
+# chpasswd reads stdin as 'user:pass\n'; a newline in the password would
+# inject a second entry and could cause arbitrary account takeover.
+_CTRL_LOWER = 0x20
+_CTRL_DEL = 0x7F
+
+
+# --------------------------------------------------------------------------
+# Helpers — password validation
+# --------------------------------------------------------------------------
+
+
+def _validate_password(password: str) -> bool:
+    """Return True only when password is safe to pass to chpasswd via stdin.
+
+    Rejects passwords outside [8, 256] chars and any C0/DEL control character.
+    Mirrors hermes-account-apply._validate_password exactly (defence-in-depth).
+    """
+    if not (_PASSWORD_MIN <= len(password) <= _PASSWORD_MAX):
+        return False
+    return not any(ord(c) < _CTRL_LOWER or ord(c) == _CTRL_DEL for c in password)
+
+
+# --------------------------------------------------------------------------
+# Helpers — file handling (mirrors hermes-remote-access-control exactly)
+# --------------------------------------------------------------------------
+
+
+def _hermes_uid() -> int:
+    # The staging is done by the COMPOSITOR (hermes-user), not the daemon.
+    return pwd.getpwnam("hermes-user").pw_uid
+
+
+def _read_staged() -> dict:
+    """Read and parse the staged request JSON with TOCTOU mitigations.
+
+    Validates:
+      - O_NOFOLLOW — refuses symlinks
+      - st_uid == uid(hermes-user)
+      - st_mode == 0o600
+      - st_nlink == 1
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    try:
+        fd = os.open(str(STAGE_FILE), flags)
+    except OSError as exc:
+        raise ValueError(f"cannot open staged file: {exc}") from exc
+
+    try:
+        st = os.fstat(fd)
+    except OSError as exc:
+        os.close(fd)
+        raise ValueError(f"fstat failed: {exc}") from exc
+
+    try:
+        expected_uid = _hermes_uid()
+    except KeyError as exc:
+        os.close(fd)
+        raise ValueError("system user 'hermes-user' not found") from exc
+
+    if st.st_uid != expected_uid:
+        os.close(fd)
+        raise ValueError(
+            f"staged file uid {st.st_uid} != hermes-user uid {expected_uid} — refusing"
+        )
+    if stat.S_IMODE(st.st_mode) != _EXPECTED_FILE_MODE:
+        os.close(fd)
+        raise ValueError(
+            f"staged file mode {oct(stat.S_IMODE(st.st_mode))} != "
+            f"{oct(_EXPECTED_FILE_MODE)} — refusing"
+        )
+    if st.st_nlink != 1:
+        os.close(fd)
+        raise ValueError(
+            f"staged file has {st.st_nlink} hard links (expected 1) — refusing"
+        )
+
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise ValueError(f"cannot read staged file: {exc}") from exc
+
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("staged file is not a JSON object")
+    return data
+
+
+def _shred(path: Path) -> None:
+    """Overwrite file content with zeros then unlink.
+
+    On /run (tmpfs) the unlink alone clears the data from RAM.
+    The overwrite is kept as defence-in-depth for potential non-tmpfs mounts.
+    Mirrors hermes-account-apply._shred and hermes-remote-access-control._shred.
+    """
+    try:
+        size = path.stat().st_size
+        with path.open("r+b") as fh:
+            fh.write(b"\x00" * max(size, 1))
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        pass
+    finally:
+        path.unlink(missing_ok=True)
+
+
+# --------------------------------------------------------------------------
+# Helpers — PAM verification (copied verbatim from hermes-remote-access-control)
+# --------------------------------------------------------------------------
+
+
+def _account_has_real_password(username: str) -> bool:
+    """True only if *username* has a REAL password (not empty, not locked).
+
+    Reads /etc/shadow directly (root). Hash locked ('!'/'*') or empty → False.
+    """
+    try:
+        with open("/etc/shadow", encoding="utf-8") as f:
+            for line in f:
+                parts = line.rstrip("\n").split(":")
+                if parts and parts[0] == username:
+                    pwhash = parts[1] if len(parts) > 1 else ""
+                    return bool(pwhash) and not pwhash.startswith(("!", "*"))
+    except OSError as exc:
+        logger.warning("no se pudo leer /etc/shadow: %s", type(exc).__name__)
+        return False
+    return False
+
+
+def _verify_password_unix_chkpwd(username: str, password: str) -> bool:
+    """Call /usr/sbin/unix_chkpwd <username> nonull with password on stdin.
+
+    Returns True on rc=0, False on anything else. Fail CLOSED on subprocess error.
+    """
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/unix_chkpwd", username, "nonull"],
+            input=password.encode("utf-8"),
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception as exc:
+        logger.warning("unix_chkpwd failed: %s", type(exc).__name__)
+        return False
+
+
+def _verify_password_pam(username: str, password: str) -> bool:
+    """Verify *username*:*password* via PAM. Fails CLOSED on any error."""
+    if not password:
+        logger.warning("rechazada verificación con contraseña vacía")
+        return False
+    if not _account_has_real_password(username):
+        logger.warning(
+            "cuenta %s sin contraseña válida (passwordless/locked) — "
+            "verificación FAIL-CLOSED",
+            username,
+        )
+        return False
+    try:
+        import pam as _pam
+
+        authenticator = _pam.pam()
+        if authenticator.authenticate(username, password, service="hermes-auth"):
+            return True
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.warning("pam verify error (python-pam): %s", type(exc).__name__)
+
+    return _verify_password_unix_chkpwd(username, password)
+
+
+# --------------------------------------------------------------------------
+# Helpers — chpasswd (copied from hermes-account-apply._set_password)
+# --------------------------------------------------------------------------
+
+
+def _set_password(username: str, password: str) -> None:
+    """Pipe 'username:password' to chpasswd via stdin — never via argv."""
+    entry = f"{username}:{password}"
+    result = subprocess.run(
+        ["/usr/sbin/chpasswd"],
+        input=entry.encode(),
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr_safe = result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"chpasswd failed (rc={result.returncode}): {stderr_safe}")
+
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
+
+
+def _apply(staged: dict) -> int:
+    action = staged.get("action", "")
+
+    if action != "change_password":
+        logger.error(
+            "unknown action %r — ignoring (valid: change_password)", action
+        )
+        return 1
+
+    current = staged.get("current", "")
+    new = staged.get("new", "")
+
+    if not isinstance(current, str) or not current:
+        logger.error("change_password: 'current' field missing or empty — aborting")
+        return 1
+
+    if not isinstance(new, str) or not _validate_password(new):
+        logger.error(
+            "change_password: 'new' password failed validation "
+            "(length 8-256, no control chars) — aborting"
+        )
+        return 1
+
+    if not _verify_password_pam(LOGIN_USER, current):
+        # WARNING not ERROR: wrong password is expected from an attacker probing.
+        logger.warning(
+            "change_password: PAM verification of current password FAILED "
+            "for user '%s' — aborting",
+            LOGIN_USER,
+        )
+        return 1
+
+    logger.info(
+        "change_password: PAM verification passed — applying new password for '%s'",
+        LOGIN_USER,
+    )
+    try:
+        _set_password(LOGIN_USER, new)
+    except RuntimeError as exc:
+        logger.error("change_password: chpasswd failed: %s", exc)
+        return 1
+
+    logger.info("change_password: password updated successfully for '%s'", LOGIN_USER)
+    return 0
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        logger.error("must run as root")
+        return 1
+
+    if not STAGE_FILE.exists():
+        logger.info("no staged passwd request — nothing to do")
+        return 0
+
+    staged = None
+    try:
+        staged = _read_staged()
+    except Exception as exc:
+        logger.error("failed to parse staged passwd request: %s", exc)
+        _shred(STAGE_FILE)
+        return 1
+
+    try:
+        return _apply(staged)
+    finally:
+        # Always shred — both 'current' and 'new' must not persist on disk.
+        _shred(STAGE_FILE)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,40 @@
+# FASE 0/1 — build OpenShell (the confinement substrate) for ARM64.
+# Validates the build with system z3 (apt, no source-build) + produces the binaries
+# we will COPY into the lumen image (multi-stage). Pinned-clone for reproducibility.
+#
+# Build:  podman build -f ops/agent-cage/Containerfile.openshell-build -t openshell-build:dev .
+# Extract: podman create + cp the /out binaries.
+FROM docker.io/library/rust:1-bookworm AS build
+
+# OpenShell build deps: z3 dev (prover/policy), clang+libclang (bindgen), cmake,
+# protoc (gRPC/Tonic), ssl, libc headers. clang's builtin resource headers (stddef.h)
+# come with the full `clang` + `llvm` packages — the host build failed precisely
+# because those were misaligned; a clean container has a consistent toolchain.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libz3-dev clang llvm-dev libclang-dev cmake pkg-config protobuf-compiler \
+        libssl-dev libc6-dev git \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG OPENSHELL_REF=main
+RUN git clone --depth 1 --branch "${OPENSHELL_REF}" https://github.com/NVIDIA/OpenShell /src 2>/dev/null \
+    || git clone --depth 1 https://github.com/NVIDIA/OpenShell /src
+WORKDIR /src
+
+# Gateway (server) + CLI + sandbox supervisor. Drivers/policy/providers/supervisor-network
+# come in as deps of the server. (Prover/z3 uses system libz3-dev installed above.)
+# Dynamic resource-dir so bindgen finds clang's builtin headers (stddef.h) on any
+# clang version (the host build failed here; a clean toolchain + this make it robust).
+RUN export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(clang -print-resource-dir)/include" && \
+    cargo build --release \
+        -p openshell-server \
+        -p openshell-cli \
+        -p openshell-sandbox
+
+# Collect the produced binaries (names resolved at build; copy the whole release bin set).
+RUN mkdir -p /out && \
+    find target/release -maxdepth 1 -type f -executable ! -name "*.so" \
+        -exec sh -c 'for f; do case "$(basename "$f")" in openshell*) cp "$f" /out/;; esac; done' _ {} + && \
+    ls -la /out
+
+FROM scratch AS export
+COPY --from=build /out/ /

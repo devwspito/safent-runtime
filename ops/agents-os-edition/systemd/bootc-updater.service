@@ -1,0 +1,18 @@
+# bootc-updater.service — T043 — FR-008/FR-050 (OTA monotonic + revocation cache).
+
+[Unit]
+Description=Hermes OTA Updater (bootc + cosign verify-at-pull)
+After=network-online.target chrony.service
+Requires=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/bootc-updater check-and-stage
+Slice=agents-os.slice
+MemoryMax=2G
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+# bootc requiere acceso a / para staging del slot B + a la red para OCI pull.
+ReadWritePaths=/var/lib/containers /etc /var/cache/bootc

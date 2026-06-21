@@ -1,0 +1,21 @@
+[Desktop Entry]
+# hermes-tasks.desktop — T048 feature 014 (agentic desktop).
+#
+# Capability app: Cola de Tareas del agente.
+# Supervision + HITL governance only. No effectors. No broker calls. No HTTP.
+#
+# D-Bus verbs: ListRecentTasks, ListPending, ApproveAction, RejectAction.
+# Authorship by sender_uid (CWE-862). Never calls run_cycle.
+Version=1.0
+Name=Tareas — Hermes
+Name[es]=Tareas — Hermes
+Comment=Cola de trabajo del agente (supervisión y aprobaciones HITL)
+Comment[es]=Cola de trabajo del agente (supervisión y aprobaciones HITL)
+Exec=python3 -m hermes.lumen.apps.tasks
+Icon=hermes-tasks
+Terminal=false
+Type=Application
+Categories=Utility;System;
+StartupNotify=true
+StartupWMClass=hermes-tasks
+Keywords=hermes;tasks;tareas;agente;HITL;aprobaciones;

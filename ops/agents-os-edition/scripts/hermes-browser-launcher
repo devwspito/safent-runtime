@@ -1,0 +1,680 @@
+#!/usr/bin/env python3
+"""hermes-browser-launcher — root helper that spawns the confined browser.
+
+Runs as root (CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_RESOURCE).
+Listens on a root-owned AF_UNIX socket (/run/hermes/browser-launch.sock,
+group=hermes, mode 0660). Accepts launch requests from the unprivileged hermes
+daemon, validates the caller via SO_PEERCRED, then execs systemd-run --scope
+with a HARDCODED property template — the caller cannot widen its own scope.
+
+Wire protocol: 4-byte big-endian length-prefix + UTF-8 JSON.
+
+Request fields (ONLY these two come from the caller — everything else is
+server-hardcoded to prevent privilege escalation):
+    session_name:      str  — must match ^exec-[a-z0-9]+$
+    domains_whitelist: list[str]  — forwarded to the jail env as-is (no security
+                                    impact: the proxy enforces the whitelist, not
+                                    the launcher; the caller cannot widen scope
+                                    by lying here — the nft policy is independent)
+
+Response: {"ok": true} or {"ok": false, "error": "<reason>"}
+
+Safety invariants:
+  - SO_PEERCRED: rejects callers not in group hermes (uid check would be
+    redundant; the socket mode 0660 + gid hermes is the first gate).
+  - Session name regex: ^exec-[a-z0-9]+$ — blocks path-traversal in unit names
+    and ReadWritePaths.
+  - ALL systemd-run properties are HARDCODED here — no caller-supplied -p flags.
+  - If the netns /run/netns/hermes-browser does not exist, the jail script itself
+    will abort (fail-closed). The launcher does not need to double-check.
+  - The launcher failing does NOT break OS boot — it is NOT in the
+    Before=hermes-runtime.service dependency chain.
+
+Design: specs/009-radiografia-os/kernel-browser-confinement-design.md §B
+"""
+
+from __future__ import annotations
+
+import grp
+import json
+import logging
+import os
+import pwd
+import re
+import signal
+import socket
+import struct
+import subprocess
+import sys
+from pathlib import Path
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+_SOCK_PATH = Path("/run/hermes/browser-launch.sock")
+_JAIL_SCRIPT = "/usr/libexec/hermes/browser-jail"
+_NETNS_PATH = "/run/netns/hermes-browser"
+_BROWSER_SESSIONS_BASE = "/var/lib/hermes/browser-sessions"
+_SLICE = "agents-os-browser.slice"
+# Session names parameterize the user-data-dir path + the transient unit name, so
+# they MUST stay a strict allowlist (no `/`, `..`, no shell metachars) to block
+# path-traversal / unit-name injection. Two prefixes are legitimate: `exec-<id>`
+# (per-task isolated execution sessions) and `teaching-<name>` (the owner's browser
+# teaching session, agent_browser._TEACHING_SESSION_NAME = "teaching-chromium").
+# The browser hardening tightened this to exec- only, which broke teaching; both
+# prefixes are restored here, still constrained to [a-z0-9-] segments.
+_SESSION_RE = re.compile(r"^(?:exec|teaching)-[a-z0-9]{1,64}$")
+_MAX_FRAME_BYTES = 16_384
+_LOG_TAG = "hermes-browser-launcher"
+
+# Browser argv geometry — owned ENTIRELY by the launcher (the privilege
+# boundary), NEVER taken from the wire. A compromised hermes-gid caller must not
+# be able to inject confinement-breaking Chromium flags (--proxy-server override,
+# --disable-web-security, --load-extension, --remote-debugging-address=0.0.0.0,
+# --user-data-dir escape, …). Only the regex-validated session_name parameterizes
+# the per-session user-data dir. (security review HIGH-1, 2026-06-15.)
+_CHROMIUM_BIN = "/usr/bin/chromium-browser"
+_CDP_PORT = 9333
+_CDP_BIND_ADDR = "10.200.0.2"          # netns veth IP; CDP reachable only from 10.200.0.1
+_EGRESS_PROXY_URL = "http://10.200.0.1:3128"  # forced egress through the audited proxy
+
+# ── Landlock self-apply exec shim (security review HIGH: FS jail was a no-op) ──
+# THE BUG: hermes-browser-jail ran `python3 -m hermes.security.landlock_loader
+# BROWSER` as a SEPARATE CHILD process. A Landlock ruleset only governs the
+# process that called landlock_restrict_self() and its fork/exec descendants — so
+# the ruleset died with that short-lived child and the Chromium binary the jail
+# exec'd afterwards inherited NOTHING. A renderer 0-day therefore had the full
+# host FS, not the session dir. (The hermes-os chromium.service ExecStartPre=
+# apply-landlock has the identical defect for the same reason.)
+#
+# THE FIX: Chromium must be the exec descendant of the process that restricts
+# itself. This shim is exec'd in Chromium's place; it applies the BROWSER ruleset
+# to ITS OWN process via the existing loader (load_and_apply restricts self), then
+# os.execv()s the real Chromium. After execv the kernel keeps the Landlock domain
+# bound to the new program image — Chromium runs FS-confined to its session dir +
+# the minimal allow-listed paths. load_and_apply is fail-closed on a kernel that
+# has Landlock-but-seccomp-blocked (returns non-zero → shim exits → no browser);
+# only genuine kernel-absence soft-degrades (matching the jail's existing policy).
+#
+# PASS-3 (red-team 2026-06-19) — re-namespacing escape closed AT THE PRODUCTION
+# LAYER. The argument-level CLONE_NEWUSER masking that denies the
+# renderer-RCE -> unshare/clone/clone3/setns(CLONE_NEWUSER) -> CAP_SYS_ADMIN
+# kernel-LPE staging primitive was wired (PASS-2) into ops/container/seccomp/
+# lumen.json and ops/hermes-os/seccomp/chromium.json. NEITHER is loaded on the
+# agents-os-edition / LumenSO path that ACTUALLY runs in production: that path is
+# launcher -> systemd-run -> hermes-browser-jail -> THIS shim -> execv(chromium),
+# and its only syscall backstop is the systemd SystemCallFilter, which can mask
+# WHOLE syscalls but CANNOT argument-mask the CLONE_NEWUSER flag on clone()/clone3().
+#
+# THE FIX (same inheritance model as the Landlock domain): the shim installs a
+# seccomp-bpf filter on ITS OWN process from ops/agents-os-edition/seccomp/
+# chromium-browser.json, then execv()s Chromium — so the kernel keeps the filter
+# bound to the Chromium image. The filter ONLY denies the namespace-pivot escape
+# (clone/unshare(CLONE_NEWUSER) -> TRAP; setns(.., CLONE_NEWUSER) -> TRAP;
+# clone3 -> ENOSYS so glibc falls back to the masked clone). Chromium runs
+# --no-sandbox --no-zygote here (plain fork+exec, threads via flag-less clone/
+# clone3), so NONE of those denied calls are on its hot path: the browser still
+# navigates. Defense-in-depth — the systemd allow-list + CapabilityBoundingSet=
+# + netns + Landlock + non-root User stay the primary backstops.
+#
+# Inlined as `python3 -c` (no new src/ module; the shim is self-contained and the
+# json is the single source of truth for syscall numbers + the CLONE_NEWUSER mask).
+# Reuses the audited Landlock loader for the FS jail. The shim's argv tail is the
+# full Chromium argv, so the jail's --user-data-dir singleton-cleanup and
+# `exec "$@"` still see Chromium's flags unchanged.
+_BROWSER_SECCOMP_PROFILE = "/usr/share/hermes/seccomp/chromium-browser.json"
+
+# The shim is a real (multi-line) Python program passed via `python3 -c`. It runs
+# AS Chromium's process image after os.execv, so both the Landlock domain and the
+# seccomp filter installed here are inherited by Chromium (the kernel keeps them
+# bound across execve). Kept readable on purpose: a security control must be
+# auditable. The cBPF assembler lives here (not in src/) so the shim is fully
+# self-contained; the json profile is the single source of truth for syscall
+# numbers and the CLONE_NEWUSER mask.
+_LANDLOCK_SHIM_SRC = r'''
+import os, sys, json, ctypes, struct, platform
+
+# --- FS jail (Landlock); inherited across execv ---
+from hermes.security.landlock_loader import load_and_apply
+_rc = load_and_apply("BROWSER")
+if _rc:
+    sys.exit(_rc)
+
+# --- namespace-pivot seccomp deny (PASS-3); inherited across execv ---
+_PROFILE = "__PROFILE__"
+
+# Audit arch tokens (linux/audit.h) for the running ABI.
+_AUDIT_ARCH = {"x86_64": 0xC000003E, "aarch64": 0xC00000B7}
+
+# Classic-BPF (cBPF) opcodes + seccomp return actions.
+_LD_W_ABS, _ALU_AND_K = 0x20, 0x54
+_JEQ_K, _RET_K = 0x15, 0x06
+_A_ALLOW, _A_TRAP = 0x7FFF0000, 0x00030000
+_A_ENOSYS = 0x00050000 | (38 & 0x0000FFFF)
+# seccomp_data offsets (both arches are little-endian):
+#   nr @ 0, arch @ 4, args[0] low32 @ 16, args[1] low32 @ 24
+_OFF_NR, _OFF_ARCH, _OFF_ARG0, _OFF_ARG1 = 0, 4, 16, 24
+
+
+def _build_filter(nrs, audit_arch, newuser):
+    """Return packed cBPF that ONLY denies CLONE_NEWUSER re-namespacing.
+
+    clone/unshare(arg0 & CLONE_NEWUSER) -> TRAP; setns(arg1 & CLONE_NEWUSER) ->
+    TRAP; clone3 -> ENOSYS (glibc falls back to the masked clone). Everything
+    else, including flag-less clone()/clone3() threads and plain forks, is ALLOWED.
+    """
+    s = struct.Struct("HBBI")  # { u16 code; u8 jt; u8 jf; u32 k; }
+
+    def deny_newuser(nr, off, deny):
+        # if nr == NR: A=arg; A&=NEWUSER; if A==NEWUSER -> deny else ALLOW
+        return [
+            (_JEQ_K, 0, 5, nr),       # not this syscall -> skip block (5 ahead)
+            (_LD_W_ABS, 0, 0, off),   # A = masked-flags arg
+            (_ALU_AND_K, 0, 0, newuser),
+            (_JEQ_K, 0, 1, newuser),  # A != NEWUSER -> ALLOW (next)
+            (deny, 0, 0, 0),          # placeholder; patched to RET below
+            (_RET_K, 0, 0, _A_ALLOW),
+        ]
+
+    prog = [
+        (_LD_W_ABS, 0, 0, _OFF_ARCH),
+        # native arch -> skip the RET ALLOW (enforce); foreign arch -> RET ALLOW
+        (_JEQ_K, 1, 0, audit_arch),
+        (_RET_K, 0, 0, _A_ALLOW),
+        (_LD_W_ABS, 0, 0, _OFF_NR),
+    ]
+    # clone3 first: whole-syscall ENOSYS (one instruction, no arg load).
+    prog += [(_JEQ_K, 0, 1, nrs["clone3"]), (_RET_K, 0, 0, _A_ENOSYS)]
+    prog += deny_newuser(nrs["clone"], _OFF_ARG0, _A_TRAP)
+    prog += deny_newuser(nrs["unshare"], _OFF_ARG0, _A_TRAP)
+    prog += deny_newuser(nrs["setns"], _OFF_ARG1, _A_TRAP)
+    prog += [(_RET_K, 0, 0, _A_ALLOW)]
+
+    # Patch the deny placeholders (code was the action; rewrite as RET_K action).
+    out = []
+    for code, jt, jf, k in prog:
+        if code == _A_TRAP:
+            out.append(s.pack(_RET_K, 0, 0, _A_TRAP))
+        else:
+            out.append(s.pack(code, jt, jf, k))
+    return b"".join(out)
+
+
+def _install_seccomp():
+    if not os.path.exists(_PROFILE):
+        # Genuine absence -> soft-degrade (mirrors the Landlock loader); the
+        # systemd SystemCallFilter remains the syscall backstop.
+        return
+    with open(_PROFILE) as fh:
+        data = json.load(fh)
+    arch = platform.machine()
+    nrs = data.get("syscallNumbers", {}).get(arch)
+    audit_arch = _AUDIT_ARCH.get(arch)
+    if nrs is None or audit_arch is None:
+        return  # unknown arch -> do not enforce, do not crash
+    newuser = data.get("cloneNewuserFlag", 0x10000000)
+
+    blob = _build_filter(nrs, audit_arch, newuser)
+    buf = ctypes.create_string_buffer(blob, len(blob))
+    fprog = struct.pack("HQ", len(blob) // 8, ctypes.addressof(buf))
+    fprog_buf = ctypes.create_string_buffer(fprog, len(fprog))
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    # Declare argtypes so the sock_fprog POINTER is passed full-width (64-bit):
+    # without this ctypes truncates it to a C int and prctl returns EFAULT, which
+    # would silently skip the filter (false security). c_ulong holds the address.
+    libc.prctl.restype = ctypes.c_int
+    libc.prctl.argtypes = [ctypes.c_int] + [ctypes.c_ulong] * 4
+    PR_SET_NO_NEW_PRIVS, PR_SET_SECCOMP, SECCOMP_MODE_FILTER = 38, 22, 2
+    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        sys.exit(91)  # fail-closed: present profile must install or no browser
+    if libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER,
+                  ctypes.addressof(fprog_buf), 0, 0) != 0:
+        sys.exit(91)
+
+
+_install_seccomp()
+os.execv(sys.argv[1], sys.argv[1:])
+'''.replace("__PROFILE__", _BROWSER_SECCOMP_PROFILE)
+
+# HARDCODED systemd-run property template (caller cannot modify these).
+# This is the entire scope of privilege the launcher grants — nothing else.
+# NOTE: use --property=NAME=VALUE, NOT -p=NAME=VALUE. systemd-run parses `-p=X`
+# as `-p` with value `=X` → "Unknown assignment: =NetworkNamespacePath=…" and the
+# property (incl. the netns!) is silently dropped / the run fails. The long form
+# with `=` is the only single-token form that parses correctly.
+_SCOPE_PROPERTIES: tuple[str, ...] = (
+    f"--property=NetworkNamespacePath={_NETNS_PATH}",
+    "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+    # @sandbox → landlock_create_ruleset/add_rule/restrict_self: the per-process FS
+    # jail loader needs them; without @sandbox it SIGSYS-crashed and the browser ran
+    # with NO Landlock (silent confinement loss). The allowlist denies everything else.
+    #
+    "--property=SystemCallFilter=@system-service @network-io @sandbox",
+    # PASS-2 (red-team 2026-06-19): @system-service pulls in @process, which GRANTS
+    # the namespace-pivot primitives unshare() and setns(). A renderer RCE uses
+    # unshare(CLONE_NEWUSER) as the canonical staging step to get CAP_SYS_ADMIN in a
+    # fresh user-namespace (kernel-LPE primitive), and setns() to jump into another
+    # namespace. Chromium runs here with --no-sandbox --no-zygote (below): it does a
+    # plain fork+exec and NEVER calls unshare()/setns() at runtime — so denying them
+    # does NOT break the browser. This `~`(subtract) line is applied AFTER the allow
+    # lines, so it wins for these two calls.
+    #
+    # We deliberately do NOT subtract clone/clone3 at this systemd layer: glibc 2.39
+    # creates THREADS via clone()/clone3() (no namespace flag) and Chromium is heavily
+    # threaded — a blanket deny would kill it, and SystemCallErrorNumber=EPERM (set
+    # below) returns EPERM, defeating glibc's ENOSYS clone3->clone fallback. The
+    # CLONE_NEWUSER-flagged clone()/clone3() escape is instead filtered at the
+    # ARGUMENT level by the container seccomp profile (ops/container/seccomp/lumen.json
+    # + ops/hermes-os/seccomp/chromium.json), which CAN mask the flags arg and return
+    # ENOSYS so the thread path keeps working. Defense-in-depth across both layers.
+    "--property=SystemCallFilter=~unshare setns",
+    # EPERM (not the default SIGSYS-kill) for denied syscalls: headless Chromium probes
+    # optional syscalls at startup and CORE-DUMPS on SIGSYS (status=31/SYS) — losing the
+    # browser entirely. With EPERM the probes just fail and Chromium runs; the denied
+    # calls (mount/setns/ptrace/@privileged…) still don't execute, and the container
+    # seccomp + netns egress jail + Landlock + empty CapabilityBoundingSet + non-root
+    # User=hermes remain the real, kernel-enforced backstop.
+    "--property=SystemCallErrorNumber=EPERM",
+    # PASS-6 C4 (in-unit seccomp arch backstop): SystemCallArchitectures=native on
+    # the launcher SERVICE does NOT inherit here — the launcher execs systemd-run,
+    # which starts a SEPARATE transient unit, and per-unit seccomp arch filtering is
+    # NOT inherited across that boundary. Set it on the TRANSIENT unit itself so the
+    # Chromium scope kills any non-native (i386 `int 0x80` / x32) syscall at the
+    # KERNEL level — a renderer RCE cannot re-issue clone/unshare(CLONE_NEWUSER) via
+    # a foreign ABI to dodge the native-only namespace-pivot filters. This is the
+    # in-unit backstop that holds INDEPENDENT of the ia32_emulation=0 / syscall.x32=n
+    # kargs (Containerfile.terminal layer 2). aarch64 is the only native ABI here, so
+    # native syscalls are unaffected and the browser still launches; only foreign-arch
+    # syscalls are killed. (Layer 1 of the three-layer C4 class fix.)
+    "--property=SystemCallArchitectures=native",
+    "--property=NoNewPrivileges=yes",
+    # ProtectProc=invisible: the browser runs as hermes-sandbox (≠ daemon's hermes),
+    # so hide the daemon's /proc — a renderer RCE can't even enumerate the daemon's
+    # open fds to attempt the /proc/fd secret-read. ProcSubset=pid hides /proc/kcore etc.
+    "--property=ProtectProc=invisible",
+    "--property=ProcSubset=pid",
+    "--property=ProtectSystem=strict",
+    "--property=ProtectHome=yes",
+    # ProtectSystem=strict makes /tmp read-only; Chromium needs a writable /tmp
+    # (singleton socket dir, shm-fallback with --disable-dev-shm-usage, temp
+    # files) or it aborts with "Failed to create socket directory" (status 21).
+    # PrivateTmp gives it an ISOLATED writable /tmp (also stronger: separated
+    # from the host /tmp). Verified in-VM that Chromium runs once /tmp is writable.
+    "--property=PrivateTmp=yes",
+    "--property=PrivateDevices=yes",
+    "--property=CapabilityBoundingSet=",
+    # V (renderer-RCE FS exfil): hide the keystore / DBs / signing keys / audit /
+    # caches from the jailed browser so a Chromium 0-day cannot read master.key or
+    # shell-state.db (→ decrypt provider keys) even if Landlock soft-degrades. The
+    # browser's own session dir (/var/lib/hermes/browser-sessions/*) stays writable.
+    # `-` prefix = tolerate-if-absent. Defense-in-depth independent of Landlock.
+    # /run/hermes hidden: it holds the privileged control sockets. A renderer RCE (or
+    # the agent driving the browser) must NOT reach the egress-proxy control socket and
+    # push `open-logged` to disable its own egress jail. Red-team finding 2026-06-18.
+    "--property=InaccessiblePaths=-/var/lib/hermes/master.key -/var/lib/hermes/shell-state.db -/var/lib/hermes/keys -/var/lib/hermes/audit -/var/lib/hermes/hermes-home -/var/lib/hermes/composio-cache -/run/hermes -/run/hermes-mcp",
+)
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format=f"%(asctime)s {_LOG_TAG} %(levelname)s %(message)s",
+    stream=sys.stderr,
+)
+logger = logging.getLogger(_LOG_TAG)
+
+
+# ── Peer credential validation ─────────────────────────────────────────────────
+
+def _hermes_gid() -> int:
+    try:
+        return grp.getgrnam("hermes").gr_gid
+    except KeyError:
+        logger.error("launcher.group_hermes_not_found — cannot validate callers")
+        sys.exit(1)
+
+
+def _check_peercred(conn: socket.socket, hermes_gid: int) -> tuple[int, int]:
+    """Return (pid, uid) of the connected peer or raise PermissionError."""
+    # SO_PEERCRED: struct { pid_t pid; uid_t uid; gid_t gid; }
+    cred = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+    pid, uid, gid = struct.unpack("3i", cred)
+    if gid != hermes_gid:
+        raise PermissionError(
+            f"launcher.peercred_rejected pid={pid} uid={uid} gid={gid} "
+            f"(expected gid={hermes_gid})"
+        )
+    return pid, uid
+
+
+# ── Wire protocol helpers ──────────────────────────────────────────────────────
+
+def _read_frame(conn: socket.socket) -> dict:
+    header = _recv_exactly(conn, 4)
+    if not header:
+        raise EOFError("connection closed before frame header")
+    length = struct.unpack(">I", header)[0]
+    if length > _MAX_FRAME_BYTES:
+        raise ValueError(f"frame too large: {length}")
+    body = _recv_exactly(conn, length)
+    return json.loads(body.decode("utf-8"))
+
+
+def _send_frame(conn: socket.socket, payload: dict) -> None:
+    body = json.dumps(payload).encode("utf-8")
+    conn.sendall(struct.pack(">I", len(body)) + body)
+
+
+def _recv_exactly(conn: socket.socket, n: int) -> bytes:
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = conn.recv(n - len(buf))
+        if not chunk:
+            break
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+# ── Request validation ─────────────────────────────────────────────────────────
+
+def _validate_request(req: dict) -> tuple[str, list[str]]:
+    """Validate the caller-supplied fields. Raises ValueError on bad input.
+
+    The caller supplies ONLY session_name (+ informational domains). It does NOT
+    supply the Chromium argv — the launcher builds the full argv server-side from
+    constants (see _build_browser_argv). Any wire-supplied `browser_argv` is
+    ignored by design (security review HIGH-1: the privilege boundary owns the
+    confinement geometry, not the caller).
+    """
+    session_name = req.get("session_name", "")
+    if not isinstance(session_name, str) or not _SESSION_RE.match(session_name):
+        raise ValueError(
+            f"invalid session_name={session_name!r} — must match ^(exec|teaching)-[a-z0-9]+$"
+        )
+
+    domains_whitelist = req.get("domains_whitelist", [])
+    if not isinstance(domains_whitelist, list):
+        raise ValueError("domains_whitelist must be a list")
+    # Domain entries are informational (passed to jail env); we sanitise to plain strings.
+    safe_domains = [str(d)[:253] for d in domains_whitelist if d]
+
+    return session_name, safe_domains
+
+
+def _build_browser_argv(session_name: str) -> list[str]:
+    """Build the FULL headless-Chromium argv server-side from launcher constants.
+
+    SECURITY (privilege boundary, HIGH-1): no flag is taken from the wire, so a
+    compromised hermes-gid caller cannot inject confinement-breaking flags. Only
+    session_name (already regex-validated, ^exec-[a-z0-9]+$) parameterizes the
+    per-session user-data dir, which stays inside the scope's ReadWritePaths.
+
+    The geometry (headless, fixed CDP port bound to the netns veth IP, egress
+    forced through the audited proxy) is identical for every browse session and
+    matches what JailedBrowserManager polls.
+
+    SECURITY (HIGH, Landlock FS jail): the argv is fronted by the Landlock
+    self-apply shim (`python3 -c _LANDLOCK_SHIM_SRC <chromium> <flags…>`). The
+    shim restricts ITS OWN process to the BROWSER ruleset, then execv()s Chromium
+    — so the kernel-enforced FS confinement is bound to the very process image
+    that becomes Chromium (not a sibling child that exits). This closes the
+    no-op where Chromium ran outside Landlock entirely.
+    """
+    user_data_dir = f"{_BROWSER_SESSIONS_BASE}/{session_name}"
+    return [
+        "python3",
+        "-c",
+        _LANDLOCK_SHIM_SRC,
+        _CHROMIUM_BIN,
+        "--headless=new",
+        # Chromium's OWN multi-process sandbox needs user-namespace / privileged
+        # syscalls that this confined service blocks (SystemCallFilter ~@privileged,
+        # CapabilityBoundingSet= empty) → it aborts with SIGTRAP. The OS provides a
+        # STRONGER boundary here (netns + egress proxy + Landlock FS + seccomp +
+        # non-root User=hermes), so we disable Chromium's internal sandbox. Mirrors
+        # the base's headless AGENT_BROWSER_ARGS (--no-sandbox,--disable-dev-shm-usage).
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        # The GPU process is spawned via a namespaced zygote fork that the scope's
+        # seccomp (~@privileged) blocks → "GPU process isn't usable. Goodbye"
+        # (status 6/ABRT). Run GPU in the main process (no separate zygote fork)
+        # and disable the GPU sandbox + SwiftShader fallback. Standard headless-
+        # in-restricted-seccomp combo.
+        "--in-process-gpu",
+        "--disable-gpu-sandbox",
+        "--disable-software-rasterizer",
+        # The zygote pre-forks renderer/utility processes via a namespaced clone
+        # that the scope seccomp (~@privileged) blocks → "Zygote could not fork"
+        # → pages never render → Page.enable hangs. --no-zygote makes Chromium
+        # spawn children with a plain fork+exec (allowed by @system-service),
+        # keeping the multi-process model AND the tight seccomp. Requires
+        # --no-sandbox (set above).
+        "--no-zygote",
+        "--no-first-run",
+        "--no-default-browser-check",
+        f"--user-data-dir={user_data_dir}",
+        f"--remote-debugging-port={_CDP_PORT}",
+        f"--remote-debugging-address={_CDP_BIND_ADDR}",
+        # Chromium 111+ rejects CDP WebSocket connections whose Origin/host isn't
+        # localhost (DNS-rebinding CVE mitigation) → the daemon's attach hangs on
+        # Page.enable. The daemon reaches CDP only via the netns veth + a single
+        # nft rule (10.200.0.1→10.200.0.2:9333), so the network is already the
+        # boundary; allow any CDP origin so the attach completes.
+        "--remote-allow-origins=*",
+        f"--proxy-server={_EGRESS_PROXY_URL}",
+        "--disable-features=Translate,SidePanel,Autofill,PasswordManager",
+        "--password-store=basic",
+        "--use-mock-keychain",
+        "about:blank",
+    ]
+
+
+# ── Browser launch ─────────────────────────────────────────────────────────────
+
+def _ensure_session_dir(rw_path: str) -> None:
+    """Create the per-session profile dir (idempotent) before systemd-run.
+
+    The transient unit declares ``ReadWritePaths={rw_path}``; systemd fails the
+    mount-namespace setup with 226/NAMESPACE if the path does not exist, so the
+    browser never starts. ``exec-*`` dirs are pre-created by the execution-context
+    factory, but ``teaching-*`` had no creator → teaching browser was dead. Mirror
+    the base dir's ownership/perms: owner ``hermes``, group ``hermes-work``, mode
+    2770 (setgid) so the jailed browser (User=hermes-sandbox, SupplementaryGroups=
+    hermes-work) gets read+write on its own profile dir via the group.
+    """
+    os.makedirs(rw_path, exist_ok=True)
+    # The parent (browser-sessions) is setgid 2770 hermes:hermes-work, so the new
+    # dir inherits group hermes-work; chmod 2770 then grants the jailed browser
+    # (User=hermes-sandbox ∈ hermes-work) group read+write on its own profile.
+    # chown to hermes is BEST-EFFORT: this root service drops CAP_CHOWN (least
+    # privilege), so the dir stays root:hermes-work when CAP_CHOWN is absent — the
+    # group write bit still lets the browser write. Never fail a launch over the
+    # cosmetic owner. root created the dir, so chmod always succeeds.
+    try:
+        uid = pwd.getpwnam("hermes").pw_uid
+        gid = grp.getgrnam("hermes-work").gr_gid
+        os.chown(rw_path, uid, gid)
+    except (KeyError, PermissionError):
+        logger.warning("launcher.session_dir_chown_skipped path=%s", rw_path)
+    os.chmod(rw_path, 0o2770)
+
+
+def _launch(session_name: str, domains_whitelist: list[str]) -> None:
+    """Build the systemd-run command and exec it, replacing this handler process.
+
+    Uses a transient SERVICE (NOT --scope): scope units silently ignore exec/
+    namespace properties (NetworkNamespacePath, ProtectSystem, SystemCallFilter
+    are service-only) — `--scope` would launch Chromium UNCONFINED. As a service,
+    systemd sets up the netns + hardening as root, then drops to User=hermes, so
+    Chromium runs NON-root (keeps its own sandbox; no forced --no-sandbox) inside
+    the hermes-browser netns. The unit name, ReadWritePaths and the full Chromium
+    argv are derived server-side from session_name (no caller flag reaches exec;
+    security HIGH-1/HIGH-2). The jail's `exec "$@"` runs Chromium directly.
+    """
+    rw_path = f"{_BROWSER_SESSIONS_BASE}/{session_name}"
+    _ensure_session_dir(rw_path)
+    unit_name = f"hermes-browser-{session_name}.service"
+    browser_argv = _build_browser_argv(session_name)
+
+    cmd = [
+        "systemd-run",
+        f"--unit={unit_name}",
+        f"--slice={_SLICE}",
+        "--collect",  # GC the unit on exit so the name is reusable after a crash
+        # User=hermes-sandbox (NOT the daemon's `hermes`): DAC blocks the jailed
+        # browser from reading the daemon's owner-only files (master.key, shell-state.db)
+        # — including the /proc/<daemon-pid>/fd re-open that bypasses InaccessiblePaths
+        # (red-team HIGH 2026-06-19). SupplementaryGroups=hermes-work gives Chromium
+        # read+write on its session profile dir (2770 hermes:hermes-work).
+        "--property=User=hermes-sandbox",
+        "--property=Group=hermes-sandbox",
+        "--property=SupplementaryGroups=hermes-work",
+        *_SCOPE_PROPERTIES,
+        f"--property=ReadWritePaths={rw_path}",
+        # Service env (systemd-run does NOT forward the caller's env to a
+        # transient unit — these MUST be --setenv):
+        #  - HOME: the passwd home (/var/home/hermes) is read-only under
+        #    ProtectSystem=strict → Chromium/crashpad abort with SIGTRAP. Point it
+        #    at the per-session writable dir (also Landlock-allowed below).
+        #  - HERMES_BROWSER_SESSION: the jail's landlock_loader keys the writable
+        #    user-data path off THIS var (defaults to "default" → would deny the
+        #    exec-browse profile). Must match session_name.
+        f"--setenv=HOME={rw_path}",
+        # TMPDIR: Chromium's ProcessSingleton creates its socket via
+        # CreateUniqueTempDir() in the SYSTEM temp dir (/tmp). PrivateTmp makes /tmp
+        # writable, but the Landlock FS jail (load_and_apply("BROWSER")) is default-deny
+        # and does NOT grant /tmp → mkdtemp there fails with "Failed to create socket
+        # directory" and Chromium aborts (status 21). Point TMPDIR at the per-session
+        # profile dir, which IS in ReadWritePaths AND Landlock-allowed, so all of
+        # Chromium's temp + singleton-socket work stays inside the writable jail.
+        f"--setenv=TMPDIR={rw_path}",
+        f"--setenv=HERMES_BROWSER_SESSION={session_name}",
+        f"--setenv=HERMES_JAIL_SESSION={session_name}",
+        # Chromium (--headless=new) binds CDP to 127.0.0.1 only; the jail starts a
+        # socat relay so the daemon reaches it on the veth IP (see hermes-browser-jail).
+        f"--setenv=HERMES_CDP_RELAY={_CDP_BIND_ADDR}:{_CDP_PORT}",
+        "--",
+        _JAIL_SCRIPT,
+        *browser_argv,
+    ]
+
+    env = dict(os.environ)
+
+    logger.info(
+        "launcher.exec unit=%s rw_path=%s domains=%d browser_binary=%s landlock_shim=%s",
+        unit_name,
+        rw_path,
+        len(domains_whitelist),
+        _CHROMIUM_BIN,
+        browser_argv[0],
+    )
+    os.execvpe(cmd[0], cmd, env)
+
+
+# ── Connection handler ─────────────────────────────────────────────────────────
+
+def _handle_connection(conn: socket.socket, hermes_gid: int) -> None:
+    """Handle one client connection: validate, launch, respond."""
+    with conn:
+        conn.settimeout(10.0)
+        try:
+            pid, uid = _check_peercred(conn, hermes_gid)
+        except (PermissionError, OSError, struct.error) as exc:
+            logger.warning("launcher.peercred_failed error=%s", exc)
+            _send_frame(conn, {"ok": False, "error": "unauthorized"})
+            return
+
+        logger.info("launcher.connection_accepted pid=%d uid=%d", pid, uid)
+
+        try:
+            req = _read_frame(conn)
+            session_name, domains = _validate_request(req)
+        except (ValueError, json.JSONDecodeError, EOFError, OSError) as exc:
+            logger.warning("launcher.request_invalid pid=%d error=%s", pid, exc)
+            _send_frame(conn, {"ok": False, "error": str(exc)})
+            return
+
+        # Fork: the child does the exec (systemd-run replaces the child).
+        # The parent sends ok=true immediately — systemd-run is async by design.
+        child_pid = os.fork()
+        if child_pid == 0:
+            # Child: close the socket, then exec systemd-run.
+            conn.close()
+            try:
+                _launch(session_name, domains)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("launcher.exec_failed error=%s", exc)
+                os._exit(1)  # noqa: SLF001
+            os._exit(0)  # noqa: SLF001  — unreachable after execvpe
+
+        # Parent: reap the child later via SIGCHLD; send ok to caller.
+        logger.info(
+            "launcher.scope_forked session=%s child_pid=%d", session_name, child_pid
+        )
+        _send_frame(conn, {"ok": True, "session_name": session_name})
+
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+
+def _setup_socket(hermes_gid: int) -> socket.socket:
+    """Create the root-owned, group-hermes AF_UNIX socket."""
+    _SOCK_PATH.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    _SOCK_PATH.unlink(missing_ok=True)
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(str(_SOCK_PATH))
+
+    # root:hermes, mode 0660 — only group hermes can connect (daemon is hermes).
+    os.chown(_SOCK_PATH, 0, hermes_gid)
+    os.chmod(_SOCK_PATH, 0o660)
+
+    sock.listen(8)
+    logger.info("launcher.listening path=%s gid=%d", _SOCK_PATH, hermes_gid)
+    return sock
+
+
+def _install_sigchld() -> None:
+    """Reap child processes (the forked systemd-run) without zombies."""
+    signal.signal(signal.SIGCHLD, lambda _sig, _frame: _reap_children())
+
+
+def _reap_children() -> None:
+    try:
+        while True:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+            if pid == 0:
+                break
+    except ChildProcessError:
+        pass
+
+
+def main() -> None:
+    if os.geteuid() != 0:
+        logger.error("launcher must run as root")
+        sys.exit(1)
+
+    hermes_gid = _hermes_gid()
+    _install_sigchld()
+    sock = _setup_socket(hermes_gid)
+
+    logger.info("launcher.ready")
+
+    with sock:
+        while True:
+            try:
+                conn, _ = sock.accept()
+            except OSError as exc:
+                if exc.errno == 4:  # EINTR from SIGCHLD
+                    continue
+                logger.error("launcher.accept_error error=%s", exc)
+                break
+
+            # Each connection is handled in the same process (lightweight).
+            # The fork happens inside _handle_connection.
+            _handle_connection(conn, hermes_gid)
+
+
+if __name__ == "__main__":
+    main()

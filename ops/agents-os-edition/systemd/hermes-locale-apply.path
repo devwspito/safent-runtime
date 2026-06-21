@@ -1,0 +1,15 @@
+# hermes-locale-apply.path — watches for a staged locale/keymap request from the
+# shell-server (non-root) and triggers the privileged apply service. The
+# shell-server writes /run/hermes/setup/locale-request.json (0600, owner hermes);
+# this root-owned .path fires the root apply service when it appears.
+
+[Unit]
+Description=Hermes — watch for staged locale/keymap request
+Documentation=man:systemd.path(5)
+
+[Path]
+PathExists=/run/hermes/setup/locale-request.json
+Unit=hermes-locale-apply.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,66 @@
+#!/usr/sbin/nft -f
+# browser-ns.nft — Reglas nftables dentro del netns hermes-browser.
+#
+# Cargado por hermes-browser-netns.service mediante:
+#   ip netns exec hermes-browser nft -f /etc/nftables/hermes/browser-ns.nft
+#
+# Diseño: specs/009-radiografia-os/kernel-browser-confinement-design.md §2.2
+# Finding D (DNS fix): el navegador resuelve DNS VÍA EL PROXY (opción proxy-side).
+# Chromium arranca con --proxy-server=http://10.200.0.1:3128, lo que provoca que
+# las conexiones CONNECT lleven el hostname al proxy (no la IP) — el proxy resuelve.
+# Como consecuencia NO hay tráfico DNS directo desde el netns del browser;
+# las reglas :53 quedan eliminadas para no abrir un escape no-supervisado.
+# El proxy (User=hermes-egress, host netns) resuelve y audita cada dominio.
+#
+# PRINCIPIO (belt-and-suspenders sobre el forward del host):
+#   Dentro del netns, el proceso Chromium solo puede abrir conexiones salientes
+#   al proxy (10.200.0.1:3128).
+#   Cualquier intento de connect directo a un destino WAN muere aquí incluso si
+#   el forward del host fallara por configuración errónea (defensa en profundidad).
+#
+# INSTANCIA: cargada DENTRO de hermes-browser netns (no en el host netns).
+
+table inet hermes_browser_local {
+
+    # ── OUTPUT: lo que el proceso navegador puede iniciar ────────────────────
+    # policy drop — salida default-deny.
+    chain output {
+        type filter hook output priority 0; policy drop;
+
+        # Loopback interno del netns (necesario para IPC del propio Chromium).
+        oif "lo" accept comment "loopback interno del netns"
+
+        # Respuestas a conexiones establecidas (e.g., accept de un socket de escucha).
+        ct state established,related accept comment "respuestas ct established"
+
+        # Única ruta de salida permitida: el proxy egress en el host.
+        # DNS va DENTRO de CONNECT (proxy-side resolution) — no hay tráfico :53
+        # directo. El proxy (en host netns) resuelve por el browser.
+        ip daddr 10.200.0.1 tcp dport 3128 accept comment "browser→proxy CONNECT (incluye DNS-vía-proxy)"
+
+        # Caída final: todo lo demás (WAN directa, RFC1918, loopback host, :53 directo, etc.).
+        log prefix "hbr NS OUT DROP: " level warn drop
+    }
+
+    # ── INPUT: el netns no escucha nada externo ──────────────────────────────
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        # Loopback interno + conexiones establecidas (respuestas del proxy).
+        iif "lo" accept comment "loopback interno"
+        ct state established,related accept comment "respuestas del proxy"
+
+        # Daemon (host gateway 10.200.0.1) → Chromium CDP listener on 9333.
+        # Only the hermes daemon (host netns, veth peer) reaches the CDP port;
+        # no WAN traffic can source from 10.200.0.1 (it is the veth host-side IP).
+        # CDP responses are covered by the output chain's ct established,related rule.
+        ip saddr 10.200.0.1 tcp dport 9333 accept comment "daemon→CDP control (jailed browser)"
+
+        log prefix "hbr NS IN DROP: " level warn drop
+    }
+
+    # ── FORWARD: el netns no enruta ──────────────────────────────────────────
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+    }
+}

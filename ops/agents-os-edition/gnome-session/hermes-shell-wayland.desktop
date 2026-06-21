@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Hermes Shell
+Comment=Hermes -- Agentic OS Edition
+Exec=/usr/bin/hermes-shell-session-wrapper
+TryExec=/usr/bin/hermes-shell-session-wrapper
+Type=Application
+DesktopNames=Hermes
+X-GDM-SessionRegisters=true

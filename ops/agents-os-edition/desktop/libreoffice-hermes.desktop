@@ -1,0 +1,21 @@
+[Desktop Entry]
+# libreoffice-hermes.desktop — T020 feature 014 (agentic desktop).
+#
+# Lanzador de la suite LibreOffice para el HUMANO (P1: instalar y abrir).
+# Abre el Start Center de LibreOffice desde donde el usuario accede a
+# Writer, Calc e Impress (todos ya horneados en la imagen).
+#
+# El agente usará LibreOffice vía LibreOfficeUnoSurfaceAdapter (P3, T060)
+# en un contexto aislado propio; NUNCA en la instancia del humano.
+Version=1.0
+Name=LibreOffice
+GenericName=Suite ofimática
+Comment=Crea y edita documentos de texto, hojas de cálculo y presentaciones
+Exec=libreoffice %U
+Icon=libreoffice-startcenter
+Terminal=false
+Type=Application
+Categories=Office;
+MimeType=application/vnd.oasis.opendocument.text;application/vnd.oasis.opendocument.spreadsheet;application/vnd.oasis.opendocument.presentation;application/msword;application/vnd.ms-excel;application/vnd.ms-powerpoint;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.openxmlformats-officedocument.presentationml.presentation;
+StartupNotify=true
+StartupWMClass=soffice

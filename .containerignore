@@ -1,0 +1,42 @@
+# .containerignore — reduces build context sent to the container daemon.
+# Keeps: dist/ (wheel), ops/agents-os-edition/ (config/scripts/units),
+#        apps/, specs/003-agents-os-edition/contracts/, src/hermes/lumen/,
+#        src/hermes/shell_server/mirror/static/
+
+# Version control
+.git/
+.gitignore
+
+# Python artifacts
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.egg-info/
+**/*.egg-link
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build output (except dist/ which has the wheel needed by Containerfile.base)
+build/
+*.tar.gz
+
+# Local dev config
+.env
+.env.*
+*.local
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test files (not needed in image)
+tests/

@@ -1,0 +1,15 @@
+[GNOME Session]
+Name=Hermes Shell
+# T012 / spec 014 increment 1 — sesion GNOME Shell real para Agents OS.
+#
+# CRITICAL: Must be in sync with the systemd drop-in:
+#   gnome-session@hermes-shell.target.d/hermes-shell.session.conf
+#
+# gnome-session-binary uses this file to build its component list and to
+# determine whether all RequiredComponents are running. The actual unit
+# that starts gnome-shell is org.gnome.Shell@wayland.service, pulled into
+# the dependency graph by the drop-in above. X-GNOME-HiddenUnderSystemd=true
+# on org.gnome.Shell.desktop means gnome-session-binary itself does NOT
+# autostart gnome-shell -- systemd does, via the drop-in -> org.gnome.Shell.target
+# -> org.gnome.Shell@wayland.service.
+RequiredComponents=org.gnome.Shell;org.gnome.SettingsDaemon.A11ySettings;org.gnome.SettingsDaemon.Color;org.gnome.SettingsDaemon.Datetime;org.gnome.SettingsDaemon.Housekeeping;org.gnome.SettingsDaemon.Keyboard;org.gnome.SettingsDaemon.MediaKeys;org.gnome.SettingsDaemon.Power;org.gnome.SettingsDaemon.PrintNotifications;org.gnome.SettingsDaemon.Rfkill;org.gnome.SettingsDaemon.ScreensaverProxy;org.gnome.SettingsDaemon.Sharing;org.gnome.SettingsDaemon.Smartcard;org.gnome.SettingsDaemon.Sound;org.gnome.SettingsDaemon.UsbProtection;org.gnome.SettingsDaemon.Wacom;org.gnome.SettingsDaemon.XSettings;

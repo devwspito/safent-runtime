@@ -1,0 +1,63 @@
+#!/usr/sbin/nft -f
+# browser-host.nft — Reglas nftables lado HOST para el netns del navegador.
+#
+# Cargado por hermes-browser-netns.service en el host network namespace.
+# Diseño: specs/009-radiografia-os/kernel-browser-confinement-design.md §2.2
+# Finding D (DNS fix): se eliminan las reglas :53 directas del browser.
+# El navegador arranca con --proxy-server=http://10.200.0.1:3128, por lo que
+# los CONNECT llevan el hostname al proxy (proxy-side DNS resolution). El proxy
+# (hermes-egress, host netns) resuelve y audita cada dominio. Sin reglas :53
+# directas el browser no puede exfiltrar hostnames vía consultas DNS crudas
+# que bypasseen el filtro de dominio del proxy.
+#
+# PRINCIPIO:
+#   El navegador (10.200.0.2) llega al host vía veth-hbr-host (10.200.0.1).
+#   La única salida permitida del browser es →proxy (10.200.0.1:3128).
+#   El proxy (User=hermes-egress, host netns) sí tiene ruta a WAN y recibe masquerade.
+#   El browser NUNCA tiene masquerade directo: un connect a 1.1.1.1:443 muere aquí.
+#   Anti-pivot: el browser no alcanza RFC1918 ni loopback del host (vLLM, tasks.sock, etc.).
+#
+# INSTANCIA: cargada en el host netns (nft -f browser-host.nft desde el host).
+
+table inet hermes_browser_egress {
+
+    # ── FORWARD: tráfico del browser que el host debe enrutar ────────────────
+    # policy drop — cualquier forward no explícitamente permitido cae aquí.
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+
+        # Respuestas a conexiones establecidas (el browser habló primero, ya permitido).
+        ct state established,related accept comment "respuestas ct established"
+
+        # Anti-pivot RFC1918 + loopback: el browser no puede pivotar al host, LAN,
+        # daemon, vLLM (127/8), shell-server, tasks.sock, ni otros namespaces.
+        # Log antes de drop para auditoría (journald + audit).
+        # 169.254.0.0/16 = link-local + metadata cloud (169.254.169.254 → SSRF a las
+        # credenciales IMDS de AWS/GCP/Azure). 100.64.0.0/10 = CGNAT (pivot ISP).
+        # Añadido P1 tras el gap-analysis vs NemoHermes (private-networks.yaml).
+        ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, 100.64.0.0/10 } \
+            log prefix "hbr FWD DROP meta: " level warn drop \
+            comment "anti-pivot: no RFC1918/loopback/metadata/CGNAT desde el browser"
+
+        # Browser → proxy egress (hermes-egress-proxy en 10.200.0.1:3128).
+        # El proxy decide si el dominio está permitido (open-logged o whitelist).
+        # DNS va DENTRO de CONNECT (proxy-side resolution) — no hay regla :53 directa.
+        ip saddr 10.200.0.0/30 ip daddr 10.200.0.1 tcp dport 3128 accept \
+            comment "browser→proxy egress CONNECT (incluye DNS-vía-proxy)"
+
+        # Caída final con log (todo lo demás: WAN directa, :53 directo, IPv6 raw, etc.).
+        log prefix "hbr FWD DROP: " level warn drop
+    }
+
+    # ── POSTROUTING: masquerade SOLO del proxy egress, nunca del browser ─────
+    # Solo los paquetes que salen por una interfaz distinta de veth-hbr-host
+    # (es decir, hacia la WAN) y cuyo origen es 10.200.0.1 (el proxy en el host)
+    # reciben masquerade. Los paquetes con saddr 10.200.0.2 (browser) nunca llegan
+    # aquí porque forward los dropeó antes — salvo al proxy.
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+
+        ip saddr 10.200.0.1 oifname != "veth-hbr-host" masquerade \
+            comment "NAT del proxy egress hacia WAN (no del browser directo)"
+    }
+}

@@ -1,0 +1,27 @@
+# hermes-remote-access-control.path — watches for a staged remote-access
+# control request from the shell-server (User=hermes, non-root) and
+# immediately triggers the privileged control service.
+#
+# The shell-server cannot call systemctl disable/enable directly (not root,
+# CapabilityBoundingSet=).  It writes a validated request to
+# /run/hermes/remote-control/request.json (mode 0600, owner hermes).
+# The remote-control/ subdir is 0700 hermes:hermes (tmpfiles), isolating
+# the staged request from other processes.
+#
+# For the DISABLE action the staged file includes the device password so the
+# root helper can PAM-verify it before acting.  The file is shredded
+# immediately after use — the password exists on disk only for milliseconds.
+#
+# The .path unit is root-owned and starts as root, ensuring the triggered
+# service also runs as root.
+
+[Unit]
+Description=Hermes — watch for staged remote-access control request
+Documentation=man:systemd.path(5)
+
+[Path]
+PathExists=/run/hermes/remote-control/request.json
+Unit=hermes-remote-access-control.service
+
+[Install]
+WantedBy=multi-user.target

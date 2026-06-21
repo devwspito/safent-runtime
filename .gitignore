@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+!ops/agents-os-edition/build/
+.env
+
+# Reinforce: this product is a Docker container, never a VM image
+*.qcow2
+*.raw
+*.iso
+node_modules/

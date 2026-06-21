@@ -1,0 +1,22 @@
+[Desktop Entry]
+# hermes-integrations.desktop — T048 feature 014 (agentic desktop).
+#
+# Capability app: Integraciones (proveedores de LLM).
+# Governance: add / test / activate LLM providers. No effectors.
+#
+# D-Bus verbs: ListProviders, GetActiveProvider, AddProvider,
+#              TestProvider, SetActiveProvider.
+# Authorship by sender_uid (CWE-862).
+Version=1.0
+Name=Integraciones — Hermes
+Name[es]=Integraciones — Hermes
+Comment=Configurar proveedores de IA del agente (Anthropic, OpenAI, Ollama…)
+Comment[es]=Configurar proveedores de IA del agente (Anthropic, OpenAI, Ollama…)
+Exec=python3 -m hermes.lumen.apps.integrations
+Icon=hermes-integrations
+Terminal=false
+Type=Application
+Categories=Utility;System;Network;
+StartupNotify=true
+StartupWMClass=hermes-integrations
+Keywords=hermes;integraciones;proveedor;LLM;IA;anthropic;openai;ollama;

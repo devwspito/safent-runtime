@@ -1,0 +1,21 @@
+[Desktop Entry]
+# hermes-memory.desktop — T048 feature 014 (agentic desktop).
+#
+# Capability app: Memoria del agente (base de conocimiento, read-only).
+#
+# D-Bus verbs: ListMemory, SearchMemory (T047 dependency — app shows honest
+# "not available" state if the daemon does not expose these verbs yet).
+# No mutations. No effectors. No broker. No HTTP.
+Version=1.0
+Name=Memoria — Hermes
+Name[es]=Memoria — Hermes
+Comment=Base de conocimiento del agente (solo lectura)
+Comment[es]=Base de conocimiento del agente (solo lectura)
+Exec=python3 -m hermes.lumen.apps.memory
+Icon=hermes-memory
+Terminal=false
+Type=Application
+Categories=Utility;System;
+StartupNotify=true
+StartupWMClass=hermes-memory
+Keywords=hermes;memoria;conocimiento;agente;base;buscar;

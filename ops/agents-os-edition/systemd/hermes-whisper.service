@@ -1,0 +1,35 @@
+# hermes-whisper.service — heredado spec 002, adaptado a Agents OS Edition.
+
+[Unit]
+Description=Faster-Whisper (local transcription)
+After=network.target
+
+[Service]
+Type=notify
+User=hermes-whisper
+Group=hermes-whisper
+ExecStart=/usr/bin/hermes-whisper --model /opt/models/distil-large-v3 --systemd-notify
+WatchdogSec=60
+Restart=always
+RestartSec=3
+StartLimitBurst=5
+
+Slice=agents-os.slice
+MemoryMax=4G
+CPUWeight=100
+
+# Hardening (sin red — research §3 Whisper loopback-only).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateUsers=yes
+ReadOnlyPaths=/opt/models/distil-large-v3
+ReadWritePaths=/run/hermes-whisper /tmp
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  org.hermes.os.overlay.gschema.xml
+
+  GSettings schema for the Hermes overlay GNOME Shell extension.
+
+  The toggle-overlay key is read by extension.js to register the global
+  keybinding via Main.wm.addKeybinding. Changing this key at runtime
+  (e.g. gsettings set org.hermes.os.overlay toggle-overlay "['<Super>Return']")
+  takes effect after disabling and re-enabling the extension.
+
+  Bake instructions (Containerfile):
+    COPY ops/agents-os-edition/gnome-shell-extension/hermes@hermes.os/schemas/ \
+         /usr/share/glib-2.0/schemas/
+    RUN glib-compile-schemas /usr/share/glib-2.0/schemas/
+
+  Extension install:
+    COPY ops/agents-os-edition/gnome-shell-extension/hermes@hermes.os/ \
+         /usr/share/gnome-shell/extensions/hermes@hermes.os/
+
+  Allowlist (dconf override — 30-agents-os.gschema.override):
+    [org.gnome.shell]
+    enabled-extensions=['hermes@hermes.os']
+    disable-user-extensions=false
+-->
+<schemalist>
+  <schema id="org.hermes.os.overlay"
+          path="/org/hermes/os/overlay/">
+
+    <key name="toggle-overlay" type="as">
+      <default>['&lt;Super&gt;space']</default>
+      <summary>Toggle Hermes overlay</summary>
+      <description>
+        Global keybinding to show or hide the Hermes overlay from any
+        application. Default: Super+Space. Set to [] to disable.
+      </description>
+    </key>
+
+  </schema>
+</schemalist>

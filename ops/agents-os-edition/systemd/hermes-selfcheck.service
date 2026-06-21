@@ -1,0 +1,22 @@
+# hermes-selfcheck.service — auto-validación de la imagen al boot.
+# Corre verify-tool-gate.py + lista units fallidas y lo vuelca a la consola
+# serie + journal. Sirve para validar la imagen horneada sin login (firewall
+# capa4 bloquea SSH). Oneshot inofensivo (solo lee + fakes). Se puede deshabilitar
+# en releases de producción si no se quiere el ruido en consola.
+
+[Unit]
+Description=Hermes self-check (failed units + broker-gate smoke-test -> serial console)
+After=hermes-runtime.service multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=HERMES_ENGINE=nous
+ExecStart=/usr/libexec/hermes/hermes-selfcheck
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

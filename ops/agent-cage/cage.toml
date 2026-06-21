@@ -1,0 +1,134 @@
+# agent-cage — generic kernel cage configuration
+#
+# Phase 2 of the roadmap ("the cage is the product"): this file is the config
+# surface that turns the Hermes-specific cage into a GENERIC, reusable sandbox able
+# to confine ANY agent runtime (Hermes, openclaw, others). Everything that was
+# hardcoded to "hermes"/"/var/lib/hermes"/"10.200.0.x" in the launchers + nftables +
+# systemd units becomes a value here. The kernel cage (~70-95% generic per piece, see
+# EXTRACTION-PLAN.md) reads this; the governance layer plugs in via GovernancePort.
+#
+# This is the EXTRACTION TARGET, not yet wired — the launchers/units currently read
+# their constants inline. The migration replaces those constants with a loader that
+# reads this file. Values below mirror the current baked Hermes deployment so it is a
+# faithful, drop-in starting point.
+
+[identity]
+# Logical name of the confined agent; used for slice/unit naming + audit labels.
+agent_name = "hermes"
+# The runtime being caged. The governance binding is selected from this.
+agent_runtime = "hermes"            # "hermes" | "openclaw" | "custom"
+
+[users]
+# uid/gid of the privileged daemon that OWNS the secrets + drives the launchers.
+daemon_uid = 880
+daemon_gid = 880
+# uid the agent's sandboxed work runs as (terminal + browser + MCP). MUST differ from
+# daemon_uid so DAC + ptrace_may_access block the agent from the daemon's /proc + files
+# (incl. the /proc/<daemon>/fd InaccessiblePaths bypass). (red-team 2026-06-19.)
+sandbox_uid = 886
+sandbox_gid = 886
+# uid the egress proxy runs as (separate so the agent cannot push egress policy).
+egress_uid = 885
+egress_gid = 885
+# Operator/UI user (the human). Optional — omit for headless deployments.
+operator_uid = 1000
+# Shared group for the agent's work areas (workspace, browser-sessions, MCP caches).
+# daemon + sandbox + operator are members; the daemon's SECRETS group (daemon_gid) is
+# NOT this group, so sandbox membership here never exposes the secrets.
+shared_work_group = "hermes-work"
+
+[paths]
+# Writable data root owned by the daemon (0751: world/other traverse-only, no list).
+data_root = "/var/lib/hermes"
+# Runtime (tmpfs) dir for the daemon's privileged control sockets (0770 daemon:daemon).
+run_root = "/run/hermes"
+# Separate run dir the sandbox-uid owns, for the mcp launcher socket (so the agent's
+# MCP children can bind there without write access to run_root's control sockets).
+mcp_run_root = "/run/hermes-mcp"
+# Shared work areas (2770 daemon:shared_work_group, setgid).
+workspace = "/var/lib/hermes/workspace"
+browser_sessions = "/var/lib/hermes/browser-sessions"
+# MCP runner caches (2770 daemon:shared_work_group) — written by the sandbox-uid MCP.
+mcp_caches = [
+    "/var/lib/hermes/mcp-home",
+    "/var/lib/hermes/npm-cache",
+    "/var/lib/hermes/uv-cache",
+    "/var/lib/hermes/xdg-cache",
+    "/var/lib/hermes/xdg-data",
+    "/var/lib/hermes/uv-tools",
+    "/var/lib/hermes/uv-python",
+]
+# Daemon secrets — 0600 daemon-only; masked from the sandbox via InaccessiblePaths AND
+# unreadable by DAC (different uid). The DB is pre-created 0600 before any opener.
+secrets = [
+    "/var/lib/hermes/master.key",
+    "/var/lib/hermes/shell-state.db",
+    "/var/lib/hermes/keys",
+    "/var/lib/hermes/audit",
+    "/var/lib/hermes/hermes-home",
+    "/var/lib/hermes/composio-cache",
+]
+
+[sockets]
+browser_launcher = "/run/hermes/browser-launch.sock"   # 0660 root:daemon_group
+exec_launcher    = "/run/hermes/exec-launch.sock"       # 0660 root:daemon_group
+mcp_launcher     = "/run/hermes-mcp/launch.sock"        # 0660 sandbox:shared_work_group
+egress_proxy     = "/run/hermes/egress-proxy.sock"      # 0660 root:egress_group
+
+[network]
+# The browser/terminal run in this netns; egress is default-deny via the proxy only.
+netns_name = "hermes-browser"
+veth_host = "veth-hbr-host"
+veth_ns   = "veth-hbr-ns"
+host_ip   = "10.200.0.1"          # proxy reachable here from inside the netns
+ns_ip     = "10.200.0.2"
+proxy_port = 3128
+cdp_port   = 9333
+egress_proxy_url = "http://10.200.0.1:3128"
+# Upstream destinations the proxy/netns must NEVER reach (anti-pivot / SSRF / metadata).
+# The proxy ALSO resolves each granted domain and refuses internal IPs at connect time.
+blocked_cidrs = [
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+    "127.0.0.0/8", "169.254.0.0/16", "100.64.0.0/10",
+]
+egress_mode = "default-deny"      # owner elevates domains via the governance API
+
+[runners]
+# The browser the browser-launcher spawns.
+browser_binary = "/usr/bin/chromium-browser"
+# argv[0] basenames the mcp-launcher will exec (no arbitrary exec; path-rewritten).
+mcp_runners = ["npx", "uvx", "node", "python3"]
+
+[limits]
+# Per-launcher cgroup limits (systemd scope/unit properties).
+exec_memory_max = "512M"
+exec_cpu_quota  = "50%"
+exec_tasks_max  = 64              # also caps fork bombs from the agent terminal
+browser_memory_max = "2G"
+
+[hardening]
+# systemd unit properties applied to each sandboxed launch. The launchers are root
+# (need CAP_NET_ADMIN/SYS_ADMIN to join the netns) but drop to sandbox_uid for the work.
+protect_system = "strict"
+protect_home = true
+private_tmp = true
+private_devices = true
+# Hide the daemon's /proc from the sandbox (defense-in-depth on top of the uid split).
+protect_proc = "invisible"
+proc_subset = "pid"
+# Syscall allowlist per launch type; @sandbox is required for the Landlock loader.
+syscall_filter = "@system-service @sandbox"
+syscall_error_number = "EPERM"    # probe failures → EPERM, not SIGSYS-kill (chromium)
+
+[governance]
+# The cage NEVER decides policy itself — it calls the runtime's GovernancePort before
+# executing an action / install, and audits after. See EXTRACTION-PLAN.md §GovernancePort.
+#   verify_action(tool, params, context) -> APPROVED | PENDING_APPROVAL | REJECTED
+#   request_approval(proposal_id, risk, justification) -> token | None   (HITL)
+#   review_install(intent) -> allowed | blocked                          (scan→score→gate)
+#   audit(action, outcome) -> None
+binding = "hermes"                # which GovernancePort implementation to load
+require_consent = true
+forced_hitl_on_taint = true       # actions derived from untrusted content (web/MCP/file) → HITL
+auto_block_install_fail = true    # Security Center FAIL verdict blocks the install
+scan_skill_content = true         # scan recorded/hub skill steps for trojan patterns

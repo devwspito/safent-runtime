@@ -1,0 +1,154 @@
+#!/bin/bash
+# hermes-browser-jail — Wrapper raíz de lanzamiento del navegador confinado.
+#
+# Invocado como root por systemd-run --scope antes de exec-ar el navegador real.
+# Hace tres cosas en orden:
+#   1. Verifica que el netns hermes-browser existe (fail-closed: sin netns → exit 1).
+#   2. Si Landlock está activo en el kernel, carga el RulesetSpec(BROWSER) via
+#      python3 -m hermes.security.landlock_loader (lo implementa otro engineer).
+#      SECURITY FIX (finding #5): si Landlock NO está disponible Y la sesión tiene
+#      credenciales/whitelist → ABORTAR (fail-closed). Solo se permite la degradación
+#      suave (warn + continuar) en modo teaching supervisado sin credenciales.
+#   3. exec "$@" — reemplaza este proceso con el navegador real (no fork extra).
+#
+# Variables de entorno para control de modo:
+#   HERMES_JAIL_HAS_CREDENTIALS=1  — indica que la tarea lleva credenciales/secrets.
+#   HERMES_JAIL_SUPERVISED=1       — indica modo teaching supervisado (HITL activo).
+#
+# Argumento: "$@" es la invocación completa del navegador (Chromium + flags).
+# Interface con landlock_loader: arg1 = capability ("BROWSER"), exit 0 = ok.
+#
+# Diseño: specs/009-radiografia-os/kernel-browser-confinement-design.md §4
+# Logs: systemd-cat -t hermes-browser-jail → journald (visible en journalctl -t hermes-browser-jail).
+
+set -euo pipefail
+
+readonly NETNS_PATH="/run/netns/hermes-browser"
+readonly LANDLOCK_LSM_PATH="/sys/kernel/security/lsm"
+readonly LOG_TAG="hermes-browser-jail"
+
+log() {
+    # Siempre a journald vía systemd-cat; también a stderr para el scope de systemd.
+    echo "$*" | systemd-cat -t "$LOG_TAG" -p info
+    echo "$LOG_TAG: $*" >&2
+}
+
+log_warn() {
+    echo "$*" | systemd-cat -t "$LOG_TAG" -p warning
+    echo "$LOG_TAG: WARN: $*" >&2
+}
+
+log_err() {
+    echo "$*" | systemd-cat -t "$LOG_TAG" -p err
+    echo "$LOG_TAG: ERROR: $*" >&2
+}
+
+# ── 1. Verificar que el netns existe ─────────────────────────────────────────
+# Si hermes-browser-netns.service falló o no se ejecutó, el browser no debe
+# lanzarse (fail-closed: sin netns el browser tendría red del host completa).
+if [[ ! -e "$NETNS_PATH" ]]; then
+    log_err "netns hermes-browser no encontrado en $NETNS_PATH — lanzamiento abortado (fail-closed)"
+    exit 1
+fi
+
+log "netns hermes-browser verificado OK"
+
+# ── 2. Landlock: cargar RulesetSpec(BROWSER) si disponible ───────────────────
+# SECURITY FIX (finding #5): la política de degradación depende del modo de sesión:
+#
+#   a) Landlock ACTIVO → intentar loader; si falla, comportamiento según modo (ver abajo).
+#   b) Landlock INACTIVO + CREDENCIALES → ABORTAR (fail-closed).
+#      El navegador con credenciales cargadas y sin Landlock puede exfiltrar datos
+#      vía FS (escribir secretos a /tmp, leer otros orígenes). El netns+scope
+#      confina la red pero NO el sistema de archivos.
+#   c) Landlock INACTIVO + modo TEACHING SUPERVISADO (sin credenciales) → degradar
+#      suavemente (warn + continuar). El operador está en control activo (HITL);
+#      el riesgo de exfiltración FS es aceptable sin credenciales cargadas.
+#
+# Las variables de entorno HERMES_JAIL_HAS_CREDENTIALS y HERMES_JAIL_SUPERVISED
+# son inyectadas por el daemon antes de systemd-run (nunca desde el cliente externo).
+
+HAS_CREDENTIALS="${HERMES_JAIL_HAS_CREDENTIALS:-0}"
+IS_SUPERVISED="${HERMES_JAIL_SUPERVISED:-0}"
+
+LANDLOCK_ACTIVE=0
+if [[ -r "$LANDLOCK_LSM_PATH" ]] && grep -q "landlock" "$LANDLOCK_LSM_PATH"; then
+    LANDLOCK_ACTIVE=1
+fi
+
+if [[ "$LANDLOCK_ACTIVE" -eq 1 ]]; then
+    log "landlock activo en kernel ($LANDLOCK_LSM_PATH) — cargando RulesetSpec BROWSER"
+    if python3 -m hermes.security.landlock_loader BROWSER; then
+        log "landlock_loader BROWSER OK — confinamiento FS activo"
+    else
+        loader_exit=$?
+        # El loader falló (bug en el loader, ABI incompatible, etc.).
+        if [[ "$HAS_CREDENTIALS" == "1" ]]; then
+            # Con credenciales cargadas, un loader roto = confinamiento FS nulo.
+            # Fail-closed: no lanzar el navegador.
+            log_err "landlock_loader BROWSER falló (exit $loader_exit) con credenciales activas — lanzamiento abortado (fail-closed)"
+            exit 1
+        else
+            log_warn "landlock_loader BROWSER falló (exit $loader_exit) — degradando a confinamiento netns+scope (sin credenciales)"
+        fi
+    fi
+else
+    # Kernel sin Landlock o /sys/kernel/security/lsm no legible.
+    if [[ "$HAS_CREDENTIALS" == "1" ]]; then
+        # SECURITY FIX (finding #5 — caso crítico): sin Landlock Y con credenciales
+        # → el navegador puede exfiltrar secrets via FS. Fail-closed.
+        log_err "landlock_unavailable con credenciales activas — lanzamiento abortado (fail-closed)"
+        log_err "El kernel debe tener lsm=landlock en cmdline (ver /usr/lib/bootc/kargs.d/01-hermes-lsm.toml)"
+        exit 1
+    elif [[ "$IS_SUPERVISED" == "1" ]]; then
+        # Modo teaching supervisado sin credenciales: degradación aceptable.
+        log_warn "landlock_unavailable_degraded (modo teaching supervisado, sin credenciales) — confinamiento netns+scope activo"
+    else
+        # Sin credenciales, sin supervisión — degradar con advertencia visible.
+        log_warn "landlock_unavailable_degraded — /sys/kernel/security/lsm no contiene 'landlock'; confinamiento netns+scope activo"
+    fi
+fi
+
+# ── 2b. CDP relay (opcional) ─────────────────────────────────────────────────
+# Chromium en --headless=new liga el puerto CDP SOLO a 127.0.0.1 (endurecimiento;
+# ignora --remote-debugging-address). El daemon vive en el netns del HOST y no
+# alcanza el loopback de ESTE netns. Si HERMES_CDP_RELAY="addr:port" está puesto,
+# levantamos un relay socat que escucha en la IP del veth (addr:port) y reenvía a
+# 127.0.0.1:port — así el daemon (10.200.0.1) llega al CDP vía la regla nft. El
+# relay queda en el cgroup del servicio → systemd lo mata al parar el navegador.
+if [[ -n "${HERMES_CDP_RELAY:-}" ]]; then
+    relay_addr="${HERMES_CDP_RELAY%%:*}"
+    relay_port="${HERMES_CDP_RELAY##*:}"
+    if command -v socat >/dev/null 2>&1; then
+        log "cdp_relay: socat ${relay_addr}:${relay_port} → 127.0.0.1:${relay_port}"
+        socat "TCP-LISTEN:${relay_port},bind=${relay_addr},fork,reuseaddr" \
+              "TCP:127.0.0.1:${relay_port}" &
+    else
+        log_warn "cdp_relay: socat no disponible — el daemon no alcanzará el CDP"
+    fi
+fi
+
+# ── Stale single-instance lock cleanup (self-heal) ───────────────────────────
+# A crashed Chromium — or a profile dir reused across container recreations —
+# leaves SingletonLock/Socket/Cookie pointing at a dead PID/host. Chromium then
+# refuses the profile ("appears to be in use by another process") and exits 21,
+# breaking the jailed browser permanently until manual cleanup. Strip stale
+# singletons for the target --user-data-dir before launch so the browser self-heals.
+for _arg in "$@"; do
+    case "$_arg" in
+        --user-data-dir=*)
+            _udd="${_arg#--user-data-dir=}"
+            rm -f "${_udd}/SingletonLock" "${_udd}/SingletonSocket" "${_udd}/SingletonCookie" 2>/dev/null || true
+            ;;
+    esac
+done
+
+# ── 3. exec del navegador real ───────────────────────────────────────────────
+# exec reemplaza este proceso — no hay proceso wrapper adicional en la jerarquía.
+if [[ $# -eq 0 ]]; then
+    log_err "hermes-browser-jail invocado sin argumentos — nada que ejecutar"
+    exit 1
+fi
+
+log "exec: $*"
+exec "$@"

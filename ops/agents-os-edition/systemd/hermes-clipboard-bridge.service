@@ -1,0 +1,45 @@
+# hermes-clipboard-bridge.service (SYSTEM) — puente HTTP del portapapeles
+# Wayland para noVNC (copiar/pegar entre el dispositivo externo y el SO).
+#
+# Antes era una unit de USUARIO (systemd --user + graphical-session.target):
+# nunca arrancaba porque la sesión LumenSO es el compositor Qt como unit de
+# SISTEMA (lumenso-shell.service) — no hay user manager con sesión gráfica.
+# El bridge quedaba muerto y el overlay de noVNC no tenía backend.
+#
+# Ahora es unit de sistema corriendo como hermes-user con el WAYLAND_DISPLAY
+# del compositor (wayland-0 — el mismo que usan las apps lanzadas por el dock).
+#
+# Puerto: 0.0.0.0:7519 (appliance single-tenant; QEMU hostfwd / túnel cloudflared
+# llegan a la NIC del guest, no a loopback). Ver clipboard_bridge/__main__.py.
+
+[Unit]
+Description=Hermes Clipboard Bridge (portapapeles noVNC ↔ Wayland)
+After=lumenso-shell.service
+Wants=lumenso-shell.service
+
+[Service]
+Type=simple
+User=hermes-user
+Group=hermes-user
+Environment=HERMES_CLIPBOARD_BRIDGE_HOST=0.0.0.0
+# Socket Wayland del compositor Qt (el mismo env que sysManager inyecta a las
+# apps nativas). XDG_RUNTIME_DIR del usuario de sesión.
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/bin/python3 -m hermes.clipboard_bridge
+Restart=on-failure
+RestartSec=3
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,34 @@
+# hermes-locale-apply.service — root oneshot that applies the staged locale/keymap
+# to the OS (writes /etc/locale.conf, /etc/vconsole.conf, X11 keyboard conf).
+# Triggered exclusively by hermes-locale-apply.path. Re-appliable (no sentinel)
+# so the user can change language later from Settings/onboarding.
+
+[Unit]
+Description=Hermes — apply staged locale/keymap (privileged)
+Documentation=man:systemd.service(5)
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/libexec/hermes/locale-apply
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-locale-apply
+
+# Hardening: no network, write only the locale/keymap config paths.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/hermes/setup /etc
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+
+# [Install] omitted — triggered exclusively by hermes-locale-apply.path.

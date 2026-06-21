@@ -1,0 +1,410 @@
+#!/usr/bin/env python3
+# hermes-remote-access-control — privileged root oneshot that starts/stops the
+# three remote-access services on behalf of the shell-server (User=hermes).
+#
+# Triggered by hermes-remote-access-control.path watching
+# /run/hermes/remote-control/request.json.
+#
+# This script MUST run as root (hermes-remote-access-control.service).
+#
+# Security invariants:
+#   - Password is in the staged file ONLY for the disable action; it is verified
+#     here via PAM (root bypasses setuid restrictions).  It is NEVER logged.
+#   - The staged file is opened with O_NOFOLLOW and fstat-verified (uid, mode,
+#     nlink) before reading — prevents symlink/substitution attacks.
+#   - The staged file is shredded (overwritten + unlinked) in a finally block
+#     whether the action succeeds or fails.
+#   - Unknown actions are silently rejected (shredded, no systemctl call).
+#   - The agent (hermes) cannot call this; it has no access to
+#     /run/hermes/remote-control (0700 hermes:hermes) from outside the
+#     shell-server process — the agent runs in a separate systemd slice with
+#     CapabilityBoundingSet= empty and no write path to this dir.
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import pwd
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+logging.basicConfig(
+    format="%(levelname)s hermes-remote-access-control: %(message)s",
+    level=logging.INFO,
+    stream=sys.stderr,
+)
+logger = logging.getLogger("hermes-remote-access-control")
+
+# --------------------------------------------------------------------------
+# Constants
+# --------------------------------------------------------------------------
+
+STAGE_DIR = Path(
+    os.environ.get("HERMES_REMOTE_CONTROL_DIR", "/run/hermes/remote-control")
+)
+STAGE_FILE = STAGE_DIR / "request.json"
+
+# The interactive login user whose password was set by hermes-account-apply.
+# This is the same user that hermes-account-apply writes chpasswd for — see
+# LOGIN_USER in hermes-account-apply.  We keep a local constant to avoid any
+# runtime dependency on the account-apply script.
+LOGIN_USER = "hermes-user"
+
+_EXPECTED_FILE_MODE = 0o600
+_KNOWN_ACTIONS = frozenset({"disable", "enable"})
+
+# Túnel: named (URL estable, requiere token del operador) o quick
+# (trycloudflare, URL efímera individual — default plug-and-play).
+_NAMED_TUNNEL_TOKEN = Path("/etc/hermes/credentials/cloudflare-tunnel.token")
+
+
+def _remote_services() -> list[str]:
+    tunnel = (
+        "hermes-remote-tunnel.service"
+        if _NAMED_TUNNEL_TOKEN.exists()
+        else "hermes-remote-quicktunnel.service"
+    )
+    # El gateway de un solo origen (noVNC + clipboard por path) debe arrancar ANTES
+    # que el túnel (Requires/After en el unit lo ordena). Lo listamos primero para
+    # que el `enable --now` lo levante en el mismo lote.
+    return ["hermes-remote-gateway.service", tunnel, "hermes-novnc.service"]
+
+
+# Modo espejo: el compositor Qt re-arranca con el platform plugin `vnc`
+# (framebuffer servido en 127.0.0.1:5900, que websockify/noVNC exponen).
+# El flag vive en un EnvironmentFile que lumenso-shell.service carga DESPUÉS
+# de sus Environment= (la última asignación gana en systemd).
+_REMOTE_DISPLAY_ENV = Path("/etc/hermes/remote-display.env")
+_REMOTE_DISPLAY_CONTENT = (
+    "# Generado por hermes-remote-access-control — modo espejo remoto ON.\n"
+    "# El compositor sirve su framebuffer por VNC loopback (noVNC lo expone).\n"
+    'QT_QPA_PLATFORM=vnc:size=1280x800:addr=127.0.0.1:port=5900\n'
+)
+_SHELL_SERVICE = "lumenso-shell.service"
+_REMOTE_URL_FILE = Path("/var/lib/hermes/remote-url")
+
+
+# --------------------------------------------------------------------------
+# Helpers — file handling
+# --------------------------------------------------------------------------
+
+
+def _hermes_uid() -> int:
+    # El staging lo hace el COMPOSITOR (hermes-user), NO el daemon (hermes), que
+    # está bloqueado de este dir por diseño. Aceptamos solo ficheros de hermes-user.
+    return pwd.getpwnam("hermes-user").pw_uid
+
+
+def _read_staged() -> dict:
+    """Read and parse the staged request JSON with TOCTOU mitigations.
+
+    Validates:
+      - O_NOFOLLOW — refuses symlinks
+      - st_uid == uid(hermes)
+      - st_mode == 0o600
+      - st_nlink == 1
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    try:
+        fd = os.open(str(STAGE_FILE), flags)
+    except OSError as exc:
+        raise ValueError(f"cannot open staged file: {exc}") from exc
+
+    try:
+        st = os.fstat(fd)
+    except OSError as exc:
+        os.close(fd)
+        raise ValueError(f"fstat failed: {exc}") from exc
+
+    try:
+        expected_uid = _hermes_uid()
+    except KeyError as exc:
+        os.close(fd)
+        raise ValueError("system user 'hermes' not found") from exc
+
+    if st.st_uid != expected_uid:
+        os.close(fd)
+        raise ValueError(
+            f"staged file uid {st.st_uid} != hermes uid {expected_uid} — refusing"
+        )
+    if stat.S_IMODE(st.st_mode) != _EXPECTED_FILE_MODE:
+        os.close(fd)
+        raise ValueError(
+            f"staged file mode {oct(stat.S_IMODE(st.st_mode))} != "
+            f"{oct(_EXPECTED_FILE_MODE)} — refusing"
+        )
+    if st.st_nlink != 1:
+        os.close(fd)
+        raise ValueError(
+            f"staged file has {st.st_nlink} hard links (expected 1) — refusing"
+        )
+
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise ValueError(f"cannot read staged file: {exc}") from exc
+
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("staged file is not a JSON object")
+    return data
+
+
+def _shred(path: Path) -> None:
+    """Overwrite file content with zeros then unlink.
+
+    On /run (tmpfs) the unlink alone clears the data from RAM.
+    The overwrite is kept as defence-in-depth for potential non-tmpfs mounts.
+    Mirrors hermes-account-apply._shred exactly.
+    """
+    try:
+        size = path.stat().st_size
+        with path.open("r+b") as fh:
+            fh.write(b"\x00" * max(size, 1))
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        pass
+    finally:
+        path.unlink(missing_ok=True)
+
+
+# --------------------------------------------------------------------------
+# Helpers — PAM verification
+# --------------------------------------------------------------------------
+
+
+def _account_has_real_password(username: str) -> bool:
+    """True solo si *username* tiene una contraseña REAL (no vacía, no bloqueada)
+    en /etc/shadow. El helper corre como root → lee /etc/shadow directo (el módulo
+    `spwd` se eliminó en Python 3.13). Hash bloqueado ('!'/'*') o vacío → False.
+    """
+    try:
+        with open("/etc/shadow", encoding="utf-8") as f:
+            for line in f:
+                parts = line.rstrip("\n").split(":")
+                if parts and parts[0] == username:
+                    pwhash = parts[1] if len(parts) > 1 else ""
+                    return bool(pwhash) and not pwhash.startswith(("!", "*"))
+    except OSError as exc:
+        logger.warning("no se pudo leer /etc/shadow: %s", type(exc).__name__)
+        return False
+    return False  # usuario ausente en shadow → fail closed
+
+
+def _verify_password_pam(username: str, password: str) -> bool:
+    """Verify *username*:*password* via PAM.
+
+    As root, python-pam / pam_unix work directly — no setuid helper needed.
+    We try `python-pam` first (the `pam` package); fall back to invoking
+    `/usr/sbin/unix_chkpwd` via subprocess (root can call it non-setuid).
+
+    Fails CLOSED on any error — returns False.
+    """
+    # Defensa explícita: una contraseña vacía NUNCA es válida para el gate de
+    # consentimiento, independientemente de cómo esté configurado PAM/unix_chkpwd.
+    if not password:
+        logger.warning("rechazada verificación con contraseña vacía")
+        return False
+    # FAIL-CLOSED si la cuenta NO tiene contraseña real (vacía o bloqueada). En
+    # estado pre-onboarding hermes-user es passwordless (autologin) y PAM acepta
+    # CUALQUIER contraseña → el gate fallaría ABIERTO. Sin contraseña que verificar
+    # no hay consentimiento posible: rechazamos la desactivación.
+    if not _account_has_real_password(username):
+        logger.warning(
+            "cuenta %s sin contraseña válida (passwordless/locked) — "
+            "gate de desactivación FAIL-CLOSED (configura una en el onboarding)",
+            username,
+        )
+        return False
+    # Servicio PAM DEDICADO (hermes-auth = solo pam_unix; sin securetty/nologin
+    # que fallan en un oneshot sin tty — por eso "login" se comportaba mal).
+    try:
+        import pam as _pam  # python-pam package
+
+        authenticator = _pam.pam()
+        if authenticator.authenticate(username, password, service="hermes-auth"):
+            return True
+        # python-pam dijo False: confirmamos con unix_chkpwd (chequeo directo de
+        # shadow como root). Ambos rechazan contraseñas incorrectas → OR seguro.
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.warning("pam verify error (python-pam): %s", type(exc).__name__)
+
+    # Fallback / confirmación: unix_chkpwd as root (no setuid escalation needed).
+    return _verify_password_unix_chkpwd(username, password)
+
+
+def _verify_password_unix_chkpwd(username: str, password: str) -> bool:
+    """Call /usr/sbin/unix_chkpwd <username> nonull with password on stdin.
+
+    `nonull` (no nullok): una contraseña vacía se RECHAZA — el gate de
+    consentimiento jamás debe pasar con password en blanco.
+    Returns True on rc=0, False on anything else. Fail CLOSED on subprocess error.
+    """
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/unix_chkpwd", username, "nonull"],
+            input=password.encode("utf-8"),
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception as exc:
+        logger.warning("unix_chkpwd failed: %s", type(exc).__name__)
+        return False
+
+
+# --------------------------------------------------------------------------
+# Helpers — systemctl
+# --------------------------------------------------------------------------
+
+
+def _systemctl(args: list[str]) -> bool:
+    """Run systemctl with *args*.  Returns True on success."""
+    cmd = ["/usr/bin/systemctl"] + args
+    result = subprocess.run(cmd, capture_output=True, check=False, timeout=30)
+    if result.returncode != 0:
+        stderr_safe = result.stderr.decode(errors="replace").strip()
+        logger.error(
+            "systemctl %s failed (rc=%d): %s",
+            " ".join(args),
+            result.returncode,
+            stderr_safe,
+        )
+    return result.returncode == 0
+
+
+_REMOTE_ACTIVE_FILE = Path("/var/lib/hermes/remote-active")
+
+
+def _disable_remote_access() -> bool:
+    ok = _systemctl(["disable", "--now"] + _remote_services())
+    # Volver al render local (eglfs): quitar los flags y relanzar el compositor.
+    try:
+        _REMOTE_DISPLAY_ENV.unlink(missing_ok=True)
+        _REMOTE_URL_FILE.unlink(missing_ok=True)
+        _REMOTE_ACTIVE_FILE.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("no se pudo retirar el flag de display: %s", exc)
+        ok = False
+    ok = _systemctl(["restart", _SHELL_SERVICE]) and ok
+    return ok
+
+
+def _enable_remote_access() -> bool:
+    # Modo espejo: el compositor re-arranca sirviendo VNC loopback.
+    try:
+        _REMOTE_DISPLAY_ENV.parent.mkdir(parents=True, exist_ok=True)
+        _REMOTE_DISPLAY_ENV.write_text(_REMOTE_DISPLAY_CONTENT, encoding="utf-8")
+        os.chmod(_REMOTE_DISPLAY_ENV, 0o644)
+    except OSError as exc:
+        logger.error("no se pudo escribir el flag de display: %s", exc)
+        return False
+    ok = _systemctl(["restart", _SHELL_SERVICE])
+    ok = _systemctl(["enable", "--now"] + _remote_services()) and ok
+    # El daemon (User=hermes, sandbox) no puede ejecutar systemctl; deriva el
+    # estado de active del flag en /var/lib/hermes (ReadWritePaths del daemon).
+    try:
+        _REMOTE_ACTIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _REMOTE_ACTIVE_FILE.write_text("1", encoding="utf-8")
+        os.chmod(_REMOTE_ACTIVE_FILE, 0o644)
+    except OSError as exc:
+        logger.warning("no se pudo escribir remote-active flag: %s", exc)
+    return ok
+
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
+
+
+def _apply(staged: dict) -> int:
+    action = staged.get("action", "")
+
+    if action not in _KNOWN_ACTIONS:
+        logger.error(
+            "unknown action %r — ignoring (valid: %s)",
+            action,
+            ", ".join(sorted(_KNOWN_ACTIONS)),
+        )
+        return 1
+
+    if action == "disable":
+        password = staged.get("password", "")
+        if not isinstance(password, str) or not password:
+            logger.error("disable action: password field missing or empty — aborting")
+            return 1
+
+        if not _verify_password_pam(LOGIN_USER, password):
+            # Log at WARNING (not ERROR) — wrong password is expected from an
+            # attacker probing; ERROR level would flood the journal.
+            logger.warning(
+                "disable action: PAM verification FAILED for user '%s' — aborting",
+                LOGIN_USER,
+            )
+            return 1
+
+        logger.info("disable action: PAM verification passed — stopping remote services")
+        ok = _disable_remote_access()
+        if ok:
+            logger.info("remote access DISABLED (hermes-remote-tunnel/novnc/tunnel-url)")
+        return 0 if ok else 1
+
+    # action == "enable"
+    # SECURITY FIX (finding #6): enable exige la MISMA verificación PAM que disable.
+    # Habilitar el acceso remoto expone el dispositivo a internet; es una operación
+    # tan sensible como deshabilitarlo. Un proceso comprometido que pueda escribir en
+    # /run/hermes/remote-control/ no debe poder activar el túnel sin autenticación.
+    password = staged.get("password", "")
+    if not isinstance(password, str) or not password:
+        logger.error("enable action: password field missing or empty — aborting")
+        return 1
+
+    if not _verify_password_pam(LOGIN_USER, password):
+        logger.warning(
+            "enable action: PAM verification FAILED for user '%s' — aborting",
+            LOGIN_USER,
+        )
+        return 1
+
+    logger.info("enable action: PAM verification passed — starting remote services")
+    ok = _enable_remote_access()
+    if ok:
+        logger.info("remote access ENABLED (hermes-remote-tunnel/novnc/tunnel-url)")
+    return 0 if ok else 1
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        logger.error("must run as root")
+        return 1
+
+    if not STAGE_FILE.exists():
+        logger.info("no staged request — nothing to do")
+        return 0
+
+    staged = None
+    try:
+        staged = _read_staged()
+    except Exception as exc:
+        logger.error("failed to parse staged request: %s", exc)
+        _shred(STAGE_FILE)
+        return 1
+
+    try:
+        return _apply(staged)
+    finally:
+        # Always shred — whether success, failure, or exception.
+        # The password field (if present) must not persist on disk.
+        _shred(STAGE_FILE)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,20 @@
+# agents-os-rdp-bootstrap.service — one-shot que configura gnome-remote-desktop
+# en headless mode + genera password único + lo escribe a serial console.
+#
+# Diseñado para correr UNA VEZ en el primer boot (verifica flag).
+# Se ejecuta como root porque grdctl --system requiere ello.
+
+[Unit]
+Description=Agents OS — bootstrap gnome-remote-desktop (RDP headless + token)
+After=multi-user.target gnome-remote-desktop.service
+ConditionPathExists=!/var/lib/agents-os/install/rdp-bootstrapped
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/agents-os-rdp-bootstrap
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

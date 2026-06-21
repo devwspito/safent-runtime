@@ -1,0 +1,9 @@
+# dconf profile — Agents OS Edition.
+#
+# T014: los ajustes de hermes-desktop.conf se aplican desde la base "local"
+# del sistema. El usuario puede sobrescribirlos en su base personal.
+#
+# Ubicación destino en la imagen: /etc/dconf/profile/user
+# (el perfil llamado "user" es el que usa cada usuario del sistema por defecto).
+user-db:user
+system-db:local

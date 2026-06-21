@@ -1,0 +1,29 @@
+# hermes-trigger-timer.timer — backstop durable para triggers de tipo timer.
+#
+# Este timer actúa como red de seguridad (spec 007 Edge Cases / FR-020):
+# si el proceso hermes-runtime cae y se reinicia, el timer recupera
+# la ejecución perdida sin acumular ráfagas (Persistent=yes + OnCalendar).
+#
+# NOTA: habilitar este timer NO habilita ningún TriggerSource automático.
+# La allow-list de orígenes está VACÍA por defecto (SC-013). Este unit
+# solo asegura que, cuando exista un origen timer autorizado, el disparo
+# se recupera tras un reinicio de la máquina.
+#
+# Seguridad: el ExecStart hace dbus-send al bus de sistema con el método
+# TriggerTimerFire de org.hermes.Runtime1 — el daemon valida authZ por
+# sender UID (CTRL-P2-9) y pasa por el pre-gate (CTRL-P2-7) antes de
+# encolar. El timer NO encola directamente.
+
+[Unit]
+Description=Hermes Runtime trigger timer (backstop durable — spec 007)
+After=hermes-runtime.service
+Requires=hermes-runtime.service
+
+[Timer]
+# Disparo cada hora en el minuto 0. Ajusta para tu caso de uso.
+OnCalendar=hourly
+Persistent=yes
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

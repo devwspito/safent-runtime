@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Hermes — Acceso remoto (espejo)</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0d12;color:#cdd3e0;font-family:system-ui,sans-serif;overflow:hidden}
+  #bar{position:fixed;top:0;left:0;right:0;height:30px;display:flex;align-items:center;gap:12px;padding:0 12px;background:#11141c;border-bottom:1px solid #1e2330;font-size:13px;z-index:10}
+  #dot{width:9px;height:9px;border-radius:50%;background:#e2495b}
+  #dot.on{background:#37d67a}
+  #wrap{position:absolute;top:30px;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center}
+  canvas{max-width:100%;max-height:100%;cursor:none;background:#000;image-rendering:auto}
+  #hint{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);background:#11141ccc;padding:6px 12px;border-radius:8px;font-size:12px}
+</style>
+</head>
+<body>
+<div id="bar"><span id="dot"></span><b>Hermes Shell</b><span id="st">conectando…</span></div>
+<div id="wrap"><canvas id="c" tabindex="0"></canvas></div>
+<div id="hint">Click para tomar foco · teclado y ratón van a la máquina</div>
+<script>
+/* event.code (tecla FÍSICA, independiente del layout) -> keycode evdev
+   (linux/input-event-codes.h). Enviamos la tecla física y la VM aplica SU
+   keymap, con Shift/Caps/etc como teclas físicas reales -> sin la síntesis
+   keysym->nivel que latcheaba el shift. Así el teclado va como un remoto de
+   verdad (RDP/VNC). */
+const CODE = {
+  Escape:1, Backquote:41,
+  Digit1:2,Digit2:3,Digit3:4,Digit4:5,Digit5:6,Digit6:7,Digit7:8,Digit8:9,Digit9:10,Digit0:11,
+  Minus:12, Equal:13, Backspace:14,
+  Tab:15, KeyQ:16,KeyW:17,KeyE:18,KeyR:19,KeyT:20,KeyY:21,KeyU:22,KeyI:23,KeyO:24,KeyP:25,
+  BracketLeft:26, BracketRight:27, Backslash:43,
+  CapsLock:58, KeyA:30,KeyS:31,KeyD:32,KeyF:33,KeyG:34,KeyH:35,KeyJ:36,KeyK:37,KeyL:38,
+  Semicolon:39, Quote:40, Enter:28,
+  ShiftLeft:42, IntlBackslash:86, KeyZ:44,KeyX:45,KeyC:46,KeyV:47,KeyB:48,KeyN:49,KeyM:50,
+  Comma:51, Period:52, Slash:53, ShiftRight:54,
+  ControlLeft:29, MetaLeft:125, AltLeft:56, Space:57, AltRight:100, MetaRight:126,
+  ContextMenu:127, ControlRight:97,
+  Insert:110, Delete:111, Home:102, End:107, PageUp:104, PageDown:109,
+  ArrowUp:103, ArrowDown:108, ArrowLeft:105, ArrowRight:106,
+  F1:59,F2:60,F3:61,F4:62,F5:63,F6:64,F7:65,F8:66,F9:67,F10:68,F11:87,F12:88,
+  NumLock:69, NumpadDivide:98, NumpadMultiply:55, NumpadSubtract:74, NumpadAdd:78,
+  NumpadEnter:96, NumpadDecimal:83,
+  Numpad0:82,Numpad1:79,Numpad2:80,Numpad3:81,Numpad4:75,Numpad5:76,Numpad6:77,
+  Numpad7:71,Numpad8:72,Numpad9:73,
+};
+const params = new URLSearchParams(location.search);
+const token = params.get("token") || "";
+const proto = location.protocol === "https:" ? "wss" : "ws";
+const url = proto + "://" + location.host + "/ws?token=" + encodeURIComponent(token);
+const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+const st = document.getElementById("st"), dot = document.getElementById("dot");
+let ws, natW=0, natH=0;
+
+function connect(){
+  ws = new WebSocket(url); ws.binaryType = "blob";
+  ws.onopen = () => { st.textContent="conectado"; dot.classList.add("on"); cv.focus(); };
+  ws.onclose = (ev) => { dot.classList.remove("on"); st.textContent = ev.code===4401?"token inválido":"desconectado — reintentando"; if(ev.code!==4401) setTimeout(connect,1500); };
+  ws.onmessage = async (ev) => {
+    const bmp = await createImageBitmap(ev.data);
+    if (bmp.width!==natW || bmp.height!==natH){ natW=bmp.width; natH=bmp.height; cv.width=natW; cv.height=natH; }
+    ctx.drawImage(bmp,0,0); bmp.close();
+  };
+}
+const send = (o)=>{ if(ws && ws.readyState===1) ws.send(JSON.stringify(o)); };
+function toImg(e){
+  const r = cv.getBoundingClientRect();
+  const x = (e.clientX - r.left) * (natW / r.width);
+  const y = (e.clientY - r.top) * (natH / r.height);
+  return [Math.max(0,Math.min(natW,x)), Math.max(0,Math.min(natH,y))];
+}
+cv.addEventListener("mousemove", e=>{ const [x,y]=toImg(e); send({t:"m",x,y}); });
+cv.addEventListener("mousedown", e=>{ cv.focus(); const [x,y]=toImg(e); send({t:"m",x,y}); send({t:"b",b:e.button,p:true}); e.preventDefault(); });
+cv.addEventListener("mouseup",   e=>{ send({t:"b",b:e.button,p:false}); e.preventDefault(); });
+cv.addEventListener("contextmenu", e=>e.preventDefault());
+cv.addEventListener("wheel", e=>{ send({t:"w",a:0,s:e.deltaY>0?-1:1}); e.preventDefault(); }, {passive:false});
+// En Mac, Cmd (Meta) -> Ctrl en la VM: copy/paste/select-all con la muscle
+// memory del Mac (Linux usa Ctrl para esos atajos).
+const IS_MAC = /Mac|iPhone|iPad/.test((navigator.platform||"")+" "+(navigator.userAgent||""));
+function evcode(e){
+  if (IS_MAC && (e.code==="MetaLeft"||e.code==="MetaRight")) return 29; // -> LeftCtrl
+  return CODE[e.code];
+}
+function isPaste(e){ return e.code==="KeyV" && (e.metaKey||e.ctrlKey); }
+cv.addEventListener("keydown", e=>{
+  if (isPaste(e)){ e.preventDefault(); return; }   // lo maneja el evento 'paste'
+  const c=evcode(e); if(c!==undefined){ send({t:"kc",c,p:true}); e.preventDefault(); }
+});
+cv.addEventListener("keyup", e=>{
+  if (isPaste(e)){ e.preventDefault(); return; }
+  const c=evcode(e); if(c!==undefined){ send({t:"kc",c,p:false}); e.preventDefault(); }
+});
+// Pegar contenido DEL MAC en la VM: el navegador lee TU portapapeles (gesto de
+// paste) y el server lo pone en el de la VM + dispara Ctrl+V.
+cv.addEventListener("paste", e=>{
+  const cd = e.clipboardData || window.clipboardData;
+  const text = cd ? cd.getData("text") : "";
+  if (text) send({t:"paste", text});
+  e.preventDefault();
+});
+// Anti-latch: al perder foco suelta TODOS los modificadores.
+const MODS=[42,54,29,97,56,100,125,126];
+function releaseMods(){ for(const m of MODS) send({t:"kc",c:m,p:false}); }
+cv.addEventListener("blur", releaseMods);
+window.addEventListener("blur", releaseMods);
+document.addEventListener("visibilitychange", ()=>{ if(document.hidden) releaseMods(); });
+connect();
+</script>
+</body>
+</html>

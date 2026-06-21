@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+# hermes-account-apply — privileged root oneshot that applies OS account
+# credentials staged by the shell-server (User=hermes, non-root).
+#
+# This script MUST run as root (called by hermes-account-apply.service).
+# It is the only component in the privilege boundary.
+#
+# Security invariants:
+#   - Strictly one-time: if the sentinel exists, shred any staged file and exit 0.
+#   - Re-validates username and password before any OS call (never trust the
+#     staging file alone; the shell-server endpoint is one layer, not the only one).
+#   - Password is passed to chpasswd via STDIN, never via argv or environment.
+#   - The staged file is opened with O_NOFOLLOW and fstat-verified (uid, mode,
+#     nlink) before reading — prevents symlink/substitution attacks.
+#   - The staged file is shredded (overwritten + unlinked) in a finally block,
+#     whether the apply succeeds or fails.
+#   - Nothing with secret content is logged to journald.
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import pwd
+import re
+import stat
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+logging.basicConfig(
+    format="%(levelname)s hermes-account-apply: %(message)s",
+    level=logging.INFO,
+    stream=sys.stderr,
+)
+logger = logging.getLogger("hermes-account-apply")
+
+# --------------------------------------------------------------------------
+# Constants
+# --------------------------------------------------------------------------
+
+# The setup/ subdir is 0700 hermes:hermes (tmpfiles: d /run/hermes/setup 0700 hermes hermes).
+STAGE_FILE = (
+    Path(os.environ.get("HERMES_ACCOUNT_STAGE_DIR", "/run/hermes/setup"))
+    / "account-request.json"
+)
+SENTINEL_DIR = Path("/var/lib/hermes")
+SENTINEL_FILE = SENTINEL_DIR / "account-applied"
+
+# Login user for this OS image (autologin via GDM, not the daemon user).
+# This is the display/interactive account; the daemon runs as 'hermes'.
+# We do NOT rename the unix account — that breaks autologin, the session,
+# the keyring, and gnome-remote-desktop. We only:
+#   1. Set a real password.
+#   2. Set the GECOS display name (cosmetic, what GDM shows).
+#   3. Remove forced password expiry so the user is not locked out.
+LOGIN_USER = "hermes-user"
+
+_USERNAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_PASSWORD_MIN = 8
+_PASSWORD_MAX = 256
+# C0 control characters (0x00–0x1F) and DEL (0x7F) are forbidden in passwords.
+# chpasswd reads stdin line-by-line; a \\n injects a second 'user:pass' entry.
+_CTRL_LOWER = 0x20  # first non-control char (space)
+_CTRL_DEL = 0x7F
+_EXPECTED_FILE_MODE = 0o600
+
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+
+def _validate_username(username: str) -> bool:
+    return bool(_USERNAME_RE.match(username))
+
+
+def _validate_password(password: str) -> bool:
+    """Return True only when password is safe to pass to chpasswd via stdin.
+
+    chpasswd reads stdin as 'user:pass\\n' — a newline in the password would
+    inject a second entry and could allow arbitrary account takeover (root
+    takeover if the attacker crafts 'root:attackerpassword').  We reject every
+    C0/DEL control character (ord < 0x20 or == 0x7f).  This is the root-side
+    gate; the same check runs in the API endpoint (defence-in-depth).
+    """
+    if not (_PASSWORD_MIN <= len(password) <= _PASSWORD_MAX):
+        return False
+    return not any(ord(c) < _CTRL_LOWER or ord(c) == _CTRL_DEL for c in password)
+
+
+def _hermes_uid() -> int:
+    """Return the numeric uid of the 'hermes' system user."""
+    return pwd.getpwnam("hermes").pw_uid
+
+
+def _read_staged() -> dict:
+    """Read and parse the staged request JSON with TOCTOU mitigations.
+
+    Opens with O_NOFOLLOW (refuses symlinks) and verifies via fstat that:
+      - st_uid == uid(hermes)  — only the daemon user produced this file
+      - st_mode (permissions) == 0o600  — no group/other read
+      - st_nlink == 1  — not hard-linked to another path
+
+    Any mismatch raises ValueError and the caller shreds + aborts.
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    try:
+        fd = os.open(str(STAGE_FILE), flags)
+    except OSError as exc:
+        raise ValueError(f"cannot open staged file: {exc}") from exc
+
+    try:
+        st = os.fstat(fd)
+    except OSError as exc:
+        os.close(fd)
+        raise ValueError(f"fstat failed: {exc}") from exc
+
+    try:
+        expected_uid = _hermes_uid()
+    except KeyError as exc:
+        os.close(fd)
+        raise ValueError("system user 'hermes' not found") from exc
+
+    if st.st_uid != expected_uid:
+        os.close(fd)
+        raise ValueError(
+            f"staged file uid {st.st_uid} != hermes uid {expected_uid} — refusing"
+        )
+    if stat.S_IMODE(st.st_mode) != _EXPECTED_FILE_MODE:
+        os.close(fd)
+        raise ValueError(
+            f"staged file mode {oct(stat.S_IMODE(st.st_mode))} != "
+            f"{oct(_EXPECTED_FILE_MODE)} — refusing"
+        )
+    if st.st_nlink != 1:
+        os.close(fd)
+        raise ValueError(
+            f"staged file has {st.st_nlink} hard links (expected 1) — refusing"
+        )
+
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise ValueError(f"cannot read staged file: {exc}") from exc
+
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("staged file is not a JSON object")
+    return data
+
+
+def _shred(path: Path) -> None:
+    """Overwrite file content with zeros then unlink.
+
+    shred(1) is the gold standard but may not be on all images.
+    We fall back to a manual overwrite + unlink, which is sufficient
+    on non-SSD or when the FS does not do copy-on-write (ext4/xfs on /run
+    is tmpfs — data is in RAM and vanishes on unlink regardless).
+    """
+    try:
+        size = path.stat().st_size
+        with path.open("r+b") as fh:
+            fh.write(b"\x00" * max(size, 1))
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        pass
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def _set_password(username: str, password: str) -> None:
+    """Pipe 'username:password' to chpasswd via stdin — never via argv."""
+    entry = f"{username}:{password}"
+    result = subprocess.run(
+        ["/usr/sbin/chpasswd"],
+        input=entry.encode(),
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr_safe = result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"chpasswd failed (rc={result.returncode}): {stderr_safe}")
+
+
+def _set_display_name(login_user: str, display_name: str) -> None:
+    """Set GECOS field (display name shown in GDM) via usermod -c.
+
+    The display_name comes from the validated username field — safe to
+    pass as argv because it already passed the strict username regex.
+    The regex forbids shell-special characters.
+    """
+    result = subprocess.run(  # noqa: S603 — trusted system binary; display_name validated by username regex
+        ["/usr/sbin/usermod", "-c", display_name, login_user],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr_safe = result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"usermod -c failed (rc={result.returncode}): {stderr_safe}")
+
+
+def _remove_password_expiry(login_user: str) -> None:
+    """Remove forced password expiry (chage -M -1).
+
+    The bib-config.toml sets the initial password 'changeme-on-firstboot'
+    with a forced expiry. Once the user sets a real password via the wizard,
+    we remove that constraint so they are not locked out.
+    """
+    result = subprocess.run(  # noqa: S603 — trusted system binary; login_user is a module constant
+        ["/usr/bin/chage", "-M", "-1", login_user],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        # Non-fatal: the password was already set. Log and continue.
+        stderr_safe = result.stderr.decode(errors="replace").strip()
+        logger.warning("chage -M -1 failed (non-fatal): %s", stderr_safe)
+
+
+_GDM_CUSTOM_CONF = Path("/etc/gdm/custom.conf")
+
+# Espejo remoto — mismos paths que hermes-remote-access-control.
+_REMOTE_DISPLAY_ENV = Path("/etc/hermes/remote-display.env")
+_REMOTE_DISPLAY_CONTENT = (
+    "# Generado por hermes-account-apply — modo espejo remoto ON (activado por onboarding).\n"
+    "# El compositor sirve su framebuffer por VNC loopback (noVNC lo expone).\n"
+    'QT_QPA_PLATFORM=vnc:size=1280x800:addr=127.0.0.1:port=5900\n'
+)
+_REMOTE_ACTIVE_FILE = Path("/var/lib/hermes/remote-active")
+_NAMED_TUNNEL_TOKEN = Path("/etc/hermes/credentials/cloudflare-tunnel.token")
+
+
+def _remote_services() -> list[str]:
+    tunnel = (
+        "hermes-remote-tunnel.service"
+        if _NAMED_TUNNEL_TOKEN.exists()
+        else "hermes-remote-quicktunnel.service"
+    )
+    return ["hermes-remote-gateway.service", tunnel, "hermes-novnc.service"]
+
+
+def _auto_enable_remote_access() -> None:
+    """Activa el acceso remoto como parte del onboarding.
+
+    Fail-safe: cualquier error se loguea pero NO aborta el onboarding ni
+    impide que se escriba el sentinel. La contraseña ya está fijada y el
+    autologin desactivado — el estado del SO es seguro independientemente
+    de si los servicios remotos arrancan.
+    """
+    try:
+        _REMOTE_DISPLAY_ENV.parent.mkdir(parents=True, exist_ok=True)
+        _REMOTE_DISPLAY_ENV.write_text(_REMOTE_DISPLAY_CONTENT, encoding="utf-8")
+        os.chmod(_REMOTE_DISPLAY_ENV, 0o644)
+    except OSError as exc:
+        logger.warning("auto-enable remote: no se pudo escribir display env: %s", exc)
+        return
+
+    result = subprocess.run(
+        ["/usr/bin/systemctl", "enable", "--now"] + _remote_services(),
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        stderr_safe = result.stderr.decode(errors="replace").strip()
+        logger.warning(
+            "auto-enable remote: systemctl enable --now falló (rc=%d): %s",
+            result.returncode,
+            stderr_safe,
+        )
+    else:
+        logger.info("acceso remoto ACTIVADO automáticamente tras el onboarding")
+
+    # Escribe el flag que el daemon lee para derivar el estado (sandbox impide
+    # ejecutar systemctl desde User=hermes).
+    try:
+        _REMOTE_ACTIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _REMOTE_ACTIVE_FILE.write_text("1", encoding="utf-8")
+        os.chmod(_REMOTE_ACTIVE_FILE, 0o644)
+    except OSError as exc:
+        logger.warning("auto-enable remote: no se pudo escribir remote-active flag: %s", exc)
+
+
+def _disable_autologin() -> None:
+    """Desactiva el autologin de GDM tras fijar la contraseña del dispositivo.
+
+    Llavero Option B (una sola contraseña): el primer boot usa autologin para el
+    onboarding (sin contraseña aún); una vez el operador fija su contraseña, el
+    siguiente boot entra POR CONTRASEÑA, y pam_gnome_keyring (ya en gdm-password)
+    crea/desbloquea el llavero del login con esa misma contraseña → cifrado real,
+    sin prompt de 'crear llavero', login == llavero == gate remoto.
+
+    Best-effort: si no puede editar la config, loguea y NO rompe el apply (el
+    onboarding ya terminó; un fallo aquí no debe dejar la cuenta a medias).
+    """
+    try:
+        if not _GDM_CUSTOM_CONF.exists():
+            logger.warning(
+                "autologin: %s no existe — no se desactiva", _GDM_CUSTOM_CONF
+            )
+            return
+        out: list[str] = []
+        seen_enable = False
+        for ln in _GDM_CUSTOM_CONF.read_text(encoding="utf-8").splitlines():
+            stripped = ln.strip()
+            if stripped.startswith("AutomaticLoginEnable"):
+                out.append("AutomaticLoginEnable=false")
+                seen_enable = True
+            elif stripped.startswith("AutomaticLogin") and "=" in stripped:
+                out.append("# " + ln)  # comenta AutomaticLogin=hermes-user
+            else:
+                out.append(ln)
+        if not seen_enable:
+            out.append("AutomaticLoginEnable=false")
+        _GDM_CUSTOM_CONF.write_text("\n".join(out) + "\n", encoding="utf-8")
+        logger.info(
+            "autologin desactivado — el login pedirá contraseña y desbloqueará el llavero"
+        )
+    except OSError as exc:
+        # SECURITY FIX (finding #3): re-lanzar como RuntimeError para que _apply
+        # lo capture y NO escriba el sentinel. Dejar autologin activo + cuenta con
+        # contraseña + acceso remoto activado es postura de seguridad inaceptable
+        # para un SO público. Fail-closed: el operador vuelve a intentar el onboarding.
+        raise RuntimeError(f"autologin: no se pudo desactivar ({exc})")
+
+
+def _write_sentinel(username: str) -> None:
+    """Write a sentinel file with timestamp (NO password) for idempotence check."""
+    SENTINEL_DIR.mkdir(parents=True, exist_ok=True)
+    content = json.dumps({
+        "applied_at": datetime.now(tz=UTC).isoformat(),
+        "display_name": username,
+    })
+    SENTINEL_FILE.write_text(content, encoding="utf-8")
+    os.chmod(SENTINEL_FILE, 0o600)
+
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        logger.error("must run as root")
+        return 1
+
+    # One-time gate: once the sentinel exists, this path is closed forever.
+    # Password changes go through authenticated OS settings, not this script.
+    if SENTINEL_FILE.exists():
+        logger.info("sentinel present — account already configured, skipping")
+        _shred(STAGE_FILE)
+        return 0
+
+    if not STAGE_FILE.exists():
+        logger.info("no staged request — nothing to do")
+        return 0
+
+    staged = None
+    try:
+        staged = _read_staged()
+    except Exception as exc:
+        logger.error("failed to parse staged request: %s", exc)
+        _shred(STAGE_FILE)
+        return 1
+
+    try:
+        return _apply(staged)
+    finally:
+        _shred(STAGE_FILE)
+
+
+def _apply(staged: dict) -> int:
+    username = staged.get("username", "")
+    password = staged.get("password", "")
+
+    # Re-validate: the endpoint validated once, but we are the root gate.
+    if not isinstance(username, str) or not _validate_username(username):
+        logger.error("staged username failed validation — aborting")
+        return 1
+
+    if not isinstance(password, str) or not _validate_password(password):
+        logger.error("staged password failed validation — aborting")
+        return 1
+
+    try:
+        _set_password(LOGIN_USER, password)
+        logger.info("password applied for login user '%s'", LOGIN_USER)
+
+        _set_display_name(LOGIN_USER, username)
+        logger.info("display name set to '%s'", username)
+
+        _remove_password_expiry(LOGIN_USER)
+
+        # Llavero Option B: tras fijar la contraseña del dispositivo, desactiva el
+        # autologin → el siguiente boot pide esa contraseña → pam_gnome_keyring
+        # desbloquea el llavero del login con ella (una sola contraseña, sin prompt).
+        #
+        # SECURITY FIX (finding #3): _disable_autologin ahora lanza RuntimeError si
+        # no puede desactivar el autologin. Si ese RuntimeError llega hasta aquí, el
+        # bloque except lo captura y NO escribe el sentinel → el operador debe reintentar.
+        # Nunca dejar autologin activo + contraseña fijada + acceso remoto habilitado.
+        _disable_autologin()
+
+        # Activar el acceso remoto por defecto tras el onboarding. Fail-safe:
+        # si falla, el onboarding y el sentinel se escriben igualmente (el estado
+        # de seguridad — autologin desactivado + contraseña real — ya está asegurado).
+        _auto_enable_remote_access()
+
+        # SECURITY FIX (finding #3): solo escribir el sentinel DESPUÉS de que
+        # _disable_autologin() haya completado sin excepción.
+        _write_sentinel(username)
+        logger.info("account-apply sentinel written — setup complete")
+        return 0
+    except RuntimeError as exc:
+        # _disable_autologin falló: NO escribir sentinel, NO dejar al acceso remoto
+        # habilitado. Loguear el error para que el operador lo investigue.
+        logger.error(
+            "account-apply FAILED — sentinel NOT written, autologin still active: %s", exc
+        )
+        logger.error(
+            "ACCIÓN REQUERIDA: ejecutar hermes-account-apply de nuevo tras corregir el error."
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

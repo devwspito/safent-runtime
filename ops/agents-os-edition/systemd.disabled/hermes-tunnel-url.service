@@ -1,0 +1,19 @@
+# hermes-tunnel-url.service — captura la URL pública de cloudflared y la publica
+# (fichero + banner de login) junto con la contraseña.
+[Unit]
+Description=Hermes Tunnel URL capture (publica URL pública + credenciales)
+After=hermes-remote-tunnel.service
+Wants=hermes-remote-tunnel.service
+
+# Acceso remoto crítico: reinicio indefinido, nunca se rinde (kill repetido
+# se recupera). Desactivar a propósito = consentimiento humano (UI + contraseña).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hermes-tunnel-url
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

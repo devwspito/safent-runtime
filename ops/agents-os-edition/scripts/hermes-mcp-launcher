@@ -1,0 +1,716 @@
+#!/usr/bin/env python3
+"""hermes-mcp-launcher — root helper that spawns MCP server subprocesses INSIDE the
+egress netns and returns their stdio to the daemon via SCM_RIGHTS.
+
+Runs as User=root. The daemon (hermes-runtime.service) is confined by Landlock +
+seccomp + ProtectSystem=strict. MCP runners (uvx/npx/node) die before the JSON-RPC
+handshake because they inherit that confinement. This helper runs OUTSIDE the
+daemon's sandbox, spawns the runner, and passes the child's stdio fds back.
+
+C1 FIX (2026-06-19) — egress jail
+---------------------------------
+Previously this helper did plain subprocess.Popen in the MAIN namespace → the MCP
+child had UNRESTRICTED egress. A malicious MCP server (one that passed the Security
+Center scan but exfiltrates at runtime) could POST the agent's browser cookies to
+any host. Now each MCP child is spawned as a TRANSIENT systemd unit joined to a
+jailed netns, where egress is default-deny except via the audited proxy. That join
+(NetworkNamespacePath=) + transient-unit creation requires CAP_NET_ADMIN +
+CAP_SYS_ADMIN, which is why the launcher must be root.
+
+C1 PASS-2 FIX (2026-06-19) — MCP gets its OWN egress identity
+-------------------------------------------------------------
+The MCP child now joins /run/netns/hermes-mcp (its OWN netns), NOT the browser's
+/run/netns/hermes-browser. Red-team found that sharing the browser netns meant
+sharing the proxy source IP (10.200.0.2) and therefore ONE policy plane: a browser
+teaching session pushing `open-logged` via the egress control socket's
+replace_global() widened the WHOLE netns — incl. the MCP child — to allow-all. The
+separate netns gives the MCP a distinct source IP (10.200.1.2) whose proxy policy is
+PINNED to default-deny and cannot be WIDENED by the browser's control-socket push.
+The hermes-mcp netns + its nft are created by hermes-browser-netns.service.
+
+C1 PASS-4 FIX (2026-06-19) — re-pinnable MCP egress (never a paperweight)
+------------------------------------------------------------------------
+PASS-3 pinned the MCP plane to default-deny with an EMPTY, immutable whitelist, which left
+network-MCPs DEAD (403 on every host, no grant path). PASS-4 keeps the security invariant
+(default-deny; the browser's open-logged push can never widen the MCP) but adds the missing
+elevation: the proxy seeds the MCP pin at boot with the CURATED BYOK hosts WE ship + vet
+(so those servers work out-of-the-box) plus any hosts the OWNER granted, and the owner can
+grant more in caliente via the egress elevation API (a grant extends the MCP's pinned
+whitelist, mode forced default-deny). A granted/curated network-MCP reaches ONLY its
+granted host(s) through the proxy; an UNgranted MCP still reaches nothing. The package
+registries are NOT granted — the runtime spawns OFFLINE from the install-time cache.
+
+C1 PASS-3 FIX (2026-06-19) — install/runtime split + offline spawn
+-----------------------------------------------------------------
+Owner-approved architecture: package DOWNLOAD happens at INSTALL time in the TRUSTED
+daemon path (add_mcp_server prefetches the scanned package into the shared runner
+cache), and the MCP RUNTIME spawns OFFLINE from that cache. This launcher injects the
+runner's offline flag server-side (npx --prefer-offline / uvx --offline) so the runtime
+NEVER reaches a package registry. Combined with removing the registry baseline from the
+egress policy + the default-deny MCP netns, the npm-PUT exfil residual is closed: the
+runtime has no path to npm/PyPI at all. Functionality is preserved because the package
+is already in the cache; the host-input accept that lets the MCP reach its proxy
+(10.200.1.2 → 10.200.1.1:3128) is added by hermes-browser-netns.service.
+
+The MCP CHILD stays UNPRIVILEGED: the transient unit carries User=hermes-sandbox +
+an empty CapabilityBoundingSet (≠ the daemon's `hermes`), so cross-uid DAC +
+ProtectProc=invisible still block it from reading the daemon's DB/master.key via
+/proc/<daemon>/fd. systemd-run --pipe wires the unit's stdio to ours, so the
+existing SCM_RIGHTS fd-passing topology is preserved unchanged.
+
+FAIL-CLOSED: if the netns is absent or systemd-run fails, the MCP does NOT spawn —
+there is no fallback to in-daemon / main-namespace execution (better no MCP than an
+un-jailed MCP). Failure does NOT break OS boot — the runtime uses Wants= (not
+Requires=) and McpLauncherClient degrades to McpLauncherUnavailable.
+
+Socket: /run/hermes/mcp-launch.sock (hermes:hermes 0660, creado por el launcher).
+        The daemon (User=hermes, group hermes) can connect because it is in the
+        hermes group. SO_PEERCRED validates that the caller gid == hermes_gid.
+
+Wire protocol (request/response):
+  Request  (daemon -> launcher):  4-byte BE length-prefix + UTF-8 JSON
+      {"argv": ["uvx", ...], "env": {"KEY": "VAL", ...}}
+  Response (launcher -> daemon):  sendmsg with:
+      - normal data: 4-byte BE length + JSON {"ok": true, "pid": <int>}
+                                          or {"ok": false, "error": "<reason>"}
+      - ancillary:   SCM_RIGHTS with 2 ints: [read_fd, write_fd]
+                     read_fd  = read-end of child's stdout pipe  (daemon reads)
+                     write_fd = write-end of child's stdin pipe   (daemon writes)
+      On error paths (no fds to pass), SCM_RIGHTS is omitted.
+
+Safety invariants:
+  - SO_PEERCRED: rejects callers whose gid != hermes_gid.
+  - argv[0] must be in _ALLOWED_RUNNERS — no arbitrary exec.
+  - env is sanitised: only keys in _ALLOWED_ENV_KEYS pass through; the base
+    env comes from the launcher's OWN process environment (set by the unit),
+    and the caller may override only those whitelisted keys.
+  - Subprocess starts a new session (start_new_session=True) so it cannot
+    send signals to the launcher or receive signals from the daemon's cgroup.
+  - SIGCHLD + waitpid(-1, WNOHANG) reaps children; no zombies.
+  - Failure does NOT break OS boot — hermes-runtime.service uses Wants=, not
+    Requires=, and McpLauncherClient degrades to McpLauncherUnavailable.
+
+Design: fix MCP "Connection closed" — subproceso hereda confinamiento del daemon.
+See specs/009-radiografia-os/ and SPEC ejecutable (2026-06-12).
+"""
+
+from __future__ import annotations
+
+import array
+import grp
+import json
+import logging
+import os
+import pwd
+import signal
+import socket
+import struct
+import subprocess
+import sys
+from pathlib import Path
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+# /run/hermes-mcp (own dir): the launcher runs as hermes-sandbox (≠ daemon's hermes,
+# /proc/fd isolation 2026-06-19) and is NOT in group `hermes`, so it cannot bind a
+# socket inside /run/hermes (0770 hermes:hermes). Its own dir (group hermes-work) also
+# stops a malicious MCP child from tampering the /run/hermes control sockets.
+_SOCK_PATH = Path("/run/hermes-mcp/launch.sock")
+_MAX_FRAME_BYTES = 32_768
+_LOG_TAG = "hermes-mcp-launcher"
+_CONNECT_TIMEOUT_S = 10.0
+
+# ── Netns egress jail ───────────────────────────────────────────────────────────
+# C1 FIX (2026-06-19): MCP children used to be plain subprocess.Popen in the MAIN
+# namespace → UNRESTRICTED egress → a malicious MCP server (one that passed the
+# Security Center scan but later exfiltrates) could POST the agent's browser cookies
+# anywhere. We spawn each MCP child as a TRANSIENT systemd unit joined to a jailed
+# netns, where egress is default-deny except via the audited proxy.
+#
+# C1 PASS-2 (2026-06-19): the MCP child now joins its OWN netns `hermes-mcp` (NOT the
+# browser's `hermes-browser`). Red-team bypass #1: the browser and MCP shared the
+# browser netns → the same source IP (10.200.0.2) → ONE proxy policy plane. A browser
+# teaching session pushing `open-logged` via the control socket's replace_global()
+# flipped the WHOLE netns — including the MCP child — to allow-all. With a separate
+# netns the MCP has a DISTINCT source IP (10.200.1.2) whose proxy policy is PINNED to
+# default-deny and is immune to the browser's control-socket push. C1 PASS-4: the pin is
+# seeded with curated-BYOK + owner-granted hosts so network-MCPs work (default-deny still
+# holds for everything else). The MCP and the browser no longer share a netns, a source
+# IP, or a policy plane.
+_NETNS_PATH = "/run/netns/hermes-mcp"
+_SLICE = "agents-os-mcp.slice"
+# The MCP runners (npx/uvx/node) route egress through the audited proxy so the SNI/Host
+# allow-list applies. C1 PASS-3: the runtime is PURE default-deny — package registries
+# are NOT allowed at runtime (packages were prefetched + scanned at install time; the
+# runner spawns OFFLINE). The owner elevates the specific hosts a network-MCP needs via
+# the normal egress-grant model. Proxy-side DNS keeps :53 closed in the netns → no DNS
+# covert channel. NO direct route exists → the proxy is the ONLY exit (and it denies
+# everything not explicitly owner-granted, registries included).
+# C1 PASS-2: the MCP netns reaches the proxy on its OWN gateway (10.200.1.1), so the
+# proxy sees the MCP's distinct source IP (10.200.1.2) and applies the pinned policy.
+_EGRESS_PROXY_URL = "http://10.200.1.1:3128"
+_MCP_RUNTIME_MAX_S = 86_400  # 24h ceiling for a long-lived MCP server unit
+
+# HARDCODED transient-unit hardening (caller cannot modify these). Mirrors the
+# exec-launcher template + the netns egress jail. The MCP child runs as
+# hermes-sandbox (the launcher's own uid) inside the netns; it cannot widen its own
+# confinement (every --property is fixed server-side) and cannot reach the daemon's
+# secrets (InaccessiblePaths + cross-uid DAC).
+_MCP_PROPERTIES: tuple[str, ...] = (
+    f"--property=NetworkNamespacePath={_NETNS_PATH}",
+    # User stays hermes-sandbox (the launcher's identity): no privilege change, but
+    # the netns now forces egress through the proxy. Group hermes-work keeps the
+    # runner caches (npm/uv/xdg under /var/lib/hermes, 2770 group hermes-work) writable.
+    "--property=User=hermes-sandbox",
+    "--property=Group=hermes-sandbox",
+    "--property=SupplementaryGroups=hermes-work",
+    "--property=ProtectProc=invisible",
+    "--property=ProcSubset=pid",
+    "--property=NoNewPrivileges=yes",
+    "--property=CapabilityBoundingSet=",
+    # MCP runners must spawn child processes + open AF_INET sockets (to the proxy);
+    # AF_NETLINK is needed for getaddrinfo. No SystemCallFilter (npx/uvx/node need
+    # execve/fork/clone freely — same reasoning as the unit's broad hardening).
+    "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+    "--property=ProtectSystem=strict",
+    "--property=ProtectHome=yes",
+    "--property=PrivateDevices=yes",
+    "--property=RestrictNamespaces=yes",
+    "--property=RestrictSUIDSGID=yes",
+    "--property=RestrictRealtime=yes",
+    "--property=LockPersonality=yes",
+    # The runner caches live under /var/lib/hermes — the child must write there.
+    "--property=ReadWritePaths=/var/lib/hermes",
+    # Hide the daemon's secrets from the MCP child (defense-in-depth atop cross-uid DAC).
+    "--property=InaccessiblePaths=-/var/lib/hermes/master.key -/var/lib/hermes/shell-state.db -/var/lib/hermes/keys -/var/lib/hermes/audit -/var/lib/hermes/hermes-home -/var/lib/hermes/composio-cache -/run/hermes -/run/hermes-mcp",
+)
+
+# ── C1 PASS-3 — OFFLINE runtime spawn (no registry network at runtime) ──────────
+# The MCP package was already DOWNLOADED + SCANNED at INSTALL time (add_mcp_server's
+# prefetch in the trusted daemon path) into the shared runner cache. At RUNTIME the
+# launcher forces every runner OFFLINE so it resolves from that warm cache and NEVER
+# touches a package registry. Combined with the default-deny MCP netns + the removal of
+# the registry baseline from the egress policy, this closes the npm-PUT exfil residual:
+# the runtime has no path to npm/PyPI at all. Owner-granted hosts (a specific API a
+# network-MCP needs) still flow through the proxy via the normal egress-grant model.
+#
+# Offline flags are injected SERVER-SIDE (here), right after the runner, so the caller
+# cannot disable them. npx: --prefer-offline (resolve from cache; the prefetch warmed
+# the whole tree, so no network is needed — --prefer-offline avoids a hard failure if a
+# transitive dep was already globally cached elsewhere, while still never reaching out
+# when the cache is complete). uvx: --offline (uv supports a hard offline mode; the
+# prefetch built the tool into UV_CACHE_DIR). Idempotent: we skip injection if the flag
+# is already present.
+_OFFLINE_FLAGS: dict[str, str] = {
+    "npx": "--prefer-offline",
+    "uvx": "--offline",
+}
+
+
+def _inject_offline_flags(argv: list[str]) -> list[str]:
+    """Force the runner OFFLINE so runtime resolves from the prefetched cache only.
+
+    Inserts the runner-specific offline flag immediately after argv[0]. node/python3 do
+    not fetch from a registry (they run an already-resolved entry), so no flag is added.
+    Idempotent — a flag already present is not duplicated.
+    """
+    if len(argv) < 1:
+        return argv
+    runner = os.path.basename(argv[0])
+    flag = _OFFLINE_FLAGS.get(runner)
+    if flag is None or flag in argv:
+        return argv
+    return [argv[0], flag, *argv[1:]]
+
+
+# Runners that MCP servers are allowed to use. Anything else is rejected.
+# These are basename-matched against argv[0] after stripping directory parts.
+# DEBE COINCIDIR con _MCP_ALLOWED_RUNNERS del gate D-Bus (add_mcp_server en
+# dbus_runtime_service.py): si divergen, un runner permitido por un lado y no por
+# el otro rompe el spawn (p.ej. python3 pasaba el gate D-Bus pero el launcher lo
+# rechazaba). `uv` se retiró (sin uso; `uvx` es el runner real). Mantener en sync.
+_ALLOWED_RUNNERS: frozenset[str] = frozenset({"npx", "uvx", "node", "python3"})
+
+# Only these env keys may be overridden by the caller's request. All others
+# are inherited from the launcher unit's own environment (set by systemd).
+# SEGURIDAD: PATH NO se permite — el runner (argv[0]) se resuelve con el PATH del
+# unit (systemd), no con uno del caller. Si el caller pudiera fijar PATH,
+# redirigiría el binario `npx`/`node` a uno arbitrario fuera del sandbox (el
+# launcher corre SIN SystemCallFilter). El resto son dirs de caché/HOME que el
+# daemon necesita redirigir a /var/lib/hermes (ProtectHome enmascara el HOME real).
+_ALLOWED_ENV_KEYS: frozenset[str] = frozenset({
+    # Runtime cache / home dirs (redirigidos a /var/lib/hermes por el daemon).
+    "npm_config_cache",
+    "UV_CACHE_DIR",
+    "npm_config_prefix",
+    "UV_TOOL_DIR",
+    "UV_PYTHON_INSTALL_DIR",
+    "HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "TMPDIR",
+    # BYOK: Open Design MCP server (open-design-mcp publicado en npm).
+    # OD_DAEMON_URL   — URL del daemon Open Design (requerido por el server).
+    # OD_API_TOKEN    — token de autenticación (secreto, nunca se loguea).
+    # OD_AUTH_MODE    — modo de autenticación ("bearer" / "basic").
+    # OD_BASIC_USER   — usuario HTTP-Basic (sólo si OD_AUTH_MODE=basic).
+    # OD_BASIC_PASS   — password HTTP-Basic (secreto, nunca se loguea).
+    "OD_DAEMON_URL",
+    "OD_API_TOKEN",
+    "OD_AUTH_MODE",
+    "OD_BASIC_USER",
+    "OD_BASIC_PASS",
+    # Curated pack (mirror of _MCP_BYOK_ENV_KEYS in dbus_runtime_service):
+    # REPLICATE_API_TOKEN — Replicate MCP (replicate-mcp): imagen + vídeo.
+    # CONTEXT7_API_KEY    — Context7 MCP: docs de librerías al día para código.
+    "REPLICATE_API_TOKEN",
+    "CONTEXT7_API_KEY",
+    # Ruflo MCP (ruflo, enjambre multi-agente): usa un endpoint OpenAI-compatible
+    # para enrutar a NUESTRO LLM nativo (Qwen vLLM) en vez de Anthropic.
+    # OPENAI_BASE_URL — base URL del endpoint OpenAI-compatible (p.ej. el vLLM).
+    # OPENAI_API_KEY  — clave del endpoint (secreto, nunca se loguea).
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+})
+
+# Env keys forwarded into the netns-jailed transient unit via --setenv. systemd-run
+# does NOT inherit the launcher's env, so we replay ONLY the runner-relevant keys —
+# the base cache/HOME/runtime vars the unit sets (the runner needs a writable HOME +
+# caches under /var/lib/hermes; NODE_OPTIONS forces IPv4-first DNS) plus every
+# caller-overridable key. We deliberately do NOT forward all of os.environ (that would
+# leak the launcher's systemd-private vars, e.g. INVOCATION_ID/NOTIFY_SOCKET/LISTEN_*,
+# into the child). The egress proxy vars are appended separately (caller cannot set).
+_FORWARDED_ENV_KEYS: frozenset[str] = _ALLOWED_ENV_KEYS | frozenset({
+    "PATH",            # runner resolves its own helpers (npm, node) inside the unit
+    "NODE_OPTIONS",    # --dns-result-order=ipv4first (unit-set; reliable npm download)
+})
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format=f"%(asctime)s {_LOG_TAG} %(levelname)s %(message)s",
+    stream=sys.stderr,
+)
+logger = logging.getLogger(_LOG_TAG)
+
+
+# ── Peer credential validation ─────────────────────────────────────────────────
+
+def _hermes_gid() -> int:
+    try:
+        return grp.getgrnam("hermes").gr_gid
+    except KeyError:
+        logger.error("launcher.group_hermes_not_found — cannot validate callers")
+        sys.exit(1)
+
+
+def _hermes_uid() -> int:
+    """uid del DAEMON (User=hermes) — el ÚNICO caller legítimo. El launcher corre
+    como root (C1 fix 2026-06-19: necesita CAP_NET_ADMIN/SYS_ADMIN para meter el hijo
+    MCP en el netns); el peercred espera el uid de `hermes` (el daemon), NO el propio
+    (os.getuid()==0). Los hijos MCP corren como hermes-sandbox vía el unit transitorio,
+    así que no pueden leer la BD del daemon vía /proc/<daemon>/fd. (/proc/fd 2026-06-19.)"""
+    try:
+        return pwd.getpwnam("hermes").pw_uid
+    except KeyError:
+        logger.error("launcher.user_hermes_not_found — cannot validate callers")
+        sys.exit(1)
+
+
+def _hermes_work_gid() -> int:
+    """gid del grupo compartido hermes-work. El socket se chgrpea aquí para que el
+    daemon (miembro de hermes-work) conecte por DAC; el launcher (hermes-sandbox)
+    es miembro de hermes-work y por tanto SÍ puede chgrp aquí (no a `hermes`, del
+    que NO es miembro). El peercred sigue siendo la verja real (CWE-862)."""
+    try:
+        return grp.getgrnam("hermes-work").gr_gid
+    except KeyError:
+        logger.error("launcher.group_hermes_work_not_found")
+        sys.exit(1)
+
+
+def _check_peercred(
+    conn: socket.socket, hermes_gid: int, hermes_uid: int
+) -> tuple[int, int]:
+    """Return (pid, uid) of the peer or raise PermissionError.
+
+    Doble check: el peer debe ser uid==hermes Y gid==hermes — i.e. EL DAEMON (o el
+    shell-server, también User=hermes). NOTA: el launcher ya NO corre como hermes
+    (ahora hermes-sandbox, aislamiento /proc/fd 2026-06-19), así que el uid esperado
+    es el de `hermes` resuelto del passwd, NO os.getuid() (que sería hermes-sandbox).
+    Esto excluye al autologin (hermes-user, uid 1000) y al PROPIO sandbox del agente
+    (hermes-sandbox), que están en hermes-work y podrían conectar por DAC pero NO son
+    el daemon. El socket 0660 group=hermes-work deja conectar al grupo; el peercred
+    es quien realmente autoriza (CWE-862).
+    """
+    # SO_PEERCRED: struct { pid_t pid; uid_t uid; gid_t gid; }
+    raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+    pid, uid, gid = struct.unpack("3i", raw)
+    if gid != hermes_gid or uid != hermes_uid:
+        raise PermissionError(
+            f"launcher.peercred_rejected pid={pid} uid={uid} gid={gid} "
+            f"(expected uid={hermes_uid} gid={hermes_gid})"
+        )
+    return pid, uid
+
+
+# ── Wire protocol helpers ──────────────────────────────────────────────────────
+
+def _recv_exactly(conn: socket.socket, n: int) -> bytes:
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = conn.recv(n - len(buf))
+        if not chunk:
+            break
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _read_frame(conn: socket.socket) -> dict:
+    header = _recv_exactly(conn, 4)
+    if len(header) < 4:
+        raise EOFError("connection closed before frame header")
+    length = struct.unpack(">I", header)[0]
+    if length > _MAX_FRAME_BYTES:
+        raise ValueError(f"frame too large: {length}")
+    body = _recv_exactly(conn, length)
+    return json.loads(body.decode("utf-8"))
+
+
+def _send_frame_plain(conn: socket.socket, payload: dict) -> None:
+    """Send a plain response frame with no ancillary data (error paths)."""
+    body = json.dumps(payload).encode("utf-8")
+    conn.sendall(struct.pack(">I", len(body)) + body)
+
+
+def _send_frame_with_fds(
+    conn: socket.socket,
+    payload: dict,
+    fds: list[int],
+) -> None:
+    """Send a response frame carrying file descriptors via SCM_RIGHTS.
+
+    The frame wire format is identical to _send_frame_plain: 4-byte big-endian
+    length prefix + UTF-8 JSON body. The fds travel in the ancillary data of
+    the same sendmsg call so they arrive atomically with the payload.
+
+    fd ordering: [read_fd, write_fd] (stdout-read, stdin-write) — must match
+    the order expected by McpLauncherClient.spawn().
+    """
+    body = json.dumps(payload).encode("utf-8")
+    frame = struct.pack(">I", len(body)) + body
+    ancdata = array.array("i", fds)
+    conn.sendmsg(
+        [frame],
+        [(socket.SOL_SOCKET, socket.SCM_RIGHTS, ancdata)],
+    )
+
+
+# ── Request validation ─────────────────────────────────────────────────────────
+
+def _validate_request(req: dict) -> tuple[list[str], dict[str, str]]:
+    """Validate and sanitise the caller-supplied fields.
+
+    Returns (argv, sanitised_env). Raises ValueError on bad input.
+    """
+    argv = req.get("argv")
+    if not isinstance(argv, list) or not argv:
+        raise ValueError("argv must be a non-empty list")
+    argv = [str(a) for a in argv]
+
+    runner = os.path.basename(argv[0])
+    if runner not in _ALLOWED_RUNNERS:
+        raise ValueError(
+            f"runner not allowed: {runner!r} — must be one of {sorted(_ALLOWED_RUNNERS)}"
+        )
+    # SECURITY (V — argv[0] path-traversal): the allowlist checks the BASENAME, but
+    # subprocess.Popen runs the FULL path. A caller-supplied argv[0] like
+    # "/var/lib/hermes/workspace/npx" (an attacker-written binary in the FS allowlist)
+    # would pass the basename check then execute in this launcher (unconfined). Rewrite
+    # argv[0] to the TRUSTED system binary resolved via the launcher's own PATH (the
+    # unit env, not the caller's). Never Popen a caller-supplied path.
+    import shutil  # noqa: PLC0415
+    resolved_runner = shutil.which(runner)
+    if not resolved_runner:
+        raise ValueError(f"runner not found on system PATH: {runner!r}")
+    argv = [resolved_runner, *argv[1:]]
+
+    caller_env = req.get("env", {})
+    if not isinstance(caller_env, dict):
+        raise ValueError("env must be a dict")
+
+    # Start from the launcher's own environment (inherits the unit's safe env),
+    # then allow the caller to override only whitelisted keys.
+    sanitised: dict[str, str] = dict(os.environ)
+    for key, val in caller_env.items():
+        if key in _ALLOWED_ENV_KEYS:
+            sanitised[key] = str(val)
+
+    return argv, sanitised
+
+
+# ── Netns-jailed spawn command builder ─────────────────────────────────────────
+
+def _require_netns() -> None:
+    """FAIL-CLOSED: refuse to spawn if the egress netns is absent.
+
+    C1 (2026-06-19): the whole point of the fix is that MCP egress is jailed. If the
+    netns is missing (hermes-browser-netns.service down), spawning in the MAIN ns
+    would reopen the exfil hole. Better no MCP than an un-jailed MCP — security-first.
+    There is NO fallback to in-daemon / main-ns spawning, and NO fallback to the
+    browser's netns (C1 PASS-2: that would re-merge the egress identities and reopen
+    the open-logged-widens-MCP bypass). The MCP runs ONLY in its own hermes-mcp netns.
+    """
+    if not os.path.exists(_NETNS_PATH):
+        raise RuntimeError(
+            f"egress netns {_NETNS_PATH} absent — refusing to spawn MCP un-jailed "
+            "(fail-closed; start hermes-browser-netns.service which creates hermes-mcp)"
+        )
+
+
+def _build_jailed_cmd(argv: list[str], env: dict[str, str]) -> list[str]:
+    """Wrap the MCP argv in a transient systemd unit joined to the egress netns.
+
+    --pipe wires the unit's stdio to systemd-run's own stdio, so the existing
+    pipe/SCM_RIGHTS topology is preserved: we Popen systemd-run with the child-side
+    pipe ends, and systemd-run forwards them into the netns-jailed MCP unit. We do
+    NOT pass --wait (an MCP server is long-lived; the daemon keeps the unit alive by
+    holding the stdio fds, and SIGCHLD/--collect reap it when it exits).
+
+    systemd-run does NOT inherit the launcher's env into the transient unit, so the
+    runner-relevant vars are forwarded via --setenv. We forward ONLY the runner
+    cache/HOME/runtime keys + the whitelisted BYOK keys — NOT all of os.environ (which
+    would leak the launcher's systemd-private vars like INVOCATION_ID/NOTIFY_SOCKET
+    into the child and bloat the argv). The egress proxy vars are added LAST so the
+    caller cannot override them (force every runner through the audited proxy).
+    """
+    unit = f"hermes-mcp-{os.urandom(8).hex()}.service"
+    cmd = [
+        "systemd-run",
+        f"--unit={unit}",
+        f"--slice={_SLICE}",
+        "--pipe",       # connect the unit's stdio to ours → fd-passing topology preserved
+        "--quiet",
+        "--collect",    # GC the unit after it exits (no leaked failed units)
+        f"--property=RuntimeMaxSec={_MCP_RUNTIME_MAX_S}",
+        *_MCP_PROPERTIES,
+    ]
+    for key in _FORWARDED_ENV_KEYS:
+        val = env.get(key)
+        if val is not None:
+            cmd.append(f"--setenv={key}={val}")
+    # Egress proxy vars LAST → authoritative (force every runner through the proxy).
+    cmd.extend([
+        f"--setenv=http_proxy={_EGRESS_PROXY_URL}",
+        f"--setenv=https_proxy={_EGRESS_PROXY_URL}",
+        f"--setenv=HTTP_PROXY={_EGRESS_PROXY_URL}",
+        f"--setenv=HTTPS_PROXY={_EGRESS_PROXY_URL}",
+    ])
+    cmd.append("--")
+    cmd.extend(argv)
+    return cmd
+
+
+# ── MCP subprocess spawn with fd-passing ──────────────────────────────────────
+
+def _spawn_and_send_fds(
+    conn: socket.socket,
+    argv: list[str],
+    env: dict[str, str],
+    caller_pid: int,
+) -> None:
+    """Create pipes, spawn the MCP process (netns-jailed), pass stdio fds to the daemon.
+
+    Pipe topology (unchanged — systemd-run --pipe just relays our stdio into the unit):
+        parent_stdin_w  -> child_stdin_r   (daemon writes -> systemd-run -> MCP reads)
+        child_stdout_w  -> parent_stdout_r (MCP -> systemd-run -> daemon reads)
+
+    The daemon receives [parent_stdout_r, parent_stdin_w] via SCM_RIGHTS, exactly as
+    before — it cannot tell the child is now wrapped in a transient unit.
+    """
+    # FAIL-CLOSED: no netns → no spawn (never fall back to the main namespace).
+    _require_netns()
+
+    # C1 PASS-3: force the runner OFFLINE — the package was prefetched + scanned at
+    # install time, so the runtime resolves from the warm cache and never reaches a
+    # registry (the MCP netns is default-deny; the egress policy no longer baselines
+    # npm/PyPI). Injected server-side so the caller cannot opt out.
+    argv = _inject_offline_flags(argv)
+
+    jailed_cmd = _build_jailed_cmd(argv, env)
+
+    child_stdin_r, parent_stdin_w = os.pipe()
+    parent_stdout_r, child_stdout_w = os.pipe()
+
+    try:
+        # Popen systemd-run (NOT the runner directly). systemd-run inherits these
+        # stdio ends and --pipe forwards them into the netns-jailed MCP unit. env is
+        # passed via --setenv inside jailed_cmd, so we do NOT set env= here (systemd-run
+        # itself needs only the unit's own PATH to find the runner, which it resolves
+        # in the transient unit's context).
+        proc = subprocess.Popen(  # noqa: S603 — jailed_cmd is a fixed list, no shell
+            jailed_cmd,
+            stdin=child_stdin_r,
+            stdout=child_stdout_w,
+            stderr=None,            # inherits launcher's stderr -> journal
+            start_new_session=True,  # decouples from launcher process group
+            close_fds=True,
+        )
+    except (FileNotFoundError, PermissionError, OSError) as exc:
+        os.close(child_stdin_r)
+        os.close(parent_stdin_w)
+        os.close(parent_stdout_r)
+        os.close(child_stdout_w)
+        raise RuntimeError(f"spawn failed: {exc}") from exc
+
+    # The launcher no longer needs the child-side pipe ends.
+    os.close(child_stdin_r)
+    os.close(child_stdout_w)
+
+    logger.info(
+        "launcher.spawned argv=%s pid=%d caller_pid=%d",
+        argv[0],
+        proc.pid,
+        caller_pid,
+    )
+
+    # Send the daemon the parent-side ends: [stdout_r, stdin_w].
+    # The kernel dup's them into the receiving process; we close our copies
+    # immediately after sendmsg to avoid fd leaks.
+    try:
+        _send_frame_with_fds(
+            conn,
+            {"ok": True, "pid": proc.pid},
+            [parent_stdout_r, parent_stdin_w],
+        )
+    except OSError as exc:
+        # El daemon se desconectó antes de recibir los fds → el hijo MCP queda
+        # con stdio que nadie lee/escribe (huérfano). Terminarlo para no dejar
+        # procesos colgados acumulándose en cada reconexión fallida.
+        logger.warning(
+            "launcher.send_fds_failed pid=%d error=%s — terminando hijo huérfano",
+            proc.pid, exc,
+        )
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError(f"send fds failed: {exc}") from exc
+    finally:
+        os.close(parent_stdout_r)
+        os.close(parent_stdin_w)
+
+
+# ── Connection handler ─────────────────────────────────────────────────────────
+
+def _handle_connection(conn: socket.socket, hermes_gid: int, hermes_uid: int) -> None:
+    """Handle one client connection: validate, spawn, pass fds."""
+    with conn:
+        conn.settimeout(_CONNECT_TIMEOUT_S)
+        try:
+            caller_pid, caller_uid = _check_peercred(conn, hermes_gid, hermes_uid)
+        except (PermissionError, OSError, struct.error) as exc:
+            logger.warning("launcher.peercred_failed error=%s", exc)
+            _send_frame_plain(conn, {"ok": False, "error": "unauthorized"})
+            return
+
+        logger.info(
+            "launcher.connection_accepted pid=%d uid=%d", caller_pid, caller_uid
+        )
+
+        try:
+            req = _read_frame(conn)
+            argv, env = _validate_request(req)
+        except (ValueError, json.JSONDecodeError, EOFError, OSError) as exc:
+            logger.warning("launcher.request_invalid pid=%d error=%s", caller_pid, exc)
+            _send_frame_plain(conn, {"ok": False, "error": str(exc)})
+            return
+
+        try:
+            _spawn_and_send_fds(conn, argv, env, caller_pid)
+        except RuntimeError as exc:
+            logger.error("launcher.spawn_failed argv=%s error=%s", argv[0], exc)
+            _send_frame_plain(conn, {"ok": False, "error": str(exc)})
+
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+
+def _setup_socket(hermes_work_gid: int) -> socket.socket:
+    """Create the AF_UNIX socket, group hermes-work, mode 0660.
+
+    El launcher corre como hermes-sandbox y el daemon como hermes — uids DISTINTOS
+    (aislamiento /proc/fd 2026-06-19). El socket nace hermes-sandbox:hermes-sandbox;
+    lo chgrpeamos a hermes-work (grupo compartido del que AMBOS son miembros) para
+    que el daemon conecte por DAC. NO se hace chown a root (sin CAP_CHOWN → EPERM →
+    crash-loop, bug 2026-06-12). El peercred (uid==hermes ∧ gid==hermes) es quien
+    realmente autoriza al daemon — el grupo del socket sólo abre la puerta DAC.
+    """
+    _SOCK_PATH.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    # Ensure the socket dir is group hermes-work so the daemon (member of hermes-work)
+    # can traverse in and connect. tmpfiles also sets this; this is defensive in case
+    # the launcher created the dir first (→ it would be group hermes-sandbox).
+    try:
+        os.chown(_SOCK_PATH.parent, -1, hermes_work_gid)
+        os.chmod(_SOCK_PATH.parent, 0o750)
+    except OSError:
+        pass
+    _SOCK_PATH.unlink(missing_ok=True)
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(str(_SOCK_PATH))
+
+    # group=hermes-work, mode 0660 — el daemon (miembro de hermes-work) conecta;
+    # owner=-1 mantiene el dueño (hermes-sandbox). hermes-sandbox SÍ es miembro de
+    # hermes-work → el chgrp funciona (a `hermes` no podría, no es miembro).
+    try:
+        os.chown(_SOCK_PATH, -1, hermes_work_gid)
+    except PermissionError:
+        pass
+    os.chmod(_SOCK_PATH, 0o660)
+
+    sock.listen(8)
+    logger.info("launcher.listening path=%s gid=%d", _SOCK_PATH, hermes_work_gid)
+    return sock
+
+
+def _install_sigchld() -> None:
+    """Reap MCP child processes without creating zombies."""
+    signal.signal(signal.SIGCHLD, lambda _sig, _frame: _reap_children())
+
+
+def _reap_children() -> None:
+    try:
+        while True:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+            if pid == 0:
+                break
+    except ChildProcessError:
+        pass
+
+
+def main() -> None:
+    hermes_gid = _hermes_gid()
+    hermes_uid = _hermes_uid()
+    hermes_work_gid = _hermes_work_gid()
+    _install_sigchld()
+    sock = _setup_socket(hermes_work_gid)
+
+    logger.info("launcher.ready")
+
+    with sock:
+        while True:
+            try:
+                conn, _ = sock.accept()
+            except OSError as exc:
+                if exc.errno == 4:  # EINTR from SIGCHLD
+                    continue
+                logger.error("launcher.accept_error error=%s", exc)
+                break
+
+            _handle_connection(conn, hermes_gid, hermes_uid)
+
+
+if __name__ == "__main__":
+    main()

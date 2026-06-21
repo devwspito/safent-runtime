@@ -1,0 +1,54 @@
+# agents-os-remote-control.service — F11 — FR-053..FR-056.
+# Servicio INDEPENDIENTE del shell-server — sobrevive a crash del runtime
+# o de Chromium (FR-034). Endurecimiento estricto FR-056.
+
+[Unit]
+Description=Agents OS Remote Control (signaling + WebRTC SO-level)
+After=network-online.target hermes-shell-server.service hermes-keygen.service
+Wants=network-online.target hermes-keygen.service
+StartLimitBurst=10
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+User=hermes-rc
+Group=hermes-rc
+# python3 -m en vez de /usr/local/bin/agents-os-remote-control: los console
+# scripts de pip viven en /usr/local/bin, que ostree descarta. El módulo sí
+# persiste en /usr/lib/python3.13/site-packages.
+ExecStart=/usr/bin/python3 -m hermes.shell_server.remote_control.service
+Restart=always
+RestartSec=2
+
+# Cgroup limits (research §7 — 2 GiB RAM + 2 vCPU).
+MemoryMax=2G
+CPUQuota=200%
+IOWeight=80
+
+# Loopback HTTP to shell-server; bind only loopback.
+Environment=HERMES_RC_SHELL_URL=http://127.0.0.1:7517
+Environment=HERMES_RC_BIND_HOST=127.0.0.1
+Environment=HERMES_RC_BIND_PORT=7518
+Environment=HERMES_RC_LOG_LEVEL=info
+
+# FR-056 capa 1: hardening básico sin namespaces dedicados.
+# F11.real (futuro) endurece con netns + landlock + seccomp allowlist
+# específica para gstreamer + pipewire (research §7).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/run/agents-os/remote-control
+
+[Install]
+WantedBy=multi-user.target

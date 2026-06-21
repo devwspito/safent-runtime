@@ -1,0 +1,36 @@
+; Agents OS Edition — gsettings overrides bake-time.
+; Aplica al recompilar schemas con `glib-compile-schemas /usr/share/glib-2.0/schemas/`.
+;
+; Invariante FR-042: el agente trabaja 24/7. La pantalla nunca lockea sola.
+
+[org.gnome.desktop.screensaver]
+lock-enabled=false
+idle-activation-enabled=false
+lock-delay=uint32 0
+
+[org.gnome.desktop.session]
+idle-delay=uint32 0
+
+[org.gnome.settings-daemon.plugins.power]
+sleep-inactive-ac-type='nothing'
+sleep-inactive-battery-type='nothing'
+power-button-action='nothing'
+idle-dim=false
+ambient-enabled=false
+
+[org.gnome.desktop.lockdown]
+disable-lock-screen=true
+
+[org.gnome.login-screen]
+disable-user-list=true
+banner-message-enable=false
+allowed-failures=3
+
+; Hermes extension allowlist (T024 + spec 014 T1).
+; Only system extensions are permitted (hermes@hermes.os + dash-to-dock).
+; Both are baked under /usr/share/gnome-shell/extensions/ (not $HOME).
+; disable-user-extensions=true would block ALL extensions including ours,
+; so we leave it false and rely on enabled-extensions as the allowlist.
+[org.gnome.shell]
+enabled-extensions=['hermes@hermes.os', 'dash-to-dock@micxgx.gmail.com']
+disable-user-extensions=false

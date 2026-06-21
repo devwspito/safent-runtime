@@ -1,0 +1,14 @@
+# hermes-grd-init.service (USER) — configura el espejo VNC de GRD en la sesión.
+# Se habilita con `systemctl --global enable`; corre en la sesión hermes-user.
+[Unit]
+Description=Hermes GRD init (configura espejo VNC de la sesión viva)
+After=gnome-remote-desktop.service
+Wants=gnome-remote-desktop.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/hermes-grd-init
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# hermes-remote-quicktunnel — UN SOLO quick tunnel (trycloudflare.com) hacia el
+# gateway de un solo origen (hermes-remote-gateway, 127.0.0.1:6088), que sirve a la
+# vez noVNC (:6080) y el clipboard (:7519) por path. URL individual por arranque.
+#
+# Diseño (fix 2026-06-11): ANTES había DOS túneles (noVNC + clipboard) + un watchdog
+# que reintentaba el 2º cada ~20 s; ese martilleo disparaba el rate-limit de
+# trycloudflare (HTTP 429 / error 1015 "Too Many Requests") y el clipboard remoto
+# nunca se exponía. AHORA: un único cloudflared → gateway → el clipboard viaja por el
+# MISMO origen (/clipboard). Sin 2º túnel, sin watchdog, sin hammering.
+#
+# NO arranca solo: lo enciende el root helper (hermes-remote-access-control) cuando el
+# operador activa "Acceso remoto" en Settings. Si hay token de named tunnel, el helper
+# usa hermes-remote-tunnel.service (URL estable) en su lugar; este quick es el default.
+
+set -uo pipefail
+
+URL_FILE="/var/lib/hermes/remote-url"
+GW_LOCAL="http://127.0.0.1:6088"   # gateway de un solo origen (noVNC + /clipboard)
+
+rm -f "${URL_FILE}"
+
+publish() {
+    local base="$1" full
+    # El overlay de clipboard usa MISMO ORIGEN (window.location.origin) → /clipboard
+    # lo enruta el gateway. No hace falta clipboard_bridge= en la URL.
+    full="${base}/vnc.html?autoconnect=true&resize=remote"
+    printf '%s\n' "$full" > "${URL_FILE}.tmp"
+    chmod 0644 "${URL_FILE}.tmp"
+    mv "${URL_FILE}.tmp" "${URL_FILE}"
+    printf 'hermes-remote-quicktunnel: URL publicada: %s\n' "$full"
+}
+
+# cloudflared en foreground; al imprimir su URL la publicamos una sola vez.
+# stdbuf: cloudflared bufferiza stdout si no es TTY.
+stdbuf -oL -eL /usr/bin/cloudflared tunnel --no-autoupdate \
+    --url "${GW_LOCAL}" 2>&1 | while IFS= read -r line; do
+    printf '%s\n' "$line"
+    base=$(printf '%s\n' "$line" | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | head -1)
+    if [ -n "$base" ] && [ ! -f "${URL_FILE}" ]; then
+        publish "$base"
+    fi
+done

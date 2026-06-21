@@ -1,0 +1,22 @@
+[Desktop Entry]
+# hermes-security.desktop — T048 feature 014 (agentic desktop).
+#
+# Capability app: Seguridad y Auditoría.
+# Supervision + HITL governance. Read-only audit chain. No effectors.
+#
+# D-Bus verbs: ListRecentTasks, ListPending, GetAuditChainHead,
+#              ApproveAction, RejectAction.
+# Authorship by sender_uid (CWE-862).
+Version=1.0
+Name=Seguridad — Hermes
+Name[es]=Seguridad — Hermes
+Comment=Auditoría del agente y aprobaciones de seguridad (HITL)
+Comment[es]=Auditoría del agente y aprobaciones de seguridad (HITL)
+Exec=python3 -m hermes.lumen.apps.security
+Icon=hermes-security
+Terminal=false
+Type=Application
+Categories=Utility;System;Security;
+StartupNotify=true
+StartupWMClass=hermes-security
+Keywords=hermes;seguridad;audit;HITL;aprobaciones;cadena;firmado;

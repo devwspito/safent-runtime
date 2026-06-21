@@ -1,0 +1,22 @@
+[Desktop Entry]
+# hermes-chat.desktop — T048 feature 014 (agentic desktop).
+#
+# Capability app: Chat con el agente.
+# Enqueues WorkItems via D-Bus Enqueue + consumes stream from tasks.sock.
+# Never calls run_cycle. The agent loop runs in the daemon.
+#
+# D-Bus verbs: Enqueue (→ task_id + stream_path).
+# Stream: /run/hermes/tasks.sock (AF_UNIX, WS delta/done/error frames).
+Version=1.0
+Name=Chat — Hermes
+Name[es]=Chat — Hermes
+Comment=Conversa con el agente Hermes en tiempo real
+Comment[es]=Conversa con el agente Hermes en tiempo real
+Exec=python3 -m hermes.lumen.apps.chat
+Icon=hermes-chat
+Terminal=false
+Type=Application
+Categories=Utility;Chat;
+StartupNotify=true
+StartupWMClass=hermes-chat
+Keywords=hermes;chat;conversación;agente;IA;

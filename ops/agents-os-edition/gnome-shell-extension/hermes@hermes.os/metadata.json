@@ -1,0 +1,8 @@
+{
+  "uuid": "hermes@hermes.os",
+  "name": "Hermes",
+  "description": "Hermes overlay keybinding and top-bar indicator. Registers a global keybind (Super+Space) and shows an icon in the system panel. On trigger, signals org.hermes.Runtime1 to open the overlay. Zero agent logic in the compositor.",
+  "version": 1,
+  "shell-version": ["45", "46", "47", "48"],
+  "url": "https://hermes.os"
+}

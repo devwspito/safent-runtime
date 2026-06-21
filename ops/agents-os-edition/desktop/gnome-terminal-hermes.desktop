@@ -1,0 +1,26 @@
+[Desktop Entry]
+# gnome-terminal-hermes.desktop — T020 feature 014 (agentic desktop).
+#
+# Terminal GNOME para el HUMANO.
+# El agente usa TerminalSurfaceAdapter (con confinamiento de kernel vía
+# systemd-run --scope con NoNewPrivileges/seccomp/IPAddressDeny — CTRL-TERM-1/2)
+# gateado por el broker; NUNCA inyecta comandos en la terminal del humano
+# (CTRL-TERM-4, CTRL-ATSPI-2 del threat-model). Esta terminal es la del humano:
+# libre, sin restricciones agénticas, sin auditoría del agente.
+Version=1.0
+Name=Terminal
+GenericName=Terminal
+Comment=Usa la línea de comandos
+Keywords=shell;prompt;command;commandline;cmd;
+Exec=gnome-terminal
+Icon=org.gnome.Terminal
+Terminal=false
+Type=Application
+StartupNotify=true
+StartupWMClass=gnome-terminal-server
+Categories=GNOME;GTK;System;TerminalEmulator;
+X-GNOME-DocPath=gnome-terminal/index.html
+X-GNOME-Bugzilla-Bugzilla=GNOME
+X-GNOME-Bugzilla-Product=gnome-terminal
+X-GNOME-Bugzilla-Component=BugBuddy
+X-GNOME-Bugzilla-Version=@VERSION@

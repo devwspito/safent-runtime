@@ -1,0 +1,68 @@
+# hermes-rescue.target — T026 — consola de mantenimiento AUTENTICADA (CTRL-P1-15, F-1)
+#
+# PROPÓSITO: Proporcionar acceso de recuperación cuando hermes-runtime.service
+# agota su StartLimitBurst (10 reinicios en 60s) y pasa a 'failed', o cuando
+# agents-os-healthy.target no se alcanza en 300s.
+#
+# DIFERENCIA CON emergency.target (systemd nativo):
+#   - emergency.target: suming root autologin, shell raíz sin contraseña.
+#     En Agents OS el usuario de autologin es 'hermes-user' (no root);
+#     no existe password de root conocida. emergency.target sería un brick
+#     efectivo en hardware de cliente.
+#   - hermes-rescue.target: invoca getty en una TTY segura, que presenta
+#     el prompt de login del sistema. El operador debe autenticarse con
+#     sus credenciales (hermes-user + password, o recovery key).
+#     NUNCA provee shell root sin credenciales (firma F-1).
+#
+# CÓMO SE ALCANZA:
+#   a) Automáticamente: cuando hermes-runtime.service pasa a 'failed'
+#      (agotó StartLimitBurst=10/StartLimitIntervalSec=60) y la unidad
+#      que lo produce (agents-os-healthy.target) dispara OnFailure=.
+#      Para activar esto, añadir en agents-os-healthy.target:
+#        OnFailure=hermes-rescue.target
+#      (T027 — se documenta aquí, el target existente no se modifica en
+#      esta tarea para minimizar blast radius).
+#   b) Manualmente: el operador puede ejecutar
+#        systemctl isolate hermes-rescue.target
+#      desde un TTY o SSH.
+#
+# SEGURIDAD:
+#   - RequiresMountsFor=/: asegura que los filesystems estén montados
+#     antes de intentar autenticación (PAM necesita /etc, /var).
+#   - getty@tty2.service: TTY2 evita interferir con el log de GDM en TTY1.
+#     El operador cambia a TTY2 con Ctrl+Alt+F2.
+#   - AllowIsolate=yes: permite llegar a este target con systemctl isolate
+#     desde otro target (privilegiado).
+#
+# QUÉ NO HACE:
+#   - No desactiva el watchdog del kernel.
+#   - No monta filesystems extra.
+#   - No inicia red ni servicios adicionales.
+#   - No provee shell sin autenticación (≠ emergency.target, ≠ rescue.target
+#     con autologin).
+#
+# ACCESO AL JOURNAL desde la consola de rescate:
+#   journalctl -u hermes-runtime.service -n 100 --no-pager
+#   journalctl -b -p err --no-pager
+
+[Unit]
+Description=Hermes Rescue Console — mantenimiento autenticado (no auto-root)
+Documentation=https://docs.agents-os.hermes/rescue
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+
+# Los filesystems base deben estar montados para que PAM/login funcione.
+RequiresMountsFor=/
+
+# sysinit.target garantiza udev + mounts básicos + journal. Sin él,
+# el getty puede fallar al intentar leer PAM o /etc/passwd.
+After=sysinit.target
+
+# Permitir llegar aquí con systemctl isolate (desde otro target en curso).
+AllowIsolate=yes
+
+[Install]
+# No se instala por defecto en el grafo de boot normal.
+# Se activa via OnFailure= de hermes-runtime.service o manualmente.
+# Ver T027 para la documentación del mecanismo OnFailure.

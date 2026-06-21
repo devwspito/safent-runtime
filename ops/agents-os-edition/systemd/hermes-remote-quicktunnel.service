@@ -1,0 +1,54 @@
+# hermes-remote-quicktunnel.service — túnel público EFÍMERO (trycloudflare.com)
+# para el acceso remoto noVNC. URL individual por instalación y por arranque.
+#
+# NO arranca solo: lo enciende el root helper (hermes-remote-access-control)
+# cuando el operador activa "Acceso remoto" en Settings (toggle → verbo D-Bus
+# enable_remote_access → staged request → root helper → systemctl start).
+# Apagar = toggle OFF con contraseña del dispositivo (mismo camino, disable).
+#
+# Si el operador deposita un token de named tunnel
+# (/etc/hermes/credentials/cloudflare-tunnel.token), el root helper arranca
+# hermes-remote-tunnel.service (URL estable) en su lugar — este quick es el
+# default plug-and-play sin credenciales.
+
+[Unit]
+Description=Hermes Remote Quick Tunnel (cloudflared trycloudflare, URL efímera)
+After=network-online.target hermes-novnc.service hermes-remote-gateway.service
+Wants=network-online.target
+# El túnel apunta al gateway de un solo origen: debe estar arriba antes.
+Requires=hermes-remote-gateway.service
+# Named tunnel configurado → el quick no compite (el helper elige, esta
+# condición es defensa extra).
+ConditionPathExists=!/etc/hermes/credentials/cloudflare-tunnel.token
+
+# Acceso remoto activado a propósito: si cloudflared cae, vuelve.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+ExecStart=/usr/libexec/hermes/hermes-remote-quicktunnel
+Restart=always
+# 30 s (no 3): si cloudflared falla al crear el túnel (p.ej. 429 de trycloudflare),
+# reintentar cada 3 s SOSTIENE el rate-limit. 30 s lo deja respirar. Un túnel ya
+# establecido se mantiene; el restart solo aplica a fallos.
+RestartSec=30
+
+# La URL se persiste aquí para la UI (D-Bus get_remote_access_status).
+ReadWritePaths=/var/lib/hermes
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

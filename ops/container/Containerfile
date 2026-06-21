@@ -1,0 +1,195 @@
+# Lumen runtime — STANDARD container (Playwright/Ubuntu + systemd PID1).
+# Replaces the bootc-OS→qcow2→VM→relay delivery. Same daemon, same units, same
+# confinement — run via `podman/docker run --systemd=always -p 17517:7517`.
+#
+#   Build (from repo root):  podman build -f ops/container/Containerfile -t lumen:dev .
+#   Run:                     podman run -d --name lumen --systemd=always \
+#                              --cap-drop ALL --cap-add NET_ADMIN --cap-add SYS_ADMIN \
+#                              --cap-add AUDIT_READ --security-opt no-new-privileges \
+#                              --shm-size=1g -p 17517:7517 lumen:dev
+#   UI:                      http://localhost:17517
+#
+# systemd PID1 is REQUIRED: the daemon fail-closes via _assert_confinement_active()
+# which checks `systemctl is-active` of the netns/egress units. A plain entrypoint
+# would force the dev-mode bypass = silent loss of the confinement moat.
+FROM mcr.microsoft.com/playwright:v1.59.0-noble
+
+ENV DEBIAN_FRONTEND=noninteractive PIP_BREAK_SYSTEM_PACKAGES=1
+
+# ── System packages we ADD on top of the Playwright base ─────────────────────
+# Base already provides: Node 20 + npm/npx, Chromium + all its shared libs +
+# fonts under /ms-playwright. We add: systemd (PID1 + the org.hermes.Runtime1
+# bus the daemon owns), python 3.12, the netns/nftables moat, uv, build deps for
+# the C-ext python wheels (dbus-fast, cryptography, pydantic-core).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      systemd systemd-sysv dbus dbus-user-session \
+      python3 python3-dev python3-pip python3-venv python3-systemd \
+      build-essential pkg-config libdbus-1-dev libssl-dev libseccomp-dev libseccomp2 \
+      nftables iproute2 iptables cgroup-tools \
+      git curl ca-certificates tini \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* \
+    # systemd-in-container hygiene: drop units that hang or are pointless headless
+    && rm -f /lib/systemd/system/systemd-firstboot.service \
+             /lib/systemd/system/getty.target \
+             /lib/systemd/system/multi-user.target.wants/systemd-update-utmp* 2>/dev/null || true \
+    && systemctl set-default multi-user.target
+
+# Install uv (uvx runner for MCP) — standalone binary, no apt package on noble.
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+    && /usr/local/bin/uv --version
+
+# ── Python: hermes-agent (Nous engine, NOT on PyPI) FIRST, then the wheel ─────
+# hermes-agent is a Requires-Dist of the wheel but lives only on GitHub; install
+# it from the pinned commit tarball so the wheel's dep resolves as satisfied.
+ARG HERMES_AGENT_COMMIT=475ecea3d75784d2c1d98279d63ae4e5fba5d497
+RUN python3 -m pip install --no-cache-dir \
+      "https://github.com/NousResearch/hermes-agent/archive/${HERMES_AGENT_COMMIT}.tar.gz"
+
+# The wheel (--no-deps) + ALL its real deps listed EXPLICITLY (core + the
+# browser/shell/tui/mcp extras we use). No extras-syntax, one package per need.
+COPY dist/hermes_runtime-0.4.0-py3-none-any.whl /tmp/
+RUN python3 -m pip install --no-cache-dir --no-deps /tmp/hermes_runtime-0.4.0-py3-none-any.whl \
+    && python3 -m pip install --no-cache-dir \
+      aiohttp composio==0.13.1 dbus-fast rfc3161ng structlog tenacity \
+      cryptography playwright pytesseract selectolax \
+      mcp fastapi 'uvicorn[standard]' PyJWT websockets httpx croniter \
+      rich textual \
+    # pydantic LAST word (determinism; matches the OS build's pin order)
+    && python3 -m pip install --no-cache-dir 'pydantic==2.10.6' 'pydantic-core==2.27.2' \
+    && rm -f /tmp/hermes_runtime-0.4.0-py3-none-any.whl
+
+# Browser automation = the npm stack (agent-browser + @playwright/mcp), EXACTLY as
+# the OS image runs it. The wheel's python playwright-extra/stagehand-py are not on
+# PyPI — the real browser path is node (node 20 ships in the Playwright base). Point
+# both at the base's bundled Chromium and symlink it to the unit-expected path
+# (Ubuntu apt chromium is a snap stub that won't run in a container).
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ARG PLAYWRIGHT_MCP_VERSION=0.0.29
+RUN npm install -g --ignore-scripts "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" agent-browser \
+    && npx --yes playwright install chromium \
+    && CHROME="$(find /ms-playwright -type f -name chrome -path '*chrome-linux*' | head -1)" \
+    && [ -n "$CHROME" ] && ln -sf "$CHROME" /usr/bin/chromium-browser \
+    && echo "chromium -> $CHROME"
+
+# Builder-stage import smoke — fail the BUILD (not runtime) on a missing dep.
+RUN python3 -c "import hermes, fastapi, uvicorn, playwright, dbus_fast, composio, mcp; \
+      import hermes.runtime.__main__, hermes.shell_server.main, hermes.egress_proxy.__main__, \
+             hermes.audit_tail_service.__main__; \
+      from run_agent import AIAgent; from hermes_cli.runtime_provider import resolve_runtime_provider; \
+      print('IMPORT SMOKE OK')"
+
+# ── Service accounts — IDENTICAL uids to the OS build ─────────────────────────
+# The Playwright base ships a non-root user at UID 1000 (pwuser); remove it so
+# hermes-user can take 1000 (the daemon's HERMES_OPERATOR_ID maps to uid 1000).
+RUN existing="$(getent passwd 1000 | cut -d: -f1)"; \
+      [ -n "$existing" ] && userdel -r "$existing" 2>/dev/null; true
+RUN useradd --system --no-create-home --shell /usr/sbin/nologin --uid 880 hermes && \
+    useradd --system --no-create-home --shell /usr/sbin/nologin --uid 881 hermes-rc && \
+    useradd --system --no-create-home --shell /usr/sbin/nologin --uid 882 hermes-whisper && \
+    useradd --system --no-create-home --shell /usr/sbin/nologin --uid 883 hermes-cp && \
+    useradd --system --no-create-home --shell /usr/sbin/nologin --uid 885 hermes-egress && \
+    useradd --create-home --uid 1000 --groups hermes,systemd-journal hermes-user
+
+# hermes-sandbox (uid 886): the user the AGENT's sandboxed exec runs as — the
+# confined terminal (hermes-exec-launcher) and the jailed browse Chromium
+# (hermes-browser-launcher). DISTINCT from the daemon's `hermes` so DAC blocks
+# the agent from reading/writing the daemon's owner-only files (shell-state.db,
+# master.key, …) — including the /proc/<daemon-pid>/fd re-open bypass of
+# InaccessiblePaths (red-team HIGH finding 2026-06-19: the agent truncated the
+# daemon's DB via a /proc fd). hermes-work is the SHARED group for the agent's
+# work areas (workspace, browser-sessions) — members get there WITHOUT joining
+# `hermes` (which would expose the daemon's group-readable secrets/config).
+RUN groupadd --system hermes-work && \
+    useradd --system --no-create-home --shell /usr/sbin/nologin --uid 886 \
+            --user-group --groups hermes-work hermes-sandbox && \
+    usermod -aG hermes-work hermes && \
+    usermod -aG hermes-work hermes-user
+
+# ── /usr/bin service wrappers (units call these → python3 -m <module>) ────────
+RUN printf '#!/bin/sh\nexec /usr/bin/python3 -m hermes.runtime.__main__ "$@"\n' \
+        > /usr/bin/hermes-runtime && \
+    printf '#!/bin/sh\nexec /usr/bin/python3 -m hermes.audit_tail_service "$@"\n' \
+        > /usr/bin/hermes-audit-tail && \
+    printf '#!/bin/sh\nexec /usr/bin/python3 -m hermes.consent_manager_service "$@"\n' \
+        > /usr/bin/hermes-consent-manager && \
+    chmod 0755 /usr/bin/hermes-runtime /usr/bin/hermes-audit-tail /usr/bin/hermes-consent-manager && \
+    mkdir -p /etc/hermes-consent-manager && touch /etc/hermes-consent-manager/profile-enabled
+
+# ── ops config, VERBATIM (Fedora-agnostic) ───────────────────────────────────
+COPY ops/agents-os-edition/systemd/        /usr/lib/systemd/system/
+COPY ops/agents-os-edition/systemd-user/   /usr/lib/systemd/user/
+COPY ops/agents-os-edition/tmpfiles/       /usr/lib/tmpfiles.d/
+COPY ops/agents-os-edition/dbus/org.hermes.Runtime1.conf /usr/share/dbus-1/system.d/
+COPY ops/agents-os-edition/netns/          /etc/nftables/hermes/
+COPY ops/agents-os-edition/modules-load.d/ /etc/modules-load.d/
+COPY ops/agents-os-edition/seed/mcp-servers.json /usr/share/hermes/seed/
+# scripts → /usr/libexec/hermes + /usr/bin (the launchers + jail + landlock assert)
+COPY ops/agents-os-edition/scripts/hermes-mcp-launcher    /usr/libexec/hermes/hermes-mcp-launcher
+COPY ops/agents-os-edition/scripts/hermes-browser-launcher /usr/libexec/hermes/hermes-browser-launcher
+COPY ops/agents-os-edition/scripts/hermes-exec-launcher   /usr/libexec/hermes/hermes-exec-launcher
+COPY ops/agents-os-edition/scripts/hermes-browser-jail    /usr/libexec/hermes/browser-jail
+COPY ops/agents-os-edition/scripts/hermes-landlock-assert /usr/bin/hermes-landlock-assert
+# container-specific drop-ins (override ONLY the OS-coupling: bind host)
+COPY ops/container/dropins/ /usr/lib/systemd/system/
+RUN chmod 0755 /usr/libexec/hermes/* /usr/bin/hermes-landlock-assert && \
+    chown root:root /usr/libexec/hermes/*
+
+# ── OpenShell confinement substrate (the cage shield) — P2 ────────────────────
+# The agent's "terminal" routes through OpenShell ExecSandbox (uid 999, landlock
+# FS jail, all egress via the L7 proxy) when OpenShell is provisioned. We bake the
+# CLI + its libz3 runtime dep + an OPT-IN env drop-in: the deploy writes
+# /var/lib/hermes/openshell/openshell.env (HERMES_OPENSHELL_SANDBOX=<sandbox>) once
+# the gateway + per-agent sandbox exist; absent → the terminal uses the
+# exec-launcher cage. Both paths are fail-closed (never in-daemon).
+COPY ops/agent-cage/bin/openshell        /usr/libexec/hermes/openshell
+COPY ops/agent-cage/bin/libz3.so.4       /usr/lib/hermes/openshell/libz3.so.4
+COPY ops/agent-cage/systemd/hermes-runtime.service.d/openshell.conf \
+     /usr/lib/systemd/system/hermes-runtime.service.d/openshell.conf
+RUN chmod 0755 /usr/libexec/hermes/openshell && \
+    chown root:root /usr/libexec/hermes/openshell /usr/lib/hermes/openshell/libz3.so.4
+
+# socat: the browser-jail CDP relay (daemon ⇄ jailed Chromium) needs it. Without it
+# the daemon can't reach the browser's CDP port. (Late layer = cheap rebuild.)
+RUN apt-get update && apt-get install -y --no-install-recommends socat \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Hardening (V): strip ALL SUID-root bits. The cage uses systemd capabilities
+# (NET_ADMIN/SYS_ADMIN on the root units), NOT SUID — so su/mount/passwd/chfn/
+# gpasswd/newgrp SUID are pure privesc surface for a compromised non-root agent.
+# Chromium runs --no-sandbox so its SUID helper is unused. Remove the surface.
+RUN find / -xdev -perm -4000 -type f -exec chmod u-s {} + 2>/dev/null; \
+    find / -xdev -perm -2000 -type f -exec chmod g-s {} + 2>/dev/null; \
+    echo "SUID/SGID restantes:"; find / -xdev -perm -4000 -o -perm -2000 2>/dev/null | head || true
+
+# ── writable dirs + ownership (tmpfiles re-asserts at boot too) ───────────────
+RUN mkdir -p /var/lib/hermes /opt/hermes /run/hermes && \
+    chown -R hermes:hermes /var/lib/hermes /opt/hermes /run/hermes
+# Shared work areas: group hermes-work + setgid (2770) so the agent's sandboxed
+# exec (User=hermes-sandbox) and the daemon/compositor (group hermes-work) both
+# read+write them, while the daemon's secrets stay owner-only / group `hermes`.
+# tmpfiles re-asserts these at every boot (authoritative); this is the bake-time
+# baseline.
+RUN mkdir -p /var/lib/hermes/workspace /var/lib/hermes/browser-sessions && \
+    chgrp hermes-work /var/lib/hermes/workspace /var/lib/hermes/browser-sessions && \
+    chmod 2770 /var/lib/hermes/workspace /var/lib/hermes/browser-sessions
+
+# ── enable the same service set the terminal variant runs ────────────────────
+# The individual enables populate hermes-workspace.target.wants/ (each service's
+# [Install] is WantedBy=hermes-workspace.target). Enabling the TARGET itself
+# (WantedBy=multi-user.target) is what actually ACTIVATES it at boot → which pulls
+# the launchers (browser/exec/mcp). Without the target enabled, only the services
+# that hermes-runtime Wants= directly (netns, egress-proxy) come up, and the
+# launchers stay inactive → their control sockets never appear.
+RUN systemctl enable \
+      hermes-keygen.service hermes-runtime.service hermes-shell-server.service \
+      hermes-mcp-launcher.service hermes-egress-proxy.service \
+      hermes-browser-netns.service hermes-browser-launcher.service \
+      hermes-exec-launcher.service \
+      hermes-audit-tail.service \
+      hermes-workspace.target 2>&1 | tail -3 || true
+
+EXPOSE 7517
+STOPSIGNAL SIGRTMIN+3
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:7517/ >/dev/null || exit 1
+ENTRYPOINT ["/usr/lib/systemd/systemd"]

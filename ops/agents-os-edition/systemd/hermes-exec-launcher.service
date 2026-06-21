@@ -1,0 +1,69 @@
+# hermes-exec-launcher.service — Root helper that runs agent TERMINAL commands
+# inside the jailed netns (egress allow-list), capturing output to the daemon.
+#
+# The unprivileged hermes daemon cannot put a command into a named netns (needs
+# CAP_NET_ADMIN + CAP_SYS_ADMIN, and a transient service with NetworkNamespacePath
+# is "Access denied" for a non-root caller). This root helper exposes a HARDCODED
+# template over an SO_PEERCRED socket: the daemon supplies only argv + cwd +
+# workspace; every systemd-run property (the netns, the hardening) is fixed
+# server-side, and the command runs as User=hermes — no privilege gain.
+#
+# Socket: /run/hermes/exec-launch.sock (root:hermes, 0660, SO_PEERCRED auth).
+# Protocol: 4-byte big-endian length-prefix + UTF-8 JSON.
+#
+# SAFETY: failing this service does NOT block OS boot. If it is down, the daemon
+# falls back to its in-process systemd-run --scope (confined but not netns-jailed)
+# only when the socket is ABSENT; a launcher error fails the command closed.
+
+[Unit]
+Description=Hermes — Root exec-launcher helper (netns egress jail for agent terminal)
+Documentation=file:///usr/libexec/hermes/hermes-exec-launcher
+After=hermes-browser-netns.service systemd-tmpfiles-setup.service
+Wants=hermes-browser-netns.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+# Join group hermes so the root launcher can create/unlink its control socket in
+# /run/hermes (the CapabilityBoundingSet omits CAP_DAC_OVERRIDE — least privilege).
+SupplementaryGroups=hermes
+
+ExecStart=/usr/libexec/hermes/hermes-exec-launcher
+
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=3
+StartLimitIntervalSec=120
+StartLimitAction=none
+
+# CAP_NET_ADMIN: required to put a unit into NetworkNamespacePath= (netns join).
+# CAP_SYS_ADMIN: required by systemd-run to create the transient service unit.
+# CAP_SYS_RESOURCE: allows systemd-run to set MemoryMax/CPUQuota on the unit.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_RESOURCE
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_RESOURCE
+
+# NoNewPrivileges=no: the spawned systemd-run sets caps on the transient unit via
+# the ambient set; the launcher itself spawns only systemd-run (a list, no shell).
+NoNewPrivileges=no
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+ReadWritePaths=/run/hermes
+
+# The launcher itself needs no network — it only forks systemd-run. The spawned
+# unit is what joins the netns (the agent command's only egress path).
+IPAddressDeny=any
+
+[Install]
+WantedBy=hermes-workspace.target

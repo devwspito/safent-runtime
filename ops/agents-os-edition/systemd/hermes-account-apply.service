@@ -1,0 +1,76 @@
+# hermes-account-apply.service — root oneshot that reads the staged account
+# request and applies it to the OS (chpasswd + usermod + chage).
+#
+# This service runs as root. Security notes:
+#   - NoNewPrivileges=no: chpasswd/chage need to interact with PAM, which
+#     internally uses setuid helpers and privilege transitions. Setting
+#     NoNewPrivileges=yes would block those transitions and break chpasswd.
+#     This is the standard tradeoff for services that wrap PAM tools.
+#     Mitigation: the service has no network access, no user namespace,
+#     and the script re-validates all inputs from the staged file before
+#     making any OS call.
+#   - ProtectSystem=strict + ReadWritePaths: restricts filesystem write access
+#     to only the paths the script legitimately needs.
+#   - /run/hermes is tmpfs — the staged file is RAM-only and evaporates on reboot.
+#   - The script shreds the staged file in a finally block (always, even on error).
+
+[Unit]
+Description=Hermes — apply staged OS account credentials (privileged)
+Documentation=man:systemd.service(5)
+# Only triggered by the .path unit. Not started independently.
+RefuseManualStart=no
+# One-time gate: if the sentinel exists, the account was already configured.
+# This prevents replay/re-application of credentials after first boot.
+ConditionPathExists=!/var/lib/hermes/account-applied
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/libexec/hermes/account-apply
+
+# Run as root — required for chpasswd/usermod/chage.
+User=root
+Group=root
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-account-apply
+
+# --------------------------------------------------------------------------
+# Hardening — as tight as PAM-wrapping tools allow.
+# --------------------------------------------------------------------------
+
+# NoNewPrivileges=no: chpasswd calls into PAM which uses setuid helpers
+# (unix_chkpwd, pam_selinux, etc.). Enabling NoNewPrivileges blocks those
+# privilege transitions and breaks chpasswd silently on some PAM stacks.
+# This is the known-acceptable tradeoff for root services that wrap PAM.
+NoNewPrivileges=no
+
+# ProtectSystem: 'strict' makes / read-only by default (mount namespace).
+# ReadWritePaths explicitly grants write access to the paths we need:
+#   /run/hermes     — staged request (read + shred)
+#   /var/lib/hermes — sentinel file (write)
+#   /etc            — chpasswd/usermod modify /etc/shadow, /etc/passwd
+ProtectSystem=strict
+ReadWritePaths=/run/hermes/setup /var/lib/hermes /etc
+
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+# Prevent the script from opening unexpected network connections.
+RestrictAddressFamilies=AF_UNIX
+
+# Minimal bounding set for this script's actual operations:
+#   CAP_DAC_OVERRIDE — chpasswd/chage read /etc/shadow (root-owned, mode 640/000)
+#   CAP_SETUID/CAP_SETGID — PAM helpers used by chpasswd/chage perform uid transitions
+# CAP_CHOWN and CAP_FOWNER are NOT needed: the script does not chown any file
+# and usermod -c here only edits GECOS (no ownership changes).
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
+
+# [Install] intentionally omitted — this service is triggered exclusively
+# by hermes-account-apply.path, never started at boot independently.

@@ -1,0 +1,31 @@
+# hermes-session-input.service (USER) — session-side input bridge.
+#
+# Serves the AF_UNIX socket /run/hermes/session-input.sock so the hardened
+# hermes-runtime.service daemon can inject pointer/keyboard events and request
+# screenshots without needing access to the Wayland/mutter session bus.
+#
+# Runs as hermes-user (systemd user unit) to have WAYLAND_DISPLAY, XDG_RUNTIME_DIR,
+# and access to org.gnome.Mutter.RemoteDesktop on the session D-Bus.
+#
+# Security:
+#   - Socket dir /run/hermes is 0700 hermes:hermes (tmpfiles.d/hermes.conf).
+#   - Per-boot token written to /run/hermes/session-input.token (0600 hermes-user).
+#   - SO_PEERCRED UID check inside the bridge (defense-in-depth).
+#   - Key-chord denylist (Ctrl-Alt-Fx) enforced unconditionally.
+#
+# Enable: systemctl --global enable hermes-session-input.service
+
+[Unit]
+Description=Hermes Session Input Bridge (host-operation MVP)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/python3 -m hermes.shell_server.session_agent
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

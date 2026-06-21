@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Hermes Shell
+Exec=/usr/bin/hermes-shell-session-wrapper
+NoDisplay=true
+X-GNOME-AutoRestart=true
+X-GNOME-Provides=windowmanager;
+DesktopNames=Hermes

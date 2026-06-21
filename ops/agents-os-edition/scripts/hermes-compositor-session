@@ -1,0 +1,19 @@
+#!/bin/sh
+# hermes-compositor-session — gate wrapper for hermes-compositor.service.
+#
+# Hard-fails if hermes-runtime.service is not active before starting the
+# Qt/QML compositor.  This mirrors the pattern used by
+# hermes-shell-session-wrapper on the personal-desktop profile.
+#
+# Exit codes:
+#   0  — hermes-runtime active; compositor launched (exec replaces this process)
+#   1  — hermes-runtime not active (compositor start aborted — systemd will restart)
+
+set -e
+
+if ! systemctl is-active --quiet hermes-runtime.service 2>/dev/null; then
+    echo "[hermes-compositor-session] hermes-runtime.service is not active — aborting." >&2
+    exit 1
+fi
+
+exec /usr/bin/python3 -m hermes.lumen.compositor "$@"

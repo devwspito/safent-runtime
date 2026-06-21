@@ -1,0 +1,54 @@
+#!/usr/sbin/nft -f
+# mcp-host.nft — nftables HOST-side rules for the hermes-mcp netns.
+#
+# C1 PASS-2 (2026-06-19). The MCP child processes (npx/uvx/node spawned by
+# hermes-mcp-launcher) live in their OWN netns `hermes-mcp`, SEPARATE from the
+# browser's `hermes-browser`. This gives the MCP a distinct proxy source IP
+# (10.200.1.2) whose egress-proxy policy is PINNED to default-deny + registries-only
+# and is immune to control-socket pushes — so a browser teaching session that pushes
+# `open-logged` can never widen the MCP's egress (red-team bypass #1).
+#
+# Mirrors browser-host.nft exactly, on a DIFFERENT /30 (10.200.1.0/30):
+#   host netns:        veth-hmcp-host  10.200.1.1/30  (gateway of the MCP netns)
+#   hermes-mcp netns:  veth-hmcp-ns    10.200.1.2/30  (source IP of the MCP children)
+#   the only egress permitted from the MCP is →proxy (10.200.1.1:3128).
+#   the proxy (User=hermes-egress, host netns) NATs to WAN; the MCP never does.
+#   anti-pivot: the MCP cannot reach RFC1918 / loopback / cloud metadata / CGNAT.
+#
+# C1 PASS-3 (2026-06-19): the MCP RUNTIME no longer needs ANY package registry. Packages
+# are downloaded + scanned at INSTALL time (add_mcp_server prefetch, trusted daemon path)
+# and the runner spawns OFFLINE from the warm cache. The egress policy on the MCP source
+# IP (10.200.1.2) is therefore PURE default-deny — npm/PyPI included — and the owner
+# elevates only the specific hosts a network-MCP needs. This forward chain (path TO the
+# proxy) is unchanged; what changed is the proxy's policy (no registry baseline) + the
+# runtime offline spawn. The matching HOST INPUT accept (10.200.1.2 → 10.200.1.1:3128)
+# is added by hermes-browser-netns.service into the `inet hermes_host` table.
+#
+# Loaded by hermes-browser-netns.service in the HOST netns.
+
+table inet hermes_mcp_egress {
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+
+        ct state established,related accept comment "respuestas ct established"
+
+        # Anti-pivot: no RFC1918 / loopback / link-local+metadata / CGNAT from the MCP.
+        ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, 100.64.0.0/10 } \
+            log prefix "hmcp FWD DROP meta: " level warn drop \
+            comment "anti-pivot: no RFC1918/loopback/metadata/CGNAT from the MCP"
+
+        # MCP → proxy egress (hermes-egress-proxy on its MCP gateway 10.200.1.1:3128).
+        ip saddr 10.200.1.0/30 ip daddr 10.200.1.1 tcp dport 3128 accept \
+            comment "mcp→proxy egress CONNECT (DNS via proxy)"
+
+        log prefix "hmcp FWD DROP: " level warn drop
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+
+        ip saddr 10.200.1.1 oifname != "veth-hmcp-host" masquerade \
+            comment "NAT of the egress proxy to WAN (never the MCP directly)"
+    }
+}

@@ -1,0 +1,345 @@
+name: agents-os-edition
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/hermes/agents_os/**'
+      - 'ops/agents-os-edition/**'
+      - 'specs/003-agents-os-edition/**'
+      - 'tests/unit/agents_os/**'
+      - 'tests/integration/agents_os/**'
+      - 'apps/**'
+      - 'pyproject.toml'
+      - '.github/workflows/agents-os-edition.yml'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      push_images:
+        description: 'Build & push OCI images (4 profiles, multi-arch, signed)'
+        required: false
+        default: 'false'
+      smoke_iso:
+        description: 'Build qcow2 from published image and boot smoke test in QEMU'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write   # required for cosign keyless OIDC
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_ORG: devwspito
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1) Tests + threat-model gate (no build).
+  # ---------------------------------------------------------------
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        # Pin by digest — supply-chain: this job has id-token:write.
+        # Update digest: gh api /repos/actions/checkout/git/ref/heads/v4 | jq -r '.object.sha'
+        # Pinned to actions/checkout v4.2.2 (2024-11-25).
+        # sha: 11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pytest pytest-asyncio cryptography
+      - run: pytest tests/unit/agents_os/ tests/unit/cli/ tests/unit/apps/ -q
+
+  integration-tests:
+    name: Integration E2E
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e . pytest pytest-asyncio cryptography
+      - run: pytest tests/integration/agents_os/ -m integration -q
+
+  threat-model-gate:
+    name: FR-047..FR-061 referenced in code
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - run: |
+          set -e
+          missing=()
+          for fr in FR-047 FR-048 FR-049 FR-050 FR-051 FR-052 \
+                   FR-053 FR-054 FR-055 FR-056 FR-057 FR-058 \
+                   FR-059 FR-060 FR-061; do
+            if ! grep -rq "${fr}" src/hermes/agents_os/ \
+                  specs/003-agents-os-edition/ 2>/dev/null; then
+              missing+=("$fr")
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "MISSING BLOQUEANTES: ${missing[*]}" >&2
+            exit 1
+          fi
+          echo "All 15 BLOQUEANTES referenced"
+
+  # ---------------------------------------------------------------
+  # 2) Build wheel (needed by Containerfile.base).
+  # ---------------------------------------------------------------
+  build-wheel:
+    name: Build hermes-runtime wheel
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, threat-model-gate]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.push_images == 'true'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: |
+          pip install build
+          python -m build --wheel
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wheel
+          path: dist/*.whl
+
+  # ---------------------------------------------------------------
+  # 3) Build base image (multi-arch).
+  #    Needed by the 3 derivative profiles.
+  # ---------------------------------------------------------------
+  build-base:
+    name: Build & push base (amd64+arm64)
+    runs-on: ubuntu-latest
+    needs: build-wheel
+    outputs:
+      base-tag: ${{ steps.meta.outputs.base-tag }}
+      base-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: wheel
+          path: dist/
+      - id: meta
+        run: |
+          version="v$(grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)-$(git rev-parse --short HEAD)"
+          echo "version=${version}" >> $GITHUB_OUTPUT
+          echo "base-tag=${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/agents-os-base:${version}" >> $GITHUB_OUTPUT
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ops/agents-os-edition/containerfiles/Containerfile.base
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.base-tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/agents-os-base:latest
+          cache-from: type=gha,scope=base
+          cache-to: type=gha,scope=base,mode=max
+      - name: Install cosign
+        # Pin by digest — cosign-installer v3.7.0 (2024-12-11).
+        # sha: d7d3a0a4571c0e73697de7b2252b3cdbf6f77a5e
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
+      - name: Sign base (keyless)
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/agents-os-base@${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "${IMAGE}"
+
+  # ---------------------------------------------------------------
+  # 4) Build the 3 derivative profiles in parallel.
+  # ---------------------------------------------------------------
+  build-derivative:
+    name: Build & push ${{ matrix.profile }}
+    runs-on: ubuntu-latest
+    needs: build-base
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [workspace-only, server, personal-desktop]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: wheel
+          path: dist/
+      - id: meta
+        run: |
+          version="v$(grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)-$(git rev-parse --short HEAD)"
+          echo "version=${version}" >> $GITHUB_OUTPUT
+          echo "tag=${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/agents-os-${{ matrix.profile }}:${version}" >> $GITHUB_OUTPUT
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ops/agents-os-edition/containerfiles/Containerfile.${{ matrix.profile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            BASE=${{ needs.build-base.outputs.base-tag }}
+          tags: |
+            ${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/agents-os-${{ matrix.profile }}:latest
+          cache-from: type=gha,scope=${{ matrix.profile }}
+          cache-to: type=gha,scope=${{ matrix.profile }},mode=max
+      - name: Install cosign
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
+      - name: Sign (keyless)
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/agents-os-${{ matrix.profile }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}"
+      - name: SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/agents-os-${{ matrix.profile }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.profile }}.spdx.json
+      - name: Attest SBOM with cosign
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/agents-os-${{ matrix.profile }}@${{ steps.build.outputs.digest }}
+        run: |
+          cosign attest --yes \
+            --predicate sbom-${{ matrix.profile }}.spdx.json \
+            --type spdxjson \
+            "${IMAGE}"
+
+  # ---------------------------------------------------------------
+  # 5) Verify the published images via cosign verify.
+  # ---------------------------------------------------------------
+  verify-published:
+    name: cosign verify ${{ matrix.profile }}
+    runs-on: ubuntu-latest
+    needs: build-derivative
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [base, workspace-only, server, personal-desktop]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
+      - run: |
+          version="v$(grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)-$(git rev-parse --short HEAD)"
+          image="${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/agents-os-${{ matrix.profile }}:${version}"
+          cosign verify \
+            --certificate-identity-regexp "^https://github\.com/${{ github.repository_owner }}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${image}"
+
+  # ---------------------------------------------------------------
+  # 6) ISO smoke test — workflow_dispatch only.
+  #    Builds a qcow2 from the published personal-desktop image,
+  #    boots it in QEMU (serial console), and asserts that
+  #    hermes-runtime is active before timing out.
+  #    Requires: smoke_iso input == 'true' + push_images must have
+  #    completed first (image must exist in registry).
+  # ---------------------------------------------------------------
+  smoke-iso:
+    name: ISO smoke test (qcow2 + QEMU)
+    runs-on: ubuntu-latest
+    needs: verify-published
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.smoke_iso == 'true'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install QEMU + OVMF + envsubst
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 ovmf gettext-base
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
+
+      - name: Build qcow2 from published image
+        env:
+          # ANACONDA_LUKS_PASSPHRASE not required for --type qcow2 (no kickstart).
+          VERSION: "v$(grep '^version' pyproject.toml | head -1 | cut -d'\"' -f2)-$(git rev-parse --short HEAD)"
+          REGISTRY: ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}
+          VERIFY_SIG: "yes"
+        run: |
+          chmod +x ops/agents-os-edition/build/build-iso.sh
+          ops/agents-os-edition/build/build-iso.sh personal-desktop \
+            --type qcow2 \
+            --version "${VERSION}"
+
+      - name: Boot qcow2 in QEMU and run serial smoke test
+        timeout-minutes: 10
+        run: |
+          QCOW2=$(find build/agents-os/output -name "*.qcow2" | head -1)
+          if [[ -z "${QCOW2}" ]]; then
+            echo "No qcow2 found in build/agents-os/output" >&2
+            exit 1
+          fi
+          echo "==> Booting: ${QCOW2}"
+
+          OVMF_CODE=""
+          for p in /usr/share/OVMF/OVMF_CODE_4M.secboot.fd \
+                   /usr/share/OVMF/OVMF_CODE.fd; do
+            [[ -f "$p" ]] && OVMF_CODE="$p" && break
+          done
+          [[ -z "${OVMF_CODE}" ]] && { echo "OVMF not found" >&2; exit 1; }
+
+          # Boot in background; serial console redirected to a log file.
+          SERIAL_LOG=$(mktemp /tmp/qemu-serial.XXXXXX.log)
+          qemu-system-x86_64 \
+            -m 3072 \
+            -smp 2 \
+            -enable-kvm \
+            -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
+            -drive "file=${QCOW2},if=virtio,format=qcow2" \
+            -display none \
+            -serial "file:${SERIAL_LOG}" \
+            -daemonize \
+            -pidfile /tmp/qemu.pid
+
+          echo "==> Waiting for hermes-runtime to become active (serial: ${SERIAL_LOG})"
+          TIMEOUT=360
+          ELAPSED=0
+          SUCCESS=false
+          while [[ ${ELAPSED} -lt ${TIMEOUT} ]]; do
+            if grep -q "hermes-runtime.*active\|hermes.runtime.starting\|READY=1" "${SERIAL_LOG}" 2>/dev/null; then
+              echo "==> SMOKE PASS: hermes-runtime active signal detected at ${ELAPSED}s"
+              SUCCESS=true
+              break
+            fi
+            sleep 5
+            ELAPSED=$((ELAPSED + 5))
+          done
+
+          # Terminate QEMU.
+          [[ -f /tmp/qemu.pid ]] && kill "$(cat /tmp/qemu.pid)" 2>/dev/null || true
+
+          if [[ "${SUCCESS}" != "true" ]]; then
+            echo "==> SMOKE FAIL: hermes-runtime did not signal active within ${TIMEOUT}s" >&2
+            echo "==> Last 50 serial lines:" >&2
+            tail -50 "${SERIAL_LOG}" >&2
+            exit 1
+          fi

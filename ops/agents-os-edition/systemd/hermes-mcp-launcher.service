@@ -1,0 +1,172 @@
+# hermes-mcp-launcher.service — Unprivileged helper that spawns MCP server processes.
+#
+# The hermes-runtime daemon is confined by Landlock + seccomp + ProtectSystem=strict.
+# MCP runners (uvx/npx/node) die before the JSON-RPC handshake because they inherit
+# that confinement. This helper runs OUTSIDE the daemon's sandbox: it fork/exec's
+# the MCP process and returns the child's stdio file descriptors to the daemon via
+# SCM_RIGHTS on the AF_UNIX socket /run/hermes-mcp/launch.sock.
+#
+# C1 FIX (2026-06-19): like hermes-browser/exec-launcher, this helper now spawns the
+# MCP child as a transient systemd unit joined to the egress netns. That needs
+# CAP_NET_ADMIN + CAP_SYS_ADMIN, so the launcher runs as User=root. The MCP CHILD is
+# still unprivileged: the transient unit sets User=hermes-sandbox (≠ daemon's hermes,
+# /proc/fd isolation 2026-06-19) + empty CapabilityBoundingSet. Egress is forced
+# through the audited proxy (default-deny) — closing the unrestricted-egress hole
+# where a malicious MCP could exfiltrate the agent's cookies.
+#
+# Socket: /run/hermes-mcp/launch.sock (hermes-sandbox:hermes-work, 0660, SO_PEERCRED
+# uid==hermes ∧ gid==hermes auth — only the daemon/shell-server, never the agent).
+# Protocol: 4-byte big-endian length-prefix + UTF-8 JSON (same as browser-launcher),
+#            with SCM_RIGHTS ancillary carrying [stdout_read_fd, stdin_write_fd].
+#
+# SAFETY: failing this service does NOT block OS boot — hermes-runtime.service
+# uses Wants= (not Requires=) and McpLauncherClient degrades gracefully to
+# McpLauncherUnavailable when the socket is absent.
+#
+# Decision (root, C1 fix 2026-06-19): SUPERSEDES the earlier "not root" call. The
+# launcher itself must be root to join the MCP child to the egress netns (CAP_NET_ADMIN
+# + CAP_SYS_ADMIN via systemd-run, identical to hermes-exec-launcher). The binaries
+# downloaded from the internet (uvx packages, the actual exfil-capable code) still run
+# UNPRIVILEGED as hermes-sandbox inside the netns — the root surface is only the fixed
+# `systemd-run <hardcoded properties> -- <runner>` argv, no untrusted exec as root.
+# The egress jail this buys (no main-ns exfil) outweighs the contained root helper.
+
+[Unit]
+Description=Hermes — MCP subprocess launcher (privilege bridge: escapes daemon sandbox)
+Documentation=file:///usr/libexec/hermes/hermes-mcp-launcher
+# Tmpfiles must have created /run/hermes and set socket perms before we start.
+# The egress netns must exist before we spawn MCP children into it (C1 fix); Wants=
+# (not Requires=) keeps fail-soft — if the netns service is down, _require_netns()
+# fails the spawn CLOSED (no un-jailed fallback) without crash-looping the launcher.
+After=systemd-tmpfiles-setup.service hermes-browser-netns.service
+Wants=hermes-browser-netns.service
+# NO PartOf — the launcher is a helper long-running process; its failure must not
+# affect the workspace target lifecycle or the runtime service. Wants= is sufficient:
+# the runtime activates it but does not propagate stops.
+# NO Before=hermes-runtime.service — fail-soft: if the launcher is down while
+# HERMES_MCP_LAUNCHER=1, MCP connects degrade to McpLauncherUnavailable (logged),
+# not a daemon crash. This mirrors the browser-launcher dependency design.
+
+[Service]
+Type=simple
+# User=root (C1 fix 2026-06-19). The launcher no longer fork/exec's the MCP runner
+# directly — it spawns the runner as a TRANSIENT systemd unit joined to the egress
+# netns (/run/netns/hermes-browser), exactly like hermes-exec-launcher does for the
+# terminal. Joining a unit to a named netns + creating a transient unit requires
+# CAP_NET_ADMIN + CAP_SYS_ADMIN, which a non-root caller cannot hold → the launcher
+# itself must be root. THE MCP CHILD IS STILL UNPRIVILEGED: the transient unit
+# carries --property=User=hermes-sandbox, so the runner runs as hermes-sandbox (≠ the
+# daemon's `hermes`) inside the netns. Cross-uid DAC + ProtectProc=invisible still
+# block it from reading the daemon's DB/master.key via /proc/<daemon>/fd. Root here
+# is the SAME elevation hermes-exec-launcher already uses for the terminal — no new
+# trust beyond "the helper that builds the jail must be able to build the jail".
+# SupplementaryGroups=hermes hermes-work: hermes lets root create/chgrp its control
+# socket dir; hermes-work is the shared group the daemon connects through + owns the
+# runner caches (npm/uv/xdg, 2770). The peercred (uid==hermes ∧ gid==hermes) is the
+# real gate on who may request a spawn.
+User=root
+Group=root
+SupplementaryGroups=hermes hermes-work
+
+# IPv4-first DNS para los runners node/npx: en redes/SO sin ruta IPv6, node
+# intenta IPv6 primero y muere con EAFNOSUPPORT al descargar de registry.npmjs.org
+# → el MCP nunca arranca. Forzar ipv4first hace fiable la descarga. Va en el env
+# BASE del launcher (lo heredan todos los spawns; el caller no lo puede sobreescribir).
+Environment=NODE_OPTIONS=--dns-result-order=ipv4first
+# Cache + HOME for the spawned MCP runners (npx/uvx/node). Under
+# ProtectSystem=strict + ProtectHome=yes the runner's default HOME
+# (/var/home/hermes) is READ-ONLY, so `npx` mkdir on $HOME/.npm dies with EACCES.
+# That is exactly what broke the browser MCP (@playwright/mcp) → the agent could
+# not browse headless. Point HOME + every runner cache at /var/lib/hermes (the
+# ONLY writable tree, already in ReadWritePaths below). These live in the BASE
+# env (the launcher seeds the spawn from its own os.environ), so EVERY runner
+# inherits them — the caller cannot leave them unset. Dirs created by tmpfiles.
+Environment=HOME=/var/lib/hermes/mcp-home
+Environment=npm_config_cache=/var/lib/hermes/npm-cache
+Environment=UV_CACHE_DIR=/var/lib/hermes/uv-cache
+Environment=XDG_CACHE_HOME=/var/lib/hermes/xdg-cache
+
+ExecStart=/usr/libexec/hermes/hermes-mcp-launcher
+
+# Restart with conservative limits to avoid restart storms.
+# Same pattern as hermes-browser-launcher.service.
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=3
+StartLimitIntervalSec=120
+StartLimitAction=none
+
+# ── Capabilities (C1 fix) — needed to spawn the MCP into the egress netns ──────
+# Mirrors hermes-exec-launcher.service:
+#   CAP_NET_ADMIN    → put the transient unit into NetworkNamespacePath= (netns join)
+#   CAP_SYS_ADMIN    → systemd-run creates the transient service unit
+#   CAP_SYS_RESOURCE → systemd-run sets RuntimeMaxSec/limits on the unit
+# The launcher only ever spawns systemd-run (a fixed argv list, no shell); the MCP
+# runner runs inside the transient unit as hermes-sandbox with an EMPTY bounding set
+# (--property=CapabilityBoundingSet= in the launcher), so the child gains nothing.
+# CAP_DAC_OVERRIDE: launcher runs User=root (systemd-run + netns join) but its AF_UNIX
+# socket dir /run/hermes-mcp is 0750 hermes-sandbox:hermes-work (agent can't connect,
+# only the daemon's hermes-work group). Root is NOT owner and 0750 denies it write →
+# sock.bind() EACCES → crash-loop (regression from the C1 User=root flip, 2026-06-19).
+# DAC_OVERRIDE lets root bind its own socket dir. The MCP CHILD still gets an EMPTY
+# bounding set + uid 886, so it gains nothing.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_RESOURCE CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_RESOURCE CAP_DAC_OVERRIDE
+# NoNewPrivileges=no: systemd-run sets the transient unit's identity/caps via the
+# ambient set; the launcher spawns only systemd-run (no shell, no untrusted exec).
+NoNewPrivileges=no
+
+# ── Hardening ─────────────────────────────────────────────────────────────────
+# Broad (not strict like hermes-runtime.service) so that fork/exec of uvx/npx/
+# node succeeds. The key difference from the daemon: NO SystemCallFilter stricly
+# blocking execve/fork/pipe/clone. ProtectSystem=strict still restricts write
+# access to most of the filesystem.
+# NOTE: tried ProtectSystem=full to make uvx work (uv hits "Invalid cross-device
+# link" populating its cache inside this namespace); it did NOT help — even with
+# the cache on tmpfs the rename fails, so it's a uv-vs-namespace issue needing a
+# root strace, not the ProtectSystem level. Reverted to strict (npx works fine).
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+PrivateDevices=yes
+# ProtectProc=invisible: the launcher is root but its MCP children run as
+# hermes-sandbox (set per-child via the transient unit), so hide the daemon's /proc
+# at the unit level too — defense-in-depth so an MCP server (which lives in the
+# child unit, also ProtectProc=invisible) can't enumerate the daemon's open fds to
+# attempt the /proc/fd secret-read. (2026-06-19.)
+ProtectProc=invisible
+ProcSubset=pid
+# Address families: AF_UNIX (socket del launcher) + AF_INET/AF_INET6 (red de los
+# MCP) + AF_NETLINK (getaddrinfo/resolución). RestrictAddressFamilies es del
+# CGROUP del servicio y lo HEREDAN los hijos (npx/uvx/node) — NO es cuestión de
+# fds heredados. Con solo AF_UNIX, node fallaba con EAFNOSUPPORT al crear el
+# socket (registry.npmjs.org no se descargaba; ningún MCP de red funcionaba).
+# El anti-exfil NO se hace bloqueando la red aquí (eso inutiliza los MCP) sino en
+# la capa de egress del SO (netns/veth/nftables), como el navegador — follow-up.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+# The launcher socket lives in its own dir /run/hermes-mcp (created by tmpfiles) —
+# needs RW to bind. npx writes its cache under /var/lib/hermes (mapped via env vars)
+# — needs RW here too. The launcher (now root) also spawns systemd-run, which talks
+# to PID 1 over /run/systemd/private (AF_UNIX, not blocked by ProtectSystem).
+ReadWritePaths=/run/hermes-mcp /var/lib/hermes
+# Defense-in-depth: hide the daemon's secrets from the launcher process AND its MCP
+# children. NOT /run/hermes (the control sockets there are group/peercred-protected;
+# the launcher needs to traverse to create its own socket dir). `-` = tolerate-if-absent.
+InaccessiblePaths=-/var/lib/hermes/master.key -/var/lib/hermes/shell-state.db -/var/lib/hermes/keys -/var/lib/hermes/audit -/var/lib/hermes/hermes-home
+
+# Anti-exfil egress control is now ENFORCED (C1 fix 2026-06-19): every MCP child is
+# spawned into the hermes-browser netns (default-deny, only the audited proxy at
+# 10.200.0.1:3128 reachable) — the same kernel nftables jail the browser/terminal
+# use. NOT via IPAddressDeny here (that would also kill the netns plumbing). Package
+# registries (npm/PyPI) are allowed by default in the proxy so npx/uvx downloads work;
+# the owner elevates any other domain via the UI. (Was the OPEN hole: plain Popen in
+# the main ns → unrestricted egress → MCP could exfiltrate the agent's cookies.)
+
+[Install]
+WantedBy=hermes-workspace.target

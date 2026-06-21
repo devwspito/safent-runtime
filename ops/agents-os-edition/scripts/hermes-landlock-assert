@@ -1,0 +1,51 @@
+#!/usr/bin/python3
+# hermes-landlock-assert — Verifica que Landlock LSM está activo en el kernel.
+# Ref: P0-2 (backlog.md), FR-052, finding #19
+#
+# Llamado por hermes-runtime.service como ExecStartPre= (boot assert, fail-closed).
+#
+# PROPÓSITO: Este script es la frontera de boot que impide arrancar el daemon
+# si el kernel no tiene Landlock activo. NO carga reglas Landlock — ese es el
+# trabajo del loader futuro (LandlockRulesetBuilder → landlock_create_ruleset
+# syscall). Este check confirma que el enforcement kernel existe ANTES de que
+# el daemon empiece a aceptar tareas que dependen de él.
+#
+# KERNEL REQUERIDO: Linux ≥ 5.13, CONFIG_SECURITY_LANDLOCK=y
+# CMDLINE REQUERIDO: lsm=landlock,lockdown,yama,bpf
+#   (Fedora bootc activa LSMs en /etc/kernel/cmdline — verificar con:
+#    cat /proc/cmdline | grep -o 'lsm=[^ ]*')
+#
+# Salida:
+#   0 — Landlock activo, el daemon puede arrancar.
+#   1 — Landlock no activo; systemd marca hermes-runtime.service como failed.
+
+import sys
+from pathlib import Path
+
+_LSM_STATUS_PATH = Path("/sys/kernel/security/lsm")
+
+
+def _is_landlock_active() -> bool:
+    try:
+        lsm_list = _LSM_STATUS_PATH.read_text(encoding="ascii").strip()
+        return "landlock" in lsm_list.split(",")
+    except OSError:
+        return False
+
+
+def main() -> int:
+    if _is_landlock_active():
+        print("hermes-landlock-assert: Landlock LSM activo — OK")
+        return 0
+    print(
+        "hermes-landlock-assert: ERROR — Landlock LSM NO está activo.\n"
+        f"  Leer: {_LSM_STATUS_PATH}\n"
+        "  Cmdline requerido: lsm=landlock,lockdown,yama,bpf\n"
+        "  El daemon hermes-runtime se niega a arrancar sin enforcement kernel (FR-052).",
+        file=sys.stderr,
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

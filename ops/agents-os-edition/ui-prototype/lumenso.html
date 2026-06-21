@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark" data-accent="amber">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LumenSO</title>
+<style>
+@import url('https://rsms.me/inter/inter.css');
+:root{
+  --font:'Inter',-apple-system,system-ui,sans-serif;
+  --r-sm:10px;--r:16px;--r-lg:22px;--r-xl:30px;
+  --ease:cubic-bezier(.22,.8,.18,1);--ease-out:cubic-bezier(.16,1,.3,1);--spring:cubic-bezier(.34,1.56,.64,1);
+}
+[data-accent="amber"]{--acc:#EFA45C;--acc-2:#E2864B;--acc-soft:rgba(239,164,92,.16);--acc-glow:rgba(239,164,92,.42);--on-acc:#1a1206}
+[data-accent="iris"]{--acc:#8C9BFF;--acc-2:#6E7BF0;--acc-soft:rgba(140,155,255,.16);--acc-glow:rgba(140,155,255,.42);--on-acc:#0c0e1a}
+[data-accent="mint"]{--acc:#5FD1A8;--acc-2:#3FB389;--acc-soft:rgba(95,209,168,.16);--acc-glow:rgba(95,209,168,.40);--on-acc:#06140e}
+[data-accent="rose"]{--acc:#F08AA6;--acc-2:#E2698A;--acc-soft:rgba(240,138,166,.16);--acc-glow:rgba(240,138,166,.42);--on-acc:#1a0810}
+[data-theme="dark"]{
+  --bg-0:#0B0C0F;--bg-1:#101218;--ink:#F4F5F7;--ink-2:#B6BAC4;--ink-3:#7C8190;
+  --glass:rgba(24,27,34,.62);--glass-2:rgba(30,34,43,.74);--card:rgba(30,34,43,.5);--hair:rgba(255,255,255,.08);
+  --hair-2:rgba(255,255,255,.045);--shadow:0 24px 70px -20px rgba(0,0,0,.7),0 8px 24px -12px rgba(0,0,0,.5);
+  --shadow-sm:0 6px 20px -8px rgba(0,0,0,.6);--hi:rgba(255,255,255,.06);--ok:#5FD1A8;--warn:#EFC05C;--bad:#F0768A;
+}
+[data-theme="light"]{
+  --bg-0:#EDEAE3;--bg-1:#F6F4EF;--ink:#1A1B1E;--ink-2:#54585F;--ink-3:#8A8E98;
+  --glass:rgba(255,255,255,.66);--glass-2:rgba(255,255,255,.82);--card:rgba(255,255,255,.6);--hair:rgba(20,20,25,.09);
+  --hair-2:rgba(20,20,25,.05);--shadow:0 24px 70px -22px rgba(40,34,28,.4),0 8px 22px -12px rgba(40,34,28,.18);
+  --shadow-sm:0 6px 18px -8px rgba(40,34,28,.22);--hi:rgba(255,255,255,.7);--ok:#2BA179;--warn:#C9912B;--bad:#D8556E;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;overflow:hidden}
+body{font-family:var(--font);color:var(--ink);background:var(--bg-0);-webkit-font-smoothing:antialiased;letter-spacing:-.011em;font-feature-settings:'cv02','cv03','cv04','cv11','ss01'}
+.wallpaper{position:fixed;inset:0;z-index:0;overflow:hidden}
+.wallpaper::before{content:'';position:absolute;inset:-30%;
+  background:radial-gradient(40% 50% at 22% 18%,var(--acc-glow),transparent 60%),radial-gradient(46% 56% at 82% 28%,rgba(120,140,255,.30),transparent 62%),radial-gradient(50% 60% at 60% 96%,rgba(95,209,168,.16),transparent 60%);
+  filter:blur(40px) saturate(1.1);animation:drift 26s var(--ease) infinite alternate}
+[data-theme="dark"] .wallpaper{background:radial-gradient(120% 120% at 50% 0%,#15171E 0%,#0B0C0F 60%)}
+[data-theme="light"] .wallpaper{background:radial-gradient(120% 120% at 50% 0%,#F7F4EE 0%,#E8E4DB 60%)}
+.wallpaper::after{content:'';position:absolute;inset:0;opacity:.04;mix-blend-mode:overlay;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+@keyframes drift{0%{transform:translate(0,0) scale(1)}100%{transform:translate(-3%,2%) scale(1.06)}}
+
+.topbar{position:fixed;top:0;left:0;right:0;height:42px;z-index:40;display:flex;align-items:center;gap:14px;padding:0 16px;background:linear-gradient(180deg,rgba(0,0,0,.18),transparent)}
+[data-theme="light"] .topbar{background:linear-gradient(180deg,rgba(255,255,255,.3),transparent)}
+.tb-brand{display:flex;align-items:center;gap:9px;font-weight:680;font-size:13.5px;letter-spacing:-.02em}
+.tb-logo{width:18px;height:18px;border-radius:6px;background:radial-gradient(circle at 32% 28%,#fff5,transparent 60%),linear-gradient(135deg,var(--acc),var(--acc-2));box-shadow:0 0 16px var(--acc-glow),inset 0 0 0 1px rgba(255,255,255,.2)}
+.tb-sep{width:1px;height:14px;background:var(--hair)}
+.tb-status{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);font-weight:500}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--acc);box-shadow:0 0 10px var(--acc-glow);position:relative}
+.dot::after{content:'';position:absolute;inset:-4px;border-radius:50%;border:1px solid var(--acc);opacity:.4;animation:pulse 2.4s var(--ease) infinite}
+@keyframes pulse{0%{transform:scale(1);opacity:.5}100%{transform:scale(2.2);opacity:0}}
+.tb-spacer{flex:1}
+.tb-tray{display:flex;align-items:center;gap:6px}
+.tray-btn{display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:8px;font-size:12px;font-weight:540;color:var(--ink-2);cursor:pointer;transition:.2s var(--ease)}
+.tray-btn:hover{background:var(--glass);color:var(--ink)}
+.tray-btn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.7}
+.tb-clock{font-variant-numeric:tabular-nums;font-weight:600;font-size:12.5px;color:var(--ink)}
+
+.glass{background:var(--glass);backdrop-filter:blur(40px) saturate(1.6);-webkit-backdrop-filter:blur(40px) saturate(1.6);border:1px solid var(--hair);box-shadow:var(--shadow);position:relative}
+.glass::before{content:'';position:absolute;inset:0;border-radius:inherit;padding:1px;background:linear-gradient(180deg,var(--hi),transparent 40%);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none}
+
+/* stage + screens */
+.stage{position:fixed;inset:42px 0 96px 0;z-index:10;display:flex;align-items:center;justify-content:center;padding:24px}
+.screen{display:none;width:100%;height:100%;align-items:center;justify-content:center}
+.screen.active{display:flex;animation:fade .5s var(--ease-out)}
+@keyframes fade{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.panel{width:min(860px,92vw);max-height:100%;border-radius:var(--r-xl);overflow:hidden;display:flex;flex-direction:column}
+.panel-head{padding:20px 24px 14px;display:flex;align-items:flex-start;gap:14px;border-bottom:1px solid var(--hair-2)}
+.panel-head h1{font-size:19px;font-weight:680;letter-spacing:-.02em}
+.panel-head p{font-size:12.5px;color:var(--ink-3);margin-top:2px}
+.ph-ico{width:40px;height:40px;border-radius:12px;flex:none;display:grid;place-items:center;background:var(--acc-soft)}
+.ph-ico svg{width:21px;height:21px;stroke:var(--acc);fill:none;stroke-width:1.8}
+.panel-body{flex:1;overflow-y:auto;padding:18px 24px 22px}
+.panel-body::-webkit-scrollbar{width:8px}.panel-body::-webkit-scrollbar-thumb{background:var(--hair);border-radius:4px}
+
+.section-t{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin:20px 2px 11px;display:flex;align-items:center}
+.section-t:first-child{margin-top:2px}
+.section-t .muted{margin-left:auto;font-weight:500;font-size:11.5px;text-transform:none;letter-spacing:0}
+
+/* row / card */
+.row{display:flex;align-items:center;gap:13px;padding:13px 15px;border-radius:14px;background:var(--card);border:1px solid var(--hair);margin-bottom:9px;transition:.2s var(--ease)}
+.row:hover{border-color:var(--hair);background:var(--glass-2)}
+.row .ricon{width:36px;height:36px;border-radius:10px;flex:none;display:grid;place-items:center;background:var(--bg-1);border:1px solid var(--hair)}
+.row .ricon svg{width:18px;height:18px;stroke:var(--acc);fill:none;stroke-width:1.8}
+.row .rmeta{min-width:0}.row .rmeta b{font-size:13.5px;font-weight:600;display:block}.row .rmeta small{font-size:12px;color:var(--ink-3);display:block;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .rend{margin-left:auto;display:flex;align-items:center;gap:9px;flex:none}
+.kbd{font-family:ui-monospace,'SF Mono',monospace;font-size:11.5px;background:var(--bg-1);border:1px solid var(--hair);border-radius:7px;padding:3px 8px;color:var(--ink-2)}
+.tag{font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px}
+.tag.ok{color:var(--ok);background:color-mix(in srgb,var(--ok) 16%,transparent)}
+.tag.warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent)}
+.tag.bad{color:var(--bad);background:color-mix(in srgb,var(--bad) 16%,transparent)}
+.tag.acc{color:var(--acc);background:var(--acc-soft)}
+
+/* segmented */
+.seg{display:inline-flex;background:var(--bg-1);border:1px solid var(--hair);border-radius:11px;padding:3px;gap:2px}
+.seg button{padding:6px 13px;border:none;background:none;border-radius:8px;font-family:var(--font);font-size:12px;font-weight:600;color:var(--ink-2);cursor:pointer;transition:.18s}
+.seg button.on{background:var(--glass-2);color:var(--ink);box-shadow:var(--shadow-sm)}
+.seg.sm button{padding:4px 10px;font-size:11px}
+.seg button.on[data-v="auto"]{color:var(--ok)} .seg button.on[data-v="block"]{color:var(--bad)}
+
+.btn{height:36px;padding:0 16px;border-radius:11px;border:none;font-family:var(--font);font-size:13px;font-weight:600;cursor:pointer;transition:.2s var(--spring);display:inline-flex;align-items:center;gap:7px}
+.btn.primary{background:linear-gradient(135deg,var(--acc),var(--acc-2));color:var(--on-acc);box-shadow:0 6px 18px -6px var(--acc-glow)}
+.btn.primary:hover{transform:translateY(-1px)}
+.btn.ghost{background:var(--hair);color:var(--ink-2)}.btn.ghost:hover{color:var(--ink)}
+
+/* stat tiles */
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:11px;margin-bottom:6px}
+.stat{padding:15px 16px;border-radius:15px;background:var(--card);border:1px solid var(--hair)}
+.stat .v{font-size:25px;font-weight:700;letter-spacing:-.03em;line-height:1}
+.stat .l{font-size:11.5px;color:var(--ink-3);margin-top:6px}
+.stat .v.acc{color:var(--acc)}
+
+/* audit chain */
+.chain{position:relative;padding-left:26px}
+.chain::before{content:'';position:absolute;left:8px;top:6px;bottom:6px;width:2px;background:linear-gradient(var(--acc),transparent)}
+.chain-item{position:relative;padding:11px 0;border-bottom:1px solid var(--hair-2)}
+.chain-item::before{content:'';position:absolute;left:-22px;top:15px;width:9px;height:9px;border-radius:50%;background:var(--acc);box-shadow:0 0 0 3px var(--bg-0),0 0 8px var(--acc-glow)}
+.chain-item .ci-top{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:600}
+.chain-item .ci-hash{font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-3);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chain-item .ci-time{margin-left:auto;font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums;font-weight:500}
+
+/* command center reuse */
+.command{width:min(720px,84vw);border-radius:var(--r-xl);overflow:hidden;display:flex;flex-direction:column;max-height:100%}
+.cmd-head{display:flex;align-items:center;gap:13px;padding:18px 22px 14px}
+.cmd-avatar{width:38px;height:38px;border-radius:12px;flex:none;position:relative;background:radial-gradient(circle at 32% 28%,#fff6,transparent 55%),linear-gradient(135deg,var(--acc),var(--acc-2));box-shadow:0 8px 24px -6px var(--acc-glow),inset 0 0 0 1px rgba(255,255,255,.22)}
+.cmd-avatar::after{content:'';position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:var(--acc);border:2.5px solid var(--glass-2)}
+.cmd-id b{font-size:15px;font-weight:650;display:block}.cmd-id span{font-size:12px;color:var(--ink-3)}
+.cmd-thread{flex:1;overflow-y:auto;padding:6px 22px 8px;display:flex;flex-direction:column;gap:16px;min-height:220px}
+.msg{display:flex;gap:11px;max-width:88%}
+.msg.me{align-self:flex-end;flex-direction:row-reverse}
+.m-av{width:26px;height:26px;border-radius:8px;flex:none}
+.msg.them .m-av{background:radial-gradient(circle at 32% 28%,#fff6,transparent 55%),linear-gradient(135deg,var(--acc),var(--acc-2))}
+.msg.me .m-av{background:linear-gradient(135deg,#54585F,#3a3d44)}
+.bubble{padding:11px 15px;border-radius:16px;font-size:13.5px;line-height:1.5}
+.msg.them .bubble{background:var(--glass-2);border:1px solid var(--hair);border-top-left-radius:5px}
+.msg.me .bubble{background:var(--acc);color:var(--on-acc);font-weight:500;border-top-right-radius:5px;box-shadow:0 8px 22px -8px var(--acc-glow)}
+.thinking{display:flex;align-items:center;gap:7px;color:var(--ink-3);font-size:13px;padding-left:37px}
+.thinking i{width:5px;height:5px;border-radius:50%;background:currentColor;animation:td 1.2s infinite}
+.thinking i:nth-child(2){animation-delay:.18s}.thinking i:nth-child(3){animation-delay:.36s}
+@keyframes td{0%,60%,100%{opacity:.25;transform:translateY(0)}30%{opacity:1;transform:translateY(-4px)}}
+.composer{padding:14px 18px 18px;display:flex;align-items:center;gap:11px;border-top:1px solid var(--hair-2)}
+.composer-field{flex:1;display:flex;align-items:center;gap:10px;background:var(--bg-1);border:1px solid var(--hair);border-radius:15px;padding:0 6px 0 16px;height:48px;transition:.25s var(--ease)}
+.composer-field:focus-within{border-color:var(--acc);box-shadow:0 0 0 4px var(--acc-soft)}
+.composer-field input{flex:1;background:none;border:none;outline:none;color:var(--ink);font-family:var(--font);font-size:14px}
+.composer-field input::placeholder{color:var(--ink-3)}
+.send{width:36px;height:36px;border-radius:11px;border:none;cursor:pointer;display:grid;place-items:center;background:linear-gradient(135deg,var(--acc),var(--acc-2));box-shadow:0 6px 18px -6px var(--acc-glow);transition:.2s var(--spring)}
+.send:hover{transform:scale(1.07)}.send svg{width:18px;height:18px;stroke:var(--on-acc);fill:none;stroke-width:2.2}
+.mini{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;color:var(--ink-3);cursor:pointer}.mini:hover{color:var(--ink);background:var(--hair)}.mini svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7}
+.act{margin-top:2px;border-radius:14px;overflow:hidden;border:1px solid var(--hair);background:var(--glass-2)}
+.act-bar{display:flex;align-items:center;gap:8px;padding:8px 11px;border-bottom:1px solid var(--hair-2);font-size:11.5px;color:var(--ink-2)}
+.act-dots{display:flex;gap:5px}.act-dots i{width:9px;height:9px;border-radius:50%}
+.act-dots i:nth-child(1){background:#ff5f57}.act-dots i:nth-child(2){background:#febc2e}.act-dots i:nth-child(3){background:#28c840}
+.act-url{flex:1;text-align:center;opacity:.8}.act-live{display:flex;align-items:center;gap:5px;color:var(--acc);font-weight:600}
+.act-live i{width:5px;height:5px;border-radius:50%;background:var(--acc);animation:pulse2 1.4s infinite}@keyframes pulse2{0%,100%{opacity:.3}50%{opacity:1}}
+.act-body{height:120px;background:linear-gradient(135deg,#1b1e26,#14161c);position:relative;overflow:hidden}
+[data-theme="light"] .act-body{background:linear-gradient(135deg,#fff,#efece5)}
+.act-skel{position:absolute;inset:14px;display:flex;flex-direction:column;gap:9px}
+.act-skel span{height:9px;border-radius:5px;background:var(--hair);position:relative;overflow:hidden}
+.act-skel span::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,var(--hi),transparent);animation:shim 1.8s infinite}
+@keyframes shim{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+.act-skel span:nth-child(1){width:62%}.act-skel span:nth-child(2){width:88%}.act-skel span:nth-child(3){width:74%}.act-skel span:nth-child(4){width:46%}
+
+/* dock */
+.dock{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:50;display:flex;align-items:flex-end;gap:7px;padding:9px 12px;border-radius:22px}
+.dock-app{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;cursor:pointer;position:relative;background:var(--glass-2);border:1px solid var(--hair);transition:.28s var(--spring)}
+.dock-app svg{width:23px;height:23px;stroke:var(--ink-2);fill:none;stroke-width:1.7;transition:.2s}
+.dock-app:hover{transform:translateY(-12px) scale(1.12)}.dock-app:hover svg{stroke:var(--acc)}
+.dock-app.active svg{stroke:var(--acc)}
+.dock-app.active::after{content:'';position:absolute;bottom:-5px;left:50%;transform:translateX(-50%);width:5px;height:5px;border-radius:50%;background:var(--acc);box-shadow:0 0 8px var(--acc-glow)}
+.dock-app .tip{position:absolute;bottom:58px;left:50%;transform:translateX(-50%) translateY(6px);background:var(--glass-2);border:1px solid var(--hair);backdrop-filter:blur(20px);color:var(--ink);font-size:11.5px;font-weight:600;padding:5px 10px;border-radius:9px;white-space:nowrap;opacity:0;pointer-events:none;transition:.2s var(--ease);box-shadow:var(--shadow-sm)}
+.dock-app:hover .tip{opacity:1;transform:translateX(-50%)}
+.dock-sep{width:1px;height:34px;background:var(--hair);margin:0 4px;align-self:center}
+
+/* flyout */
+.flyout{position:fixed;top:48px;right:14px;width:268px;border-radius:var(--r-lg);z-index:80;padding:16px;opacity:0;transform:translateY(-10px) scale(.97);pointer-events:none;transition:.28s var(--ease)}
+.flyout.open{opacity:1;transform:none;pointer-events:auto}
+.fly-title{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin:2px 0 11px}
+.accents{display:flex;gap:10px}
+.acc-chip{width:34px;height:34px;border-radius:11px;cursor:pointer;position:relative;transition:.2s var(--spring);border:2px solid transparent}
+.acc-chip:hover{transform:scale(1.1)}.acc-chip.on{border-color:var(--ink)}
+.acc-chip[data-a="amber"]{background:linear-gradient(135deg,#EFA45C,#E2864B)}.acc-chip[data-a="iris"]{background:linear-gradient(135deg,#8C9BFF,#6E7BF0)}
+.acc-chip[data-a="mint"]{background:linear-gradient(135deg,#5FD1A8,#3FB389)}.acc-chip[data-a="rose"]{background:linear-gradient(135deg,#F08AA6,#E2698A)}
+
+/* lock screen */
+.lock{position:fixed;inset:0;z-index:200;display:none;flex-direction:column;align-items:center;justify-content:center;gap:26px}
+.lock.show{display:flex;animation:fade .5s var(--ease-out)}
+.lock-time{font-size:90px;font-weight:700;letter-spacing:-.04em;font-variant-numeric:tabular-nums;text-shadow:0 2px 40px rgba(0,0,0,.4)}
+.lock-date{font-size:16px;color:var(--ink-2);font-weight:500;margin-top:-18px}
+.lock-av{width:64px;height:64px;border-radius:20px;background:radial-gradient(circle at 32% 28%,#fff6,transparent 55%),linear-gradient(135deg,var(--acc),var(--acc-2));box-shadow:0 12px 40px -8px var(--acc-glow)}
+.lock-name{font-size:15px;font-weight:600}
+.lock-enter{display:flex;align-items:center;gap:9px;background:var(--glass-2);border:1px solid var(--hair);border-radius:14px;padding:0 6px 0 18px;height:48px;width:260px;backdrop-filter:blur(20px)}
+.lock-enter input{flex:1;background:none;border:none;outline:none;color:var(--ink);font-family:var(--font);font-size:14px}
+.lock-enter .send{width:36px;height:36px}
+
+.hint{position:fixed;left:18px;bottom:20px;z-index:90;font-size:11.5px;color:var(--ink-3);background:var(--glass);backdrop-filter:blur(20px);border:1px solid var(--hair);padding:7px 12px;border-radius:10px}
+.hint b{color:var(--ink-2)}
+
+/* Launcher / Spotlight */
+.launcher{position:fixed;inset:0;z-index:150;display:none;align-items:flex-start;justify-content:center;padding-top:13vh;background:rgba(0,0,0,.32);backdrop-filter:blur(8px)}
+.launcher.show{display:flex;animation:fade .28s var(--ease-out)}
+.launcher-box{width:min(620px,90vw);border-radius:var(--r-lg);overflow:hidden;animation:rise .4s var(--ease-out)}
+.launcher-in{display:flex;align-items:center;gap:13px;padding:17px 20px;border-bottom:1px solid var(--hair-2)}
+.launcher-in svg{width:21px;height:21px;stroke:var(--ink-3);fill:none;stroke-width:1.8;flex:none}
+.launcher-in input{flex:1;background:none;border:none;outline:none;color:var(--ink);font-family:var(--font);font-size:18px;font-weight:500}
+.launcher-in input::placeholder{color:var(--ink-3)}
+.launcher-in .esc{font-size:10.5px;color:var(--ink-3);border:1px solid var(--hair);border-radius:6px;padding:3px 7px;font-weight:600}
+.launcher-res{max-height:46vh;overflow-y:auto;padding:8px}
+.lr-sec{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);padding:9px 12px 4px}
+.lr-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:11px;cursor:pointer;transition:.12s}
+.lr-item:hover,.lr-item.sel{background:var(--acc-soft)}
+.lr-item .lr-ico{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;background:var(--glass-2);border:1px solid var(--hair);flex:none}
+.lr-item .lr-ico svg{width:16px;height:16px;stroke:var(--acc);fill:none;stroke-width:1.8}
+.lr-item b{font-size:13.5px;font-weight:550}.lr-item small{font-size:11px;color:var(--ink-3);margin-left:auto;font-variant-numeric:tabular-nums}
+
+/* Notification center */
+.notif{position:fixed;top:50px;right:10px;bottom:78px;width:330px;z-index:120;border-radius:var(--r-lg);transform:translateX(115%);opacity:0;transition:.42s var(--ease);padding:16px;display:flex;flex-direction:column;pointer-events:none}
+.notif.show{transform:none;opacity:1;pointer-events:auto}
+.notif-head{display:flex;align-items:center;margin-bottom:13px;padding:0 2px}
+.notif-head b{font-size:16px;font-weight:680}
+.notif-head .clear{margin-left:auto;font-size:12px;color:var(--ink-3);cursor:pointer}
+.notif-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:9px}
+.ncard{padding:12px 14px;border-radius:14px;background:var(--card);border:1px solid var(--hair);animation:rise .4s var(--ease-out) both}
+.ncard .nc-top{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.ncard .nc-ico{width:25px;height:25px;border-radius:8px;display:grid;place-items:center;background:var(--acc-soft);flex:none}
+.ncard .nc-ico svg{width:14px;height:14px;stroke:var(--acc);fill:none;stroke-width:2}
+.ncard b{font-size:12.5px;font-weight:600}.ncard .nc-time{margin-left:auto;font-size:10.5px;color:var(--ink-3)}
+.ncard p{font-size:12px;color:var(--ink-2);line-height:1.45}
+.ncard .nc-act{display:flex;gap:7px;margin-top:9px}
+.ncard .nc-act button{font-size:11px;font-weight:600;padding:5px 11px;border-radius:8px;border:none;cursor:pointer}
+.ncard .nc-act .y{background:var(--acc);color:var(--on-acc)}.ncard .nc-act .n{background:var(--hair);color:var(--ink-2)}
+</style>
+</head>
+<body>
+<div class="wallpaper"></div>
+
+<!-- LOCK SCREEN -->
+<div class="lock" id="lock">
+  <div></div>
+  <div style="text-align:center"><div class="lock-time" id="lockTime">9:41</div><div class="lock-date" id="lockDate">martes, 9 de junio</div></div>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:12px">
+    <div class="lock-av"></div><div class="lock-name">Luis</div>
+    <div class="lock-enter"><input type="password" placeholder="Contraseña" onkeydown="if(event.key==='Enter')unlock()"><button class="send" onclick="unlock()"><svg viewBox="0 0 24 24" fill="none" stroke="var(--on-acc)" stroke-width="2.2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button></div>
+    <small style="color:var(--ink-3)">LumenSO · sesión de Luis</small>
+  </div>
+</div>
+
+<!-- TOP BAR -->
+<div class="topbar">
+  <div class="tb-brand"><div class="tb-logo"></div>LumenSO</div>
+  <div class="tb-sep"></div>
+  <div class="tb-status"><span class="dot"></span> Hermes · <span id="tbScreen">trabajando</span></div>
+  <div class="tb-spacer"></div>
+  <div class="tb-tray">
+    <div class="tray-btn" title="Red"><svg viewBox="0 0 24 24"><path d="M5 13a10 10 0 0 1 14 0M8.5 16.5a5 5 0 0 1 7 0M12 20h.01"/></svg></div>
+    <div class="tray-btn" title="Sonido"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4zM15.5 8.5a5 5 0 0 1 0 7"/></svg></div>
+    <div class="tray-btn" onclick="toggleFly(event)" title="Ajustes rápidos"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.3l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2.3-1.3L13.8 2h-3.6l-.5 2.5a7 7 0 0 0-2.3 1.3l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .9.1 1.3l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2.3 1.3l.5 2.5h3.6l.5-2.5a7 7 0 0 0 2.3-1.3l2.3 1 2-3.4z"/></svg></div>
+    <div class="tray-btn" onclick="toggleNotif()" title="Notificaciones"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/></svg></div>
+    <div class="tray-btn" onclick="lockScreen()" title="Bloquear"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div>
+    <div class="tb-clock" id="clock">9:41</div>
+  </div>
+</div>
+
+<!-- FLYOUT -->
+<div class="flyout glass" id="fly">
+  <div class="fly-title">Apariencia</div>
+  <div class="seg" id="themeSeg" style="width:100%;margin-bottom:16px">
+    <button style="flex:1" onclick="setTheme('light')">Claro</button><button class="on" style="flex:1" onclick="setTheme('dark')">Oscuro</button>
+  </div>
+  <div class="fly-title">Acento</div>
+  <div class="accents">
+    <div class="acc-chip on" data-a="amber" onclick="setAccent('amber')"></div><div class="acc-chip" data-a="iris" onclick="setAccent('iris')"></div>
+    <div class="acc-chip" data-a="mint" onclick="setAccent('mint')"></div><div class="acc-chip" data-a="rose" onclick="setAccent('rose')"></div>
+  </div>
+</div>
+
+<!-- STAGE -->
+<div class="stage">
+
+  <!-- DESKTOP / HERMES -->
+  <div class="screen active" data-screen="hermes">
+    <div class="command glass">
+      <div class="cmd-head"><div class="cmd-avatar"></div><div class="cmd-id"><b>Hermes</b><span>Tu agente · trabajando para ti</span></div>
+        <div style="margin-left:auto;display:flex;gap:6px"><div class="mini" title="Historial"><svg viewBox="0 0 24 24"><path d="M12 8v4l3 2M21 12a9 9 0 1 1-9-9 9 9 0 0 1 9 9z"/></svg></div><div class="mini" title="Nuevo"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div></div>
+      </div>
+      <div class="cmd-thread" id="thread">
+        <div class="msg me"><div class="m-av"></div><div class="bubble">Resérvame mesa para 2 mañana a las 21h en un italiano bien valorado del centro.</div></div>
+        <div class="msg them"><div class="m-av"></div><div>
+          <div class="bubble">Voy. Busco italianos del centro con buena nota y hueco mañana 21:00 (2 personas). Te lo enseño en directo 👇</div>
+          <div class="act"><div class="act-bar"><div class="act-dots"><i></i><i></i><i></i></div><div class="act-url">thefork.es · resultados</div><div class="act-live"><i></i>EN VIVO</div></div><div class="act-body"><div class="act-skel"><span></span><span></span><span></span><span></span></div></div></div>
+        </div></div>
+        <div class="thinking" id="thinking">Comparando 6 opciones<i></i><i></i><i></i></div>
+      </div>
+      <div class="composer">
+        <div class="mini"><svg viewBox="0 0 24 24"><path d="M21.4 11.05 12.25 20.2a5 5 0 0 1-7.07-7.07l9.19-9.2a3 3 0 0 1 4.24 4.25l-8.49 8.49a1 1 0 0 1-1.42-1.42l7.43-7.42"/></svg></div>
+        <div class="composer-field"><input id="chatInput" placeholder="Pídele cualquier cosa a Hermes…" onkeydown="if(event.key==='Enter')sendChat()"><div class="mini"><svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v4"/></svg></div></div>
+        <button class="send" onclick="sendChat()"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PERMISOS -->
+  <div class="screen" data-screen="permisos">
+    <div class="panel glass">
+      <div class="panel-head"><div class="ph-ico"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 19 4M16 7l2.5-2.5M14 9l1.5-1.5"/></svg></div><div><h1>Permisos</h1><p>Qué hace Hermes solo · qué te pide antes</p></div><div style="margin-left:auto"><button class="btn primary">Guardar</button></div></div>
+      <div class="panel-body">
+        <div class="section-t">Modo por defecto</div>
+        <div class="row"><div class="rmeta"><b>Autonomía base</b><small>Lo que no encaje en una regla sigue este modo</small></div><div class="rend"><div class="seg sm"><button onclick="seg(this)">Autónomo</button><button class="on" onclick="seg(this)">Pedir permiso</button><button onclick="seg(this)">Bloquear</button></div></div></div>
+        <div class="section-t">Reglas <span class="muted">pre-autoriza o bloquea por patrón</span></div>
+        <div class="row"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg></div><div class="rmeta"><b>Borrados y destructivos</b><small class="kbd" style="display:inline-block;margin-top:4px">rm · delete · drop · format</small></div><div class="rend"><div class="seg sm"><button onclick="seg(this)" data-v="auto">Auto</button><button onclick="seg(this)">Pedir</button><button class="on" data-v="block" onclick="seg(this)">Bloquear</button></div></div></div>
+        <div class="row"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></div><div class="rmeta"><b>Lectura segura</b><small class="kbd" style="display:inline-block;margin-top:4px">ls · cat · git status · navegar</small></div><div class="rend"><div class="seg sm"><button class="on" data-v="auto" onclick="seg(this)">Auto</button><button onclick="seg(this)">Pedir</button><button onclick="seg(this)">Bloquear</button></div></div></div>
+        <div class="row"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M4 17l6-6-6-6M12 19h8"/></svg></div><div class="rmeta"><b>Terminal y ficheros</b><small class="kbd" style="display:inline-block;margin-top:4px">write_file · terminal · patch</small></div><div class="rend"><div class="seg sm"><button onclick="seg(this)" data-v="auto">Auto</button><button class="on" onclick="seg(this)">Pedir</button><button data-v="block" onclick="seg(this)">Bloquear</button></div></div></div>
+        <div class="row" style="border-style:dashed;background:transparent;justify-content:center;color:var(--ink-3);cursor:pointer"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>&nbsp;Añadir regla</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- AUDITORIA -->
+  <div class="screen" data-screen="auditoria">
+    <div class="panel glass">
+      <div class="panel-head"><div class="ph-ico"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4zM8 9h8M8 13h8M8 17h5"/></svg></div><div><h1>Auditoría</h1><p>Cada acción y decisión · cadena a prueba de manipulación</p></div><div style="margin-left:auto"><span class="tag ok">✓ cadena íntegra</span></div></div>
+      <div class="panel-body">
+        <div class="stats"><div class="stat"><div class="v">1.284</div><div class="l">eventos registrados</div></div><div class="stat"><div class="v acc">37</div><div class="l">aprobaciones hoy</div></div><div class="stat"><div class="v">0</div><div class="l">rupturas de cadena</div></div></div>
+        <div class="section-t">Actividad reciente</div>
+        <div class="chain">
+          <div class="chain-item"><div class="ci-top"><span class="tag ok">PERMITIDO</span> Reserva confirmada en TheFork<span class="ci-time">9:41:06</span></div><div class="ci-hash">sha256:0a0bafd5…b711a5e · prev:bece1a96</div></div>
+          <div class="chain-item"><div class="ci-top"><span class="tag acc">AUTO</span> Navegó a thefork.es (lectura)<span class="ci-time">9:40:51</span></div><div class="ci-hash">sha256:40fa10ca…1d89cb2 · prev:0a0bafd5</div></div>
+          <div class="chain-item"><div class="ci-top"><span class="tag warn">PIDIÓ</span> Solicitó confirmar la reserva<span class="ci-time">9:40:48</span></div><div class="ci-hash">sha256:150bc6ee…fee01c9 · prev:40fa10ca</div></div>
+          <div class="chain-item"><div class="ci-top"><span class="tag bad">BLOQUEADO</span> rm -rf intentado por una skill<span class="ci-time">9:38:12</span></div><div class="ci-hash">sha256:c7e9a1b2…04d77f1 · prev:150bc6ee</div></div>
+          <div class="chain-item"><div class="ci-top"><span class="tag acc">AUTO</span> Leyó calendario (lectura segura)<span class="ci-time">9:37:30</span></div><div class="ci-hash">sha256:e2f4d6a8…99c0b3e · prev:c7e9a1b2</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAREAS -->
+  <div class="screen" data-screen="tareas">
+    <div class="panel glass">
+      <div class="panel-head"><div class="ph-ico"><svg viewBox="0 0 24 24"><path d="M9 11l3 3 8-8M5 12l3 3M3 17h7"/></svg></div><div><h1>Tareas</h1><p>Lo que Hermes hace por ti · ahora, programado y hecho</p></div><div style="margin-left:auto"><button class="btn ghost">+ Nueva tarea</button></div></div>
+      <div class="panel-body">
+        <div class="section-t">Ahora <span class="muted">en ejecución</span></div>
+        <div class="row" style="border-color:var(--acc-soft)"><div class="ricon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/></svg></div><div class="rmeta"><b>Reservar italiano · mañana 21h</b><small>Confirmando en TheFork…</small></div><div class="rend"><span class="tag acc">en vivo</span></div></div>
+        <div class="section-t">Programado</div>
+        <div class="row"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M3 4h18v18H3zM3 9h18M8 2v4M16 2v4"/></svg></div><div class="rmeta"><b>Resumen de prensa cada mañana</b><small>Diario · 8:00 · 12 fuentes</small></div><div class="rend"><span class="kbd">8:00</span></div></div>
+        <div class="row"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="rmeta"><b>Vigilar precio del vuelo a Tokio</b><small>Cada 6h · avísame si baja de 600€</small></div><div class="rend"><span class="kbd">6h</span></div></div>
+        <div class="section-t">Hecho hoy</div>
+        <div class="row"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></div><div class="rmeta"><b>Pagó la factura de la luz</b><small>Iberdrola · 64,20€ · con tu aprobación</small></div><div class="rend"><span class="tag ok">hecho</span></div></div>
+        <div class="row"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></div><div class="rmeta"><b>Respondió 3 correos rutinarios</b><small>Borradores aprobados por ti</small></div><div class="rend"><span class="tag ok">hecho</span></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- AJUSTES -->
+  <div class="screen" data-screen="ajustes">
+    <div class="panel glass">
+      <div class="panel-head"><div class="ph-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.9 7.9 0 0 0 .1-2l2-1.5-2-3.4-2.4 1a8 8 0 0 0-1.7-1l-.4-2.6h-4l-.4 2.6a8 8 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.5a7.9 7.9 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a8 8 0 0 0 1.7 1l.4 2.6h4l.4-2.6a8 8 0 0 0 1.7-1l2.4 1 2-3.4z"/></svg></div><div><h1>Ajustes</h1><p>Tu LumenSO · cuenta, sistema y el agente</p></div></div>
+      <div class="panel-body">
+        <div class="section-t">Sistema</div>
+        <div class="row"><div class="ricon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg></div><div class="rmeta"><b>LumenSO</b><small>Edición personal · build 2026.06 · al día</small></div><div class="rend"><span class="tag ok">seguro</span></div></div>
+        <div class="row"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M5 13a10 10 0 0 1 14 0M8.5 16.5a5 5 0 0 1 7 0M12 20h.01"/></svg></div><div class="rmeta"><b>Red</b><small>Wi-Fi · Casa · confinamiento de egress activo</small></div><div class="rend"><span class="tag ok">protegido</span></div></div>
+        <div class="row"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M12 2 4 7v6c0 5 3.4 8.5 8 10 4.6-1.5 8-5 8-10V7z"/></svg></div><div class="rmeta"><b>Seguridad</b><small>Landlock + seccomp + netns · daemon no-root</small></div><div class="rend"><span class="tag ok">enforced</span></div></div>
+        <div class="section-t">El agente</div>
+        <div class="row"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M12 2a4 4 0 0 1 4 4c0 1.5-1 3-1 3h-6s-1-1.5-1-3a4 4 0 0 1 4-4zM7 12h10l1 8H6z"/></svg></div><div class="rmeta"><b>Modelo de Hermes</b><small>gpt-5.4-nano · rápido · privado</small></div><div class="rend"><button class="btn ghost" style="height:32px">Cambiar</button></div></div>
+        <div class="row"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M12 8v8M8 12h8"/><circle cx="12" cy="12" r="9"/></svg></div><div class="rmeta"><b>Integraciones</b><small>1.043 apps disponibles · 0 conectadas</small></div><div class="rend"><span class="chev">›</span></div></div>
+        <div class="section-t">Apariencia</div>
+        <div class="row"><div class="rmeta"><b>Tema y acento</b><small>Cambia el look de todo el sistema al instante</small></div><div class="rend"><div class="accents"><div class="acc-chip on" data-a="amber" onclick="setAccent('amber')"></div><div class="acc-chip" data-a="iris" onclick="setAccent('iris')"></div><div class="acc-chip" data-a="mint" onclick="setAccent('mint')"></div><div class="acc-chip" data-a="rose" onclick="setAccent('rose')"></div></div></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- NAVEGADOR -->
+  <div class="screen" data-screen="navegador">
+    <div class="panel glass" style="width:min(900px,94vw)">
+      <div class="panel-head" style="padding-bottom:13px">
+        <div class="ph-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/></svg></div>
+        <div><h1>Navegador</h1><p>Hermes opera la web como un humano · tú observas y apruebas</p></div>
+        <div style="margin-left:auto;display:flex;gap:8px;align-items:center"><button class="btn ghost" style="height:32px">Tomar control</button><span class="tag acc">EN VIVO</span></div>
+      </div>
+      <div class="panel-body" style="padding:14px 18px 18px">
+        <div style="border-radius:16px;overflow:hidden;border:1px solid var(--hair);background:var(--glass-2)">
+          <div class="act-bar" style="padding:9px 12px;gap:10px">
+            <div class="act-dots"><i></i><i></i><i></i></div>
+            <div style="flex:1;display:flex;align-items:center;gap:7px;background:var(--bg-1);border:1px solid var(--hair);border-radius:9px;padding:5px 12px;font-size:12px;color:var(--ink-2)"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0"/></svg>thefork.es/madrid-centro</div>
+            <div class="act-live"><i></i>Hermes navegando</div>
+          </div>
+          <div style="padding:16px;background:var(--bg-1);min-height:248px">
+            <div style="font-size:12.5px;font-weight:600;margin-bottom:12px;color:var(--ink-2)">Italianos · centro · mañana 21:00 · 2 personas</div>
+            <div style="display:flex;flex-direction:column;gap:9px">
+              <div class="row" style="margin:0;background:var(--card)"><div class="ricon" style="background:linear-gradient(135deg,var(--acc),var(--acc-2));border:none"><svg viewBox="0 0 24 24" stroke="var(--on-acc)"><path d="M7 3v18M7 8h6a3 3 0 0 0 0-6H7M17 3v18"/></svg></div><div class="rmeta"><b>Trattoria del Corso</b><small>★ 4,7 · italiano · 280m · hueco 21:00</small></div><div class="rend"><span class="tag ok">disponible</span></div></div>
+              <div class="row" style="margin:0;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)"><div class="ricon" style="background:linear-gradient(135deg,var(--acc),var(--acc-2));border:none"><svg viewBox="0 0 24 24" stroke="var(--on-acc)"><path d="M7 3v18M7 8h6a3 3 0 0 0 0-6H7M17 3v18"/></svg></div><div class="rmeta"><b>Osteria La Nonna <span style="color:var(--acc);font-size:11px;font-weight:600">← Hermes mira aquí</span></b><small>★ 4,8 · italiano · 350m · hueco 21:00</small></div><div class="rend"><span class="tag ok">disponible</span></div></div>
+              <div class="row" style="margin:0;background:var(--card);opacity:.6"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M7 3v18M7 8h6a3 3 0 0 0 0-6H7M17 3v18"/></svg></div><div class="rmeta"><b>Il Pomodoro</b><small>★ 4,4 · italiano · 410m · sin hueco</small></div><div class="rend"><span class="tag warn">lleno</span></div></div>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:9px;margin-top:12px;font-size:12.5px;color:var(--ink-3)"><span class="dot"></span> Hermes filtró por valoración ≥ 4,5 · acción de lectura (auto)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SKILLS -->
+  <div class="screen" data-screen="skills">
+    <div class="panel glass">
+      <div class="panel-head"><div class="ph-ico"><svg viewBox="0 0 24 24"><path d="M12 2l2.4 7.4H22l-6 4.5 2.3 7.1L12 16.7 5.7 21l2.3-7.1-6-4.5h7.6z"/></svg></div><div><h1>Skills</h1><p>Lo que Hermes sabe hacer · enséñale más abriendo el navegador en directo</p></div><div style="margin-left:auto"><button class="btn primary"><svg width="15" height="15" fill="none" stroke="var(--on-acc)" stroke-width="2.2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Enseñar skill</button></div></div>
+      <div class="panel-body">
+        <div class="section-t">Activas <span class="muted">6 skills</span></div>
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px">
+          <div class="row" style="margin:0"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M7 3v18M7 8h6a3 3 0 0 0 0-6H7M17 3v18"/></svg></div><div class="rmeta"><b>Reservar restaurantes</b><small>TheFork · validada</small></div><div class="rend"><span class="tag ok">activa</span></div></div>
+          <div class="row" style="margin:0"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4zM4 8l8 5 8-5"/></svg></div><div class="rmeta"><b>Gestionar correo</b><small>Gmail · borradores HITL</small></div><div class="rend"><span class="tag ok">activa</span></div></div>
+          <div class="row" style="margin:0"><div class="ricon"><svg viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg></div><div class="rmeta"><b>Pagar facturas</b><small>Banca · siempre te pide permiso</small></div><div class="rend"><span class="tag ok">activa</span></div></div>
+          <div class="row" style="margin:0"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg></div><div class="rmeta"><b>Resumir prensa</b><small>12 fuentes · cada mañana</small></div><div class="rend"><span class="tag ok">activa</span></div></div>
+          <div class="row" style="margin:0"><div class="ricon"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><div class="rmeta"><b>Vigilar precios</b><small>Vuelos · alertas</small></div><div class="rend"><span class="tag ok">activa</span></div></div>
+          <div class="row" style="margin:0;border-style:dashed;background:transparent;color:var(--ink-3);justify-content:center;cursor:pointer"><svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>&nbsp;Enseñar una nueva</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FICHEROS -->
+  <div class="screen" data-screen="ficheros">
+    <div class="panel glass" style="width:min(900px,94vw)">
+      <div class="panel-head"><div class="ph-ico"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div><h1>Ficheros</h1><p>Tus documentos · y lo que Hermes genera para ti</p></div></div>
+      <div class="panel-body" style="padding:0;display:flex">
+        <div style="width:178px;border-right:1px solid var(--hair-2);padding:14px 10px;flex:none">
+          <div class="row" style="margin:0 0 4px;padding:9px 11px;background:var(--acc-soft);border-color:transparent"><div class="rmeta"><b style="font-size:13px">Recientes</b></div></div>
+          <div class="row" style="margin:0 0 4px;padding:9px 11px;background:transparent;border-color:transparent"><div class="rmeta"><b style="font-size:13px;font-weight:500;color:var(--ink-2)">Documentos</b></div></div>
+          <div class="row" style="margin:0 0 4px;padding:9px 11px;background:transparent;border-color:transparent"><div class="rmeta"><b style="font-size:13px;font-weight:500;color:var(--ink-2)">Descargas</b></div></div>
+          <div class="row" style="margin:0 0 4px;padding:9px 11px;background:transparent;border-color:transparent"><div class="rmeta"><b style="font-size:13px;font-weight:500;color:var(--acc)">De Hermes</b></div></div>
+          <div class="row" style="margin:0;padding:9px 11px;background:transparent;border-color:transparent"><div class="rmeta"><b style="font-size:13px;font-weight:500;color:var(--ink-2)">Capturas</b></div></div>
+        </div>
+        <div style="flex:1;padding:16px 18px">
+          <div class="section-t" style="margin-top:0">Recientes</div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+            <div style="padding:14px;border-radius:14px;background:var(--card);border:1px solid var(--hair);cursor:pointer;transition:.2s var(--ease)"><div style="width:38px;height:38px;border-radius:10px;background:var(--acc-soft);display:grid;place-items:center;margin-bottom:10px"><svg width="20" height="20" fill="none" stroke="var(--acc)" stroke-width="1.8" viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6zM15 2v5h5"/></svg></div><b style="font-size:12.5px;display:block">Reserva TheFork.pdf</b><small style="font-size:11px;color:var(--ink-3)">de Hermes · hoy</small></div>
+            <div style="padding:14px;border-radius:14px;background:var(--card);border:1px solid var(--hair);cursor:pointer"><div style="width:38px;height:38px;border-radius:10px;background:var(--acc-soft);display:grid;place-items:center;margin-bottom:10px"><svg width="20" height="20" fill="none" stroke="var(--acc)" stroke-width="1.8" viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6zM15 2v5h5"/></svg></div><b style="font-size:12.5px;display:block">Factura Iberdrola.pdf</b><small style="font-size:11px;color:var(--ink-3)">pagada · hoy</small></div>
+            <div style="padding:14px;border-radius:14px;background:var(--card);border:1px solid var(--hair);cursor:pointer"><div style="width:38px;height:38px;border-radius:10px;background:var(--acc-soft);display:grid;place-items:center;margin-bottom:10px"><svg width="20" height="20" fill="none" stroke="var(--acc)" stroke-width="1.8" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg></div><b style="font-size:12.5px;display:block">Resumen prensa.md</b><small style="font-size:11px;color:var(--ink-3)">de Hermes · 8:00</small></div>
+            <div style="padding:14px;border-radius:14px;background:var(--card);border:1px solid var(--hair);cursor:pointer"><div style="width:38px;height:38px;border-radius:10px;background:var(--bg-1);border:1px solid var(--hair);display:grid;place-items:center;margin-bottom:10px"><svg width="20" height="20" fill="none" stroke="var(--ink-2)" stroke-width="1.8" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><b style="font-size:12.5px;display:block">Viajes</b><small style="font-size:11px;color:var(--ink-3)">14 elementos</small></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CENTRO DE SEGURIDAD -->
+  <div class="screen" data-screen="seguridad">
+    <div class="panel glass" style="width:min(920px,94vw)">
+      <div class="panel-head">
+        <div class="ph-ico"><svg viewBox="0 0 24 24"><path d="M12 2 4 6v6c0 5 3.4 8.5 8 10 4.6-1.5 8-5 8-10V6z"/><path d="M9 12l2 2 4-4"/></svg></div>
+        <div><h1>Centro de Seguridad</h1><p>Todo lo que entra —App, Skill o MCP— pasa por aquí. Lo ejecuta Hermes · 100% open-source · fail-closed.</p></div>
+        <div style="margin-left:auto"><span class="tag ok" style="font-size:13px;padding:6px 12px">Protegido</span></div>
+      </div>
+      <div class="panel-body">
+        <div class="section-t" style="margin-top:0">Confinamiento del kernel <span class="muted">verificado en vivo</span></div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-bottom:4px">
+          <div style="padding:13px;border-radius:14px;background:var(--card);border:1px solid var(--hair)"><div style="font-size:11px;color:var(--ink-3)">Landlock LSM</div><b style="color:var(--ok,#5BBF8A);font-size:14px">enforce ✓</b></div>
+          <div style="padding:13px;border-radius:14px;background:var(--card);border:1px solid var(--hair)"><div style="font-size:11px;color:var(--ink-3)">seccomp BPF</div><b style="color:var(--ok,#5BBF8A);font-size:14px">mode2 ✓</b></div>
+          <div style="padding:13px;border-radius:14px;background:var(--card);border:1px solid var(--hair)"><div style="font-size:11px;color:var(--ink-3)">netns + egress</div><b style="color:var(--ok,#5BBF8A);font-size:14px">SNI-deny ✓</b></div>
+          <div style="padding:13px;border-radius:14px;background:var(--card);border:1px solid var(--hair)"><div style="font-size:11px;color:var(--ink-3)">Firma skills v2</div><b style="color:var(--ok,#5BBF8A);font-size:14px">fail-closed ✓</b></div>
+        </div>
+        <div class="section-t">Puerta de admisión <span class="muted">deny-by-default · lo corre Hermes</span></div>
+        <div class="row" style="margin:0"><div class="ricon" style="background:linear-gradient(135deg,#EFA45C,#E2864B);border:none"><svg viewBox="0 0 24 24" stroke="#fff"><path d="M12 2v6m0 8v6M2 12h6m8 0h6"/></svg></div><div class="rmeta"><b>skill · "resumir-pdfs"</b><small>analizando con Semgrep + Cisco MCP Scanner… <span style="color:var(--acc)">68%</span></small></div><div class="rend"><span class="tag" style="background:rgba(239,164,92,.15);color:var(--acc)">escaneando</span></div></div>
+        <div class="section-t">Motores de análisis <span class="muted">Hermes los invoca como MCP · todos OSS</span></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:9px">
+          <div style="padding:13px;border-radius:14px;background:var(--card);border:1px solid var(--hair)"><b style="font-size:13.5px">Cisco MCP Scanner + mcp-audit</b><small style="display:block;color:var(--ink-3);font-size:11.5px;margin-top:2px">tool poisoning · prompt injection · rug-pull</small><span class="tag ok" style="margin-top:7px;display:inline-block">Apache-2.0 · activo</span></div>
+          <div style="padding:13px;border-radius:14px;background:var(--card);border:1px solid var(--hair)"><b style="font-size:13.5px">Semgrep + Bandit</b><small style="display:block;color:var(--ink-3);font-size:11.5px;margin-top:2px">SAST · inyección · secretos · 30+ langs</small><span class="tag ok" style="margin-top:7px;display:inline-block">LGPL · activo</span></div>
+          <div style="padding:13px;border-radius:14px;background:var(--card);border:1px solid var(--hair)"><b style="font-size:13.5px">Trivy + Gitleaks</b><small style="display:block;color:var(--ink-3);font-size:11.5px;margin-top:2px">CVEs en deps · secretos hardcoded · SBOM</small><span class="tag ok" style="margin-top:7px;display:inline-block">Apache-2.0 · activo</span></div>
+          <div style="padding:13px;border-radius:14px;background:var(--card);border:1px solid var(--hair)"><b style="font-size:13.5px">Nuclei + OWASP ZAP</b><small style="display:block;color:var(--ink-3);font-size:11.5px;margin-top:2px">pentest · XSS/SQLi/IDOR · vulns conocidas</small><span class="tag ok" style="margin-top:7px;display:inline-block">MIT · activo</span></div>
+        </div>
+        <div class="section-t">Veredictos recientes</div>
+        <div class="row" style="margin:0 0 9px"><div class="ricon" style="background:rgba(91,191,138,.16);border:none"><svg viewBox="0 0 24 24" stroke="#5BBF8A"><path d="M5 12l4 4 10-10"/></svg></div><div class="rmeta"><b>skill · "rellenar-modelo-303"</b><small>Semgrep 0 critical · Trivy 0 CVE · sandbox OK</small></div><div class="rend"><span class="tag ok">aprobada</span></div></div>
+        <div class="row" style="margin:0 0 9px"><div class="ricon" style="background:rgba(224,90,90,.16);border:none"><svg viewBox="0 0 24 24" stroke="#E05A5A"><path d="M12 8v5M12 16h.01M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg></div><div class="rmeta"><b>MCP · "scraper-no-oficial"</b><small style="color:#E05A5A">tool poisoning detectado — exfiltra a dominio no declarado</small></div><div class="rend"><span class="tag" style="background:rgba(224,90,90,.16);color:#E05A5A">cuarentena</span></div></div>
+        <div class="row" style="margin:0"><div class="ricon" style="background:rgba(91,191,138,.16);border:none"><svg viewBox="0 0 24 24" stroke="#5BBF8A"><path d="M5 12l4 4 10-10"/></svg></div><div class="rmeta"><b>app · "GIMP" (Flathub)</b><small>permisos flatpak revisados · Trivy 0 CVE · firma verificada</small></div><div class="rend"><span class="tag ok">aprobada</span></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- APPS (app store) -->
+  <div class="screen" data-screen="apps">
+    <div class="panel glass" style="width:min(900px,94vw)">
+      <div class="panel-head">
+        <div class="ph-ico"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
+        <div><h1>Apps</h1><p>Instala apps de Linux · Flathub + LibreOffice incluido</p></div>
+        <div style="margin-left:auto"><div class="composer-field" style="height:38px;width:220px;border-radius:11px;padding-left:13px"><svg width="16" height="16" fill="none" stroke="var(--ink-3)" stroke-width="1.8" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input placeholder="Buscar apps…" style="font-size:13px"></div></div>
+      </div>
+      <div class="panel-body">
+        <div class="section-t" style="margin-top:0">Destacadas</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:11px;margin-bottom:4px">
+          <div style="padding:16px;border-radius:16px;background:var(--card);border:1px solid var(--hair)"><div style="width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,#3F76E0,#2B53B8);display:grid;place-items:center;margin-bottom:11px"><svg width="23" height="23" fill="none" stroke="#fff" stroke-width="1.8" viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6zM9 13h6M9 17h6"/></svg></div><b style="font-size:13.5px;display:block">LibreOffice</b><small style="font-size:11.5px;color:var(--ink-3);display:block;margin:3px 0 11px">Ofimática completa</small><button class="btn ghost" style="height:30px;width:100%;font-size:12px;justify-content:center" onclick="openApp(this)">✓ Abrir</button></div>
+          <div style="padding:16px;border-radius:16px;background:var(--card);border:1px solid var(--hair)"><div style="width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,#7B5BD6,#5C3FB0);display:grid;place-items:center;margin-bottom:11px"><svg width="23" height="23" fill="none" stroke="#fff" stroke-width="1.8" viewBox="0 0 24 24"><path d="M12 19l7-7-3-3-7 7zM16 9l3 3M5 21l4-1 9-9-3-3-9 9z"/></svg></div><b style="font-size:13.5px;display:block">GIMP</b><small style="font-size:11.5px;color:var(--ink-3);display:block;margin:3px 0 11px">Editor de imágenes</small><button class="btn primary" style="height:30px;width:100%;font-size:12px;justify-content:center" onclick="installApp(this)">Instalar</button></div>
+          <div style="padding:16px;border-radius:16px;background:var(--card);border:1px solid var(--hair)"><div style="width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,#F0883C,#E0691E);display:grid;place-items:center;margin-bottom:11px"><svg width="23" height="23" fill="none" stroke="#fff" stroke-width="1.8" viewBox="0 0 24 24"><path d="M5 20h14L12 4z"/></svg></div><b style="font-size:13.5px;display:block">VLC</b><small style="font-size:11.5px;color:var(--ink-3);display:block;margin:3px 0 11px">Reproductor multimedia</small><button class="btn primary" style="height:30px;width:100%;font-size:12px;justify-content:center" onclick="installApp(this)">Instalar</button></div>
+        </div>
+        <div class="section-t">Populares <span class="muted">Flathub · se instala bajo tu permiso</span></div>
+        <div class="row" style="margin:0 0 9px"><div class="ricon" style="background:linear-gradient(135deg,#E87D0D,#C25E00);border:none"><svg viewBox="0 0 24 24" stroke="#fff"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg></div><div class="rmeta"><b>Blender</b><small>Modelado y animación 3D · 320 MB</small></div><div class="rend"><button class="btn ghost" style="height:32px" onclick="installApp(this)">Instalar</button></div></div>
+        <div class="row" style="margin:0 0 9px"><div class="ricon" style="background:linear-gradient(135deg,#2B2B2B,#111);border:none"><svg viewBox="0 0 24 24" stroke="#fff"><path d="M3 17l5-9 4 5 3-4 6 8z"/></svg></div><div class="rmeta"><b>Inkscape</b><small>Gráficos vectoriales · 280 MB</small></div><div class="rend"><button class="btn ghost" style="height:32px" onclick="installApp(this)">Instalar</button></div></div>
+        <div class="row" style="margin:0 0 9px"><div class="ricon" style="background:linear-gradient(135deg,#1DB954,#15913F);border:none"><svg viewBox="0 0 24 24" stroke="#fff"><circle cx="12" cy="12" r="9"/><path d="M7 10a9 9 0 0 1 10 1M7.5 14a6 6 0 0 1 7 .7"/></svg></div><div class="rmeta"><b>Spotify</b><small>Música en streaming · 140 MB</small></div><div class="rend"><button class="btn ghost" style="height:32px" onclick="installApp(this)">Instalar</button></div></div>
+        <div class="row" style="margin:0 0 9px"><div class="ricon" style="background:linear-gradient(135deg,#3390EC,#2070C0);border:none"><svg viewBox="0 0 24 24" stroke="#fff"><path d="M21 4 3 11l5 2 2 6 3-4 5 4z"/></svg></div><div class="rmeta"><b>Telegram</b><small>Mensajería · 90 MB</small></div><div class="rend"><button class="btn ghost" style="height:32px" onclick="installApp(this)">Instalar</button></div></div>
+        <div class="section-t">Desarrollo <span class="muted">horneado en LumenSO</span></div>
+        <div class="row" style="margin:0 0 9px"><div class="ricon" style="background:linear-gradient(135deg,#23A9F1,#0A6CB8);border:none"><svg viewBox="0 0 24 24" stroke="#fff"><path d="M16 3v18l5-3V6zM16 12 3 3v18z"/></svg></div><div class="rmeta"><b>Visual Studio Code</b><small>Editor de código</small></div><div class="rend"><span class="tag ok">instalada</span><button class="btn ghost" style="height:32px" onclick="openApp(this)">Abrir</button></div></div>
+        <div class="row" style="margin:0 0 9px"><div class="ricon" style="background:linear-gradient(135deg,#2B2B2B,#000);border:none"><svg viewBox="0 0 24 24" stroke="#fff"><path d="M4 17l6-6-6-6M12 19h8"/></svg></div><div class="rmeta"><b>opencode</b><small>Agente de código en terminal</small></div><div class="rend"><span class="tag ok">instalada</span></div></div>
+        <div class="row" style="margin:0 0 9px"><div class="ricon" style="background:linear-gradient(135deg,#F0568A,#C23A6A);border:none"><svg viewBox="0 0 24 24" stroke="#fff"><path d="M12 2l2.4 7.4H22l-6 4.5 2.3 7.1L12 16.7 5.7 21l2.3-7.1-6-4.5h7.6z"/></svg></div><div class="rmeta"><b>Open Design</b><small>Diseño open-source · integra con Hermes (MCP)</small></div><div class="rend"><span class="tag ok">instalada</span></div></div>
+        <div class="section-t">Instaladas</div>
+        <div class="row" style="margin:0 0 9px"><div class="ricon" style="background:linear-gradient(135deg,#3F76E0,#2B53B8);border:none"><svg viewBox="0 0 24 24" stroke="#fff"><path d="M6 2h9l5 5v15H6z"/></svg></div><div class="rmeta"><b>LibreOffice</b><small>Writer · Calc · Impress · Draw · horneado en LumenSO</small></div><div class="rend"><span class="tag ok">instalada</span><button class="btn ghost" style="height:32px" onclick="openApp(this)">Abrir</button></div></div>
+        <div class="row" style="margin:0"><div class="ricon" style="background:linear-gradient(135deg,#5A6470,#3A434E);border:none"><svg viewBox="0 0 24 24" stroke="#fff"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18"/></svg></div><div class="rmeta"><b>Navegador confinado</b><small>Chromium · el que opera Hermes</small></div><div class="rend"><span class="tag ok">instalada</span></div></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- DOCK -->
+<div class="dock glass">
+  <div class="dock-app active" data-go="hermes"><span class="tip">Hermes</span><svg viewBox="0 0 24 24"><path d="M12 2a4 4 0 0 1 4 4c0 1.5-1 3-1 3h-6s-1-1.5-1-3a4 4 0 0 1 4-4zM7 12h10l1 8H6z"/></svg></div>
+  <div class="dock-app" data-go="navegador"><span class="tip">Navegador</span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/></svg></div>
+  <div class="dock-app" data-go="tareas"><span class="tip">Tareas</span><svg viewBox="0 0 24 24"><path d="M9 11l3 3 8-8M5 12l3 3M3 17h7"/></svg></div>
+  <div class="dock-app" data-go="skills"><span class="tip">Skills</span><svg viewBox="0 0 24 24"><path d="M12 2l2.4 7.4H22l-6 4.5 2.3 7.1L12 16.7 5.7 21l2.3-7.1-6-4.5h7.6z"/></svg></div>
+  <div class="dock-app" data-go="ficheros"><span class="tip">Ficheros</span><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
+  <div class="dock-app" data-go="apps"><span class="tip">Apps</span><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
+  <div class="dock-sep"></div>
+  <div class="dock-app" data-go="permisos"><span class="tip">Permisos</span><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 19 4M16 7l2.5-2.5M14 9l1.5-1.5"/></svg></div>
+  <div class="dock-app" data-go="auditoria"><span class="tip">Auditoría</span><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4zM8 9h8M8 13h8M8 17h5"/></svg></div>
+  <div class="dock-app" data-go="seguridad"><span class="tip">Seguridad</span><svg viewBox="0 0 24 24"><path d="M12 2 4 6v6c0 5 3.4 8.5 8 10 4.6-1.5 8-5 8-10V6z"/><path d="M9 12l2 2 4-4"/></svg></div>
+  <div class="dock-sep"></div>
+  <div class="dock-app" data-go="ajustes"><span class="tip">Ajustes</span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.9 7.9 0 0 0 .1-2l2-1.5-2-3.4-2.4 1a8 8 0 0 0-1.7-1l-.4-2.6h-4l-.4 2.6a8 8 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.5a7.9 7.9 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a8 8 0 0 0 1.7 1l.4 2.6h4l.4-2.6a8 8 0 0 0 1.7-1l2.4 1 2-3.4z"/></svg></div>
+</div>
+
+<!-- LAUNCHER / SPOTLIGHT -->
+<div class="launcher" id="launcher" onclick="if(event.target===this)closeLauncher()">
+  <div class="launcher-box glass">
+    <div class="launcher-in">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input id="launcherInput" placeholder="Busca o pídele algo a Hermes…">
+      <span class="esc">esc</span>
+    </div>
+    <div class="launcher-res">
+      <div class="lr-sec">Pídeselo a Hermes</div>
+      <div class="lr-item sel"><div class="lr-ico"><svg viewBox="0 0 24 24"><path d="M7 3v18M7 8h6a3 3 0 0 0 0-6H7M17 3v18"/></svg></div><b>Reservar una mesa para esta noche</b><small>↵</small></div>
+      <div class="lr-item"><div class="lr-ico"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4zM4 8l8 5 8-5"/></svg></div><b>Responder mis correos pendientes</b><small>↵</small></div>
+      <div class="lr-item"><div class="lr-ico"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div><b>Vigilar el precio de un vuelo</b><small>↵</small></div>
+      <div class="lr-sec">Ir a</div>
+      <div class="lr-item" onclick="go('navegador');closeLauncher()"><div class="lr-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/></svg></div><b>Navegador</b><small>⌘1</small></div>
+      <div class="lr-item" onclick="go('permisos');closeLauncher()"><div class="lr-ico"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 19 4"/></svg></div><b>Permisos</b><small>⌘2</small></div>
+      <div class="lr-item" onclick="go('auditoria');closeLauncher()"><div class="lr-ico"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4zM8 9h8M8 13h8"/></svg></div><b>Auditoría</b><small>⌘3</small></div>
+    </div>
+  </div>
+</div>
+
+<!-- NOTIFICATION CENTER -->
+<div class="notif glass" id="notif">
+  <div class="notif-head"><b>Notificaciones</b><span class="clear" onclick="toggleNotif()">Limpiar</span></div>
+  <div class="notif-list">
+    <div class="ncard" style="border-color:var(--acc)">
+      <div class="nc-top"><div class="nc-ico"><svg viewBox="0 0 24 24"><path d="M9 12l2 2 4-4M12 3l8 4v5c0 5-3.4 8.5-8 10-4.6-1.5-8-5-8-10V7z"/></svg></div><b>Hermes pide permiso</b><span class="nc-time">ahora</span></div>
+      <p>Quiere <b>confirmar la reserva</b> en TheFork. ¿Lo autorizo?</p>
+      <div class="nc-act"><button class="y" onclick="this.closest('.ncard').remove()">Permitir</button><button class="n" onclick="this.closest('.ncard').remove()">Ahora no</button></div>
+    </div>
+    <div class="ncard"><div class="nc-top"><div class="nc-ico"><svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></div><b>Factura pagada</b><span class="nc-time">9:32</span></div><p>Iberdrola · 64,20€ · con tu aprobación.</p></div>
+    <div class="ncard"><div class="nc-top"><div class="nc-ico"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg></div><b>Resumen de prensa listo</b><span class="nc-time">8:00</span></div><p>12 fuentes · 6 titulares relevantes hoy.</p></div>
+  </div>
+</div>
+
+<div class="hint">LumenSO · <b>cero Fedora</b> · <b>⌘Espacio</b> launcher · dock para navegar · ⚙ tema/acento</div>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>document.querySelectorAll(s);
+const TITLES={hermes:'trabajando',navegador:'navegando',tareas:'gestionando tareas',skills:'tus skills',ficheros:'tus ficheros',apps:'tienda de apps',seguridad:'centro de seguridad',permisos:'tus permisos',auditoria:'auditoría',ajustes:'ajustes'};
+function go(name){
+  $$('.screen').forEach(s=>s.classList.toggle('active', s.dataset.screen===name));
+  $$('.dock-app').forEach(a=>a.classList.toggle('active', a.dataset.go===name));
+  $('#tbScreen').textContent=TITLES[name]||name;
+}
+$$('.dock-app').forEach(a=>a.addEventListener('click',()=>{ if($('[data-screen="'+a.dataset.go+'"]')) go(a.dataset.go); }));
+function setTheme(t){document.documentElement.dataset.theme=t;$$('#themeSeg button').forEach(b=>b.classList.toggle('on',b.textContent.toLowerCase().startsWith(t==='dark'?'osc':'cla')))}
+function setAccent(a){document.documentElement.dataset.accent=a;$$('.acc-chip').forEach(c=>c.classList.toggle('on',c.dataset.a===a))}
+function toggleFly(e){e.stopPropagation();$('#fly').classList.toggle('open')}
+document.addEventListener('click',()=>$('#fly').classList.remove('open'));$('#fly').addEventListener('click',e=>e.stopPropagation());
+function seg(btn){btn.parentElement.querySelectorAll('button').forEach(b=>b.classList.remove('on'));btn.classList.add('on')}
+function installApp(btn){const o=btn.textContent;btn.disabled=true;btn.textContent='Instalando…';btn.classList.remove('primary');btn.classList.add('ghost');
+  setTimeout(()=>{const row=btn.closest('.row');if(row&&!row.querySelector('.tag.ok')){const e=row.querySelector('.rend');const t=document.createElement('span');t.className='tag ok';t.textContent='instalada';e.insertBefore(t,btn)}btn.textContent='Abrir';btn.disabled=false},1600)}
+function openApp(btn){const o=btn.textContent;btn.textContent='Abriendo…';setTimeout(()=>btn.textContent=o,1200)}
+function lockScreen(){$('#lock').classList.add('show')}
+function unlock(){$('#lock').classList.remove('show')}
+function openLauncher(){$('#launcher').classList.add('show');setTimeout(()=>{const i=$('#launcherInput');if(i)i.focus()},60)}
+function closeLauncher(){$('#launcher').classList.remove('show')}
+function toggleNotif(){$('#notif').classList.toggle('show')}
+document.addEventListener('keydown',e=>{
+  if((e.metaKey||e.ctrlKey)&&e.code==='Space'){e.preventDefault();openLauncher()}
+  if(e.key==='Escape'){closeLauncher();$('#notif').classList.remove('show')}
+});
+// chat (prototype echo; real wiring → gpt-5.4-nano backend in e2e phase)
+let __convId=null;
+function __uuid(){return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,function(c){const r=Math.random()*16|0;return (c==='x'?r:(r&0x3|0x8)).toString(16)})}
+function __them(txt){const t=$('#thread'),th=$('#thinking');th.style.display='none';const r=document.createElement('div');r.className='msg them';r.innerHTML='<div class="m-av"></div><div class="bubble"></div>';r.querySelector('.bubble').textContent=txt;t.insertBefore(r,th);t.scrollTop=t.scrollHeight}
+async function __pollReply(conv){
+  for(let i=0;i<26;i++){
+    await new Promise(r=>setTimeout(r,2500));
+    try{
+      const raw=await window.hermes('get_conversation',{conversation_id:conv});
+      const d=typeof raw==='string'?JSON.parse(raw):raw;
+      const msgs=(d&&d.messages)||[];
+      for(let j=msgs.length-1;j>=0;j--){if((msgs[j].role||'')==='assistant'&&msgs[j].content)return msgs[j].content}
+    }catch(e){}
+  }
+  return null;
+}
+async function sendChat(){
+  const i=$('#chatInput'), v=(i.value||'').trim(); if(!v)return;
+  const t=$('#thread'), th=$('#thinking');
+  if(!__convId){ t.querySelectorAll('.msg').forEach(e=>e.remove()); __convId=__uuid(); }
+  const m=document.createElement('div');m.className='msg me';m.innerHTML='<div class="m-av"></div><div class="bubble"></div>';m.querySelector('.bubble').textContent=v;
+  t.insertBefore(m, th); i.value=''; t.scrollTop=t.scrollHeight; th.style.display='flex';
+  // window.hermes lo inyecta la shell LumenSO (puente D-Bus al daemon). Sin él = modo diseño.
+  if(!window.hermes){ setTimeout(()=>__them('(modo diseño — sin daemon conectado)'),700); return; }
+  try{
+    await window.hermes('enqueue',{text:v, conversation_id:__convId});
+    const reply=await __pollReply(__convId);
+    __them(reply || 'Hermes sigue procesando…');
+  }catch(e){ __them('No pude contactar al daemon: '+e); }
+}
+function tick(){const d=new Date();const hm=d.getHours()+':'+String(d.getMinutes()).padStart(2,'0');$('#clock').textContent=hm;$('#lockTime').textContent=hm;
+  $('#lockDate').textContent=d.toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long'})}
+tick();setInterval(tick,10000);
+</script>
+</body>
+</html>

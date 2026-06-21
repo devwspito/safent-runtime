@@ -1,0 +1,33 @@
+# agents-os-healthy.target — T019 — FR-010 NFR-004 (OTA healthy boot watchdog).
+#
+# Si el sistema no alcanza este target en 5 min tras un boot del slot B,
+# JobTimeoutAction=reboot dispara rollback al slot A automáticamente.
+#
+# T027 — REUTILIZACIÓN EXPLÍCITA (no se crea mecanismo paralelo):
+# Este target es el único watchdog de no-brick del sistema. hermes-runtime-ready.target
+# (T021) se encadena AQUÍ vía WantedBy=agents-os-healthy.target.
+# GDM espera ESTE target (T022 drop-in). No se introduce ningún JobTimeout
+# adicional ni target de watchdog paralelo — hacerlo dividiría el presupuesto
+# temporal y podría causar rollbacks espurios (Edge Case "ventana de arranque").
+#
+# El JobTimeoutSec=300 se mide en wall-clock propio del slot B (no heredado
+# del slot A). Verificar en VM (slot D / T076) que el budget no se hereda.
+#
+# Consola de rescate autenticada (T026 / T027 / F-1):
+# OnFailure=hermes-rescue.target NO se coloca aquí (decidido en T027).
+# JobTimeoutAction=reboot aborta el JOB antes de que el unit entre en
+# 'failed', por lo que OnFailure= sería letra muerta bajo timeout.
+# El hook de rescate vive en hermes-runtime-ready.target (fallo de
+# liveness del daemon) que SÍ entra en 'failed' al agotar StartLimitBurst.
+# Ver comentario extendido en hermes-runtime-ready.target.
+
+[Unit]
+Description=Agents OS healthy boot reached
+JobTimeoutSec=300
+JobTimeoutAction=reboot
+JobTimeoutRebootArgument=
+Requires=hermes-runtime.service hermes-audit-tail.service
+After=hermes-runtime.service hermes-audit-tail.service
+
+[Install]
+WantedBy=multi-user.target

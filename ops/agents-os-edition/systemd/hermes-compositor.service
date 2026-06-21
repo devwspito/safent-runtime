@@ -1,0 +1,101 @@
+# hermes-compositor.service — Qt/QML Wayland compositor for Agents OS Pocket.
+#
+# Replaces gdm.service + gnome-session on the pocket (SBC) profile.
+# Starts the hermes.lumen.compositor entry point which:
+#   1. Launches the Qt/QML Wayland compositor (Compositor.qml).
+#   2. Serves the SessionInputBridge AF_UNIX socket in-process.
+#   3. Emits sd_notify READY=1 once the Qt event loop is running.
+#
+# QPA backend selection (via environment):
+#   Production (RK3588 KMS/DRM): QT_QPA_PLATFORM=eglfs  [H0-HARDWARE]
+#   Development (nested Wayland): QT_QPA_PLATFORM=wayland
+#   Headless / CI:                QT_QPA_PLATFORM=offscreen
+#
+# DeviceAllow grants access to:
+#   /dev/dri/*   — KMS/DRM framebuffer (eglfs_kms)
+#   char-input   — evdev input devices via libinput
+#
+# SupplementaryGroups: video (DRM), input (evdev), render (GPU render node).
+#
+# [H0-HARDWARE] Production deployment on RK3588:
+#   - Set QT_QPA_PLATFORM=eglfs
+#   - Add QT_QPA_EGLFS_KMS_CONFIG=/etc/hermes/kms-config.json
+#     (specify DRM device, mode, connector)
+#   - Add DeviceAllow=/dev/dri/card0 rw
+#   - Uncomment the Rockchip Mali/MPP DeviceAllow lines below
+
+[Unit]
+Description=Hermes Compositor (Qt/QML Wayland — pocket profile)
+After=hermes-runtime-ready.target dbus.socket
+Requires=hermes-runtime-ready.target
+PartOf=agents-os-pocket.target
+StartLimitBurst=5
+StartLimitIntervalSec=30
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=hermes-user
+Group=hermes-user
+
+# QPA backend: eglfs for KMS/DRM bare-metal (RK3588), offscreen for CI.
+# Override in a drop-in for a specific deployment target:
+#   /etc/systemd/system/hermes-compositor.service.d/qpa.conf
+#     [Service]
+#     Environment=QT_QPA_PLATFORM=eglfs
+Environment=QT_QPA_PLATFORM=offscreen
+Environment=HERMES_SHELL_BACKEND_URL=http://127.0.0.1:7517
+Environment=HERMES_TASKS_SOCK=/run/hermes/tasks.sock
+
+# [H0-HARDWARE] RK3588 KMS config — uncomment for bare-metal deployment:
+# Environment=QT_QPA_PLATFORM=eglfs
+# Environment=QT_QPA_EGLFS_KMS_CONFIG=/etc/hermes/kms-config.json
+# Environment=QT_QPA_EGLFS_HIDECURSOR=1
+
+ExecStartPre=-/usr/bin/hermes-landlock-assert
+ExecStart=/usr/bin/hermes-compositor-session
+
+Restart=always
+RestartSec=3
+
+# Cgroups
+Slice=agents-os.slice
+KillMode=control-group
+MemoryMin=256M
+MemoryHigh=2G
+MemoryMax=4G
+CPUWeight=200
+OOMScoreAdjust=-300
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+PrivateTmp=yes
+# PASS-5 C4 (CLASS FIX): native-arch-only seccomp — kill any non-native ABI
+# syscall (i386/x32 on x86_64). Closes the namespace-pivot bypass where a
+# foreign seccomp_data.arch evades native-only filters. The compositor is a
+# native Qt/QML binary; the aarch64/x86_64 native path is unaffected.
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/hermes /run/hermes
+
+# DRM/GPU/input device access
+DeviceAllow=/dev/dri rw
+DevicePolicy=closed
+SupplementaryGroups=video input render
+
+# [H0-HARDWARE] Rockchip Mali GPU render node — uncomment for RK3588:
+# DeviceAllow=/dev/mali0 rw
+# DeviceAllow=/dev/rga rw
+
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=agents-os-pocket.target

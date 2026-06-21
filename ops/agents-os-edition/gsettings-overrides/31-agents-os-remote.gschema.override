@@ -1,0 +1,15 @@
+; Acceso remoto modo ESPEJO (gnome-remote-desktop, backend VNC).
+; Se compila DESPUÉS del dnf install de gnome-remote-desktop (su schema no
+; existe antes). Por eso va en un override separado del 30-agents-os.
+;
+; SECURITY FIX (finding #2): se eliminó la línea encryption=['none'] que
+; forzaba RFB security type 2 (VNC-auth sin TLS). GRD usará su valor por
+; defecto (tls-anon, type 18) si el cliente lo soporta. El mirror nativo
+; (hermes-mirror.service) es el canal principal de acceso remoto; GRD es
+; fallback. Si noVNC como cliente necesita específicamente type 2 para conectar
+; a GRD, habilitar la línea de nuevo solo para ese caso de uso documentado.
+[org.gnome.desktop.remote-desktop.vnc]
+auth-method='password'
+view-only=false
+enable=true
+screen-share-mode='mirror-primary'

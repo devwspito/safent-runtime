@@ -1,0 +1,31 @@
+# hermes-user-nopasswd.service — deja la cuenta de autologin sin contraseña
+# ANTES de GDM en el PRIMER BOOT pre-onboarding.
+# Necesario para que pam_gnome_keyring (ya en el stack de
+# gdm-autologin) cree+desbloquee el login keyring VACÍO en la sesión, y así GRD
+# (libsecret) pueda guardar/recuperar la pass VNC sin el diálogo "Choose
+# password for new keyring". hermes-user NO está en wheel → sin escalada sudo.
+#
+# SECURITY FIX (finding #3): se añade ConditionPathExists=! para que esta unit
+# SOLO corra en el primer boot pre-onboarding. Una vez hermes-account-apply
+# completa el setup (escribe el sentinel /var/lib/hermes/account-applied), esta
+# unit queda inactiva en todos los reboots posteriores. Así se evita mantener
+# la cuenta passwordless indefinidamente (una cuenta sin contraseña + autologin
+# activo + acceso remoto es la combinación más peligrosa para un SO público).
+
+[Unit]
+Description=Hermes — autologin user passwordless (keyring auto-unlock, first boot only)
+DefaultDependencies=no
+After=systemd-sysusers.service systemd-tmpfiles-setup.service
+Before=gdm.service display-manager.service sysinit.target shutdown.target
+Conflicts=shutdown.target
+# Gate de primer boot: si el sentinel existe, la cuenta ya tiene contraseña
+# (hermes-account-apply completó). No re-eliminar la contraseña en boots siguientes.
+ConditionPathExists=!/var/lib/hermes/account-applied
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/usr/bin/passwd -d hermes-user || true'
+
+[Install]
+WantedBy=multi-user.target

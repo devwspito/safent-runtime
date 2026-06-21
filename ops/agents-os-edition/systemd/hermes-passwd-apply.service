@@ -1,0 +1,72 @@
+# hermes-passwd-apply.service — root oneshot that reads the staged
+# password-change request, PAM-verifies the current password, then calls
+# chpasswd to apply the new one.
+#
+# This service runs as root.  Security notes:
+#   - NoNewPrivileges=no: PAM verification runs directly as root; no setuid
+#     helper escalation needed.  Running as root IS the privilege — same
+#     reasoning as hermes-account-apply.service and
+#     hermes-remote-access-control.service.
+#   - The staged file is shredded in a finally block (always, even on error).
+#     Both 'current' and 'new' passwords are never logged.
+#   - ProtectSystem=strict + ReadWritePaths restricts writes to only the
+#     paths this script legitimately needs:
+#       /run/hermes/remote-control — read + shred the staged request
+#       /etc                       — chpasswd writes /etc/shadow
+#   - RestrictAddressFamilies=AF_UNIX prevents network connections from this
+#     root process — PAM/unix_chkpwd communicates over AF_UNIX only.
+#   - /run/hermes is tmpfs — the staged file is RAM-only.
+
+[Unit]
+Description=Hermes — apply staged password-change request (privileged)
+Documentation=man:systemd.service(5)
+# Only triggered by the .path unit; not started independently.
+RefuseManualStart=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/libexec/hermes/passwd-apply
+
+User=root
+Group=root
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-passwd-apply
+
+# --------------------------------------------------------------------------
+# Hardening
+# --------------------------------------------------------------------------
+
+# NoNewPrivileges=no: running as root already — PAM verify is direct, no
+# setuid escalation.  Same reasoning as hermes-account-apply.service.
+NoNewPrivileges=no
+
+# ProtectSystem=strict makes / read-only by default.
+# ReadWritePaths grants the minimal set:
+#   /run/hermes/remote-control — read + shred the staged passwd request
+#   /etc                       — chpasswd needs write access to /etc/shadow
+ProtectSystem=strict
+ReadWritePaths=/run/hermes/remote-control /etc
+
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+# PAM (python-pam / unix_chkpwd) communicates over AF_UNIX.
+# No TCP/UDP needed.
+RestrictAddressFamilies=AF_UNIX
+
+# Capabilities: running as root gives us everything; we bound to only what
+# is needed.
+#   CAP_DAC_OVERRIDE — read /etc/shadow for PAM verify + write /etc/shadow
+#                      for chpasswd (mode 000/640, root-only)
+#   CAP_SETUID/CAP_SETGID — PAM helpers may perform uid transitions internally
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
+
+# [Install] intentionally omitted — triggered exclusively by the .path unit.

@@ -1,0 +1,26 @@
+[Desktop Entry]
+# nautilus-hermes.desktop — T020 feature 014 (agentic desktop).
+#
+# Gestor de archivos Nautilus para el HUMANO.
+# El agente usa FilesystemSurfaceAdapter (confinado, gateado por broker) para
+# operar el sistema de archivos; nunca usa Nautilus como efector.
+# Este lanzador abre el gestor de archivos del humano de forma completamente
+# normal — es su gestor de archivos, sin restricciones agénticas.
+Version=1.0
+Name=Archivos
+GenericName=Gestor de archivos
+Comment=Accede y organiza tus archivos
+Exec=nautilus --new-window %U
+Icon=org.gnome.Nautilus
+Terminal=false
+Type=Application
+StartupNotify=true
+StartupWMClass=nautilus
+Categories=GNOME;GTK;Utility;Core;FileManager;
+MimeType=inode/directory;application/x-gnome-saved-search;
+DBusActivatable=true
+X-GNOME-DocPath=nautilus/index.html
+X-GNOME-Bugzilla-Bugzilla=GNOME
+X-GNOME-Bugzilla-Product=nautilus
+X-GNOME-Bugzilla-Component=general
+X-GNOME-Bugzilla-Version=@VERSION@

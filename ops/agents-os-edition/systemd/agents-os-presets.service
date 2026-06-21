@@ -1,0 +1,24 @@
+# agents-os-presets.service — T015 — FR-040..FR-046 enforcement 24/7.
+#
+# Oneshot que corre en first boot y enmascara TODOS los targets de
+# suspend/hibernate/sleep. Sin esto, sysadmin podría suspender el nodo
+# por accidente con `systemctl suspend` y romper el invariante 24/7.
+
+[Unit]
+Description=Agents OS Edition — apply 24/7 presets (suspend masking, logind, cgroup)
+DefaultDependencies=no
+After=systemd-tmpfiles-setup.service
+Before=multi-user.target
+ConditionFirstBoot=yes
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl mask sleep.target
+ExecStart=/usr/bin/systemctl mask suspend.target
+ExecStart=/usr/bin/systemctl mask hibernate.target
+ExecStart=/usr/bin/systemctl mask hybrid-sleep.target
+ExecStart=/usr/bin/systemctl mask suspend-then-hibernate.target
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

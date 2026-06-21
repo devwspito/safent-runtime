@@ -1,0 +1,217 @@
+# hermes-browser-netns.service — Confinamiento de red del navegador del agente.
+#
+# Crea el network namespace `hermes-browser` con veth pair + NAT hacia la WAN
+# y carga las reglas nftables de egress (host side + ns side). El navegador
+# (Chromium/Playwright) corre dentro de hermes-browser; el daemon hermes-runtime
+# permanece en la red del host (vLLM local intacto — ver design doc §5).
+#
+# C1 PASS-2 (2026-06-19): esta unit crea AHORA un SEGUNDO netns `hermes-mcp` para los
+# hijos MCP (npx/uvx/node lanzados por hermes-mcp-launcher), con su PROPIO veth en un
+# /30 distinto (10.200.1.0/30) y su PROPIO nft default-deny + registries-only. Motivo:
+# el red-team encontró que compartir el netns del navegador daba a los MCP la MISMA IP
+# de origen del proxy (10.200.0.2) y por tanto UN solo plano de política — una sesión
+# teaching del navegador que empuja `open-logged` via el socket de control ampliaba TODO
+# el netns, incluidos los MCP. Con un netns aparte el MCP tiene IP de origen distinta
+# (10.200.1.2), cuya política en el proxy está PINEADA (default-deny + registries-only)
+# e inmune al socket de control. Las reglas nft del hermes-mcp viven en FICHEROS ESTÁTICOS
+# (mcp-host.nft / mcp-ns.nft, COPYados a /etc/nftables/hermes/ igual que los del browser) y
+# se cargan con `nft -f`. (Antes iban inline vía `printf`, pero systemd expande `%b`→boot-id
+# y el anidamiento de comillas rompía los `log prefix "…"`; los ficheros estáticos son robustos.)
+#
+# Diseño: specs/009-radiografia-os/kernel-browser-confinement-design.md §2.2
+# Precondición de lanzamiento del navegador: /run/netns/hermes-browser existe.
+# Si este servicio falla, el daemon sigue vivo; los lanzamientos de navegador
+# fallan cerrados (hermes-browser-jail verifica la existencia del netns).
+#
+# TOPOLOGÍA:
+#   host netns:           veth-hbr-host   10.200.0.1/30  (gateway del navegador)
+#   hermes-browser netns: veth-hbr-ns     10.200.0.2/30  (IP del navegador)
+#   default route del ns: via 10.200.0.1
+#   masquerade:           solo conexiones originadas desde el proxy egress (10.200.0.1),
+#                         no desde el browser directo. El browser NO tiene ruta directa a WAN.
+
+[Unit]
+Description=Hermes — Network namespace y nftables del navegador confinado
+Documentation=file:///etc/nftables/hermes/
+After=systemd-modules-load.service systemd-tmpfiles-setup.service
+# C1 PASS-3: After=hermes-host-firewall.service para que la tabla `inet hermes_host`
+# (INPUT default-deny del host) ya exista cuando esta unit le AÑADA la regla de
+# accept del netns del MCP (10.200.1.2 → 10.200.1.1:3128). El firewall de host es
+# WantedBy=multi-user.target y DefaultDependencies=no; pedimos sólo el orden, no
+# una dependencia dura (si el firewall no está, el add falla y se loguea, pero el
+# netns del browser sigue montándose).
+After=hermes-host-firewall.service
+# PERF W37: network-online.target ELIMINADO. El setup del netns es 100% config
+# LOCAL de kernel (ip netns add + veth 10.200.0.1/30 estático + nft -f ficheros
+# estáticos); NO consulta DHCP/ruta/WAN. Esperar a network-online metía ~5s de
+# DHCP en la cadena crítica del boot (netns -> runtime self-check -> compositor).
+# El navegador navega lazy POST-boot, cuando la WAN ya está arriba; el masquerade
+# aplica cuando fluye el tráfico, no al cargar la regla.
+# NO Before=hermes-runtime.service — el daemon no depende de este servicio.
+# El navegador NO se lanza si este servicio falla (el jail verifica /run/netns/hermes-browser).
+Before=hermes-egress-proxy.service hermes-browser-launcher.service
+# NO PartOf=hermes-workspace.target: el netns es infraestructura de kernel persistente.
+# PartOf provocaba que cualquier parada del target (e.g., por fallo en cascade del
+# launcher) hiciera stop del netns, disparando el ciclo teardown/recreate que causa
+# la race condition (ip netns del concurrente con nft exec).
+# El netns se activa vía WantedBy; se para SOLO si el propio servicio se detiene
+# explícitamente o si la máquina hace shutdown. Esto rompe el restart-storm.
+WantedBy=hermes-workspace.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Restart=no: el netns es infraestructura de kernel de arranque único.
+# Si falla (módulos no cargados, permisos, etc.) debe quedarse en estado
+# failed para que el operador lo diagnostique. Un restart automático haría
+# que el ExecStop (ip netns del) solapara con el ExecStart siguiente →
+# EACCES en nft (race condition confirmada). El fallo del netns es fail-closed:
+# hermes-browser-launcher verifica /run/netns/hermes-browser antes de lanzar.
+Restart=no
+User=root
+
+# CAP_SYS_ADMIN: ip netns add (crea net namespace).
+# CAP_NET_ADMIN:  ip link, ip addr, ip route, nft (reglas en el namespace).
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN
+
+# ── Verificación de módulos kernel (belt-and-suspenders) ──────────────────────
+# nf_conntrack y nf_log_syslog deben estar cargados antes de que nft intente
+# registrar expresiones `ct state` y `log level warn` dentro del netns.
+# Normalmente los carga systemd-modules-load.service vía
+# /etc/modules-load.d/hermes-netfilter.conf (After= garantiza el orden).
+# Este ExecStartPre es la red de seguridad: si por cualquier razón los módulos
+# no están cargados (imagen antigua, modules-load deshabilitado, etc.), la unit
+# falla AQUÍ con un mensaje claro — NO con el críptico 255/EXCEPTION del nft.
+# Fail-closed: sin módulos → sin jaula → navegador no se lanza.
+ExecStartPre=/bin/sh -c '\
+    for mod in nf_conntrack nf_log_syslog; do \
+        if ! grep -q "^$mod " /proc/modules 2>/dev/null; then \
+            echo "hermes-browser-netns: módulo requerido no cargado: $mod" >&2; \
+            echo "  Asegúrese de que /etc/modules-load.d/hermes-netfilter.conf está horneado en la imagen." >&2; \
+            exit 1; \
+        fi; \
+    done; \
+    echo "hermes-browser-netns: módulos nf_conntrack + nf_log_syslog verificados OK"'
+
+# ── Crear netns (idempotente) ─────────────────────────────────────────────────
+ExecStart=/bin/sh -c 'ip netns add hermes-browser 2>/dev/null || true'
+
+# ── veth pair: host side ──────────────────────────────────────────────────────
+# Si el veth ya existe (restart), `|| true` evita el error.
+ExecStart=/bin/sh -c '\
+    ip link add veth-hbr-host type veth peer name veth-hbr-ns 2>/dev/null || true && \
+    ip link set veth-hbr-ns netns hermes-browser 2>/dev/null || true && \
+    ip addr add 10.200.0.1/30 dev veth-hbr-host 2>/dev/null || true && \
+    ip link set veth-hbr-host up'
+
+# ── veth ns side + default route + loopback ───────────────────────────────────
+ExecStart=/bin/sh -c '\
+    ip netns exec hermes-browser ip addr add 10.200.0.2/30 dev veth-hbr-ns 2>/dev/null || true && \
+    ip netns exec hermes-browser ip link set veth-hbr-ns up && \
+    ip netns exec hermes-browser ip link set lo up && \
+    ip netns exec hermes-browser ip route add default via 10.200.0.1 2>/dev/null || true'
+
+# ── Reenvío por interfaz (per-iface, no global) ───────────────────────────────
+# Solo el veth del browser; no habilitar ip_forward global (innecesario).
+ExecStart=/bin/sh -c 'sysctl -w net.ipv4.conf.veth-hbr-host.forwarding=1'
+
+# ── Reglas nftables host side ─────────────────────────────────────────────────
+# table inet hermes_browser_egress: forward policy drop + anti-pivot RFC1918 +
+# permite solo browser→proxy:3128 + DNS; postrouting masquerade del proxy.
+ExecStart=/bin/sh -c 'nft -f /etc/nftables/hermes/browser-host.nft'
+
+# ── Reglas nftables ns side ───────────────────────────────────────────────────
+# table inet hermes_browser_local: output default-deny excepto →proxy.
+# Nota: se llama DIRECTAMENTE sin el bloque de diagnóstico que existía durante
+# la investigación del bug de race. Ese bloque alargaba el tiempo de ejecución
+# del último ExecStart, ampliando la ventana de solapamiento con un ExecStop
+# concurrente (ip netns del) y causando EACCES en el ip netns exec de nft.
+ExecStart=/bin/sh -c 'ip netns exec hermes-browser nft -f /etc/nftables/hermes/browser-ns.nft'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# C1 PASS-2 — SEGUNDO netns `hermes-mcp` para los hijos MCP (egress propio, aislado)
+# ══════════════════════════════════════════════════════════════════════════════
+# Topología (espejo del browser, en 10.200.1.0/30):
+#   host netns:        veth-hmcp-host  10.200.1.1/30  (gateway + 2º listener del proxy)
+#   hermes-mcp netns:  veth-hmcp-ns    10.200.1.2/30  (IP de origen de los MCP)
+# Reglas nft INLINE (nft -f -) → no dependen de un COPY del Containerfile.
+
+# ── Crear netns hermes-mcp (idempotente) ──────────────────────────────────────
+ExecStart=/bin/sh -c 'ip netns add hermes-mcp 2>/dev/null || true'
+
+# ── veth pair: host side ──────────────────────────────────────────────────────
+ExecStart=/bin/sh -c '\
+    ip link add veth-hmcp-host type veth peer name veth-hmcp-ns 2>/dev/null || true && \
+    ip link set veth-hmcp-ns netns hermes-mcp 2>/dev/null || true && \
+    ip addr add 10.200.1.1/30 dev veth-hmcp-host 2>/dev/null || true && \
+    ip link set veth-hmcp-host up'
+
+# ── veth ns side + default route + loopback ───────────────────────────────────
+ExecStart=/bin/sh -c '\
+    ip netns exec hermes-mcp ip addr add 10.200.1.2/30 dev veth-hmcp-ns 2>/dev/null || true && \
+    ip netns exec hermes-mcp ip link set veth-hmcp-ns up && \
+    ip netns exec hermes-mcp ip link set lo up && \
+    ip netns exec hermes-mcp ip route add default via 10.200.1.1 2>/dev/null || true'
+
+# ── Reenvío por interfaz (per-iface) ──────────────────────────────────────────
+ExecStart=/bin/sh -c 'sysctl -w net.ipv4.conf.veth-hmcp-host.forwarding=1'
+
+# ── Reglas nftables host side (fichero estático) ──────────────────────────────
+# table inet hermes_mcp_egress: forward drop + anti-pivot + solo mcp→proxy:3128;
+# postrouting masquerade SOLO del proxy (10.200.1.1), nunca del MCP directo.
+ExecStart=/bin/sh -c 'nft -f /etc/nftables/hermes/mcp-host.nft'
+
+# ── Reglas nftables ns side (fichero estático) ────────────────────────────────
+# table inet hermes_mcp_local: output default-deny excepto →proxy (10.200.1.1:3128).
+ExecStart=/bin/sh -c 'ip netns exec hermes-mcp nft -f /etc/nftables/hermes/mcp-ns.nft'
+
+# ── HOST INPUT accept para el netns del MCP (C1 PASS-3 — arregla rotura funcional)
+# El proxy egress escucha en el lado HOST del veth del MCP (10.200.1.1:3128). La
+# conexión del MCP (netns hermes-mcp, origen 10.200.1.2) ENTRA al host y la pillaría
+# el policy drop de `inet hermes_host input` (host-input.nft). El browser ya tiene su
+# accept ahí (10.200.0.2→10.200.0.1:3128); el MCP NO lo tenía → npx/uvx no alcanzaban
+# su proxy en un boot real → MCP muerto. Lo añadimos AQUÍ (no en host-input.nft) para
+# mantener la regla junto al setup del netns que la justifica y evitar desincronía.
+# IDEMPOTENTE: si ya existe una regla con este comment, no se duplica. El runtime sigue
+# default-deny en el PROXY (sin registries); esta regla sólo abre el CAMINO al proxy.
+ExecStart=/bin/sh -c '\
+    if nft list table inet hermes_host >/dev/null 2>&1; then \
+        if ! nft list chain inet hermes_host input 2>/dev/null | grep -q "mcp netns -> egress proxy"; then \
+            nft add rule inet hermes_host input ip saddr 10.200.1.2 ip daddr 10.200.1.1 tcp dport 3128 accept comment \"mcp netns -> egress proxy\"; \
+        fi; \
+    else \
+        echo "hermes-browser-netns: tabla inet hermes_host ausente; ¿hermes-host-firewall.service activo? (MCP no alcanzará su proxy)" >&2; \
+    fi'
+
+# ── Teardown al parar ─────────────────────────────────────────────────────────
+# El flush de las tablas nft ocurre implícitamente al destruir el netns.
+ExecStop=/bin/sh -c 'nft delete table inet hermes_browser_egress 2>/dev/null || true'
+ExecStop=/bin/sh -c 'ip link del veth-hbr-host 2>/dev/null || true'
+ExecStop=/bin/sh -c 'ip netns del hermes-browser 2>/dev/null || true'
+ExecStop=/bin/sh -c 'nft delete table inet hermes_mcp_egress 2>/dev/null || true'
+ExecStop=/bin/sh -c 'ip link del veth-hmcp-host 2>/dev/null || true'
+ExecStop=/bin/sh -c 'ip netns del hermes-mcp 2>/dev/null || true'
+# Quitar la regla de host-input del MCP (por handle, localizada por su comment) para
+# que un restart no acumule duplicados ni deje un accept colgando sin su netns.
+ExecStop=/bin/sh -c 'h=$(nft -a list chain inet hermes_host input 2>/dev/null | grep "mcp netns -> egress proxy" | grep -oE "handle [0-9]+" | grep -oE "[0-9]+"); [ -n "$h" ] && nft delete rule inet hermes_host input handle "$h" 2>/dev/null || true'
+
+# ── Hardening ────────────────────────────────────────────────────────────────
+NoNewPrivileges=yes
+# CRÍTICO — NO usar ProtectSystem / PrivateTmp / ProtectHome aquí:
+# esas opciones le dan al servicio un MOUNT NAMESPACE PRIVADO. `ip netns add`
+# crea /run/netns/hermes-browser como un bind-mount; si el servicio está en un
+# mount-ns privado, ese bind-mount NO propaga al host → ningún otro proceso (el
+# browser-launcher, el egress-proxy) ni otro run del propio servicio puede
+# abrir el netns por nombre → "Cannot open network namespace: Permission denied"
+# (EACCES) en el `ip netns exec ... nft`. `ip netns` EXIGE un mount-ns compartido
+# con el host. Este servicio es un oneshot root mínimo que solo corre ip/nft/
+# sysctl; su superficie es ínfima. La SEGURIDAD REAL es el JAIL que crea (netns
+# + veth + nftables output-drop confinando al NAVEGADOR), que queda intacto.
+# MountFlags=shared refuerza que cualquier mount que cree propague al host.
+MountFlags=shared
+# RestrictNamespaces=no: necesitamos crear network namespaces del kernel.
+RestrictNamespaces=no
+
+[Install]
+# Activado por el target del workspace; el integrador añade el COPY+enable al overlay.
+WantedBy=hermes-workspace.target

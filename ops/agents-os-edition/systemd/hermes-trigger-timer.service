@@ -1,0 +1,25 @@
+# hermes-trigger-timer.service — unit de activación del timer backstop.
+#
+# Hace dbus-send al bus de sistema para notificar al runtime que evalúe
+# los triggers timer autorizados (spec 007 / FR-020).
+#
+# El runtime NO ejecuta nada sin pasar por el pre-gate default-deny
+# (TriggerGate.enqueue_from_trigger → is_authorized). Con allow-list
+# vacía, este unit no produce ningún efecto.
+
+[Unit]
+Description=Hermes Runtime trigger timer activator (spec 007)
+After=hermes-runtime.service
+Requires=hermes-runtime.service
+
+[Service]
+Type=oneshot
+# dbus-send → org.hermes.Runtime1 → TriggerTimerFire (implementado en el wiring)
+# El sender UID del bus se verifica contra authorized_uids (CTRL-P2-9).
+ExecStart=/usr/bin/dbus-send \
+    --system \
+    --dest=org.hermes.Runtime1 \
+    --type=method_call \
+    /org/hermes/Runtime1 \
+    org.hermes.Runtime1.TriggerTimerFire
+RemainAfterExit=no

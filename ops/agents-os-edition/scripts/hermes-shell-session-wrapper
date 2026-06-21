@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# hermes-shell-session-wrapper — entrypoint de la sesión gráfica.
+#
+# GDM ejecuta esto cuando el usuario entra al SO.
+# Gatea en hermes-runtime.service (daemon primario, Constitución §0.7) y
+# luego lanza la sesión GNOME Shell real como escritorio del humano.
+#
+# T013 — feature 014 (agentic desktop):
+#   ANTES: exec mutter --wayland --display-server -- python3 -m hermes.lumen
+#   AHORA: exec gnome-session --session=hermes-shell
+#
+# Lo que NO cambia:
+#   - El gate de liveness (~L23-54): escritorio solo si daemon active.
+#   - El bootstrap del user systemd (clipboard-bridge, mirror).
+#   - Los gsettings de screensaver/power (mantienen el 24/7).
+# Lo que cambia:
+#   - La última línea: gnome-shell real en vez de mutter+lumen kiosko.
+#   - XDG_CURRENT_DESKTOP=GNOME (las apps del escritorio esperan GNOME).
+
+set -euo pipefail
+
+# Logging al journal del sistema (GDM redirige stdout/stderr).
+exec > >(systemd-cat -t hermes-shell-session 2>/dev/null || cat) 2>&1
+echo "[hermes-shell-session-wrapper] starting at $(date -u +%H:%M:%S)"
+
+# ---------------------------------------------------------------------------
+# T025 / CTRL-P1-16 / G3 — LIVENESS CHECK HARD-FAIL
+#
+# El gate de boot (hermes-runtime-ready.target → agents-os-healthy.target)
+# garantiza que GDM no arranca hasta que hermes-runtime.service notificó
+# READY=1. Sin embargo GDM puede re-ejecutar este wrapper después de una
+# caída/relogueo. En ese momento el daemon podría estar en crash-loop.
+#
+# Por eso se verifica AQUÍ también, en el único punto donde podríamos
+# lanzar el escritorio con un daemon caído.
+#
+# Por qué exit 1 y no un poll silencioso:
+#   - El poll de /healthz anterior chequeaba el shell-server, no el daemon,
+#     y degradaba en silencio: la sesión arrancaba igual aunque el agente
+#     estuviera caído → UI sin agente real, sin aviso.
+#   - Un poll silencioso introduce un TOCTOU: entre el último check OK y
+#     el exec gnome-session, el daemon puede haber caído.
+#   - exit 1 aquí hace que GDM re-intente con mensaje claro en el journal.
+#
+# NO se usa /healthz del shell-server porque:
+#   1. El shell-server puede estar up aunque el daemon esté caído.
+#   2. El shell-server puede estar caído aunque el daemon esté up.
+#   3. El agente es el proceso primario; el escritorio es un cliente de él.
+#
+# TOCTOU residual: aceptado y documentado (research.md Edge Case "daemon
+# parpadea"): el overlay detectará la caída vía D-Bus y mostrará
+# RECONNECTING. RestartSec=2 del daemon acota la ventana.
+# ---------------------------------------------------------------------------
+
+_RUNTIME_UNIT="hermes-runtime.service"
+
+if ! systemctl is-active --quiet "${_RUNTIME_UNIT}"; then
+    echo "[wrapper] FATAL: ${_RUNTIME_UNIT} no está active — abortando sesión." >&2
+    echo "[wrapper] Estado actual: $(systemctl is-active "${_RUNTIME_UNIT}" 2>/dev/null || echo unknown)" >&2
+    echo "[wrapper] Ver: journalctl -u ${_RUNTIME_UNIT} -n 50" >&2
+    exit 1
+fi
+
+echo "[wrapper] ${_RUNTIME_UNIT} active — arrancando sesión GNOME real"
+
+# ---------------------------------------------------------------------------
+# Wayland baseline.
+# XDG_CURRENT_DESKTOP=GNOME: gnome-shell lo requiere para sus portales XDG
+# y para que las apps GTK/QML resuelvan los portales correctamente.
+# ---------------------------------------------------------------------------
+export XDG_CURRENT_DESKTOP=GNOME
+export XDG_SESSION_TYPE=wayland
+export XDG_SESSION_DESKTOP=hermes-shell
+
+# gtk4-layer-shell (overlay Hermes) y apps GTK respetan GDK_BACKEND.
+export GDK_BACKEND=wayland
+
+# Qt6/QML apps (capability apps: Skills, Audit, etc.) y PySide6.
+export QT_QPA_PLATFORM=wayland
+
+# gsettings (FR-042) — silencioso si schemas no en sesión user dconf.
+# Estos se aplican también por el override horneado (30-agents-os.gschema.override),
+# pero el gsettings live garantiza el valor incluso antes del primer compile-schemas.
+for cmd in \
+    "org.gnome.desktop.screensaver lock-enabled false" \
+    "org.gnome.desktop.screensaver idle-activation-enabled false" \
+    "org.gnome.desktop.session idle-delay 0" \
+    "org.gnome.settings-daemon.plugins.power power-button-action 'nothing'" \
+    "org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'" \
+    "org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing'"; do
+    gsettings set ${cmd} 2>/dev/null || true
+done
+
+# ---------------------------------------------------------------------------
+# Bootstrap del systemd de USUARIO.
+# Con gnome-session real, WAYLAND_DISPLAY se propaga por gnome-session mismo
+# al user manager. El bloque de espera del socket se mantiene como fallback
+# por si gnome-session tarda en propagarlo.
+# ---------------------------------------------------------------------------
+(
+  RT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  _sock=""
+  for _i in $(seq 1 120); do
+    _sock=$(ls "$RT"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -1)
+    [ -n "$_sock" ] && break
+    sleep 0.5
+  done
+  if [ -n "$_sock" ]; then
+    systemctl --user set-environment \
+      WAYLAND_DISPLAY="$(basename "$_sock")" \
+      XDG_RUNTIME_DIR="$RT" \
+      XDG_CURRENT_DESKTOP=GNOME \
+      XDG_SESSION_DESKTOP=hermes-shell \
+      XDG_SESSION_TYPE=wayland 2>/dev/null || true
+    systemctl --user start graphical-session.target 2>/dev/null || true
+    # Arrancar explícitamente por si el After=graphical-session.target los saltó.
+    systemctl --user restart hermes-clipboard-bridge.service hermes-mirror.service 2>/dev/null || true
+    echo "[wrapper] user-systemd bootstrap OK (WAYLAND_DISPLAY=$(basename "$_sock"))"
+  else
+    echo "[wrapper] WARN: no apareció socket Wayland en 60s; servicios de usuario podrían no arrancar" >&2
+  fi
+) &
+
+# ---------------------------------------------------------------------------
+# T013 / spec 014 increment 1 — sesión GNOME real.
+#
+# gnome-session --session=hermes-shell es el entrypoint de la sesión,
+# exactamente como /usr/share/wayland-sessions/gnome.desktop hace con
+# `Exec=/usr/bin/gnome-session --session=gnome`. gnome-session es el proceso
+# en primer plano que GDM monitoriza; si sale, la sesión termina.
+#
+# CADENA DE ARRANQUE DE gnome-shell (GNOME 47 systemd-managed):
+#
+#   gnome-session --session=hermes-shell
+#     ├─ (interno) sd_bus: systemctl --user start gnome-session-wayland@hermes-shell.target
+#     │    ├─ gnome-session@hermes-shell.target (plantilla instanciada)
+#     │    │    └─ [DROP-IN] gnome-session@hermes-shell.target.d/hermes-shell.session.conf
+#     │    │         ├─ Requires=org.gnome.Shell.target
+#     │    │         │    └─ Wants=org.gnome.Shell@wayland.service
+#     │    │         │         └─ ExecStart=/usr/bin/gnome-shell  <-- COMPOSITOR
+#     │    │         └─ Wants=org.gnome.SettingsDaemon.*.target   <-- GSD
+#     │    └─ gnome-session-manager@hermes-shell.service
+#     │         └─ ExecStart=gnome-session-binary --systemd-service --session=hermes-shell
+#     └─ (foreground: este proceso es gnome-session-binary en modo --systemd-service)
+#
+# SIN el drop-in, org.gnome.Shell.target NO se arrastra al grafo de dependencias
+# de gnome-session@hermes-shell.target, y gnome-shell nunca arranca (GS=0, MUT=0).
+# X-GNOME-HiddenUnderSystemd=true en org.gnome.Shell.desktop impide que
+# gnome-session-binary lo arranque por autostart; lo debe arrancar systemd.
+#
+# gnome-shell incorpora mutter (no es necesario llamar mutter por separado).
+# El agente sigue siendo proceso primario (daemon -> broker -> efector).
+# GNOME Shell es el escritorio del HUMANO; nunca ejecuta acciones del agente.
+# ---------------------------------------------------------------------------
+echo "[wrapper] exec gnome-session --session=hermes-shell (escritorio GNOME real)"
+exec gnome-session --session=hermes-shell

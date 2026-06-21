@@ -1,0 +1,25 @@
+# hermes-account-apply.path — watches for a staged account-request from the
+# shell-server (User=hermes, non-root) and immediately triggers the privileged
+# apply service.
+#
+# The shell-server cannot call chpasswd directly (not root). It writes a
+# validated request to /run/hermes/setup/account-request.json (mode 0600, owner
+# hermes). The setup/ subdir is 0700 hermes:hermes (tmpfiles), isolating the
+# staged credentials from other processes that can access /run/hermes (0750).
+# This unit fires when that file appears.
+#
+# The .path unit is root-owned and starts as root, ensuring that the triggered
+# service also runs as root.
+
+[Unit]
+Description=Hermes — watch for staged OS account request
+Documentation=man:systemd.path(5)
+
+[Path]
+PathExists=/run/hermes/setup/account-request.json
+# Trigger immediately on inotify event; do not wait for stable content.
+# The apply script reads atomically (the shell-server does write+rename).
+Unit=hermes-account-apply.service
+
+[Install]
+WantedBy=multi-user.target

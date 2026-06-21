@@ -1,0 +1,88 @@
+# hermes-egress-proxy.service — Proxy filtrante de egress para el navegador confinado.
+#
+# Corre en el host network namespace (NO en hermes-browser netns) con identidad
+# hermes-egress (UID mínimo, sin acceso a datos del agente). Acepta conexiones
+# CONNECT del browser en 10.200.0.1:3128 y decide por SNI/Host si el dominio
+# está permitido según la política de la tarea activa.
+#
+# Política de dos niveles por-tarea (empujada por el daemon vía socket root
+# /run/hermes/egress-proxy.sock — el navegador no puede ampliar su propia política):
+#   - Tareas de discovery (sin whitelist): open-logged — cualquier dominio + audit.
+#   - Tareas con credenciales (SiteSpec.domains_whitelist no vacío): default-deny.
+#
+# Diseño: specs/009-radiografia-os/kernel-browser-confinement-design.md §3
+#
+# El componente hermes.egress_proxy lo implementa el backend-engineer;
+# esta unit solo define el ciclo de vida, dependencias y hardening.
+
+[Unit]
+Description=Hermes — Proxy egress filtrante (SNI/Host) para el navegador confinado
+Documentation=file:///etc/nftables/hermes/browser-host.nft
+After=hermes-browser-netns.service
+Requires=hermes-browser-netns.service
+# SECURITY FIX (finding #4): BindsTo garantiza que si hermes-browser-netns.service
+# se detiene o falla DESPUÉS del arranque, hermes-egress-proxy.service también se
+# detiene automáticamente. Sin BindsTo, Requires solo bloquea el arranque inicial
+# pero no reacciona a una parada posterior del netns (race condition de seguridad:
+# el proxy seguiría corriendo sin netns, con acceso directo a la WAN del host).
+BindsTo=hermes-browser-netns.service
+# NO PartOf=hermes-workspace.target — igual que el launcher: PartOf propagaba
+# paradas del proxy hacia el target, que a su vez podía parar el netns y
+# generar la race condition en el nft exec del siguiente ciclo de arranque.
+# BindsTo ya garantiza la invariante de seguridad (proxy muere si netns muere);
+# el ciclo de vida del proxy no necesita controlar el del target.
+
+[Service]
+Type=simple
+User=hermes-egress
+Group=hermes-egress
+# Join group hermes so the proxy (a) can create its control socket in /run/hermes
+# (0770 hermes:hermes) and (b) can chown that socket to group hermes so the daemon
+# (User=hermes) can connect to PUSH the per-task egress policy. Without this the
+# control socket never binds (PermissionError, silently swallowed) and the proxy
+# is stuck at default-deny forever → the browser/terminal can reach NO domain and
+# the owner can never elevate one. Least-privilege otherwise: no caps, no data.
+SupplementaryGroups=hermes
+
+ExecStart=/usr/bin/python3 -m hermes.egress_proxy
+
+# RestartSec=5: espera suficiente para que el netns (Requires+BindsTo) esté
+# en estado active antes del siguiente intento. Sin esto, un restart rápido
+# intenta arrancar cuando el netns aún está en teardown → cascade.
+# StartLimitBurst=3 en 60s: si el proxy falla 3 veces seguidas, algo está
+# roto en el netns/implementación. Ir a failed es correcto.
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+# ── Hardening ────────────────────────────────────────────────────────────────
+# Sin capabilities: el proxy no necesita operaciones privilegiadas.
+# La escucha en :3128 (puerto > 1024) no requiere CAP_NET_BIND_SERVICE.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+
+# Familias de sockets: AF_UNIX (socket de control root), AF_INET/AF_INET6
+# (escucha en 10.200.0.1:3128 y conexiones salientes WAN).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+# El proxy escribe logs de audit de dominios y lee el socket de control.
+ReadWritePaths=/run/hermes
+
+# El proxy NO está en el hermes-browser netns — corre en el host netns para
+# poder abrir conexiones WAN y recibir la política del daemon.
+
+[Install]
+WantedBy=hermes-workspace.target

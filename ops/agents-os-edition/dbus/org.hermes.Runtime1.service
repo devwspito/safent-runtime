@@ -1,0 +1,39 @@
+# D-Bus system-bus activation descriptor — org.hermes.Runtime (well-known name)
+# =============================================================================
+#
+# Este fichero habilita la ACTIVACIÓN POR BUS (bus activation) para el
+# well-known name "org.hermes.Runtime". Con este archivo, el bus D-Bus puede
+# arrancar hermes-runtime.service automáticamente la primera vez que un caller
+# autorizado intenta enviar a "org.hermes.Runtime" y el daemon no está vivo.
+#
+# INTEGRACIÓN CON SYSTEMD (T021 / CTRL-P1-13):
+#   SystemdService=hermes-runtime.service es la unidad que systemd arrancará
+#   cuando el bus reciba una petición para "org.hermes.Runtime" y el nombre
+#   no esté registrado. Esto cierra la brecha de arranque: el caller no obtiene
+#   un DBUS_ERROR_SERVICE_UNKNOWN si el daemon tarda en arrancar —
+#   el bus lo despierta automáticamente.
+#
+# RELACIÓN CON LA POLÍTICA .conf:
+#   Este archivo no define authZ; eso está en org.hermes.Runtime1.conf.
+#   Este archivo solo indica QUIÉN arranca cuando nadie atiende el nombre.
+#
+# NOTA DE SEGURIDAD (CTRL-P1-17 / hermes-runtime.service:NotifyAccess=main):
+#   La activación por bus está gatillada por el bus daemon (root), que llama a
+#   systemd para iniciar la unidad. La unidad ya tiene NotifyAccess=main —
+#   esto evita que el proceso de activación (distinto del PID principal del
+#   servicio) pueda falsificar el READY=1 (anti-spoof CTRL-P1-17, G3).
+#
+# INSTALACIÓN:
+#   cp ops/agents-os-edition/dbus/org.hermes.Runtime1.service \
+#      /usr/share/dbus-1/system-services/org.hermes.Runtime.service
+#   Bakeado en la imagen OCI vía Containerfile.
+#
+# VALIDACIÓN: dbus-send --system --print-reply --dest=org.hermes.Runtime \
+#   /org/hermes/Runtime org.freedesktop.DBus.Introspectable.Introspect
+#   (con el daemon corriendo) debe devolver el XML de org.hermes.Runtime1.
+
+[D-BUS Service]
+Name=org.hermes.Runtime
+Exec=/bin/false
+User=hermes
+SystemdService=hermes-runtime.service

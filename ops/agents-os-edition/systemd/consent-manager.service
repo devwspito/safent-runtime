@@ -1,0 +1,29 @@
+# consent-manager.service — solo perfil personal-desktop (FR-013 + FR-053).
+
+[Unit]
+Description=Hermes Consent Manager (xdg-portal + propios + Landlock reload)
+After=xdg-desktop-portal.service dbus.socket
+ConditionPathExists=/etc/hermes-consent-manager/profile-enabled
+
+[Service]
+Type=notify
+User=hermes
+Group=hermes
+ExecStart=/usr/bin/hermes-consent-manager --systemd-notify
+WatchdogSec=30
+Restart=always
+RestartSec=2
+
+Slice=agents-os.slice
+MemoryMax=512M
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# Sin esto, ProtectSystem=strict deja /var/lib/hermes en read-only y el
+# SQLiteConsentRepository falla con "unable to open database file" (crash-loop).
+ReadWritePaths=/var/lib/hermes
+
+[Install]
+WantedBy=multi-user.target

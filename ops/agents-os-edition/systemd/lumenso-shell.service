@@ -1,0 +1,50 @@
+# lumenso-shell.service — la shell NATIVA de LumenSO (reemplaza GNOME/GDM).
+#
+# cage = compositor Wayland kiosk: lanza UNA sola app fullscreen y nada más.
+# Aquí lanza lumen_shell (GTK4+WebKit con la UI premium cableada al daemon).
+# CERO GNOME, cero barra Fedora, cero máscara. Es lo PRIMERO que ves al bootear.
+#
+# Arranca en tty1 con sesión logind real (PAMName=login) para tener seat0 + DRM
+# (virtio-gpu) + input. gdm queda enmascarado (no hay escritorio GNOME).
+[Unit]
+Description=LumenSO Desktop (compositor Qt/QML anidado en cage — la cara nativa del SO)
+After=systemd-user-sessions.service plymouth-quit-wait.service hermes-runtime.service
+After=getty@tty1.service
+Conflicts=getty@tty1.service
+Wants=hermes-runtime.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/lumenso-compositor
+Restart=always
+RestartSec=2
+User=hermes-user
+SupplementaryGroups=video render input
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal+console
+UtmpIdentifier=tty1
+UtmpMode=user
+# El compositor Qt corre DIRECTO sobre DRM via eglfs (la ruta de render prevista en
+# el diseño pocket), SIN cage. Así sus errores QML salen a la consola tty1 → VISIBLES
+# por VNC (cage los tapaba). virtio-gpu + GBM + llvmpipe (software GL). Si eglfs fallara,
+# el error también se ve en pantalla. eglfs_kms = backend KMS/DRM.
+Environment=QT_QPA_PLATFORM=eglfs
+Environment=QT_QPA_EGLFS_INTEGRATION=eglfs_kms
+Environment=QT_QPA_EGLFS_ALWAYS_SET_MODE=1
+Environment=LIBGL_ALWAYS_SOFTWARE=1
+Environment=QT_QUICK_BACKEND=software
+Environment=QSG_RENDER_LOOP=basic
+Environment=HERMES_SHELL_BACKEND_URL=http://127.0.0.1:7517
+# Modo espejo remoto (Settings → Acceso remoto): si el flag existe, redefine
+# QT_QPA_PLATFORM=vnc:...:5900 (EnvironmentFile va DESPUÉS de Environment= →
+# su asignación GANA). El root helper (hermes-remote-access-control) lo
+# escribe/borra y relanza esta unit. Sin flag (boot normal) el `-` evita error.
+EnvironmentFile=-/etc/hermes/remote-display.env
+
+[Install]
+WantedBy=multi-user.target

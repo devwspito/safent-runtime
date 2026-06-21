@@ -1,0 +1,10 @@
+/*
+ * tokens-light.css — no cargado (la shell usa FORCE_DARK siempre).
+ * Archivo conservado para que _load_css_resource no falle si algún
+ * código lo referencia; contiene solo el acento de fallback para que
+ * un import accidental no rompa el tema.
+ */
+
+@define-color accent_bg_color  #6E56CF;
+@define-color accent_fg_color  #FFFFFF;
+@define-color accent_color     #6E56CF;

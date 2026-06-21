@@ -1,0 +1,45 @@
+# hermes-remote-gateway.service — reverse proxy de un solo origen (noVNC + clipboard).
+#
+# El quicktunnel de cloudflared apunta a ESTE gateway (127.0.0.1:6088), que enruta
+# /clipboard → :7519 (QClipboard del compositor) y el resto + WebSocket → :6080
+# (websockify/noVNC). Así el clipboard remoto viaja por el MISMO túnel y origen que
+# noVNC: un solo cloudflared, sin 2º túnel, sin watchdog, sin disparar el rate-limit
+# 429 de trycloudflare (causa raíz del clipboard remoto roto — fix 2026-06-11).
+#
+# NO arranca solo: lo enciende el root helper (hermes-remote-access-control) junto
+# con el túnel y noVNC cuando el operador activa "Acceso remoto".
+
+[Unit]
+Description=Hermes Remote Gateway (single-origin reverse proxy noVNC + clipboard)
+After=network-online.target hermes-novnc.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+ExecStart=/usr/libexec/hermes/hermes-remote-gateway
+Restart=always
+RestartSec=3
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# Workspace: lectura de los entregables del Cerebro para /files/<relpath>.
+# ReadOnlyPaths basta: el gateway SOLO sirve; nunca escribe en el workspace.
+# ProtectSystem=strict hace el resto del FS read-only → el gateway no puede
+# tocar nada fuera del workspace ni de /run. Principio de mínimo privilegio.
+ReadOnlyPaths=/var/lib/hermes/workspace
+# Loopback a :6080 (websockify) y :7519 (clipboard) + escucha en :6088.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

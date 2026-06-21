@@ -1,0 +1,167 @@
+[project]
+name = "hermes-runtime"
+version = "0.4.0"
+description = "Hermes: runtime agentico LLM reutilizable. ReasoningEngine + CapturingToolHost + PII tokenization + policy layer. Reemplaza dependencia de hermes-agent NousResearch por loop propio sobre LiteLLM."
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "luiscorrea2368@gmail.com" }]
+readme = "README.md"
+
+dependencies = [
+    "pydantic>=2.5",
+    "structlog>=24.0",
+    "tenacity>=8.0",
+    "rfc3161ng>=2.1",
+    "dbus-fast>=2.21",
+    "aiohttp>=3.13.4",
+    "composio==0.13.1",
+    "hermes-agent==0.15.1",
+]
+
+[project.optional-dependencies]
+# (nous-agent es ahora core, ya no opt-in.)
+# Browser automation (Tier 1 Stagehand default + Playwright + stealth + crypto).
+# Instalar con: pip install "hermes-runtime[browser]"
+browser = [
+    "playwright>=1.59,<2",
+    "stagehand-py>=3.20,<4",
+    "playwright-extra>=1.0,<2",
+    "cryptography>=44.0.1,<46",
+    "pytesseract>=0.3.10,<0.4",
+    "selectolax>=0.3.20,<0.4",
+]
+# OCR cloud fallback (Azure Document Intelligence EU, opt-in) + NER.
+ocr-cloud = [
+    "azure-ai-documentintelligence>=1.0,<2",
+    "spacy>=3.7,<4",
+]
+# Tier 2 discovery (browser-use) y Tier 3 computer-use opt-in.
+browser-extra = [
+    "browser-use>=0.12,<1",
+    "anthropic>=0.40,<1",
+]
+# Playwright MCP driver: learning-phase driver via @playwright/mcp server.
+# Runtime also needs: Node.js >= 18 + `npx @playwright/mcp` (Containerfile).
+browser-mcp = [
+    "mcp>=1.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff==0.15.14",
+    "mypy>=1.10",
+    "bandit>=1.7",
+    "pip-audit>=2.7",
+]
+# Hermes Shell — UI nativa del SO (GTK4 + libadwaita + FastAPI backend).
+# PyGObject viene del sistema (no de PyPI en Fedora); aquí solo el server.
+shell = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    # PyJWT with cryptography backend — required for Cloudflare Access RS256
+    # JWT verification in the mirror server (cf_access_verifier.py).
+    # PyJWT[crypto] ensures RSA algorithm support via cryptography>=3.4.
+    # cryptography is already a transitive dep; explicit pin avoids silent
+    # fallback to a version that lacks RSA support.
+    "PyJWT[crypto]>=2.7,<3",
+]
+# GEPA offline skill evolution (DSPy + Genetic-Pareto Prompt Evolution).
+# Instalación: pip install "hermes-runtime[evolution]"
+# Requiere además un modelo accesible vía env vars del provider LLM.
+# El core y la suite de tests funcionan SIN este extra instalado.
+# Lazy-import: solo GEPAEvolutionEngine falla en __init__ si dspy falta.
+evolution = [
+    "dspy-ai>=2.5,<4",
+]
+# Lumen Terminal — la UI de consola del SO (variante terminal-only + "corre en
+# cualquier máquina"). Reusa el cliente D-Bus headless; sin GTK/Qt. Textual es
+# el framework TUI (streaming-markdown nativo, command palette, temas).
+tui = [
+    "textual>=0.86",
+    "rich>=13.7",
+]
+
+[project.scripts]
+hermes-shell = "hermes.shell.presentation.gtk4.app:main"
+hermes-shell-server = "hermes.shell_server.main:main"
+agents-os-remote-control = "hermes.shell_server.remote_control.service:main"
+hermes-evolution = "hermes.training.evolution.__main__:main"
+hermes-tui = "hermes.tui.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"hermes.shell.presentation.gtk4" = ["css/*.css"]
+"hermes.lumen" = ["qml/*.qml", "qml/*.js", "qml/icons/*.svg", "qml/qmldir", "qml/fonts/*.ttf"]
+# spec 014: el overlay y las 6 capability apps reusan/llevan sus .qml; deben
+# horneárse en el wheel o QQmlApplicationEngine no los encuentra (file not found).
+"hermes.lumen.overlay" = ["*.qml"]
+"hermes.lumen.apps._base" = ["*.qml"]
+"hermes.lumen.apps.chat" = ["*.qml"]
+"hermes.lumen.apps.tasks" = ["*.qml"]
+"hermes.lumen.apps.security" = ["*.qml"]
+"hermes.lumen.apps.skills" = ["*.qml"]
+"hermes.lumen.apps.integrations" = ["*.qml"]
+"hermes.lumen.apps.memory" = ["*.qml"]
+"hermes.lumen.compositor" = ["qml/*.qml", "qml/qmldir"]
+# Lumen Terminal stylesheet — debe ir en el wheel o Textual no encuentra el TCSS
+# (CSS_PATH relativo al módulo app.py).
+"hermes.tui" = ["*.tcss"]
+"hermes.shell_server.mirror" = ["static/*.html"]
+# Lumen Cowork web UI — static assets served by shell-server (StaticFiles at
+# /webui). Keyed on the shell_server package (webui/ has no __init__.py); without
+# this the wheel ships no UI and the baked image serves a blank page.
+"hermes.shell_server" = ["webui/*.html", "webui/*.css", "webui/*.md", "webui/*.json", "webui/js/*.js", "webui/assets/*", "webui/vendor/*.js", "webui/vendor/*.mjs"]
+# Cert CA de freeTSA bakeado en el paquete (no por ruta de repo — se rompía
+# instalado en /usr/lib, ver tsa_external_anchor._load_bundled_cert).
+"hermes.capabilities.infrastructure" = ["*.crt"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "S", "ARG", "PIE", "RET", "SIM", "PL", "TID"]
+ignore = ["S101", "PLR0913"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S", "PLR2004", "PLC0415"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_decorators = false
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# CI base excluye markers que requieren binarios externos o redes.
+addopts = "-ra --strict-markers --strict-config -m 'not requires_chromium and not requires_llm and not requires_external_ocr and not integration and not requires_network and not requires_vm and not requires_openshell'"
+markers = [
+    "unit: pruebas unitarias puras",
+    "integration: pruebas con DB / red / sistemas externos (opt-in)",
+    "requires_chromium: requiere Chromium binario instalado via `playwright install`",
+    "requires_llm: requiere HERMES_MODEL + HERMES_API_KEY contra provider LLM real",
+    "requires_external_ocr: requiere endpoint Azure Document Intelligence EU configurado",
+    "requires_network: requiere red real a servicios externos (freeTSA.org, etc.) — excluido en CI base",
+    "requires_vm: requiere VM/hardware real con boot agents-os (slot D, T076) — excluido en CI base",
+    "requires_openshell: requiere openshell gateway up + sandbox chromium-jail Ready — excluido en CI base",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/hermes"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true

@@ -1,0 +1,14 @@
+# agents-os-pocket.target — system target for Agents OS Pocket (SBC) profile.
+#
+# Replaces graphical.target on the pocket profile:
+#   - No GDM, no gnome-session, no mutter.
+#   - hermes-compositor.service is the single display server.
+#
+# Units that WantedBy=agents-os-pocket.target start when this target activates.
+
+[Unit]
+Description=Agents OS Pocket (Qt/QML compositor profile)
+Documentation=https://github.com/hermes-os/hermes-runtime
+Requires=multi-user.target
+After=multi-user.target
+AllowIsolate=yes

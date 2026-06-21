@@ -1,0 +1,27 @@
+# agents-os-browser.slice — cgroup v2 slice para scopes transitorios del navegador.
+#
+# Hijo de agents-os.slice. Cada lanzamiento del navegador corre en un scope
+# transitorio dentro de este slice (via systemd-run --scope --slice=agents-os-browser.slice).
+# Garantiza:
+#   - OOM score alto: el kernel mata al browser antes que al daemon.
+#   - MemoryMax: limita el blast radius de un Chromium descontrolado.
+#   - Al morir el daemon (agents-os.slice), systemd mata todo el control-group
+#     → los procesos browser/Chromium no quedan huérfanos con cookies vivas.
+#
+# Diseño: specs/009-radiografia-os/kernel-browser-confinement-design.md §4
+# Referencia: hermes-runtime.service KillMode=control-group (FR-F03).
+
+[Unit]
+Description=Agents OS — Browser slice (scopes transitorios del navegador confinado)
+
+[Slice]
+# Máximo de RAM por todos los procesos navegador activos.
+# Ajustar según hardware del nodo; 4G es conservador para N sesiones concurrentes.
+MemoryMax=4G
+# Umbral de presión: desde este punto el kernel reclamará páginas agresivamente.
+MemoryHigh=3G
+# Los procesos browser tienen OOM score ajustado al alza — mueren antes que el daemon
+# (daemon tiene OOMScoreAdjust=-500 en hermes-runtime.service).
+OOMScoreAdjust=300
+# CPU weight bajo — el daemon (CPUWeight=200) tiene prioridad sobre el browser.
+CPUWeight=50

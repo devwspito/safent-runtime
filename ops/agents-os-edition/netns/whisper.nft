@@ -1,0 +1,32 @@
+#!/usr/sbin/nft -f
+# whisper.nft — Reglas nftables para hermes-whisper netns.
+# Ref: P0-3 (backlog.md), T039, FR-056, research §3
+#
+# Política: loopback ONLY. Sin acceso de red alguno.
+# Whisper opera completamente offline:
+#   - Recibe audio vía Unix socket desde hermes-runtime
+#   - Lee el modelo desde /opt/models/ (partición local read-only)
+#   - Escribe transcripciones en /run/hermes-whisper/ (tmpfs local)
+#
+# Nota: hermes-whisper.service usa PrivateNetwork=yes que crea un netns
+# propio vacío (solo loopback). Este archivo aplica reglas adicionales
+# de defensa en profundidad sobre ese netns privado.
+# Cargado por hermes-netns-setup.service en el netns hermes-whisper.
+
+table inet hermes_whisper {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        iif "lo" accept comment "loopback: IPC Unix socket con hermes-runtime"
+        log prefix "hermes_whisper INPUT DROP: " level warn
+    }
+
+    chain output {
+        type filter hook output priority 0; policy drop;
+        oif "lo" accept comment "loopback: respuestas a hermes-runtime"
+        log prefix "hermes_whisper OUTPUT DROP: " level warn
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+    }
+}

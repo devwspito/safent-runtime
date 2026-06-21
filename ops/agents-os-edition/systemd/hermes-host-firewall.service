@@ -1,0 +1,39 @@
+# hermes-host-firewall.service — Firewall de host INPUT default-deny.
+# Ref: remote-access hardening (noVNC 100%), capa 4.
+#
+# Carga /etc/nftables/hermes/host-input.nft en el host network namespace al boot,
+# ANTES de que la red se configure, de modo que ningún puerto inbound quede
+# alcanzable. El acceso remoto entra solo por el túnel cloudflared (outbound).
+#
+# NO bloquea: cloudflared (es outbound; su retorno es established/related),
+# noVNC vía el túnel (origen loopback, iif lo), ni la VNC de display de QEMU
+# (es host-side, no del guest). Egress intacto.
+
+[Unit]
+Description=Hermes — host inbound firewall (INPUT default-deny; remoto solo vía túnel)
+Documentation=file:///etc/nftables/hermes/host-input.nft
+DefaultDependencies=no
+After=systemd-tmpfiles-setup.service
+Before=network-pre.target hermes-novnc.service hermes-remote-tunnel.service
+Wants=network-pre.target
+ConditionPathExists=/etc/nftables/hermes/host-input.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=root
+ExecStart=/usr/sbin/nft -f /etc/nftables/hermes/host-input.nft
+ExecReload=/usr/sbin/nft -f /etc/nftables/hermes/host-input.nft
+# Fail-safe: NO se hace flush al parar — el firewall permanece puesto.
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

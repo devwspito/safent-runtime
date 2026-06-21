@@ -1,0 +1,78 @@
+# hermes-runtime-ready.target — T021 — US1 boot inversion gate (CTRL-P1-13)
+#
+# Semántica: "el agente está VIVO" — su criterio es READY=1 emitido por
+# hermes-runtime.service (Type=notify, sd_notify post-bootstrap()).
+# NO exige modelo de inferencia cargado: un daemon sin HERMES_MODEL
+# notifica READY=1 igualmente y queda en estado sano-ocioso (FR-002/SC-003).
+#
+# Posición en el grafo:
+#   sysinit.target → hermes-runtime.service → hermes-runtime-ready.target
+#                                                   ↑
+#                                           Before=multi-user.target
+#
+# Esto hace que multi-user.target NO se alcance hasta que el agente haya
+# anunciado READY=1 — sin modelo eso es ~1s; con modelo cargado, igual.
+#
+# agents-os-healthy.target y GDM consumen ESTE target (no el .service
+# directamente) para evitar acoplar el gate gráfico al servicio concreto.
+# Si en el futuro el agente se divide en unidades hijas, basta con ajustar
+# los Requires de este target.
+#
+# DefaultDependencies=no evita crear dependencias circulares implícitas
+# con targets de alto nivel (sysinit, basic) que systemd añade por defecto
+# a los targets normales. Este target es de bajo nivel y se ancla
+# explícitamente.
+#
+# OnFailure=hermes-rescue.target — T027 / F-1 — decisión de placement:
+#
+#   POR QUÉ AQUÍ y NO en agents-os-healthy.target:
+#   agents-os-healthy.target tiene JobTimeoutAction=reboot (OTA-rollback).
+#   Ese mecanismo actúa sobre el JOB de activación (el 300s-budget) y
+#   dispara reboot directamente SIN que la unidad llegue a estado 'failed'
+#   — por tanto, el OnFailure= del target padre nunca se activaría por
+#   timeout; es letra muerta en ese contexto.
+#
+#   hermes-runtime-ready.target, en cambio, entra en 'failed' cuando
+#   hermes-runtime.service agota su StartLimitBurst (10 reinicios en 60s)
+#   y pasa a estado 'failed' definitivo. En ese instante ES CORRECTO ir a
+#   rescate autenticado: el daemon está muerto, no es un timeout transitorio
+#   de slot B sino un fallo de liveness real.
+#
+#   Separación de responsabilidades:
+#     • Fallo de LIVENESS (daemon 'failed') → este target falla → rescate.
+#     • Gate de salud con TIMEOUT (slot B no arranca en 300s) → agents-os-
+#       healthy.target timeout → JobTimeoutAction=reboot → OTA-rollback.
+#   Los dos caminos son mutuamente excluyentes: el timeout aborta el job
+#   antes de que el unit llegue a 'failed', por lo que OnFailure no se
+#   dispara desde agents-os-healthy.target.
+#
+#   Validado en T076 (requires_vm): verificar que un daemon que no arranca
+#   activa rescue sin competir con el path de reboot del gate de salud.
+
+[Unit]
+Description=Hermes Runtime — liveness gate (agente VIVO, READY=1)
+DefaultDependencies=no
+OnFailure=hermes-rescue.target
+
+# Garantiza que el sistema base (dispositivos, montajes esenciales) esté
+# listo antes de intentar evaluar el agente.
+After=sysinit.target
+
+# El agente DEBE estar activo para que este target se alcance.
+# Requires (no Wants) → si hermes-runtime.service falla, este target falla
+# también y el boot no continúa hacia multi-user (→ rollback via JobTimeout
+# del agents-os-healthy.target que lo envuelve).
+Requires=hermes-runtime.service
+After=hermes-runtime.service
+
+# Ancla semántica: multi-user.target no se activa sin este target.
+# Ninguna sesión gráfica ni servicio de usuario arranca antes de que
+# el agente anuncie READY=1 (cierra el "GATE GRÁFICO AUSENTE" de US1).
+Before=multi-user.target
+
+[Install]
+# Instalado como dependencia de agents-os-healthy.target (que lleva el
+# JobTimeoutSec=300 → reboot/OTA-rollback). No se instala directamente
+# en multi-user.target para evitar doble dependencia (agents-os-healthy
+# ya está en WantedBy=multi-user.target).
+WantedBy=agents-os-healthy.target
