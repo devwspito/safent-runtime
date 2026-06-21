@@ -92,6 +92,7 @@ podman run -d --name "$NAME" --systemd=always \
   --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
   --security-opt "seccomp=${SECCOMP}" \
   --security-opt unmask=/sys/kernel/security \
+  --security-opt label=disable \
   -v /sys/kernel/security:/sys/kernel/security:ro \
   -v lumen-data:/var/lib/hermes \
   --shm-size=1g \

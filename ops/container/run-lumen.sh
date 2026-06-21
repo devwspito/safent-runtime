@@ -42,6 +42,13 @@ SECCOMP="${LUMEN_SECCOMP:-$HERE/seccomp/lumen.json}"
 #   --security-opt unmask=/sys/kernel/security  let hermes-landlock-assert read the
 #                       LSM list (read-only) to fail-closed if Landlock is absent.
 #   -v /sys/kernel/security:ro  expose securityfs read-only for the same check.
+#   --security-opt label=disable  on SELinux-enforcing hosts (Fedora/RHEL, and the
+#                       Fedora CoreOS VM that backs `podman machine` on macOS) SELinux
+#                       denies the container reading securityfs → the Landlock assert
+#                       wrongly sees "no Landlock" and fail-closes. Disabling the SELinux
+#                       label for THIS container restores the read (the cage's real
+#                       confinement is Landlock/seccomp/netns/uid inside, not the outer
+#                       SELinux label). No-op on AppArmor/no-LSM hosts.
 #   --shm-size=1g       Chromium needs a real /dev/shm.
 #   -v lumen-data       persist /var/lib/hermes (keystore, audit, config) across
 #                       image updates (so master.key / provider keys survive pull).
@@ -52,6 +59,7 @@ exec "$RUNTIME" run -d --name "$NAME" --systemd=always \
   --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
   --security-opt "seccomp=${SECCOMP}" \
   --security-opt unmask=/sys/kernel/security \
+  --security-opt label=disable \
   -v /sys/kernel/security:/sys/kernel/security:ro \
   -v lumen-data:/var/lib/hermes \
   --shm-size=1g \
