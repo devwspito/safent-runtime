@@ -180,6 +180,9 @@ interface ProviderRowProps {
 function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRowProps) {
   const [testing, setTesting] = useState(false)
   const [oauthPending, setOauthPending] = useState(false)
+  const [showKeyForm, setShowKeyForm] = useState(false)
+  const [apiKeyInput, setApiKeyInput] = useState('')
+  const [addingKey, setAddingKey] = useState(false)
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const label = badgeLabel(provider)
   const color = KIND_COLORS[label.toLowerCase()] ?? '#6B7280'
@@ -217,20 +220,24 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRow
     }
   }
 
-  async function handleAdd() {
-    const apiKey = window.prompt(`API key para ${name}:`)
-    if (!apiKey) return
+  async function handleAddConfirm() {
+    if (!apiKeyInput.trim()) { onToast('Introduce la API key', 'warn'); return }
+    setAddingKey(true)
     try {
       await addProvider({
         provider_id: id,
         alias: provider.alias ?? provider.name,
-        api_key: apiKey,
+        api_key: apiKeyInput.trim(),
         kind: provider.kind ?? provider.category,
       })
       onToast('Proveedor añadido', 'ok')
+      setShowKeyForm(false)
+      setApiKeyInput('')
       onRefresh()
     } catch (e) {
       onToast(e instanceof Error ? e.message : 'Error', 'error')
+    } finally {
+      setAddingKey(false)
     }
   }
 
@@ -354,12 +361,48 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRow
           >
             {oauthPending ? 'Conectando…' : 'Conectar'}
           </button>
-        ) : (
-          <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={handleAdd}>
+        ) : !showKeyForm ? (
+          <button
+            className="cv-btn cv-btn--secondary cv-btn--sm"
+            onClick={() => setShowKeyForm(true)}
+          >
             Añadir
           </button>
-        )}
+        ) : null}
       </div>
+
+      {/* Inline masked-input for API key — avoids window.prompt leaking the secret */}
+      {!isConfigured && !isOAuthProvider(provider) && showKeyForm && (
+        <div className="cv-form-inline" style={{ marginTop: 'var(--sp-3)', flexWrap: 'wrap', gap: 'var(--sp-2)' }}>
+          <label className="sr-only" htmlFor={`pv-key-${id}`}>API key para {name}</label>
+          <input
+            id={`pv-key-${id}`}
+            className="cv-input"
+            type="password"
+            autoComplete="new-password"
+            placeholder={`API key para ${name}`}
+            value={apiKeyInput}
+            onChange={e => setApiKeyInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') void handleAddConfirm() }}
+            style={{ flex: 1, minWidth: 180 }}
+          />
+          <button
+            className="cv-btn cv-btn--primary cv-btn--sm"
+            onClick={handleAddConfirm}
+            disabled={addingKey}
+            type="button"
+          >
+            {addingKey ? 'Guardando…' : 'Guardar'}
+          </button>
+          <button
+            className="cv-btn cv-btn--ghost cv-btn--sm"
+            onClick={() => { setShowKeyForm(false); setApiKeyInput('') }}
+            type="button"
+          >
+            Cancelar
+          </button>
+        </div>
+      )}
     </div>
   )
 }

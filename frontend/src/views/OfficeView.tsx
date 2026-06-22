@@ -1,7 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { sileo } from 'sileo'
 
-import { getAgentRoster, getRuntimeStatus, listMcpServers, createAgent } from '../api/client'
+import { getAgentRoster, getRuntimeStatus, listMcpServers, createAgent, setActiveAgent } from '../api/client'
 import type { AgentRoster, RosterAgent, RosterDepartment, RuntimeStatus, CreateAgentPayload } from '../api/types'
 import type { LumenAgent, LumenRuntimeStatus } from './office-live/engine/office-state'
 
@@ -78,16 +79,22 @@ interface DeptSelectorProps {
 }
 
 function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
+  // showCustom tracks whether the user explicitly chose "Nuevo departamento…"
+  // We never mirror value back into a separate local state — the parent owns it.
   const [showCustom, setShowCustom] = useState(false)
-  const [customVal, setCustomVal] = useState('')
   const customRef = useRef<HTMLInputElement>(null)
 
   const existingNames = departments.map((d) => d.name)
+
+  // If the current value isn't in the list it must be a custom entry
+  const isCustom = value !== '' && !existingNames.includes(value)
+  const showInput = showCustom || isCustom
 
   function handleSelectChange(e: React.ChangeEvent<HTMLSelectElement>) {
     const v = e.target.value
     if (v === '__new__') {
       setShowCustom(true)
+      onChange('')
       setTimeout(() => customRef.current?.focus(), 0)
     } else {
       setShowCustom(false)
@@ -96,16 +103,17 @@ function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
   }
 
   function handleCustomChange(e: React.ChangeEvent<HTMLInputElement>) {
-    setCustomVal(e.target.value)
     onChange(e.target.value)
   }
 
-  // If the current value isn't in the list, show the custom input
-  const isCustom = value !== '' && !existingNames.includes(value)
+  function handleClear() {
+    setShowCustom(false)
+    onChange('')
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-1)' }}>
-      {!showCustom && !isCustom ? (
+      {!showInput ? (
         <select
           id={id}
           className="office-field-input"
@@ -125,7 +133,7 @@ function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
             id={id}
             type="text"
             className="office-field-input"
-            value={isCustom ? value : customVal}
+            value={value}
             onChange={handleCustomChange}
             placeholder="Nombre del nuevo departamento"
             maxLength={60}
@@ -135,11 +143,7 @@ function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
             type="button"
             className="office-btn office-btn--ghost"
             style={{ height: 36, padding: '0 var(--sp-3)', fontSize: 'var(--text-label)' }}
-            onClick={() => {
-              setShowCustom(false)
-              setCustomVal('')
-              onChange('')
-            }}
+            onClick={handleClear}
           >
             ✕
           </button>
@@ -323,12 +327,35 @@ function AgentDrawer({ agent, isWorking, onClose, onClone }: AgentDrawerProps) {
   const navigate = useNavigate()
   const initials = agent.name.charAt(0).toUpperCase()
   const isFactory = agent.source === 'ruflo'
+  const [activating, setActivating] = useState(false)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose])
+
+  async function handleChat() {
+    // Activate the agent if it's not the default, then navigate to /chat
+    if (!agent.is_default) {
+      setActivating(true)
+      try {
+        await setActiveAgent(agent.id)
+        sileo.success({ title: `${agent.name} ahora está activo` })
+      } catch {
+        sileo.warning({ title: `No se pudo activar ${agent.name}` })
+      } finally {
+        setActivating(false)
+      }
+    }
+    navigate('/chat')
+    onClose()
+  }
+
+  // Strip the "custom:<slug>" namespace the backend uses when displaying the dept label
+  const deptLabel = agent.department
+    ? agent.department.replace(/^custom:/i, '')
+    : ''
 
   return (
     <div
@@ -349,8 +376,8 @@ function AgentDrawer({ agent, isWorking, onClose, onClone }: AgentDrawerProps) {
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <h2 id="agent-drawer-title" className="office-drawer-title">{agent.name}</h2>
-            {agent.department && (
-              <p className="agent-role" style={{ margin: 0 }}>{agent.department}</p>
+            {deptLabel && (
+              <p className="agent-role" style={{ margin: 0 }}>{deptLabel}</p>
             )}
           </div>
           {agent.is_default && <span className="badge">Cerebro</span>}
@@ -390,9 +417,11 @@ function AgentDrawer({ agent, isWorking, onClose, onClone }: AgentDrawerProps) {
             <button
               type="button"
               className="office-btn office-btn--primary"
-              onClick={() => { navigate('/chat'); onClose() }}
+              onClick={handleChat}
+              disabled={activating}
+              aria-busy={activating}
             >
-              Chatear
+              {activating ? 'Activando…' : 'Chatear'}
             </button>
 
             {isFactory ? (
@@ -558,6 +587,7 @@ interface TarjetasViewProps {
   runtimeStatus: RuntimeStatus
   hasRuflo: boolean
   onRosterChange: (roster: AgentRoster) => void
+  onRosterRefetch: () => void
 }
 
 interface ClonePrefill {
@@ -566,7 +596,7 @@ interface ClonePrefill {
   department: string
 }
 
-function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterChange }: TarjetasViewProps) {
+function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch }: TarjetasViewProps) {
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [clonePrefill, setClonePrefill] = useState<ClonePrefill | undefined>(undefined)
   const [selectedAgent, setSelectedAgent] = useState<RosterAgent | null>(null)
@@ -578,28 +608,12 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterChange }: Tarje
   const customDepts = roster.departments.filter((d) => d.kind === 'custom')
   const hasCustomDepts = customDepts.length > 0
 
-  function handleAgentCreated(agent: RosterAgent) {
-    // Insert the new custom agent into the appropriate department or create one
-    const targetDeptName = agent.department || 'Mis agentes'
-    const existing = roster.departments.find(
-      (d) => d.kind === 'custom' && d.name === targetDeptName,
-    )
-    if (existing) {
-      const updatedDepts = roster.departments.map((d) =>
-        d.id === existing.id ? { ...d, agents: [...d.agents, agent] } : d,
-      )
-      onRosterChange({ departments: updatedDepts })
-    } else {
-      const newDept: RosterDepartment = {
-        id: `custom-${targetDeptName.toLowerCase().replace(/\s+/g, '-')}`,
-        name: targetDeptName,
-        kind: 'custom',
-        agents: [agent],
-      }
-      onRosterChange({ departments: [...roster.departments, newDept] })
-    }
+  function handleAgentCreated(_agent: RosterAgent) {
+    // Re-fetch the canonical roster from the server — avoids stale ids and
+    // the custom:<slug> namespace the backend now uses.
     setShowCreateModal(false)
     setClonePrefill(undefined)
+    onRosterRefetch()
   }
 
   function handleCloneRequest(agent: RosterAgent) {
@@ -731,11 +745,25 @@ export default function OfficeView() {
   const navigate = useNavigate()
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // ── Initial load ─────────────────────────────────────────────────────────
+  // ── Initial load + programmatic refetch ──────────────────────────────────
+  const load = useCallback(async () => {
+    try {
+      const [roster, runtimeStatus, mcpServers] = await Promise.all([
+        getAgentRoster(),
+        getRuntimeStatus(),
+        listMcpServers(),
+      ])
+      const hasRuflo = mcpServers.some((s) => s.slug === 'ruflo')
+      dispatch({ type: 'LOADED', roster, runtimeStatus, hasRuflo })
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'No se pudo cargar la oficina.'
+      dispatch({ type: 'FAILED', message })
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
-
-    async function load() {
+    const run = async () => {
       try {
         const [roster, runtimeStatus, mcpServers] = await Promise.all([
           getAgentRoster(),
@@ -753,8 +781,7 @@ export default function OfficeView() {
         }
       }
     }
-
-    void load()
+    void run()
     return () => { cancelled = true }
   }, [])
 
@@ -772,9 +799,21 @@ export default function OfficeView() {
     }
   }, [])
 
-  const handleAgentClick = useCallback((agentId: string, _agentName: string) => {
-    navigate(`/chat?agent_id=${encodeURIComponent(agentId)}`)
-  }, [navigate])
+  const handleAgentClick = useCallback(async (agentId: string, agentName: string) => {
+    // Activate the clicked agent, then navigate to /chat
+    const agent = state.status === 'ready'
+      ? state.roster.departments.flatMap(d => d.agents).find(a => a.id === agentId)
+      : undefined
+    if (agent && !agent.is_default) {
+      try {
+        await setActiveAgent(agentId)
+        sileo.success({ title: `${agentName} ahora está activo` })
+      } catch {
+        sileo.warning({ title: `No se pudo activar ${agentName}` })
+      }
+    }
+    navigate('/chat')
+  }, [navigate, state])
 
   // Fullscreen for the live floor — many users want the office maximised.
   const liveRef = useRef<HTMLDivElement>(null)
@@ -864,6 +903,7 @@ export default function OfficeView() {
                     hasRuflo: state.hasRuflo,
                   })
                 }
+                onRosterRefetch={load}
               />
             )}
 

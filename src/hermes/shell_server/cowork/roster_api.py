@@ -172,8 +172,8 @@ async def _load_ruflo_catalog_live(proxy: Any) -> list[dict[str, str]] | None:
                 catalog = _ruflo_catalog_from_mcp_tools(tools)
                 logger.info("hermes.roster.ruflo_catalog_live tools=%d", len(catalog))
                 return catalog
-    except (AgentUnavailable, Exception):  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.roster.ruflo_catalog_live_failed error=%s", exc)
     return None
 
 
@@ -273,13 +273,14 @@ def _build_custom_departments(agents: list[dict[str, Any]]) -> list[dict[str, An
             "agents": cerebro_agents,
         })
 
-    # Named custom departments (alpha by dept id).
-    for dept_id in sorted(dept_buckets):
+    # Named custom departments (alpha by slug; namespaced id prevents collision
+    # with factory dept ids such as "writing", "coding", "support", etc.).
+    for slug in sorted(dept_buckets):
         departments.append({
-            "id": dept_id,
-            "name": dept_id.replace("-", " ").title(),
+            "id": f"custom:{slug}",
+            "name": slug.replace("-", " ").title(),
             "kind": "custom",
-            "agents": dept_buckets[dept_id],
+            "agents": dept_buckets[slug],
         })
 
     # Mis agentes bucket (custom agents with no department).

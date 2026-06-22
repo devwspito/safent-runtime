@@ -130,6 +130,10 @@ export function getActiveAgent(): Promise<ActiveAgentResponse> {
   )
 }
 
+export function setActiveAgent(agentId: string): Promise<unknown> {
+  return request<unknown>(`/agents/${encodeURIComponent(agentId)}/activate`, { method: 'POST' })
+}
+
 export function createAgent(payload: CreateAgentPayload): Promise<Agent> {
   return request<Agent>('/agents', { method: 'POST', body: JSON.stringify(payload) })
 }

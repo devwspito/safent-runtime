@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { listConversations } from '../api/client'
+import { useChat } from '../hooks/useChat'
 import type { ConversationSummary } from '../api/types'
 
 interface NavItem {
@@ -139,25 +140,24 @@ function truncate(s: string, n: number) {
   return s.length > n ? s.slice(0, n) + '…' : s
 }
 
-// ChatContext exposes the active conversation id and loadConversation so that
-// Recentes can highlight the current conversation and load a selected one.
-// We pass these in via props from Layout → ChatView bridge via context.
-// Since Layout doesn't directly own useChat, we use a lightweight shared context.
+// ── ChatOutletContext — shared between RecentsSection (in nav) and ChatView ──
 
-interface ChatBridgeContextValue {
+export interface ChatOutletContext {
+  convId: string | null
+  loadConversation(id: string): Promise<void>
+  startNew(): void
+  sendMessage(text: string): Promise<void>
+  messages: ReturnType<typeof useChat>['messages']
+  status: ReturnType<typeof useChat>['status']
+  stopStream(): void
+}
+
+interface RecentsSectionProps {
   activeConvId: string | null
   loadConversation(id: string): Promise<void>
 }
 
-import { createContext, useContext } from 'react'
-
-export const ChatBridgeContext = createContext<ChatBridgeContextValue>({
-  activeConvId: null,
-  loadConversation: async () => {},
-})
-
-function RecentsSection() {
-  const { activeConvId, loadConversation } = useContext(ChatBridgeContext)
+function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps) {
   const navigate = useNavigate()
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -266,6 +266,17 @@ function RecentsSection() {
 }
 
 export default function Layout() {
+  const navigate = useNavigate()
+
+  // Chat state lives here, above both the sidebar nav (RecentsSection) and
+  // the main content area (ChatView). ChatView receives it via outlet context.
+  const chat = useChat()
+
+  function handleNewChat() {
+    chat.startNew()
+    navigate('/chat')
+  }
+
   return (
     <div className="app-shell">
       <nav className="sidebar" aria-label="Navegación principal">
@@ -277,20 +288,24 @@ export default function Layout() {
           </div>
         </div>
 
-        {/* New chat button */}
-        <NavLink
-          to="/chat"
+        {/* New chat button — always resets the conversation */}
+        <button
           className="sidebar-new-chat"
           aria-label="Nuevo chat"
+          type="button"
+          onClick={handleNewChat}
         >
           <PlusIcon />
           Nuevo chat
-        </NavLink>
+        </button>
 
         {/* Scrollable area */}
         <div className="sidebar-scroll">
-          {/* Recientes */}
-          <RecentsSection />
+          {/* Recientes — reads activeConvId directly from the lifted chat state */}
+          <RecentsSection
+            activeConvId={chat.convId}
+            loadConversation={chat.loadConversation}
+          />
 
           {/* Main nav */}
           <div className="sidebar-nav">
@@ -322,7 +337,16 @@ export default function Layout() {
       </nav>
 
       <main className="main-content" id="main-content" tabIndex={-1}>
-        <Outlet />
+        {/* Pass the shared chat state down to ChatView via outlet context */}
+        <Outlet context={{
+          convId: chat.convId,
+          loadConversation: chat.loadConversation,
+          startNew: chat.startNew,
+          sendMessage: chat.sendMessage,
+          messages: chat.messages,
+          status: chat.status,
+          stopStream: chat.stopStream,
+        } satisfies ChatOutletContext} />
       </main>
     </div>
   )

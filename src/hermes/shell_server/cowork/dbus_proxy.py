@@ -23,6 +23,8 @@ import os
 from typing import Any
 from uuid import UUID
 
+from fastapi import HTTPException
+
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
 logger = logging.getLogger("hermes.shell_server.cowork.dbus_proxy")
@@ -172,11 +174,45 @@ def _parse_dict(raw: Any) -> dict:
 
 
 def _translate_dbus_error(exc: Exception, member: str) -> None:
+    """Translate a D-Bus exception into the appropriate Python exception.
+
+    Branches on the structured D-Bus error name before falling back to the
+    error message string, so that daemon validation errors reach the caller
+    as 4xx rather than collapsing everything into 503 agent_unavailable.
+
+    Raises:
+        HTTPException(422): daemon rejected the request as invalid input.
+        HTTPException(401): daemon rejected the request as unauthorized.
+        AgentUnavailable: genuine unavailability; callers render 503.
+    """
+    # dbus-fast exposes the error name on DBusError as .type or .text prefix.
+    err_name: str = ""
+    if hasattr(exc, "type") and exc.type:  # type: ignore[union-attr]
+        err_name = str(exc.type)
+    elif hasattr(exc, "text") and exc.text:  # type: ignore[union-attr]
+        err_name = str(exc.text).split(":")[0].strip()
+
+    if err_name == "org.hermes.Error.InvalidInput":
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_input", "message": str(exc)},
+        ) from exc
+
+    if err_name == "org.hermes.Error.Unauthorized":
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "unauthorized", "message": str(exc)},
+        ) from exc
+
+    # Legacy string-match kept as a secondary guard for older daemon builds
+    # that may not emit the structured error name.
     err_str = str(exc).lower()
     if "notauthorized" in err_str or "accessdenied" in err_str:
-        raise AgentUnavailable(
-            f"D-Bus authorization denied for {member}: {exc}"
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "unauthorized", "message": str(exc)},
         ) from exc
+
     raise AgentUnavailable(
         f"org.hermes.Runtime1.{member} unavailable: {exc}"
     ) from exc

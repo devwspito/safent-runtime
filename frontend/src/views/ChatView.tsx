@@ -1,10 +1,10 @@
 /**
  * ChatView — streaming chat with the Lumen agent.
  *
- * Layout: topbar / scrollable message list / composer (matches the vanilla
- * #center column). Sidebar recents are shown in the parent Layout's sidebar slot
- * via context (not done here — the sidebar is a separate concern). The chat
- * logic lives in useChat; this component is purely presentational.
+ * Chat state is owned by Layout and passed down via outlet context so that
+ * RecentsSection (in the sidebar) and ChatView share the same instance.
+ * This file is purely presentational — all state mutations go through
+ * the outlet context.
  */
 
 import {
@@ -16,12 +16,11 @@ import {
   type KeyboardEvent,
   type ChangeEvent,
 } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { useChat } from '../hooks/useChat'
+import { useNavigate, useOutletContext } from 'react-router-dom'
 import type { ChatMessage, ToolStep } from '../hooks/useChat'
 import { listProviders, uploadWorkspaceFile, ApiError } from '../api/client'
 import type { Provider } from '../api/types'
-import { ChatBridgeContext } from '../components/Layout'
+import type { ChatOutletContext } from '../components/Layout'
 import ContextPanel from '../components/ContextPanel'
 
 // ── i18n strings (ES, matching vanilla i18n.js) ───────────────────────────────
@@ -144,12 +143,25 @@ function ThinkingBlock({ text, done }: ThinkingBlockProps) {
 
 interface UserMessageProps {
   text: string
+  failed?: boolean
 }
 
-function UserMessage({ text }: UserMessageProps) {
+function UserMessage({ text, failed }: UserMessageProps) {
   return (
-    <div className="message message--user" role="article" aria-label="Tu mensaje">
+    <div
+      className={`message message--user${failed ? ' message--failed' : ''}`}
+      role="article"
+      aria-label="Tu mensaje"
+    >
       <div className="message__bubble">{text}</div>
+      {failed && (
+        <p
+          style={{ fontSize: 'var(--text-caption)', color: 'var(--danger)', margin: '4px 0 0' }}
+          role="alert"
+        >
+          No se pudo enviar
+        </p>
+      )}
     </div>
   )
 }
@@ -216,6 +228,28 @@ function StatusBar({ phase, text }: StatusBarProps) {
     >
       {!isError && <SpinnerIcon />}
       <span>{text}</span>
+    </div>
+  )
+}
+
+// ── No-model CTA banner ───────────────────────────────────────────────────────
+
+function NoModelBanner() {
+  const navigate = useNavigate()
+  return (
+    <div
+      className="chat-status chat-status--error"
+      role="alert"
+      style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 'var(--sp-3)' }}
+    >
+      <span>Sin modelo configurado. Conecta un proveedor para empezar a chatear.</span>
+      <button
+        type="button"
+        className="cv-btn cv-btn--primary cv-btn--sm"
+        onClick={() => navigate('/proveedores')}
+      >
+        Ir a Proveedores
+      </button>
     </div>
   )
 }
@@ -583,15 +617,28 @@ function SpinnerIcon() {
 // ── ChatView ──────────────────────────────────────────────────────────────────
 
 export default function ChatView() {
-  const { messages, status, sendMessage, stopStream, convId, loadConversation } = useChat()
+  // All chat state comes from Layout via outlet context — no duplicate useChat instance.
+  const { messages, status, sendMessage, stopStream } = useOutletContext<ChatOutletContext>()
   const [composerText, setComposerText] = useState('')
   const [panelOpen, setPanelOpen] = useState(false)
+  const [showNoModel, setShowNoModel] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
   const userScrolledRef = useRef(false)
   const pinRef = useRef(true)
 
   const isStreaming = status.phase === 'streaming' || status.phase === 'sending'
   const showWelcome = messages.length === 0
+
+  // Detect no-model 409 error and show the actionable CTA instead of the dead bar
+  useEffect(() => {
+    if (status.phase === 'error') {
+      const msg = (status as { phase: 'error'; message: string }).message ?? ''
+      const isNoModel = msg.includes('409') || /sin modelo|no model|no provider|no.*provider/i.test(msg)
+      setShowNoModel(isNoModel)
+    } else {
+      setShowNoModel(false)
+    }
+  }, [status])
 
   // Scroll pinning — matches vanilla scrollToBottom logic
   useEffect(() => {
@@ -618,7 +665,8 @@ export default function ChatView() {
     userScrolledRef.current = false
     pinRef.current = true
     setComposerText('')
-    sendMessage(text)
+    setShowNoModel(false)
+    void sendMessage(text)
   }, [sendMessage])
 
   const handleSuggestion = useCallback((text: string) => {
@@ -627,11 +675,11 @@ export default function ChatView() {
 
   const statusText = status.phase === 'streaming' ? status.statusText
     : status.phase === 'sending' ? 'Enviando…'
-    : status.phase === 'error' ? status.message
+    : status.phase === 'error' && !showNoModel ? (status as { phase: 'error'; message: string }).message
     : undefined
 
   return (
-    <ChatBridgeContext.Provider value={{ activeConvId: convId, loadConversation }}>
+    <>
       {/* Outer shell: chat column + optional context panel */}
       <div className="chat-shell">
         <div className="chat-view">
@@ -672,8 +720,12 @@ export default function ChatView() {
             )}
           </div>
 
-          {/* Status bar */}
-          <StatusBar phase={status.phase} text={statusText} />
+          {/* No-model CTA replaces the dead error bar */}
+          {showNoModel ? (
+            <NoModelBanner />
+          ) : (
+            <StatusBar phase={status.phase} text={statusText} />
+          )}
 
           {/* Composer */}
           <Composer
@@ -691,6 +743,6 @@ export default function ChatView() {
           <ContextPanel onClose={() => setPanelOpen(false)} />
         )}
       </div>
-    </ChatBridgeContext.Provider>
+    </>
   )
 }

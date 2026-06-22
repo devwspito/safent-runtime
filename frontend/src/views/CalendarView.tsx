@@ -63,8 +63,11 @@ function buildCron({ mode, days, date, time }: {
   const min = parseInt(mm, 10) || 0
   const hour = parseInt(hh, 10) || 0
   if (mode === 'once') {
-    const [, mo, dd] = (date || '').split('-')
-    return `${min} ${hour} ${parseInt(dd, 10)} ${parseInt(mo, 10)} *`
+    // Carry yyyy-mm-dd in full so tasksForDate can match the exact year.
+    // Store as "min hour dd mo yyyy" (non-standard 6-field) — tasksForDate
+    // and the backend use next_run_at for scheduling; this is only for the UI.
+    const [yyyy, mo, dd] = (date || '').split('-')
+    return `${min} ${hour} ${parseInt(dd, 10)} ${parseInt(mo, 10)} * ${parseInt(yyyy, 10)}`
   }
   if (days.length === 0 || days.length === 7) return `${min} ${hour} * * *`
   const dow = days.map(d => (d === 6 ? 0 : d + 1)).sort((a, b) => a - b).join(',')
@@ -77,12 +80,25 @@ const ymd = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.
 function tasksForDate(date: Date, tasks: ConfiguredTask[]): Array<{ task: ConfiguredTask; time: string }> {
   const out: Array<{ task: ConfiguredTask; time: string }> = []
   const monIdx = (date.getDay() + 6) % 7
-  const dd = date.getDate(), mo = date.getMonth() + 1
+  const dd = date.getDate(), mo = date.getMonth() + 1, yyyy = date.getFullYear()
   for (const tk of tasks) {
     const cron = taskCron(tk)
     if (tk.one_shot) {
+      // Prefer backend next_run_at for exact matching (avoids year ambiguity)
+      if (tk.next_run_at) {
+        const nr = new Date(tk.next_run_at)
+        if (nr.getDate() === dd && nr.getMonth() + 1 === mo && nr.getFullYear() === yyyy) {
+          out.push({ task: tk, time: `${String(nr.getHours()).padStart(2,'0')}:${String(nr.getMinutes()).padStart(2,'0')}` })
+        }
+        continue
+      }
+      // Fallback: parse the 6-field cron we build (min hour dd mo * yyyy)
       const p = (cron || '').trim().split(/\s+/)
-      if (p.length >= 4 && parseInt(p[2], 10) === dd && parseInt(p[3], 10) === mo) {
+      const cronDd = parseInt(p[2] ?? '', 10)
+      const cronMo = parseInt(p[3] ?? '', 10)
+      const cronYyyy = p.length >= 6 ? parseInt(p[5] ?? '', 10) : NaN
+      const yearMatches = isNaN(cronYyyy) || cronYyyy === yyyy
+      if (cronDd === dd && cronMo === mo && yearMatches) {
         out.push({ task: tk, time: parseCron(cron).time })
       }
     } else {
@@ -526,6 +542,7 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
   const [mode, setMode] = useState<'recurrent' | 'once'>(presetDate ? 'once' : 'recurrent')
   const [selectedDays, setSelectedDays] = useState<Set<number>>(new Set())
   const [creating, setCreating] = useState(false)
+  const [fieldErrors, setFieldErrors] = useState<{ name?: string; prompt?: string; date?: string; days?: string }>({})
   const nameRef = useRef<HTMLInputElement>(null)
   const promptRef = useRef<HTMLTextAreaElement>(null)
   const timeRef = useRef<HTMLInputElement>(null)
@@ -554,14 +571,31 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
   async function handleCreate() {
     const name = nameRef.current?.value.trim() ?? ''
     let prompt = promptRef.current?.value.trim() ?? ''
-    if (!name || !prompt) { return }
+    const errors: typeof fieldErrors = {}
+
+    if (!name || !prompt) {
+      if (!name) errors.name = 'Pon nombre e instrucción'
+      if (!prompt) errors.prompt = 'Pon nombre e instrucción'
+      setFieldErrors(errors)
+      show('Pon nombre e instrucción', 'warn')
+      return
+    }
 
     if (mode === 'once') {
       const date = dateRef.current?.value ?? ''
-      if (!date) { return }
+      if (!date) {
+        setFieldErrors({ date: 'Elige una fecha' })
+        show('Elige una fecha', 'warn')
+        return
+      }
     } else {
-      if (selectedDays.size === 0) { return }
+      if (selectedDays.size === 0) {
+        setFieldErrors({ days: 'Selecciona al menos un día' })
+        show('Selecciona al menos un día', 'warn')
+        return
+      }
     }
+    setFieldErrors({})
 
     const time = timeRef.current?.value || '09:00'
     const timeEnd = timeEndRef.current?.value
@@ -615,7 +649,12 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
               type="text"
               placeholder="Informe diario de ventas"
               autoComplete="off"
+              aria-describedby={fieldErrors.name ? 'tm-name-err' : undefined}
+              aria-invalid={fieldErrors.name ? true : undefined}
             />
+            {fieldErrors.name && (
+              <p id="tm-name-err" role="alert" className="office-field-error">{fieldErrors.name}</p>
+            )}
 
             <label className="cv-label" htmlFor="tm-prompt">Instrucción</label>
             <textarea
@@ -624,7 +663,12 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
               className="cv-textarea"
               rows={3}
               placeholder="Qué debe hacer Lumen…"
+              aria-describedby={fieldErrors.prompt ? 'tm-prompt-err' : undefined}
+              aria-invalid={fieldErrors.prompt ? true : undefined}
             />
+            {fieldErrors.prompt && (
+              <p id="tm-prompt-err" role="alert" className="office-field-error">{fieldErrors.prompt}</p>
+            )}
 
             <label className="cv-label" htmlFor="tm-mode">Frecuencia</label>
             <select
@@ -640,7 +684,10 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
             {mode === 'recurrent' && (
               <>
                 <label className="cv-label">¿Qué días?</label>
-                <div className="day-chips">
+                <div
+                  className="day-chips"
+                  aria-describedby={fieldErrors.days ? 'tm-days-err' : undefined}
+                >
                   {DOW_LABELS.map((label, i) => (
                     <button
                       key={i}
@@ -661,6 +708,9 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
                     Todos los días
                   </button>
                 </div>
+                {fieldErrors.days && (
+                  <p id="tm-days-err" role="alert" className="office-field-error">{fieldErrors.days}</p>
+                )}
               </>
             )}
 
@@ -673,7 +723,12 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
                   className="cv-input"
                   type="date"
                   defaultValue={presetDate ?? undefined}
+                  aria-describedby={fieldErrors.date ? 'tm-date-err' : undefined}
+                  aria-invalid={fieldErrors.date ? true : undefined}
                 />
+                {fieldErrors.date && (
+                  <p id="tm-date-err" role="alert" className="office-field-error">{fieldErrors.date}</p>
+                )}
               </>
             )}
 

@@ -49,25 +49,21 @@ function getRunner(argv: string | string[] | undefined): string {
     .pop() ?? ''
 }
 
-// Mirrors mcp.js BYOK env collection using the browser prompt (same as vanilla promptDialog).
-async function collectEnv(
-  entry: McpRegistryEntry,
-): Promise<Record<string, string> | null> {
+// EnvField schema derived from entry.env_vars
+interface EnvFieldSchema {
+  key: string
+  label: string
+  required: boolean
+  secret: boolean
+}
+
+function parseEnvSchema(entry: McpRegistryEntry): EnvFieldSchema[] {
   const rawVars = entry.env_vars ?? []
-  const schema = rawVars.map(v =>
+  return rawVars.map(v =>
     typeof v === 'string'
-      ? { key: v, label: v, required: false, secret: false }
-      : v,
+      ? { key: v, label: v, required: false, secret: true }
+      : { key: v.key, label: v.label ?? v.key, required: Boolean(v.required), secret: Boolean(v.secret ?? true) },
   )
-  const env: Record<string, string> = {}
-  for (const field of schema) {
-    const label = `${field.label ?? field.key}${field.required ? ' *' : ''}`
-    const val = window.prompt(label)
-    if (val === null) { if (field.required) return null; continue }
-    if (val.trim()) env[field.key] = val.trim()
-    else if (field.required) return null
-  }
-  return env
 }
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -120,14 +116,13 @@ export default function McpView() {
     ? new Set(state.servers.map(s => s.server_id ?? s.id ?? ''))
     : new Set<string>()
 
-  async function installEntry(entry: McpRegistryEntry, onDone: () => void) {
+  async function installEntry(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void) {
     const runner = getRunner(entry.argv)
     if (runner && runner !== 'npx') {
       show(`Solo se admiten servidores npx por ahora (este usa ${runner}).`, 'warn', 7000)
+      onDone()
       return
     }
-    const collectedEnv = await collectEnv(entry)
-    if (collectedEnv === null) return
 
     const argv = Array.isArray(entry.argv)
       ? entry.argv
@@ -147,9 +142,9 @@ export default function McpView() {
         show(`Servidor "${name}" añadido`, 'ok')
       }
       load()
-      onDone()
     } catch (e) {
       show(e instanceof Error ? e.message : 'Error', 'error')
+    } finally {
       onDone()
     }
   }
@@ -321,23 +316,43 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
 interface CatalogCardProps {
   entry: McpRegistryEntry
   installedIds: Set<string>
-  onInstall: (entry: McpRegistryEntry, onDone: () => void) => void
+  onInstall: (entry: McpRegistryEntry, env: Record<string, string>, onDone: () => void) => void
 }
 
 function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
   const [installing, setInstalling] = useState(false)
+  const [showEnvForm, setShowEnvForm] = useState(false)
+  const [envValues, setEnvValues] = useState<Record<string, string>>({})
   const id = entry.server_id ?? entry.id ?? slugify(entry.name ?? '')
   const already = installedIds.has(id) || installedIds.has(entry.server_id ?? '')
   const runner = getRunner(entry.argv)
   const nonNpx = runner !== '' && runner !== 'npx'
   const unsupported = entry.installable === false || nonNpx
   const argv = Array.isArray(entry.argv) ? entry.argv.join(' ') : (entry.argv ?? '')
-  const needsEnv = Array.isArray(entry.env_vars) && entry.env_vars.length > 0
+  const envSchema = parseEnvSchema(entry)
+  const needsEnv = envSchema.length > 0
   const repo = entry.repository ?? entry.homepage ?? entry.website ?? ''
 
-  function handleInstall() {
+  function handleInstallClick() {
+    if (needsEnv) {
+      setShowEnvForm(true)
+    } else {
+      setInstalling(true)
+      onInstall(entry, {}, () => setInstalling(false))
+    }
+  }
+
+  function handleEnvSubmit() {
+    // Validate required fields
+    for (const field of envSchema) {
+      if (field.required && !(envValues[field.key] ?? '').trim()) {
+        show(`"${field.label}" es obligatorio`, 'warn')
+        return
+      }
+    }
+    setShowEnvForm(false)
     setInstalling(true)
-    onInstall(entry, () => setInstalling(false))
+    onInstall(entry, { ...envValues }, () => setInstalling(false))
   }
 
   return (
@@ -357,6 +372,40 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
           <div className="mcp-card__cmd">Solo se admiten servidores npx por ahora (este usa {runner}).</div>
         )}
       </div>
+
+      {/* Inline BYOK form — shown when the entry requires env vars */}
+      {showEnvForm && (
+        <div className="cv-form-stack" style={{ marginTop: 'var(--sp-3)' }}>
+          {envSchema.map(field => (
+            <div key={field.key}>
+              <label className="cv-label" htmlFor={`mcp-env-${id}-${field.key}`}>
+                {field.label}{field.required ? ' *' : ''}
+              </label>
+              <input
+                id={`mcp-env-${id}-${field.key}`}
+                className="cv-input"
+                type={field.secret ? 'password' : 'text'}
+                autoComplete="off"
+                value={envValues[field.key] ?? ''}
+                onChange={e => setEnvValues(prev => ({ ...prev, [field.key]: e.target.value }))}
+              />
+            </div>
+          ))}
+          <div className="cv-form-actions">
+            <button className="cv-btn cv-btn--primary cv-btn--sm" type="button" onClick={handleEnvSubmit}>
+              Añadir
+            </button>
+            <button
+              className="cv-btn cv-btn--ghost cv-btn--sm"
+              type="button"
+              onClick={() => { setShowEnvForm(false); setEnvValues({}) }}
+            >
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="mcp-card__actions">
         {repo && (
           <a
@@ -368,13 +417,15 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
             Docs
           </a>
         )}
-        <button
-          className="cv-btn cv-btn--secondary cv-btn--sm"
-          disabled={already || unsupported || installing}
-          onClick={handleInstall}
-        >
-          {already ? 'Añadido' : unsupported ? 'No disponible' : installing ? 'Añadiendo…' : 'Añadir'}
-        </button>
+        {!showEnvForm && (
+          <button
+            className="cv-btn cv-btn--secondary cv-btn--sm"
+            disabled={already || unsupported || installing}
+            onClick={handleInstallClick}
+          >
+            {already ? 'Añadido' : unsupported ? 'No disponible' : installing ? 'Añadiendo…' : 'Añadir'}
+          </button>
+        )}
       </div>
     </div>
   )

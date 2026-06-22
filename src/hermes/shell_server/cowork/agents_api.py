@@ -44,6 +44,21 @@ logger = logging.getLogger("hermes.shell_server.cowork.agents_api")
 
 
 # ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+
+def _normalize_agent_dict(d: dict) -> dict:
+    """Ensure the agent dict carries both 'agent_id' and 'id' so the
+    React frontend (which reads Agent.id) and the daemon protocol
+    (which emits 'agent_id') both work without a client-side shim.
+    """
+    if "agent_id" in d and "id" not in d:
+        return {**d, "id": d["agent_id"]}
+    return d
+
+
+# ------------------------------------------------------------------
 # Pydantic schemas
 # ------------------------------------------------------------------
 
@@ -51,11 +66,14 @@ logger = logging.getLogger("hermes.shell_server.cowork.agents_api")
 class AgentDraft(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     role: str = Field(default="", max_length=512)
+    # Tone/register instruction forwarded to the prompt builder.
+    register: str = Field(default="", max_length=512)
     primary_mission: str = Field(default="", max_length=2000)
     instructions: str = Field(default="", max_length=8000)
     language: str = Field(default="es-ES", max_length=20)
     color: str = Field(default="#6366f1", max_length=30)
     golden_rules: list[str] = Field(default_factory=list)
+    forbidden_phrases: list[str] = Field(default_factory=list)
     autonomy_level: str = Field(default="balanced")
     is_default: bool = False
     # Optional department slug; null → rendered in "mis-agentes" bucket.
@@ -123,7 +141,8 @@ def create_agents_router() -> APIRouter:
         """Create a new agent."""
         proxy = request.app.state.dbus_proxy
         try:
-            return await proxy.call_mutator("create_agent", json.dumps(_clean_draft(body)))
+            d = await proxy.call_mutator("create_agent", json.dumps(_clean_draft(body)))
+            return _normalize_agent_dict(d)
         except AgentUnavailable as exc:
             _raise_503(exc, "create_agent")
 
@@ -133,7 +152,8 @@ def create_agents_router() -> APIRouter:
         """Update an existing agent (PUT and PATCH are equivalent here)."""
         proxy = request.app.state.dbus_proxy
         try:
-            return await proxy.call_mutator("update_agent", agent_id, json.dumps(_clean_draft(body)))
+            d = await proxy.call_mutator("update_agent", agent_id, json.dumps(_clean_draft(body)))
+            return _normalize_agent_dict(d)
         except AgentUnavailable as exc:
             _raise_503(exc, "update_agent")
 

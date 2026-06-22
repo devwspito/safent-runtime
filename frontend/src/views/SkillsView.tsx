@@ -11,17 +11,34 @@ import type { Skill, HubSkillResult, HubInstallResponse } from '../api/types'
 
 // ── Poll helper ───────────────────────────────────────────────────────────────
 
-function pollHubOp(opId: string, { onDone, onError }: { onDone?: () => void; onError?: (r: string) => void }) {
+interface PollHandle {
+  cancel(): void
+}
+
+function pollHubOp(opId: string, { onDone, onError }: { onDone?: () => void; onError?: (r: string) => void }): PollHandle {
   let tries = 0
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let cancelled = false
+
   const tick = async () => {
+    if (cancelled) return
     if (tries++ > 40) { onError?.('timeout'); return }
     const st = await getHubOpStatus(opId)
+    if (cancelled) return
     const s = String(st?.status ?? '').toLowerCase()
     if (s === 'done' || s === 'completed' || s === 'success') { onDone?.(); return }
     if (s === 'error' || s === 'failed') { onError?.(st?.error ?? st?.message ?? 'error'); return }
-    setTimeout(tick, 2500)
+    if (!cancelled) timer = setTimeout(tick, 2500)
   }
-  setTimeout(tick, 1500)
+
+  timer = setTimeout(tick, 1500)
+
+  return {
+    cancel() {
+      cancelled = true
+      if (timer !== null) clearTimeout(timer)
+    },
+  }
 }
 
 function skillDocUrl(item: HubSkillResult): string {
@@ -73,6 +90,20 @@ export default function SkillsView() {
   const teachDescRef = useRef<HTMLTextAreaElement>(null)
   // ── Skill name for teach form (needed inside stop handler)
   const teachNameValueRef = useRef('')
+
+  const pollHandlesRef = useRef<PollHandle[]>([])
+
+  // Cancel all active polls on unmount
+  useEffect(() => {
+    return () => {
+      for (const h of pollHandlesRef.current) h.cancel()
+      pollHandlesRef.current = []
+    }
+  }, [])
+
+  function trackPoll(handle: PollHandle) {
+    pollHandlesRef.current.push(handle)
+  }
 
   const loadInstalled = useCallback(async () => {
     dispatch({ type: 'LOADING' })
@@ -139,10 +170,10 @@ export default function SkillsView() {
   function handleInstallOp(op: HubInstallResponse, name: string, onBtnUpdate: (s: 'installing' | 'installed' | 'ready') => void) {
     if (op?.op_id) {
       show(`Instalando "${name}"…`, 'ok')
-      pollHubOp(op.op_id, {
+      trackPoll(pollHubOp(op.op_id, {
         onDone: () => { show(`Skill "${name}" instalada`, 'ok'); onBtnUpdate('installed'); loadInstalled() },
         onError: r => { show(`No se pudo instalar: ${r}`, 'error'); onBtnUpdate('ready') },
-      })
+      }))
     } else {
       show(`Skill "${name}" instalada`, 'ok')
       onBtnUpdate('installed')
@@ -315,10 +346,10 @@ export default function SkillsView() {
                           try {
                             const op = await uninstallHubSkill(name)
                             if (op?.op_id) {
-                              pollHubOp(op.op_id, {
+                              trackPoll(pollHubOp(op.op_id, {
                                 onDone: () => { show(`Skill "${name}" desinstalada`, 'ok'); loadInstalled() },
                                 onError: r => { show(`No se pudo desinstalar: ${r}`, 'error'); loadInstalled() },
-                              })
+                              }))
                             } else {
                               show(`Skill "${name}" desinstalada`, 'ok'); loadInstalled()
                             }

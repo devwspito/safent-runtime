@@ -507,11 +507,13 @@ function EgressSection() {
     try {
       await grantEgressDomain(d)
       setStatus({ msg: `${d} autorizado.`, kind: 'ok' })
+      sileo.success({ title: `${d} autorizado` })
       setInput('')
       await loadDomains()
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setStatus({ msg: `No se pudo autorizar: ${msg}`, kind: 'error' })
+      sileo.error({ title: `No se pudo autorizar: ${msg}` })
     }
   }
 
@@ -520,11 +522,12 @@ function EgressSection() {
     try {
       await revokeEgressDomain(d)
       setStatus({ msg: `${d} revocado.`, kind: 'ok' })
+      sileo.success({ title: `${d} revocado` })
       await loadDomains()
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setStatus({ msg: `No se pudo revocar: ${msg}`, kind: 'error' })
-      sileo.error({ title: msg })
+      sileo.error({ title: `No se pudo revocar: ${msg}` })
     }
   }
 

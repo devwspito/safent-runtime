@@ -52,7 +52,14 @@ export function OfficeCanvas({ agents, runtimeStatus, onAgentClick }: Props) {
     officeRef.current = office
     const camera = cameraRef.current
 
+    // alive tracks whether this effect instance is still mounted.
+    // If the component unmounts before sprites finish loading we bail out
+    // before starting the game loop so no rAF leaks.
+    let alive = true
+
     Promise.all([loadCharacterSprites(), loadWallSprites()]).then(() => {
+      if (!alive) return
+
       spritesLoadedRef.current = true
       if (!initialSizeRef.current) {
         initialSizeRef.current = { w: canvas.width, h: canvas.height }
@@ -88,7 +95,10 @@ export function OfficeCanvas({ agents, runtimeStatus, onAgentClick }: Props) {
       cleanupRef.current = stop
     })
 
-    return () => { cleanupRef.current?.() }
+    return () => {
+      alive = false
+      cleanupRef.current?.()
+    }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Sync agents + status when props change ─────────────────

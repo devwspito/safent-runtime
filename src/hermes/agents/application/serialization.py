@@ -13,7 +13,7 @@ from hermes.agents.domain.agent import Agent, AgentDraft, AutonomyLevel, autonom
 
 
 def agent_to_dict(agent: Agent) -> dict[str, Any]:
-    return {
+    d: dict[str, Any] = {
         "agent_id": agent.agent_id,
         "name": agent.name,
         "color": agent.color,
@@ -30,6 +30,10 @@ def agent_to_dict(agent: Agent) -> dict[str, Any]:
         "created_at": agent.created_at.isoformat(),
         "updated_at": agent.updated_at.isoformat(),
     }
+    # Expose "id" as an alias for "agent_id" so all consumers (REST
+    # routers, roster builder, React frontend) can rely on a single key.
+    d["id"] = d["agent_id"]
+    return d
 
 
 def draft_from_dict(data: dict[str, Any]) -> AgentDraft:

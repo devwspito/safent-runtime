@@ -42,6 +42,14 @@ function show(message: string, kind: 'ok' | 'warn' | 'error' | 'info' = 'ok') {
 export default function IntegrationsView() {
   const [composioState, dispatch] = useReducer(composioReducer, { status: 'loading' })
   const [wsStatus, setWsStatus] = useState<WebSearchStatus | null>(null)
+  const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Clear the reload timer on unmount so it never fires on a dead component
+  useEffect(() => {
+    return () => {
+      if (reloadTimerRef.current !== null) clearTimeout(reloadTimerRef.current)
+    }
+  }, [])
 
   async function loadComposio() {
     dispatch({ type: 'LOADING' })
@@ -152,7 +160,7 @@ export default function IntegrationsView() {
                               window.open(r.redirect_url, '_blank', 'noopener,noreferrer')
                             }
                             show(`Conectando ${a.name ?? a.slug}…`, 'info')
-                            setTimeout(loadComposio, 3000)
+                            reloadTimerRef.current = setTimeout(loadComposio, 3000)
                           } catch (e) {
                             show(e instanceof Error ? e.message : 'Error', 'error')
                           }

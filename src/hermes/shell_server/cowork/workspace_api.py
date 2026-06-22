@@ -101,21 +101,38 @@ def _safe_upload_path(workspace: Path, name: str) -> Path | None:
 def _deduplicate(dest: Path) -> Path:
     """Return a non-colliding path under the same directory.
 
-    If `dest` does not exist, returns it as-is. Otherwise appends ` (N)` before
-    the file suffix, incrementing N until a free slot is found (cap: 999).
+    If `dest` does not exist, returns it as-is.
+
+    Naming strategy:
+    - Single-extension files (``report.pdf``, ``.env``):
+        insert counter before the final suffix → ``report (1).pdf``.
+    - Multi-extension files (``archive.tar.gz``) and dotfiles with no
+        suffix (``.env`` → suffix is empty after stripping the dot-prefix):
+        the counter is inserted before the final suffix component only.
+        For dotfiles whose ``name`` IS the suffix (e.g. ``.env``),
+        ``Path.suffix`` returns ``""`` and ``Path.stem`` returns ``.env``,
+        so we append to the full name → ``.env (1)``.
     """
     if not dest.exists():
         return dest
-    stem = dest.stem
-    suffix = dest.suffix
+
+    name = dest.name
+    # Determine the split point: use only the *last* suffix so that
+    # "archive.tar.gz" → base="archive.tar", ext=".gz".
+    # For dotfiles like ".env": suffix="" and stem=".env", so we treat
+    # the whole name as the base and append with no extension.
+    suffix = dest.suffix   # last suffix only, e.g. ".gz" or ".pdf" or ""
+    base = name[: len(name) - len(suffix)] if suffix else name
+
     for counter in range(1, 1000):
-        candidate = dest.with_name(f"{stem} ({counter}){suffix}")
+        candidate = dest.with_name(f"{base} ({counter}){suffix}")
         if not candidate.exists():
             return candidate
+
     # All 999 slots taken — use a timestamp-derived name as last resort.
     import time as _time  # noqa: PLC0415
     ts = int(_time.time())
-    return dest.with_name(f"{stem}_{ts}{suffix}")
+    return dest.with_name(f"{base}_{ts}{suffix}")
 
 
 def create_workspace_router() -> APIRouter:
