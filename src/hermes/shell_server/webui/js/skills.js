@@ -211,10 +211,16 @@ export async function renderSkillsView(container) {
         const name = skill.name ?? identifier;
         if (btn) { btn.disabled = true; btn.textContent = t('skills.installing'); }
         try {
-          const op = await installSkill(identifier);   // 202 {op_id, status}
+          const op = await installSkill(identifier);   // 202 {op_id} | {ok:false, blocked, error}
+          // The daemon returns {ok:false, blocked, error} with a 2xx status when the
+          // Security Center scan BLOCKS the skill. Without this guard the UI read it as
+          // "queued" and left the button stuck on "Instalando…" forever (silent fail).
+          if (op && (op.ok === false || op.blocked || op.error)) {
+            throw new Error(op.error || t('skills.installFailed', { reason: 'security' }));
+          }
           const opId = op?.op_id;
-          showToast(t('skills.installQueued', { name }), 'ok');
           if (opId) {
+            showToast(t('skills.installQueued', { name }), 'ok');
             pollHubOp(opId, {
               onDone: () => {
                 showToast(t('skills.skillInstalled', { name }), 'ok');
@@ -226,7 +232,12 @@ export async function renderSkillsView(container) {
                 if (btn) { btn.disabled = false; btn.textContent = t('skills.install'); }
               },
             });
-          } else { loadInstalled(); }
+          } else {
+            // No op_id and not blocked → install completed synchronously.
+            showToast(t('skills.skillInstalled', { name }), 'ok');
+            if (btn) { btn.disabled = true; btn.textContent = t('skills.alreadyInstalled'); }
+            loadInstalled();
+          }
         } catch (e) {
           showToast(t('skills.installFailed', { reason: e.message }), 'error');
           if (btn) { btn.disabled = false; btn.textContent = t('skills.install'); }
