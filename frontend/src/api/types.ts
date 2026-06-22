@@ -22,6 +22,15 @@ export interface ActiveAgentResponse {
 export interface RuntimeStatus {
   state: string
   active_task_count: number
+  active_agent_id?: string
+  activity?: Array<{ agent_id: string; tool?: string }>
+  ruflo_active?: boolean
+}
+
+export interface CreateAgentPayload {
+  name: string
+  role?: string
+  primary_mission?: string
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────

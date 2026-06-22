@@ -8,6 +8,7 @@ import type {
   ConversationDetail,
   ConversationSummary,
   StreamFrame,
+  CreateAgentPayload,
 } from './types'
 
 // Mirrors the timeout strategy in vanilla api.js: snappy GETs fail fast;
@@ -102,6 +103,14 @@ export function getActiveAgent(): Promise<ActiveAgentResponse> {
   return request<ActiveAgentResponse>('/agents/active').catch(
     () => ({ active_agent_id: '' }),
   )
+}
+
+export function createAgent(payload: CreateAgentPayload): Promise<Agent> {
+  return request<Agent>('/agents', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function listMcpServers(): Promise<Array<{ id: string; slug: string; name: string }>> {
+  return request<Array<{ id: string; slug: string; name: string }>>('/mcp/servers').catch(() => [])
 }
 
 // ── Runtime ───────────────────────────────────────────────────────────────────

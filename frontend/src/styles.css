@@ -1121,3 +1121,378 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   padding: var(--sp-10);
   flex: 1;
 }
+
+/* ── Office view ─────────────────────────────────────────────────────────── */
+
+.office-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.office-view-header {
+  padding-bottom: var(--sp-4);
+}
+
+.office-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+
+.office-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Segmented toggle ─────────────────────────────────────────────────────── */
+
+.office-seg-toggle {
+  display: flex;
+  background: var(--surface2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 3px;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+
+.office-seg-btn {
+  height: 30px;
+  padding: 0 var(--sp-4);
+  border: none;
+  border-radius: 6px;
+  font-size: var(--text-label);
+  font-weight: 500;
+  color: var(--ink3);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--ease-hover), color var(--ease-hover);
+  white-space: nowrap;
+}
+
+.office-seg-btn:hover { color: var(--ink2); }
+.office-seg-btn--active { background: var(--card); color: var(--ink); font-weight: 600; box-shadow: var(--shadow-raised); }
+
+/* ── Live canvas container ─────────────────────────────────────────────────── */
+
+.office-live-container {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+/* ── Tarjetas (cards) view ─────────────────────────────────────────────────── */
+
+.office-tarjetas {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-6) var(--sp-8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-8);
+}
+
+.office-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.office-section-title {
+  font-size: var(--text-subtitle);
+  font-weight: 650;
+  color: var(--ink);
+  letter-spacing: -.02em;
+}
+
+.office-section-desc {
+  font-size: var(--text-label);
+  color: var(--ink3);
+  margin-bottom: var(--sp-1);
+}
+
+/* ── Clickable agent card (office variant) ─────────────────────────────────── */
+
+.office-agent-card {
+  transition: border-color 150ms ease, box-shadow 150ms ease, transform 100ms ease;
+}
+
+.office-agent-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+  transform: translateY(-1px);
+}
+
+.office-agent-card:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* ── Status dot ────────────────────────────────────────────────────────────── */
+
+.office-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* ── Create-agent card ─────────────────────────────────────────────────────── */
+
+.office-create-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  min-height: 110px;
+  background: var(--card);
+  border: 1px dashed var(--line2);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  color: var(--ink4);
+  transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
+  padding: var(--sp-5);
+  width: 100%;
+}
+
+.office-create-card:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+.office-create-card:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.office-create-icon {
+  font-size: 28px;
+  font-weight: 300;
+  line-height: 1;
+}
+
+.office-create-label {
+  font-size: var(--text-label);
+  font-weight: 500;
+}
+
+/* ── Generic office buttons ────────────────────────────────────────────────── */
+
+.office-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--ctrl-sm);
+  padding: 0 var(--sp-4);
+  border-radius: var(--r-sm);
+  font-size: var(--text-button);
+  font-weight: 600;
+  transition: all var(--ease-hover);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.office-btn--primary {
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid transparent;
+}
+.office-btn--primary:hover:not(:disabled) { background: var(--accent-hover); }
+
+.office-btn--ghost {
+  background: var(--surface2);
+  color: var(--ink2);
+  border: 1px solid var(--line2);
+}
+.office-btn--ghost:hover:not(:disabled) { background: var(--card2); }
+
+/* ── Modal ─────────────────────────────────────────────────────────────────── */
+
+.office-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  padding: var(--sp-4);
+}
+
+.office-modal {
+  background: var(--surface);
+  border: 1px solid var(--line2);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-floating);
+  width: 100%;
+  max-width: 440px;
+  overflow: hidden;
+}
+
+.office-modal-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-5) var(--sp-6);
+  border-bottom: 1px solid var(--line);
+}
+
+.office-modal-title {
+  flex: 1;
+  font-size: var(--text-subtitle);
+  font-weight: 650;
+  color: var(--ink);
+  letter-spacing: -.02em;
+}
+
+.office-modal-close {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: var(--surface2);
+  border-radius: var(--r-sm);
+  color: var(--ink3);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background var(--ease-hover), color var(--ease-hover);
+  flex-shrink: 0;
+}
+.office-modal-close:hover { background: var(--card2); color: var(--ink); }
+
+.office-modal-form {
+  padding: var(--sp-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.office-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+  padding-top: var(--sp-2);
+}
+
+/* ── Form fields ─────────────────────────────────────────────────────────── */
+
+.office-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.office-field-label {
+  font-size: var(--text-label);
+  font-weight: 600;
+  color: var(--ink2);
+}
+
+.office-field-input {
+  background: var(--card);
+  border: 1px solid var(--line2);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--text-body);
+  font-family: var(--font-ui);
+  color: var(--ink);
+  line-height: 1.5;
+  outline: none;
+  transition: border-color var(--ease-hover), box-shadow var(--ease-hover);
+}
+
+.office-field-input:focus {
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus-ring) 18%, transparent);
+}
+
+.office-field-input::placeholder { color: var(--ink4); }
+
+.office-field-textarea {
+  resize: vertical;
+  min-height: 72px;
+}
+
+.office-field-error {
+  font-size: var(--text-label);
+  color: var(--danger);
+}
+
+/* ── Agent drawer (slide-in panel from the right) ─────────────────────────── */
+
+.office-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .4);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 200;
+}
+
+.office-drawer {
+  background: var(--surface);
+  border-left: 1px solid var(--line2);
+  box-shadow: var(--shadow-floating);
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.office-drawer-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-6);
+  border-bottom: 1px solid var(--line);
+}
+
+.office-drawer-title {
+  font-size: var(--text-subtitle);
+  font-weight: 650;
+  color: var(--ink);
+  letter-spacing: -.02em;
+}
+
+.office-drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-6);
+  display: flex;
+  flex-direction: column;
+}
+
+.office-drawer-status {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-6);
+}
+
+.office-drawer-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+/* ── Reduced-motion: disable canvas animations via CSS hint ──────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .office-live-container canvas {
+    /* The rAF loop still runs but we signal to JS (via window.matchMedia) */
+  }
+}
