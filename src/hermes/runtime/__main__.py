@@ -1459,6 +1459,24 @@ async def _run(*, systemd_notify: bool) -> None:
                 broker=broker,
                 consent_context=consent_context,
             )) or ()
+        # Publish dynamic (MCP + Composio) tools to the process-scoped registry
+        # so the Policies UI snapshot() can include them in the enriched catalog.
+        # Fail-soft: a registry failure must never stall the agent cycle.
+        try:
+            from hermes.capabilities.dynamic_tool_registry import (  # noqa: PLC0415
+                DynamicToolEntry,
+                get_dynamic_tool_registry,
+            )
+            dynamic_entries = tuple(
+                DynamicToolEntry(name=s.name, origin="composio")
+                for s in composio
+            ) + tuple(
+                DynamicToolEntry(name=s.name, origin="mcp")
+                for s in mcp_specs
+            )
+            get_dynamic_tool_registry().publish(dynamic_entries)
+        except Exception as _dyn_exc:  # noqa: BLE001
+            logger.debug("hermes.runtime.dynamic_registry_publish_failed: %s", _dyn_exc)
         # spec 014 inc. 3: capability_specs are static (built once, always
         # present).  Included BEFORE composio + mcp so they appear first in
         # the LLM schema and are not filtered by _resolve_external_specs

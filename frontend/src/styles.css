@@ -2915,6 +2915,305 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   color: var(--danger);
 }
 
+/* ── Policy catalog — grouped categories with master-toggle ──────────────── */
+
+/* MFA bar: labels + inputs in a two-column row */
+.seg-pol-mfa-bar {
+  border: 1px solid var(--line2);
+  border-radius: var(--r-sm);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.seg-pol-inputs {
+  display: flex;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.seg-pol-inputs .cv-input { flex: 1; min-width: 120px; }
+
+.seg-pol-input-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  flex: 1;
+  min-width: 120px;
+}
+
+.seg-pol-mfa-error {
+  font-size: var(--text-label);
+  color: var(--danger);
+  margin: 0;
+}
+
+/* MFA on dangers row */
+.seg-pol-danger-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--surface2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+
+.seg-pol-danger-row__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.seg-pol-danger-row__label {
+  font-size: var(--text-body);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.seg-pol-danger-row__hint {
+  font-size: var(--text-label);
+  color: var(--ink3);
+  line-height: 1.5;
+}
+
+/* Sub-label (inside card, above catalog groups) */
+.seg-pol-sub-label {
+  font-size: var(--text-label);
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--ink4);
+  margin-bottom: var(--sp-2);
+}
+
+/* Catalog container */
+.seg-pol-catalog {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Category group card */
+.seg-pol-group {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+.seg-pol-group__header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  min-height: 48px;
+}
+
+/* Expand/collapse button (▸) */
+.seg-pol-group__expand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--ink4);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color var(--ease-hover), background var(--ease-hover);
+  padding: 0;
+}
+
+.seg-pol-group__expand:hover {
+  background: var(--surface2);
+  color: var(--ink2);
+}
+
+.seg-pol-chevron {
+  font-size: 12px;
+  line-height: 1;
+  display: inline-block;
+  transition: transform 200ms ease;
+  user-select: none;
+}
+
+.seg-pol-chevron--open {
+  transform: rotate(90deg);
+}
+
+/* Category name */
+.seg-pol-group__name {
+  flex: 1;
+  font-size: var(--text-body);
+  font-weight: 600;
+  color: var(--ink);
+  min-width: 0;
+}
+
+/* Count chip */
+.seg-pol-group__count {
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--ink4);
+  background: var(--surface2);
+  padding: 1px 7px;
+  border-radius: 100px;
+  flex-shrink: 0;
+}
+
+/* Hidden but accessible label for toggle */
+.seg-pol-group__toggle-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+}
+
+/* Delicacy badge (inline) */
+.seg-pol-badge {
+  font-size: var(--text-caption);
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 100px;
+  letter-spacing: .02em;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.seg-pol-badge--sm {
+  font-size: var(--text-micro);
+  padding: 1px 6px;
+}
+
+/* Toggle switch (role=switch button) */
+.seg-pol-switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  background: var(--line2);
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 180ms ease;
+  padding: 0;
+}
+
+.seg-pol-switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 180ms ease;
+  box-shadow: 0 1px 3px rgba(0,0,0,.25);
+}
+
+.seg-pol-switch--on {
+  background: var(--accent);
+}
+
+.seg-pol-switch--on::after {
+  transform: translateX(16px);
+}
+
+/* Mixed (indeterminate) state: amber */
+.seg-pol-switch--mixed {
+  background: var(--warn);
+}
+
+.seg-pol-switch--mixed::after {
+  transform: translateX(8px);
+}
+
+.seg-pol-switch:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.seg-pol-switch:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Tool list (inside expanded category) */
+.seg-pol-tool-list {
+  list-style: none;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* Single tool row */
+.seg-pol-tool-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+  transition: background var(--ease-hover);
+}
+
+.seg-pol-tool-row:last-child {
+  border-bottom: none;
+}
+
+.seg-pol-tool-row:hover {
+  background: var(--surface2);
+}
+
+/* Muted style for non-llm-visible tools */
+.seg-pol-tool-row--muted {
+  opacity: .6;
+}
+
+.seg-pol-tool-check {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.seg-pol-tool-check:disabled {
+  cursor: not-allowed;
+}
+
+.seg-pol-tool-label {
+  flex: 1;
+  font-size: var(--text-body);
+  color: var(--ink2);
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+/* "nativo" chip — shown when llm_visible===false */
+.seg-pol-tool-native {
+  font-size: var(--text-micro);
+  font-weight: 600;
+  color: var(--ink4);
+  background: var(--surface2);
+  padding: 1px 6px;
+  border-radius: 100px;
+  border: 1px solid var(--line2);
+  cursor: help;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    Chat shell — wraps chat-view + optional context panel side by side
    ═══════════════════════════════════════════════════════════════════════════ */

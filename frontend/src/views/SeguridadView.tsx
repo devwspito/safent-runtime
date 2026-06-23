@@ -3,11 +3,11 @@
  *
  * Three sub-areas mirroring vanilla security.js / governance.js / approvals.js:
  *   (a) Pending HITL approvals — polled every 3 s, Approve/Deny with MFA form.
- *   (b) Governance — MFA enrollment + security policy presets + per-tool toggles.
+ *   (b) Governance — MFA enrollment + security policy presets + catalog-based toggles.
  *   (c) Security center — egress permissions, audit chain, recent scans, policy JSON.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { sileo } from 'sileo'
 import {
   listPendingApprovals,
@@ -29,6 +29,7 @@ import type {
   PendingApproval,
   MfaStatus,
   PoliciesResponse,
+  PolicyCatalogEntry,
   SecurityScan,
   AuditHead,
 } from '../api/types'
@@ -85,6 +86,213 @@ const PRESETS: Array<[string, string, string]> = [
   ['bloqueado', 'Bloqueado', 'Todo desactivado (máximo bloqueo)'],
 ]
 
+// Human-readable names for known category slugs.
+const CATEGORY_LABELS: Record<string, string> = {
+  filesystem:   'Sistema de archivos',
+  network:      'Red',
+  terminal:     'Terminal',
+  browser:      'Navegador',
+  memory:       'Memoria',
+  tasks:        'Tareas programadas',
+  agents:       'Agentes',
+  providers:    'Modelos y proveedores',
+  security:     'Seguridad del sistema',
+  mcp:          'Herramientas externas (MCP)',
+  composio:     'Apps conectadas (Composio)',
+}
+
+// Categories that are system-defense tools, not LLM capabilities.
+// These get separated into the "Defensas del sistema" block.
+const DEFENSE_CATEGORIES = new Set(['security'])
+
+function categoryLabel(cat: string): string {
+  return CATEGORY_LABELS[cat] ?? cat.replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase())
+}
+
+type DelicacyLevel = 'normal' | 'delicate' | 'most_delicate'
+
+function aggregateDelicacy(entries: PolicyCatalogEntry[]): DelicacyLevel {
+  if (entries.some(e => e.delicacy === 'most_delicate')) return 'most_delicate'
+  if (entries.some(e => e.delicacy === 'delicate')) return 'delicate'
+  return 'normal'
+}
+
+// ── Delicacy badge ────────────────────────────────────────────────────────────
+
+function DelicacyBadge({ level, size = 'normal' }: { level: DelicacyLevel; size?: 'normal' | 'sm' }) {
+  if (level === 'normal') return null
+  const label = level === 'most_delicate' ? 'Muy delicado' : 'Delicado'
+  const color = level === 'most_delicate' ? 'var(--danger)' : 'var(--warn)'
+  return (
+    <span
+      className={`seg-pol-badge ${size === 'sm' ? 'seg-pol-badge--sm' : ''}`}
+      style={{ color, background: `${color}22` }}
+      aria-label={`Nivel de delicadeza: ${label}`}
+    >
+      {label}
+    </span>
+  )
+}
+
+// ── Mini toggle switch ────────────────────────────────────────────────────────
+
+interface ToggleSwitchProps {
+  id: string
+  checked: boolean
+  onChange: (v: boolean) => void
+  disabled?: boolean
+  indeterminate?: boolean
+  'aria-label': string
+}
+
+function ToggleSwitch({ id, checked, onChange, disabled, indeterminate, 'aria-label': ariaLabel }: ToggleSwitchProps) {
+  return (
+    <button
+      id={id}
+      role="switch"
+      type="button"
+      aria-checked={indeterminate ? 'mixed' : checked}
+      aria-label={ariaLabel}
+      disabled={disabled}
+      className={`seg-pol-switch ${checked && !indeterminate ? 'seg-pol-switch--on' : ''} ${indeterminate ? 'seg-pol-switch--mixed' : ''}`}
+      onClick={() => onChange(!checked)}
+    />
+  )
+}
+
+// ── Category group ────────────────────────────────────────────────────────────
+
+interface CategoryGroupProps {
+  category: string
+  entries: PolicyCatalogEntry[]
+  polTotp: string
+  polRiddle: string
+  busy: boolean
+  onToggleTool: (name: string, enabled: boolean) => Promise<void>
+  onToggleAll: (category: string, enabled: boolean, entries: PolicyCatalogEntry[]) => Promise<void>
+}
+
+function CategoryGroup({
+  category,
+  entries,
+  polTotp,
+  polRiddle,
+  busy,
+  onToggleTool,
+  onToggleAll,
+}: CategoryGroupProps) {
+  const [expanded, setExpanded] = useState(false)
+
+  const allOn = entries.every(e => e.enabled)
+  const allOff = entries.every(e => !e.enabled)
+  const mixed = !allOn && !allOff
+  const delicacy = aggregateDelicacy(entries)
+  const switchId = `cat-switch-${category}`
+  const bodyId = `cat-body-${category}`
+
+  return (
+    <div className="seg-pol-group">
+      <div className="seg-pol-group__header">
+        <button
+          type="button"
+          className="seg-pol-group__expand"
+          aria-expanded={expanded}
+          aria-controls={bodyId}
+          onClick={() => setExpanded(v => !v)}
+          title={expanded ? 'Contraer' : 'Expandir herramientas'}
+        >
+          <span className={`seg-pol-chevron ${expanded ? 'seg-pol-chevron--open' : ''}`} aria-hidden="true">▸</span>
+        </button>
+
+        <span className="seg-pol-group__name">{categoryLabel(category)}</span>
+        <span className="seg-pol-group__count" aria-label={`${entries.length} herramientas`}>{entries.length}</span>
+
+        <DelicacyBadge level={delicacy} />
+
+        <label className="seg-pol-group__toggle-label" htmlFor={switchId}>
+          <span className="sr-only">
+            {allOn ? 'Todo activo' : allOff ? 'Todo desactivado' : 'Parcialmente activo'} — activar o desactivar toda la categoría
+          </span>
+        </label>
+        <ToggleSwitch
+          id={switchId}
+          aria-label={`Activar o desactivar todas las herramientas de ${categoryLabel(category)}`}
+          checked={allOn}
+          indeterminate={mixed}
+          disabled={busy}
+          onChange={v => onToggleAll(category, v, entries)}
+        />
+      </div>
+
+      {expanded && (
+        <ul
+          id={bodyId}
+          className="seg-pol-tool-list"
+          aria-label={`Herramientas de ${categoryLabel(category)}`}
+        >
+          {entries.map(entry => (
+            <ToolRow
+              key={entry.name}
+              entry={entry}
+              busy={busy}
+              polTotp={polTotp}
+              polRiddle={polRiddle}
+              onToggle={onToggleTool}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+// ── Tool row ──────────────────────────────────────────────────────────────────
+
+interface ToolRowProps {
+  entry: PolicyCatalogEntry
+  busy: boolean
+  polTotp: string
+  polRiddle: string
+  onToggle: (name: string, enabled: boolean) => Promise<void>
+}
+
+function ToolRow({ entry, busy, onToggle }: ToolRowProps) {
+  const checkId = `tool-${entry.name}`
+  const tipId = `tool-tip-${entry.name}`
+  const notVisible = !entry.llm_visible
+
+  return (
+    <li className={`seg-pol-tool-row ${notVisible ? 'seg-pol-tool-row--muted' : ''}`}>
+      <input
+        type="checkbox"
+        id={checkId}
+        aria-describedby={notVisible ? tipId : undefined}
+        checked={entry.enabled}
+        disabled={busy}
+        onChange={e => onToggle(entry.name, e.target.checked)}
+        className="seg-pol-tool-check"
+        aria-label={`${entry.label}: ${entry.enabled ? 'activo' : 'inactivo'}`}
+      />
+      <label htmlFor={checkId} className="seg-pol-tool-label">
+        {entry.label}
+      </label>
+      <DelicacyBadge level={entry.delicacy} size="sm" />
+      {notVisible && (
+        <span
+          id={tipId}
+          className="seg-pol-tool-native"
+          title="El agente usa el equivalente nativo; esta herramienta no aparece en el catálogo del LLM"
+          aria-label="Usa equivalente nativo"
+        >
+          nativo
+        </span>
+      )}
+    </li>
+  )
+}
+
+// ── Governance section ────────────────────────────────────────────────────────
+
 function GovernanceSection() {
   const [mfa, setMfa] = useState<MfaStatus | null>(null)
   const [pol, setPol] = useState<PoliciesResponse | null>(null)
@@ -94,6 +302,8 @@ function GovernanceSection() {
   const [riddleTotp, setRiddleTotp] = useState('')
   const [polTotp, setPolTotp] = useState('')
   const [polRiddle, setPolRiddle] = useState('')
+  const [mfaError, setMfaError] = useState('')
+  const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
     const [m, p] = await Promise.all([mfaStatus(), getPolicies()])
@@ -103,6 +313,43 @@ function GovernanceSection() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // Group catalog entries: separate defense-category tools from capability tools.
+  const { capabilityGroups, defenseGroups } = useMemo(() => {
+    const catalog = pol?.catalog ?? []
+    const grouped = new Map<string, PolicyCatalogEntry[]>()
+    for (const entry of catalog) {
+      const list = grouped.get(entry.category) ?? []
+      list.push(entry)
+      grouped.set(entry.category, list)
+    }
+    const capability: Map<string, PolicyCatalogEntry[]> = new Map()
+    const defense: Map<string, PolicyCatalogEntry[]> = new Map()
+    for (const [cat, entries] of grouped) {
+      if (DEFENSE_CATEGORIES.has(cat)) {
+        defense.set(cat, entries)
+      } else {
+        capability.set(cat, entries)
+      }
+    }
+    return { capabilityGroups: capability, defenseGroups: defense }
+  }, [pol?.catalog])
+
+  // Fallback: when catalog is absent, fall back to the flat tools map
+  // (pre-catalog backend compatibility).
+  const legacyToolNames = useMemo(() => {
+    if ((pol?.catalog?.length ?? 0) > 0) return []
+    return Object.keys(pol?.tools ?? {}).sort()
+  }, [pol?.catalog, pol?.tools])
+
+  function validateMfa(): boolean {
+    if (!polTotp.trim()) {
+      setMfaError('Introduce tu código MFA antes de cambiar una política.')
+      return false
+    }
+    setMfaError('')
+    return true
+  }
 
   async function handleRiddleSave() {
     if (!riddleQ.trim() || !riddleA.trim() || !riddleTotp.trim()) {
@@ -119,47 +366,130 @@ function GovernanceSection() {
   }
 
   async function handlePreset(preset: string) {
+    if (!validateMfa()) return
+    setBusy(true)
     try {
       await setPolicyPreset(preset, polTotp, polRiddle || null)
       sileo.success({ title: `Preset «${preset}» aplicado` })
       await load()
     } catch (err) {
       sileo.error({ title: `No se pudo aplicar: ${err instanceof Error ? err.message : err}` })
+    } finally {
+      setBusy(false)
     }
   }
 
-  async function handleToolToggle(tool: string, enabled: boolean) {
+  // Single-tool toggle (used by checkbox rows and master-toggle batches).
+  async function handleToolToggle(toolName: string, enabled: boolean) {
+    if (!validateMfa()) return
     try {
-      await setPolicyTool(tool, enabled, polTotp, polRiddle || null)
-      sileo.success({ title: `${tool}: ${enabled ? 'activado' : 'desactivado'}` })
-      setPol(prev => prev ? { ...prev, tools: { ...prev.tools, [tool]: enabled } } : prev)
+      await setPolicyTool(toolName, enabled, polTotp, polRiddle || null)
+      // Optimistic update: keep local state in sync
+      setPol(prev => {
+        if (!prev) return prev
+        const updatedCatalog = prev.catalog?.map(e =>
+          e.name === toolName ? { ...e, enabled } : e
+        )
+        return {
+          ...prev,
+          tools: { ...prev.tools, [toolName]: enabled },
+          catalog: updatedCatalog,
+        }
+      })
     } catch (err) {
-      sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
-      // revert optimistic update
-      setPol(prev => prev ? { ...prev, tools: { ...prev.tools, [tool]: !enabled } } : prev)
+      const msg = err instanceof Error ? err.message : String(err)
+      sileo.error({ title: `No se pudo cambiar ${toolName}: ${msg}` })
+      // Revert optimistic update
+      setPol(prev => {
+        if (!prev) return prev
+        const revertedCatalog = prev.catalog?.map(e =>
+          e.name === toolName ? { ...e, enabled: !enabled } : e
+        )
+        return {
+          ...prev,
+          tools: { ...prev.tools, [toolName]: !enabled },
+          catalog: revertedCatalog,
+        }
+      })
+    }
+  }
+
+  // Master-toggle: fires one setPolicyTool per tool in the category sequentially.
+  async function handleToggleAll(
+    _category: string,
+    targetEnabled: boolean,
+    entries: PolicyCatalogEntry[],
+  ) {
+    if (!validateMfa()) return
+    setBusy(true)
+    const toChange = entries.filter(e => e.enabled !== targetEnabled)
+    let firstError: string | null = null
+    for (const entry of toChange) {
+      try {
+        await setPolicyTool(entry.name, targetEnabled, polTotp, polRiddle || null)
+        // Optimistic update each tool as it succeeds
+        setPol(prev => {
+          if (!prev) return prev
+          const updatedCatalog = prev.catalog?.map(e =>
+            e.name === entry.name ? { ...e, enabled: targetEnabled } : e
+          )
+          return {
+            ...prev,
+            tools: { ...prev.tools, [entry.name]: targetEnabled },
+            catalog: updatedCatalog,
+          }
+        })
+      } catch (err) {
+        firstError = err instanceof Error ? err.message : String(err)
+        break
+      }
+    }
+    setBusy(false)
+    if (firstError) {
+      sileo.error({ title: `Error al cambiar la categoría: ${firstError}` })
+      await load() // re-sync from server after partial failure
+    } else if (toChange.length > 0) {
+      sileo.success({ title: `Categoría ${targetEnabled ? 'activada' : 'desactivada'}` })
     }
   }
 
   async function handleMfaDangers(checked: boolean) {
+    if (!validateMfa()) return
     if (!checked && !window.confirm(
       'Vas a permitir que el agente ejecute comandos PELIGROSOS en autónomo sin tu aprobación.\n' +
       'La jaula sigue conteniendo el daño, pero TÚ te haces responsable.\n\n¿Continuar?'
     )) {
       return
     }
+    setBusy(true)
     try {
       await setMfaOnDangers(checked, polTotp, polRiddle || null)
       sileo.success({ title: checked ? 'MFA en peligrosos: ACTIVO' : 'MFA en peligrosos: desactivado' })
       setPol(prev => prev ? { ...prev, mfa_on_dangers: checked } : prev)
     } catch (err) {
       sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Legacy single-tool toggle (when catalog is absent).
+  async function handleLegacyToolToggle(toolName: string, enabled: boolean) {
+    if (!validateMfa()) return
+    try {
+      await setPolicyTool(toolName, enabled, polTotp, polRiddle || null)
+      sileo.success({ title: `${toolName}: ${enabled ? 'activado' : 'desactivado'}` })
+      setPol(prev => prev ? { ...prev, tools: { ...prev.tools, [toolName]: enabled } } : prev)
+    } catch (err) {
+      sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
+      setPol(prev => prev ? { ...prev, tools: { ...prev.tools, [toolName]: !enabled } } : prev)
     }
   }
 
   if (loading) return <div className="cv-skeleton" aria-busy="true" aria-label="Cargando gobernanza…" />
   if (!mfa || !pol) return null
 
-  const toolNames = Object.keys(pol.tools ?? {}).sort()
+  const hasCatalog = (pol.catalog?.length ?? 0) > 0
 
   return (
     <>
@@ -218,66 +548,141 @@ function GovernanceSection() {
         <div className="cv-section-label">Políticas de seguridad — qué puede hacer el agente</div>
         <div className="seg-card">
           <p className="seg-card__intro">
-            Cambiar cualquier política requiere tu código MFA + acertijo (así el agente nunca abre su propia jaula).
+            Cambiar cualquier política requiere tu código MFA (así el agente nunca abre su propia jaula).
           </p>
 
-          <div className="seg-pol-inputs">
-            <input
-              className="cv-input"
-              inputMode="numeric"
-              placeholder="Código MFA"
-              aria-label="Código MFA para cambiar políticas"
-              value={polTotp}
-              onChange={e => setPolTotp(e.target.value)}
-            />
-            <input
-              className="cv-input"
-              placeholder="Respuesta del acertijo"
-              aria-label="Respuesta del acertijo para cambiar políticas"
-              value={polRiddle}
-              onChange={e => setPolRiddle(e.target.value)}
-            />
-          </div>
+          {/* Shared MFA input — applies to every toggle below */}
+          <fieldset className="seg-pol-mfa-bar" aria-label="Autenticación para cambiar políticas">
+            <legend className="sr-only">Código MFA para políticas</legend>
+            <div className="seg-pol-inputs">
+              <div className="seg-pol-input-wrap">
+                <label htmlFor="pol-totp" className="cv-label">Código MFA</label>
+                <input
+                  id="pol-totp"
+                  className="cv-input"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  placeholder="6 dígitos"
+                  aria-describedby={mfaError ? 'pol-mfa-error' : undefined}
+                  aria-invalid={!!mfaError}
+                  value={polTotp}
+                  onChange={e => { setPolTotp(e.target.value); setMfaError('') }}
+                />
+              </div>
+              <div className="seg-pol-input-wrap">
+                <label htmlFor="pol-riddle" className="cv-label">Acertijo (si aplica)</label>
+                <input
+                  id="pol-riddle"
+                  className="cv-input"
+                  placeholder="Respuesta del acertijo"
+                  aria-label="Respuesta del acertijo para políticas"
+                  value={polRiddle}
+                  onChange={e => setPolRiddle(e.target.value)}
+                />
+              </div>
+            </div>
+            {mfaError && (
+              <p id="pol-mfa-error" className="seg-pol-mfa-error" role="alert">
+                {mfaError}
+              </p>
+            )}
+          </fieldset>
 
-          <label className="seg-tool-row" style={{ fontWeight: 600, marginBottom: 8 }}>
-            <input
-              type="checkbox"
-              checked={pol.mfa_on_dangers ?? true}
-              onChange={e => handleMfaDangers(e.target.checked)}
+          {/* MFA on dangers global toggle */}
+          <div className="seg-pol-danger-row">
+            <div className="seg-pol-danger-row__info">
+              <span className="seg-pol-danger-row__label">
+                Pedir mi MFA para los comandos peligrosos
+              </span>
+              <span className="seg-pol-danger-row__hint">
+                Si lo desactivas, el agente ejecuta acciones peligrosas en autónomo sin pedírtelo. Recomendado mantenerlo activo.
+              </span>
+            </div>
+            <ToggleSwitch
+              id="toggle-mfa-dangers"
               aria-label="Pedir MFA para comandos peligrosos"
+              checked={pol.mfa_on_dangers ?? true}
+              disabled={busy}
+              onChange={handleMfaDangers}
             />
-            Pedir mi MFA para los comandos peligrosos (recomendado)
-          </label>
-          <p className="seg-card__intro" style={{ marginBottom: 12 }}>
-            Si lo desactivas, el agente ejecutará acciones peligrosas en autónomo sin pedírtelo.
-            La jaula sigue conteniendo el daño, pero tú te haces responsable.
-          </p>
-
-          <div className="cv-section-label" style={{ marginBottom: 6 }}>Preset</div>
-          <div className="seg-presets">
-            {PRESETS.map(([id, label, desc]) => (
-              <button
-                key={id}
-                className={`cv-btn cv-btn--sm ${pol.preset === id ? 'cv-btn--primary' : 'cv-btn--secondary'}`}
-                title={desc}
-                onClick={() => handlePreset(id)}
-                type="button"
-              >
-                {label}
-              </button>
-            ))}
           </div>
 
-          {toolNames.length > 0 && (
+          {/* Preset quick-access */}
+          <div>
+            <div className="seg-pol-sub-label">Preset rápido</div>
+            <div className="seg-presets">
+              {PRESETS.map(([id, label, desc]) => (
+                <button
+                  key={id}
+                  className={`cv-btn cv-btn--sm ${pol.preset === id ? 'cv-btn--primary' : 'cv-btn--secondary'}`}
+                  title={desc}
+                  onClick={() => handlePreset(id)}
+                  type="button"
+                  disabled={busy}
+                  aria-pressed={pol.preset === id}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Catalog-based grouped view */}
+          {hasCatalog && capabilityGroups.size > 0 && (
+            <div>
+              <div className="seg-pol-sub-label">Capacidades del agente</div>
+              <div className="seg-pol-catalog">
+                {[...capabilityGroups.entries()].map(([cat, entries]) => (
+                  <CategoryGroup
+                    key={cat}
+                    category={cat}
+                    entries={entries}
+                    polTotp={polTotp}
+                    polRiddle={polRiddle}
+                    busy={busy}
+                    onToggleTool={handleToolToggle}
+                    onToggleAll={handleToggleAll}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* System defenses — separated from agent capabilities */}
+          {hasCatalog && defenseGroups.size > 0 && (
+            <div>
+              <div className="seg-pol-sub-label">Defensas del sistema</div>
+              <p className="seg-card__intro" style={{ marginTop: 0, marginBottom: 8 }}>
+                Estas herramientas protegen el sistema. No son capacidades del LLM — el agente no las invoca directamente.
+              </p>
+              <div className="seg-pol-catalog">
+                {[...defenseGroups.entries()].map(([cat, entries]) => (
+                  <CategoryGroup
+                    key={cat}
+                    category={cat}
+                    entries={entries}
+                    polTotp={polTotp}
+                    polRiddle={polRiddle}
+                    busy={busy}
+                    onToggleTool={handleToolToggle}
+                    onToggleAll={handleToggleAll}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Legacy flat list — shown only when catalog is absent */}
+          {!hasCatalog && legacyToolNames.length > 0 && (
             <details className="seg-details" style={{ marginTop: 12 }}>
-              <summary>Comandos uno a uno ({toolNames.length})</summary>
+              <summary>Comandos uno a uno ({legacyToolNames.length})</summary>
               <div className="seg-tool-list">
-                {toolNames.map(name => (
+                {legacyToolNames.map(name => (
                   <label key={name} className="seg-tool-row">
                     <input
                       type="checkbox"
                       checked={pol.tools?.[name] ?? false}
-                      onChange={e => handleToolToggle(name, e.target.checked)}
+                      onChange={e => handleLegacyToolToggle(name, e.target.checked)}
                       aria-label={`Permiso para ${name}`}
                     />
                     <span>{name}</span>

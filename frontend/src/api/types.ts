@@ -318,10 +318,21 @@ export interface MfaStatus {
   riddle_set?: boolean
 }
 
+export interface PolicyCatalogEntry {
+  name: string
+  label: string
+  category: string
+  delicacy: 'normal' | 'delicate' | 'most_delicate'
+  enabled: boolean
+  llm_visible: boolean
+  origin: 'native' | 'capability' | 'mcp' | 'composio'
+}
+
 export interface PoliciesResponse {
   preset?: string
   tools?: Record<string, boolean>
   mfa_on_dangers?: boolean
+  catalog?: PolicyCatalogEntry[]
 }
 
 export interface InstallDecisionPayload {

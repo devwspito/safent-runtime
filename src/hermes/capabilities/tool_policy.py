@@ -36,6 +36,185 @@ _CAPABILITY_TOOLS: frozenset[str] = frozenset({
 # (tool_delicacy) — no hand-listed duplicate of the cage set (de-dup audit 2026-06-19).
 TOOL_CATALOG: frozenset[str] = NOUS_TOOL_CATALOG | _CAPABILITY_TOOLS | CAGED_NATIVE_TOOLS
 
+# ---------------------------------------------------------------------------
+# Category mapping: tool name → human-readable capability group.
+#
+# Category labels are UI-facing (Spanish, domain language for Lumen).
+# Origin axes:
+#   - native (NOUS_TOOL_CATALOG): categorised by functional group below.
+#   - capability (_CAPABILITY_TOOLS + CAGED_NATIVE_TOOLS): derives from
+#     SurfaceKind via _CAPABILITY_CATEGORY_MAP.
+#   - mcp:      "Herramientas externas (MCP)"
+#   - composio: "Apps conectadas (Composio)"
+# ---------------------------------------------------------------------------
+
+_NATIVE_TOOL_CATEGORY: dict[str, str] = {
+    # Files and documents
+    "read_file": "Ficheros y documentos",
+    "search_files": "Ficheros y documentos",
+    "write_file": "Ficheros y documentos",
+    "patch": "Ficheros y documentos",
+    # Terminal and execution
+    "execute_code": "Terminal y ejecución",
+    "terminal": "Terminal y ejecución",
+    "process": "Terminal y ejecución",
+    # Web and browser
+    "web_search": "Web y navegador",
+    "web_extract": "Web y navegador",
+    "browser_snapshot": "Web y navegador",
+    "browser_back": "Web y navegador",
+    "browser_get_images": "Web y navegador",
+    "browser_console": "Web y navegador",
+    "browser_navigate": "Web y navegador",
+    "browser_click": "Web y navegador",
+    "browser_type": "Web y navegador",
+    "browser_scroll": "Web y navegador",
+    "browser_press": "Web y navegador",
+    "browser_vision": "Web y navegador",
+    "browser_cdp": "Web y navegador",
+    "browser_dialog": "Web y navegador",
+    # Screen and input control
+    "computer_use": "Pantalla y control",
+    # Messaging / communication
+    "send_message": "Comunicación",
+    "discord": "Comunicación",
+    "discord_admin": "Comunicación",
+    "feishu_doc_read": "Comunicación",
+    "feishu_drive_list_comments": "Comunicación",
+    "feishu_drive_list_comment_replies": "Comunicación",
+    "feishu_drive_add_comment": "Comunicación",
+    "feishu_drive_reply_comment": "Comunicación",
+    "yb_query_group_info": "Comunicación",
+    "yb_query_group_members": "Comunicación",
+    "yb_search_sticker": "Comunicación",
+    "yb_send_dm": "Comunicación",
+    "yb_send_sticker": "Comunicación",
+    "x_search": "Comunicación",
+    # Home automation (IoT)
+    "ha_call_service": "Sistema",
+    "ha_get_state": "Sistema",
+    "ha_list_entities": "Sistema",
+    "ha_list_services": "Sistema",
+    # Kanban / task management
+    "kanban_list": "Orquestación",
+    "kanban_show": "Orquestación",
+    "kanban_heartbeat": "Orquestación",
+    "kanban_create": "Orquestación",
+    "kanban_complete": "Orquestación",
+    "kanban_block": "Orquestación",
+    "kanban_unblock": "Orquestación",
+    "kanban_comment": "Orquestación",
+    "kanban_link": "Orquestación",
+    # Skills
+    "skill_manage": "Programación",
+    "skill_view": "Programación",
+    "skills_list": "Programación",
+    # Memory
+    "memory": "Memoria",
+    "session_search": "Memoria",
+    # Media
+    "image_generate": "Medios",
+    "video_generate": "Medios",
+    "text_to_speech": "Medios",
+    "video_analyze": "Medios",
+    "vision_analyze": "Medios",
+    # Orchestration / delegation
+    "delegate_task": "Orquestación",
+    "mixture_of_agents": "Orquestación",
+    "todo": "Orquestación",
+    # Clarify (user dialogue)
+    "clarify": "Comunicación",
+    # Scheduler
+    "cronjob": "Sistema",
+}
+
+# Capability tools: derive category from SurfaceKind name pattern or explicit map.
+_CAPABILITY_CATEGORY_MAP: dict[str, str] = {
+    # Apps / desktop
+    "activate_app": "Apps",
+    "navigate_app": "Apps",
+    "search_apps": "Apps",
+    "install_app": "Apps",
+    # Integrations / MCP
+    "connect_integration": "Apps conectadas (Composio)",
+    "install_mcp": "Herramientas externas (MCP)",
+    "search_mcp": "Herramientas externas (MCP)",
+    # Skills
+    "install_skill": "Programación",
+    "search_skills": "Programación",
+    # System services
+    "get_service_status": "Sistema",
+    "list_services": "Sistema",
+    "start_service": "Sistema",
+    "stop_service": "Sistema",
+    "restart_service": "Sistema",
+    # LibreOffice / documents
+    "lo_open_document": "Ficheros y documentos",
+    "lo_save_document": "Ficheros y documentos",
+    "lo_write_text": "Ficheros y documentos",
+}
+
+# Caged native exec/file tools category
+_CAGED_CATEGORY_MAP: dict[str, str] = {
+    "terminal": "Terminal y ejecución",
+    "execute_code": "Terminal y ejecución",
+    "process": "Terminal y ejecución",
+    "read_file": "Ficheros y documentos",
+    "search_files": "Ficheros y documentos",
+    "write_file": "Ficheros y documentos",
+    "patch": "Ficheros y documentos",
+}
+
+# Tools that the LLM does NOT see because they are superseded by Nous-native equivalents.
+# Imported lazily to avoid a circular import at module load time (capability_tool_specs
+# imports from this module indirectly via tool_delicacy).
+def _get_nous_native_duplicates() -> frozenset[str]:
+    try:
+        from hermes.runtime.capability_tool_specs import _NOUS_NATIVE_DUPLICATES  # noqa: PLC0415
+        return _NOUS_NATIVE_DUPLICATES
+    except Exception:  # noqa: BLE001
+        return frozenset()
+
+
+def _get_os_native_skill_names() -> frozenset[str]:
+    try:
+        from hermes.runtime.capability_tool_specs import _OS_NATIVE_SKILL_NAMES  # noqa: PLC0415
+        return _OS_NATIVE_SKILL_NAMES
+    except Exception:  # noqa: BLE001
+        return frozenset()
+
+
+def _tool_label(name: str) -> str:
+    """Humanise a snake_case tool name to Title Case for the UI."""
+    return name.replace("_", " ").replace("__", " / ").title()
+
+
+def _tool_category(name: str, origin: str) -> str:
+    """Return the human-readable capability group for a tool."""
+    if origin == "mcp":
+        return "Herramientas externas (MCP)"
+    if origin == "composio":
+        return "Apps conectadas (Composio)"
+    if name in _NATIVE_TOOL_CATEGORY:
+        return _NATIVE_TOOL_CATEGORY[name]
+    if name in _CAPABILITY_CATEGORY_MAP:
+        return _CAPABILITY_CATEGORY_MAP[name]
+    if name in _CAGED_CATEGORY_MAP:
+        return _CAGED_CATEGORY_MAP[name]
+    return "Sistema"
+
+
+def _tool_origin(name: str) -> str:
+    """Derive the static origin of a tool from the TOOL_CATALOG membership."""
+    if name in NOUS_TOOL_CATALOG:
+        return "native"
+    if name in _CAPABILITY_TOOLS:
+        return "capability"
+    if name in CAGED_NATIVE_TOOLS:
+        return "native"
+    return "native"
+
+
 class Preset(StrEnum):
     EQUILIBRADO = "equilibrado"  # default: all on except high-risk-default-off
     PERMISIVO = "permisivo"      # everything on (owner's choice/responsibility)
@@ -132,15 +311,74 @@ class ToolPolicyStore:
         self._save(d)
 
     def snapshot(self) -> dict:
-        """Full state for the UI: preset + every catalog tool's enabled flag."""
+        """Full state for the UI: preset + every catalog tool's enabled flag.
+
+        Returns:
+            preset:         active preset name.
+            tools:          {name: bool} — kept for backwards-compat with any
+                            existing consumer (frontend, shell_server, tests).
+            overridden:     sorted list of tool names with explicit overrides.
+            mfa_on_dangers: whether danger-gate MFA is on.
+            catalog:        list of enriched tool descriptors — one per tool
+                            (static catalog + live dynamic tools from
+                            DynamicToolRegistry).  Each entry:
+                              name        : tool name (str)
+                              label       : human-readable label (str)
+                              category    : capability group (str)
+                              delicacy    : "normal" | "delicate" | "most_delicate"
+                              enabled     : bool (respects overrides + preset)
+                              llm_visible : bool (False for NOUS_NATIVE_DUPLICATES
+                                            and _OS_NATIVE_SKILL_NAMES suppressed tools)
+                              origin      : "native" | "capability" | "mcp" | "composio"
+        """
+        from hermes.capabilities.tool_delicacy import delicacy  # noqa: PLC0415
+        from hermes.capabilities.dynamic_tool_registry import get_dynamic_tool_registry  # noqa: PLC0415
+
         preset = self._preset()
         overrides = self._load().get("overrides", {})
+
+        # Backwards-compat: the flat tools:{name:bool} map over the STATIC catalog.
         tools = {
             t: (bool(overrides[t]) if t in overrides else _preset_default(preset, t))
             for t in sorted(TOOL_CATALOG)
         }
-        return {"preset": preset.value, "tools": tools, "overridden": sorted(overrides),
-                "mfa_on_dangers": self.mfa_on_dangers()}
+
+        # Build the enriched catalog: static tools + live dynamic tools (deduped).
+        nous_native_dupes = _get_nous_native_duplicates()
+        os_native_skills = _get_os_native_skill_names()
+        suppressed_from_llm = nous_native_dupes | os_native_skills
+
+        # Seed with static catalog entries.
+        catalog_names: dict[str, str] = {
+            name: _tool_origin(name) for name in TOOL_CATALOG
+        }
+
+        # Overlay dynamic (live) tools — they take precedence over any same-named static entry.
+        dynamic_registry = get_dynamic_tool_registry()
+        for entry in dynamic_registry.all():
+            catalog_names[entry.name] = entry.origin
+
+        catalog = [
+            {
+                "name": name,
+                "label": _tool_label(name),
+                "category": _tool_category(name, origin),
+                "delicacy": delicacy(name).value,
+                "enabled": bool(overrides[name]) if name in overrides
+                           else _preset_default(preset, name),
+                "llm_visible": name not in suppressed_from_llm,
+                "origin": origin,
+            }
+            for name, origin in sorted(catalog_names.items())
+        ]
+
+        return {
+            "preset": preset.value,
+            "tools": tools,
+            "overridden": sorted(overrides),
+            "mfa_on_dangers": self.mfa_on_dangers(),
+            "catalog": catalog,
+        }
 
     def set_tool(self, tool: str, enabled: bool) -> None:
         d = self._load()
