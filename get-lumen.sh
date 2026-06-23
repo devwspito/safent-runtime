@@ -9,7 +9,9 @@
 set -eu
 
 IMAGE="${LUMEN_IMAGE:-ghcr.io/devwspito/lumen:latest}"
-PORT="${LUMEN_PORT:-17517}"
+# Puerto del host: si fijas LUMEN_PORT se respeta; si no, el runtime asigna uno
+# LIBRE (dinámico) y lo descubrimos tras arrancar → nunca choca con 17517 ocupado.
+PORT="${LUMEN_PORT:-}"
 NAME="${LUMEN_NAME:-lumen}"
 SECCOMP_URL="${LUMEN_SECCOMP_URL:-https://raw.githubusercontent.com/devwspito/lumen-runtime/main/ops/container/seccomp/lumen.json}"
 
@@ -59,8 +61,9 @@ echo "▸ Descargando Lumen…"
 
 echo "▸ Arrancando…"
 "$RT" rm -f "$NAME" >/dev/null 2>&1 || true
+if [ -n "$PORT" ]; then PUBLISH="127.0.0.1:${PORT}:7517"; else PUBLISH="127.0.0.1::7517"; fi
 "$RT" run -d --name "$NAME" --systemd=always \
-  -p "127.0.0.1:${PORT}:7517" \
+  -p "$PUBLISH" \
   --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
   --security-opt seccomp="$SECCOMP" \
   --security-opt unmask=/sys/kernel/security \
@@ -69,6 +72,12 @@ echo "▸ Arrancando…"
   -v lumen-data:/var/lib/hermes \
   --shm-size=1g \
   "$IMAGE" >/dev/null
+
+# Descubrir el puerto de host asignado (dinámico si no se fijó LUMEN_PORT).
+if [ -z "$PORT" ]; then
+  PORT="$("$RT" port "$NAME" 7517 2>/dev/null | head -1 | sed 's/.*:\([0-9][0-9]*\)$/\1/')"
+fi
+[ -n "$PORT" ] || PORT=17517
 
 echo "▸ Esperando a Lumen…"
 secret=""
