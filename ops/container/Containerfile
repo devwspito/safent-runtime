@@ -229,13 +229,28 @@ RUN mkdir -p /var/lib/hermes/workspace /var/lib/hermes/browser-sessions && \
 # dep tree is cached. /var/lib/hermes is volume-copied-up into the customer's fresh
 # volume on first boot → the seeded MCPs connect OFFLINE, out of the box, no grant.
 ENV npm_config_cache=/var/lib/hermes/npm-cache
-RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/mcp-home /tmp/mcpwarm && \
+ENV UV_CACHE_DIR=/var/lib/hermes/uv-cache
+ENV XDG_CACHE_HOME=/var/lib/hermes/xdg-cache
+# Warm BOTH runner caches with the EXACT seed specs (ops/.../seed/mcp-servers.json) so the
+# curated MCPs connect OFFLINE on a fresh boot (the cage denies npm/uv at runtime). npx →
+# npm-cache (@pinkpixel/mcpollinations: imagen/audio sin clave); uvx → UV_CACHE_DIR (Excel /
+# Word / PowerPoint, locales sin clave). /var/lib/hermes is volume-copied-up on first boot.
+RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache /var/lib/hermes/xdg-cache \
+      /var/lib/hermes/mcp-home /tmp/mcpwarm && \
     cd /tmp/mcpwarm && npm init -y >/dev/null 2>&1 && \
     HOME=/var/lib/hermes/mcp-home npm install --no-save --no-audit --no-fund \
-      ruflo@latest 2>&1 | tail -2 ; \
+      @pinkpixel/mcpollinations 2>&1 | tail -2 ; \
+    for spec in "excel-mcp-server stdio" \
+                "--from office-word-mcp-server word_mcp_server" \
+                "--from office-powerpoint-mcp-server ppt_mcp_server"; do \
+      echo "▸ warming uvx $spec" ; \
+      HOME=/var/lib/hermes/mcp-home timeout 240 uvx $spec </dev/null >/dev/null 2>&1 || true ; \
+    done ; \
     cd / && rm -rf /tmp/mcpwarm && \
-    chown -R hermes:hermes-work /var/lib/hermes/npm-cache /var/lib/hermes/mcp-home && \
-    chmod -R g+rwX /var/lib/hermes/npm-cache /var/lib/hermes/mcp-home
+    chown -R hermes:hermes-work /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache \
+      /var/lib/hermes/xdg-cache /var/lib/hermes/mcp-home && \
+    chmod -R g+rwX /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache \
+      /var/lib/hermes/xdg-cache /var/lib/hermes/mcp-home
 
 # ── enable the same service set the terminal variant runs ────────────────────
 # The individual enables populate hermes-workspace.target.wants/ (each service's
