@@ -16,9 +16,11 @@ SECCOMP_URL="${LUMEN_SECCOMP_URL:-https://raw.githubusercontent.com/devwspito/lu
 RT="$(command -v podman 2>/dev/null || command -v docker 2>/dev/null || true)"
 [ -n "$RT" ] || { echo "✗ Necesitas podman o docker.  →  https://podman.io/get-started"; exit 1; }
 RTN="$(basename "$RT")"
+OS="$(uname -s 2>/dev/null || echo unknown)"
 
-# macOS: la jaula (Landlock/netns) necesita una podman machine ROOTFUL.
-if [ "$RTN" = podman ]; then
+# macOS: la jaula (Landlock/netns) corre dentro de una podman machine, que DEBE
+# ser rootful. En Linux nativo no hay machine (podman corre directo) → se omite.
+if [ "$RTN" = podman ] && [ "$OS" = Darwin ]; then
   rf="$(podman machine inspect --format '{{.Rootful}}' 2>/dev/null || echo nomachine)"
   if [ "$rf" = nomachine ]; then
     echo "✗ No hay una podman machine. Crea una (rootful):"
@@ -32,9 +34,12 @@ if [ "$RTN" = podman ]; then
   fi
 fi
 
-# Perfil seccomp (descargado del repo; necesario para la jaula).
-SECCOMP="$(mktemp)"
-trap 'rm -f "$SECCOMP"' EXIT
+# Perfil seccomp (necesario para la jaula). Se descarga bajo $HOME, no /tmp:
+# en macOS la podman machine monta $HOME en la VM pero NO /tmp, así que un
+# perfil en /tmp no sería visible para `podman run` (corre dentro de la VM).
+SECCOMP_DIR="${HOME:-/tmp}/.lumen"
+mkdir -p "$SECCOMP_DIR" 2>/dev/null || true
+SECCOMP="$SECCOMP_DIR/lumen-seccomp.json"
 if ! curl -fsSL "$SECCOMP_URL" -o "$SECCOMP" 2>/dev/null; then
   echo "✗ No se pudo descargar el perfil seccomp ($SECCOMP_URL)."
   echo "  Si el repo aún no es público, exporta LUMEN_SECCOMP_URL a una URL accesible."

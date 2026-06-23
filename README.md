@@ -5,6 +5,19 @@
 > ⚠️ This is the **clean product repo**. It is a **Docker container**, **NOT** qemu / qcow2 / Apple-VZ / bootc.
 > That VM delivery is **legacy** and is intentionally **not** in this repo.
 
+## Install (one line)
+
+macOS (Apple Silicon / Intel) and Linux (amd64 / arm64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/devwspito/lumen-runtime/main/get-lumen.sh | sh
+```
+
+This pulls the public hardened image, runs it with the security cage, and opens your
+browser at a per-boot unique token. The model, Composio, Brave, agents and skills are all
+configured in the UI. Requires **podman** or **docker** (on macOS, a **rootful** podman
+machine). Windows: experimental via WSL2.
+
 ## What's inside (the whole product, one container)
 
 - **Daemon** — the Lumen runtime + the **Nous** reasoning engine.
@@ -70,3 +83,10 @@ podman run -d --name lumen --systemd=always \
 ```sh
 pytest tests/unit/agents_os/ tests/unit/cli/ tests/unit/apps/ -q
 ```
+
+## License
+
+**[PolyForm Noncommercial License 1.0.0](LICENSE)** — free to use, study, modify and share
+for **any noncommercial purpose** (personal, research, education, nonprofits, hobby).
+**Commercial use is not permitted** under this license. For a commercial license, contact
+the author.
