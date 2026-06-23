@@ -2,6 +2,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { listConfiguredTasks, listRecentTasks, createTask, deleteTask, toggleTask, listAgents, ApiError } from '../api/client'
 import type { ConfiguredTask, RecentTask, Agent, CreateTaskPayload } from '../api/types'
+import { useConfirmDialog } from '../components/ConfirmDialog'
 
 // ── Cron parsing (mirrors tasks-view.js exactly) ──────────────────────────────
 
@@ -176,6 +177,7 @@ export default function CalendarView() {
   const [calRef, setCalRef] = useState<Date>(() => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), 1) })
   const [modalOpen, setModalOpen] = useState(false)
   const [modalPresetDate, setModalPresetDate] = useState<string | null>(null)
+  const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
   const agentsById = Object.fromEntries(state.agents.map(a => [a.id, a]))
 
@@ -183,8 +185,8 @@ export default function CalendarView() {
     const id = task.target_agent_id ?? task.agent_id ?? ''
     if (!id) return 'Todos los agentes'
     const a = agentsById[id]
-    if (a?.is_default) return 'Cerebro'
-    return a?.name ?? 'Cerebro'
+    if (a?.is_default) return 'Agente principal'
+    return a?.name ?? 'Agente principal'
   }
 
   const loadAll = useCallback(async () => {
@@ -230,7 +232,13 @@ export default function CalendarView() {
   async function handleDelete(task: ConfiguredTask) {
     const id = task.trigger_id ?? task.task_id ?? task.id ?? ''
     const name = task.label ?? task.name ?? id
-    if (!window.confirm(`¿Eliminar "${name}"?`)) return
+    const ok = await confirm({
+      title: `¿Eliminar "${name}"?`,
+      description: 'Esta tarea programada no se ejecutará más.',
+      confirmLabel: 'Eliminar',
+      variant: 'danger',
+    })
+    if (!ok) return
     try {
       await deleteTask(id)
       show('Tarea eliminada', 'ok')
@@ -240,6 +248,7 @@ export default function CalendarView() {
 
   return (
     <>
+      {ConfirmDialogNode}
       <header className="view-header">
         <h1 className="view-title">Tareas programadas</h1>
         <p className="view-subtitle">Agenda programada y cola de ejecución del agente.</p>
@@ -340,7 +349,7 @@ export default function CalendarView() {
           onCreate={async (payload) => {
             try {
               await createTask(payload)
-              show('Tarea creada', 'ok')
+              show('Tarea creada — se ejecutará según la programación', 'ok')
               setModalOpen(false)
               reloadTasks()
             } catch (e) {
@@ -744,7 +753,7 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
               <div>
                 <label className="cv-label" htmlFor="tm-agent">Agente</label>
                 <select id="tm-agent" ref={agentRef} className="cv-input">
-                  <option value="">Cerebro (por defecto)</option>
+                  <option value="">Agente principal (por defecto)</option>
                   {customAgents.map(a => (
                     <option key={a.id} value={a.id}>{a.name}</option>
                   ))}

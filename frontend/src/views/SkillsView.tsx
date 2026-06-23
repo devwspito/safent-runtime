@@ -8,6 +8,7 @@ import {
   ApiError,
 } from '../api/client'
 import type { Skill, HubSkillResult, HubInstallResponse } from '../api/types'
+import { useConfirmDialog } from '../components/ConfirmDialog'
 
 // ── Poll helper ───────────────────────────────────────────────────────────────
 
@@ -91,6 +92,7 @@ export default function SkillsView() {
   const teachDescRef = useRef<HTMLTextAreaElement>(null)
   // ── Skill name for teach form (needed inside stop handler)
   const teachNameValueRef = useRef('')
+  const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
   const pollHandlesRef = useRef<PollHandle[]>([])
 
@@ -160,9 +162,14 @@ export default function SkillsView() {
 
       // Security Center BLOCK: show score + risks, offer owner override
       if (op && op.blocked) {
-        const risksText = (op.risks ?? []).slice(0, 3).join('; ') || 'varios'
-        const msg = `El Centro de Seguridad puntuó esta skill ${op.score ?? '?'}/100 (no superó el control). Riesgos: ${risksText}. ¿Instalar de todas formas, bajo tu responsabilidad?`
-        if (window.confirm(msg)) {
+        const risksText = (op.risks ?? []).slice(0, 3).join('; ') || 'varios riesgos detectados'
+        const ok = await confirm({
+          title: `El análisis de seguridad bloqueó "${name}"`,
+          description: `Puntuación: ${op.score ?? '?'}/100. Riesgos: ${risksText}.\n\n¿Instalar igualmente bajo tu responsabilidad?`,
+          confirmLabel: 'Instalar igualmente',
+          variant: 'danger',
+        })
+        if (ok) {
           await doInstall(identifier, name, onBtnUpdate, true)
         } else {
           onBtnUpdate('ready')
@@ -184,11 +191,11 @@ export default function SkillsView() {
     if (op?.op_id) {
       show(`Instalando "${name}"…`, 'ok')
       trackPoll(pollHubOp(op.op_id, {
-        onDone: () => { show(`Skill "${name}" instalada`, 'ok'); onBtnUpdate('installed'); loadInstalled() },
+        onDone: () => { show(`"${name}" instalada — pruébala en el chat`, 'ok'); onBtnUpdate('installed'); loadInstalled() },
         onError: r => { show(`No se pudo instalar: ${r}`, 'error'); onBtnUpdate('ready') },
       }))
     } else {
-      show(`Skill "${name}" instalada`, 'ok')
+      show(`"${name}" instalada — pruébala en el chat`, 'ok')
       onBtnUpdate('installed')
       loadInstalled()
     }
@@ -261,15 +268,16 @@ export default function SkillsView() {
 
   return (
     <>
+      {ConfirmDialogNode}
       <header className="view-header">
-        <h1 className="view-title">Skills</h1>
-        <p className="view-subtitle">Habilidades del agente. Busca en el hub e instala en segundos.</p>
+        <h1 className="view-title">Habilidades</h1>
+        <p className="view-subtitle">Amplía lo que puede hacer el agente. Busca e instala en segundos.</p>
       </header>
 
       <div className="view-body cv-view-body">
         {/* ── Hub search (first — easiest path to value) ────────────────── */}
-        <section className="cv-section" aria-label="Hub de habilidades">
-          <h2 className="cv-section-label">Hub de habilidades</h2>
+        <section className="cv-section" aria-label="Catálogo de habilidades">
+          <h2 className="cv-section-label">Catálogo</h2>
 
           {/* Suggestion chips — visible before any search so the hub is useful immediately */}
           {!hubSearching && hubResults.length === 0 && (
@@ -352,7 +360,7 @@ export default function SkillsView() {
                       hubInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
                     }}
                   >
-                    Buscar en el hub
+                    Buscar en el catálogo
                   </button>
                 </div>
               )
@@ -364,21 +372,31 @@ export default function SkillsView() {
                         skill={s}
                         onPromote={async () => {
                           const pkgId = s.package_id ?? s.skill_id ?? ''
-                          try { await promoteSkill(pkgId); show('Skill promovida a autónoma', 'ok'); loadInstalled() }
+                          try {
+                            await promoteSkill(pkgId)
+                            show('El agente puede usar esta habilidad de forma autónoma', 'ok')
+                            loadInstalled()
+                          }
                           catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
                         }}
                         onUninstall={async () => {
                           const name = s.skill_name ?? s.name ?? s.package_id ?? ''
-                          if (!window.confirm(`¿Desinstalar "${name}"?`)) return
+                          const ok = await confirm({
+                            title: `¿Desinstalar "${name}"?`,
+                            description: 'El agente dejará de tener esta habilidad.',
+                            confirmLabel: 'Desinstalar',
+                            variant: 'danger',
+                          })
+                          if (!ok) return
                           try {
                             const op = await uninstallHubSkill(name)
                             if (op?.op_id) {
                               trackPoll(pollHubOp(op.op_id, {
-                                onDone: () => { show(`Skill "${name}" desinstalada`, 'ok'); loadInstalled() },
+                                onDone: () => { show(`"${name}" desinstalada`, 'ok'); loadInstalled() },
                                 onError: r => { show(`No se pudo desinstalar: ${r}`, 'error'); loadInstalled() },
                               }))
                             } else {
-                              show(`Skill "${name}" desinstalada`, 'ok'); loadInstalled()
+                              show(`"${name}" desinstalada`, 'ok'); loadInstalled()
                             }
                           } catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
                         }}
@@ -391,7 +409,7 @@ export default function SkillsView() {
         </section>
 
         {/* ── Teach a skill (advanced — collapsable at the bottom) ──────── */}
-        <section className="cv-section" aria-label="Enseñar una skill">
+        <section className="cv-section" aria-label="Enseñar una habilidad">
           <details>
             <summary
               style={{
@@ -408,7 +426,7 @@ export default function SkillsView() {
               }}
             >
               <span aria-hidden="true" style={{ fontSize: 10 }}>▶</span>
-              Enseñar una skill (avanzado)
+              Enseñar una habilidad (avanzado)
             </summary>
 
             <div className="cv-teach-card" style={{ marginTop: 'var(--sp-3)' }}>
@@ -479,7 +497,7 @@ export default function SkillsView() {
 
 function stateMeta(state: string) {
   const s = state.toLowerCase()
-  if (s.includes('autonom')) return { label: 'Autónoma', cls: 'is-autonomous' }
+  if (s.includes('autonom')) return { label: 'Autónoma (sin tu permiso)', cls: 'is-autonomous' }
   if (s.includes('deprec')) return { label: 'Obsoleta', cls: 'is-deprecated' }
   if (s.includes('valid')) return { label: 'Validada', cls: 'is-validated' }
   return { label: state, cls: '' }
@@ -515,9 +533,9 @@ function SkillRow({ skill, onPromote, onUninstall }: SkillRowProps) {
           <button
             className="cv-btn cv-btn--primary cv-btn--sm"
             onClick={onPromote}
-            aria-label="Promover skill"
+            aria-label="Activar modo autónomo para esta habilidad"
           >
-            Promover
+            Activar modo autónomo
           </button>
         )}
         <button

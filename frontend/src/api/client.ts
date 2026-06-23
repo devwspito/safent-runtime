@@ -198,11 +198,11 @@ export async function uploadWorkspaceFile(file: File): Promise<WorkspaceFile> {
 // ── Providers ─────────────────────────────────────────────────────────────────
 
 export function listProviders(): Promise<Provider[]> {
-  return request<Provider[]>('/providers').catch(() => [])
+  return request<Provider[]>('/providers')
 }
 
 export function listNativeProviders(): Promise<Provider[]> {
-  return request<Provider[]>('/providers/native').catch(() => [])
+  return request<Provider[]>('/providers/native')
 }
 
 export function addProvider(payload: Record<string, unknown>): Promise<Provider> {
@@ -240,7 +240,7 @@ export function getProviderOAuthStatus(sessionId: string): Promise<{ status?: st
 // ── Skills ────────────────────────────────────────────────────────────────────
 
 export function listSkills(): Promise<Skill[]> {
-  return request<Skill[]>('/skills').catch(() => [])
+  return request<Skill[]>('/skills')
 }
 
 export function searchSkillsHub(query: string): Promise<{ results?: HubSkillResult[] } | HubSkillResult[]> {
@@ -303,17 +303,15 @@ export function abandonTrainingSession(sessionId: string): Promise<unknown> {
 // ── Integrations (Composio) ───────────────────────────────────────────────────
 
 export function getComposioStatus(): Promise<ComposioStatus> {
-  return request<ComposioStatus>('/integrations/composio/status').catch(
-    () => ({ has_key: false, enabled: false, entity_id: '' }),
-  )
+  return request<ComposioStatus>('/integrations/composio/status')
 }
 
 export function listComposioConnected(): Promise<ComposioApp[]> {
-  return request<ComposioApp[]>('/integrations/composio/connected').catch(() => [])
+  return request<ComposioApp[]>('/integrations/composio/connected')
 }
 
 export function listComposioApps(): Promise<ComposioApp[]> {
-  return request<ComposioApp[]>('/integrations/composio/toolkits').catch(() => [])
+  return request<ComposioApp[]>('/integrations/composio/toolkits')
 }
 
 export function connectComposioApp(slug: string): Promise<{ redirect_url?: string }> {
@@ -331,9 +329,7 @@ export function setComposioApiKey(apiKey: string): Promise<unknown> {
 }
 
 export function getWebSearchStatus(): Promise<WebSearchStatus> {
-  return request<WebSearchStatus>('/web-search/status').catch(
-    () => ({ brave: false, ddgs_fallback: true }),
-  )
+  return request<WebSearchStatus>('/web-search/status')
 }
 
 export function setWebSearchKey(provider: string, apiKey: string): Promise<{ ok?: boolean; error?: string }> {
@@ -346,7 +342,7 @@ export function setWebSearchKey(provider: string, apiKey: string): Promise<{ ok?
 // ── MCP ───────────────────────────────────────────────────────────────────────
 
 export function listMcpServers(): Promise<McpServer[]> {
-  return request<McpServer[]>('/mcp').catch(() => [])
+  return request<McpServer[]>('/mcp')
 }
 
 export function addMcpServer(payload: Record<string, unknown>): Promise<McpAddResponse> {
@@ -369,7 +365,7 @@ export function searchMcpRegistry(query: string, limit = 30): Promise<McpRegistr
   return request<McpRegistryEntry[]>(
     `/mcp/registry?q=${encodeURIComponent(query)}&limit=${limit}`,
     { timeoutMs: 25_000 },
-  ).catch(() => [])
+  )
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────

@@ -118,15 +118,15 @@ function PlusIcon() {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { to: '/chat',         label: 'Chat',          icon: <ChatIcon /> },
-  { to: '/programadas',  label: 'Programadas',   icon: <TasksIcon /> },
-  { to: '/agentes',      label: 'Agentes',       icon: <AgentsIcon /> },
-  { to: '/skills',       label: 'Skills',        icon: <SkillsIcon /> },
-  { to: '/integraciones',label: 'Integraciones', icon: <IntegrationsIcon /> },
-  { to: '/mcp',          label: 'MCP',           icon: <McpIcon /> },
-  { to: '/proveedores',  label: 'Proveedores',   icon: <ProvidersIcon /> },
-  { to: '/seguridad',    label: 'Seguridad',     icon: <SecurityIcon /> },
-  { to: '/memoria',      label: 'Memoria',       icon: <MemoriaIcon /> },
+  { to: '/chat',         label: 'Chat',            icon: <ChatIcon /> },
+  { to: '/programadas',  label: 'Programadas',     icon: <TasksIcon /> },
+  { to: '/agentes',      label: 'Agentes',         icon: <AgentsIcon /> },
+  { to: '/skills',       label: 'Habilidades',     icon: <SkillsIcon /> },
+  { to: '/integraciones',label: 'Integraciones',   icon: <IntegrationsIcon /> },
+  { to: '/mcp',          label: 'Herramientas',    icon: <McpIcon /> },
+  { to: '/proveedores',  label: 'Proveedores',     icon: <ProvidersIcon /> },
+  { to: '/seguridad',    label: 'Seguridad',       icon: <SecurityIcon /> },
+  { to: '/memoria',      label: 'Memoria',         icon: <MemoriaIcon /> },
 ]
 
 // ── Recientes ─────────────────────────────────────────────────────────────────

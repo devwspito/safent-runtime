@@ -6,6 +6,7 @@ import {
   ApiError,
 } from '../api/client'
 import type { Provider } from '../api/types'
+import { useConfirmDialog } from '../components/ConfirmDialog'
 
 // Mirrors vanilla providers.js: badge colours per kind/auth-type
 const KIND_COLORS: Record<string, string> = {
@@ -64,9 +65,12 @@ function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok') {
 
 export default function ProvidersView() {
   const [state, dispatch] = useReducer(reducer, { status: 'loading' })
+  const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
   function load() {
     dispatch({ type: 'RELOAD' })
+    // Both calls throw on error — we catch at the combined level so the view
+    // shows an honest error instead of silently returning empty arrays.
     Promise.all([listProviders(), listNativeProviders()])
       .then(([configured, native]) => {
         dispatch({
@@ -91,6 +95,7 @@ export default function ProvidersView() {
 
   return (
     <>
+      {ConfirmDialogNode}
       <header className="view-header">
         <h1 className="view-title">Proveedores</h1>
         <p className="view-subtitle">Conecta modelos de IA. Activa el que Lumen usará por defecto.</p>
@@ -125,6 +130,7 @@ export default function ProvidersView() {
                           isConfigured
                           onRefresh={load}
                           onToast={show}
+                          onConfirm={confirm}
                         />
                       </li>
                     ))}
@@ -153,6 +159,7 @@ export default function ProvidersView() {
                             isConfigured={false}
                             onRefresh={load}
                             onToast={show}
+                            onConfirm={confirm}
                           />
                         </li>
                       ))
@@ -170,14 +177,17 @@ export default function ProvidersView() {
 
 // ── Provider row ──────────────────────────────────────────────────────────────
 
+type ConfirmFn = (opts: import('../components/ConfirmDialog').ConfirmOptions) => Promise<boolean>
+
 interface ProviderRowProps {
   provider: Provider
   isConfigured: boolean
   onRefresh: () => void
   onToast: (msg: string, kind: 'ok' | 'warn' | 'error') => void
+  onConfirm: ConfirmFn
 }
 
-function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRowProps) {
+function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: ProviderRowProps) {
   const [testing, setTesting] = useState(false)
   const [oauthPending, setOauthPending] = useState(false)
   const [showKeyForm, setShowKeyForm] = useState(false)
@@ -192,7 +202,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRow
   async function handleActivate() {
     try {
       await setActiveProvider(id)
-      onToast(`${name} activado`, 'ok')
+      onToast(`${name} activado — ya puedes chatear`, 'ok')
       onRefresh()
     } catch (e) {
       onToast(e instanceof Error ? e.message : 'Error', 'error')
@@ -203,14 +213,23 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRow
     setTesting(true)
     try {
       const r = await testProvider(id)
-      onToast(r?.ok ? 'Conexión exitosa' : 'Sin respuesta', r?.ok ? 'ok' : 'warn')
+      onToast(r?.ok ? 'Conexión exitosa' : 'Sin respuesta del servidor', r?.ok ? 'ok' : 'warn')
     } catch (e) {
       onToast(e instanceof Error ? e.message : 'Error', 'error')
     } finally { setTesting(false) }
   }
 
   async function handleDelete() {
-    if (!window.confirm(`¿Eliminar ${name}?`)) return
+    const isActive = isConfigured && provider.is_active
+    const ok = await onConfirm({
+      title: `¿Eliminar ${name}?`,
+      description: isActive
+        ? 'Este es el proveedor activo. Si lo eliminas, el chat dejará de funcionar hasta que configures otro.'
+        : undefined,
+      confirmLabel: 'Eliminar',
+      variant: 'danger',
+    })
+    if (!ok) return
     try {
       await deleteProvider(id)
       onToast('Proveedor eliminado', 'ok')
@@ -221,7 +240,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRow
   }
 
   async function handleAddConfirm() {
-    if (!apiKeyInput.trim()) { onToast('Introduce la API key', 'warn'); return }
+    if (!apiKeyInput.trim()) { onToast('Introduce la clave API', 'warn'); return }
     setAddingKey(true)
     try {
       await addProvider({
@@ -238,12 +257,12 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRow
       try {
         const r = await testProvider(id)
         if (r?.ok) {
-          onToast(`${name} añadido, verificado y activado — ya puedes chatear`, 'ok')
+          onToast(`${name} conectado y verificado — pruébalo en el chat`, 'ok')
         } else {
-          onToast(`${name} añadido y activado, pero la conexión falló: revisa la API key`, 'warn')
+          onToast(`${name} añadido, pero la conexión falló. Revisa la clave API.`, 'warn')
         }
       } catch {
-        onToast(`${name} añadido y activado, pero la conexión falló: revisa la API key`, 'warn')
+        onToast(`${name} añadido, pero la conexión falló. Revisa la clave API.`, 'warn')
       }
       onRefresh()
     } catch (e) {
@@ -265,7 +284,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRow
     }
 
     if (!r || r['error']) {
-      onToast(`No se pudo conectar: ${(r?.['error'] as string) ?? 'unknown'}`, 'error')
+      onToast(`No se pudo conectar: ${(r?.['error'] as string) ?? 'error desconocido'}`, 'error')
       setOauthPending(false)
       return
     }
@@ -298,13 +317,13 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRow
       const st = await getProviderOAuthStatus(session)
       const status = String(st?.status ?? '').toLowerCase()
       if (status === 'approved' || status === 'connected' || status === 'success') {
-        onToast(`${name} conectado`, 'ok')
+        onToast(`${name} conectado — pruébalo en el chat`, 'ok')
         setOauthPending(false)
         onRefresh()
         return
       }
       if (status === 'error' || status === 'failed') {
-        onToast(`No se pudo conectar: ${st?.error_message ?? st?.error ?? 'unknown'}`, 'error')
+        onToast(`No se pudo conectar: ${st?.error_message ?? st?.error ?? 'error desconocido'}`, 'error')
         setOauthPending(false)
         return
       }
@@ -386,13 +405,13 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast }: ProviderRow
       {/* Inline masked-input for API key — avoids window.prompt leaking the secret */}
       {!isConfigured && !isOAuthProvider(provider) && showKeyForm && (
         <div className="cv-form-inline" style={{ marginTop: 'var(--sp-3)', flexWrap: 'wrap', gap: 'var(--sp-2)' }}>
-          <label className="sr-only" htmlFor={`pv-key-${id}`}>API key para {name}</label>
+          <label className="sr-only" htmlFor={`pv-key-${id}`}>Clave API para {name}</label>
           <input
             id={`pv-key-${id}`}
             className="cv-input"
             type="password"
             autoComplete="new-password"
-            placeholder={`API key para ${name}`}
+            placeholder={`Clave API para ${name}`}
             value={apiKeyInput}
             onChange={e => setApiKeyInput(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') void handleAddConfirm() }}
@@ -441,14 +460,14 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
     const api_key = keyRef.current?.value.trim() || undefined
 
     if (!base_url || !default_model) {
-      onToast('Pon al menos la Base URL y el modelo.', 'warn')
+      onToast('Pon al menos la URL base y el nombre del modelo.', 'warn')
       return
     }
 
     setSaving(true)
     try {
       await addProvider({ kind: 'openai_compatible', alias, default_model, base_url, api_key, set_active: true })
-      onToast('Proveedor añadido', 'ok')
+      onToast('Modelo propio añadido y activado — pruébalo en el chat', 'ok')
       setOpen(false)
       if (aliasRef.current) aliasRef.current.value = ''
       if (urlRef.current) urlRef.current.value = ''
@@ -463,7 +482,7 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
   return (
     <div className="cv-teach-card">
       <p className="cv-teach-intro">
-        Conecta cualquier endpoint compatible con OpenAI: vLLM, LM Studio, Ollama o un servidor propio.
+        Conecta cualquier servidor compatible: vLLM, LM Studio, Ollama o uno propio.
       </p>
       {!open ? (
         <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={() => setOpen(true)}>
@@ -480,13 +499,13 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
             placeholder='Nombre (p. ej. "Qwen local")'
             autoComplete="off"
           />
-          <label className="cv-label" htmlFor="pv-c-url">Base URL</label>
+          <label className="cv-label" htmlFor="pv-c-url">URL base del servidor</label>
           <input
             id="pv-c-url"
             ref={urlRef}
             className="cv-input"
             type="text"
-            placeholder="Base URL (p. ej. https://tu-servidor/v1)"
+            placeholder="URL base (p. ej. https://tu-servidor/v1)"
             autoComplete="off"
           />
           <label className="cv-label" htmlFor="pv-c-model">Modelo</label>
@@ -498,17 +517,17 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
             placeholder="Modelo (p. ej. qwen3.6-35b-a3b)"
             autoComplete="off"
           />
-          <label className="cv-label" htmlFor="pv-c-key">API key</label>
+          <label className="cv-label" htmlFor="pv-c-key">Clave API</label>
           {/* Never echo back: password input for secrets */}
           <input
             id="pv-c-key"
             ref={keyRef}
             className="cv-input"
             type="password"
-            placeholder="API key (si tu servidor la requiere)"
+            placeholder="Clave API (si tu servidor la requiere)"
             autoComplete="new-password"
           />
-          <p className="cv-hint">La Base URL debe terminar en /v1. La API key solo si tu servidor la pide.</p>
+          <p className="cv-hint">La URL base debe terminar en /v1. La clave API solo si tu servidor la pide.</p>
           <div className="cv-form-actions">
             <button
               className="cv-btn cv-btn--primary cv-btn--sm"
@@ -529,4 +548,3 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
     </div>
   )
 }
-

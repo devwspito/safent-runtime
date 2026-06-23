@@ -32,6 +32,12 @@ function composioReducer(_s: ComposioState, a: ComposioAction): ComposioState {
   }
 }
 
+// Web-search — separate state machine; lightweight enough to stay in useState
+type WsState =
+  | { status: 'loading' }
+  | { status: 'ready'; data: WebSearchStatus }
+  | { status: 'error'; message: string }
+
 function show(message: string, kind: 'ok' | 'warn' | 'error' | 'info' = 'ok') {
   if (kind === 'ok') sileo.success({ title: message })
   else if (kind === 'error') sileo.error({ title: message })
@@ -41,7 +47,7 @@ function show(message: string, kind: 'ok' | 'warn' | 'error' | 'info' = 'ok') {
 
 export default function IntegrationsView() {
   const [composioState, dispatch] = useReducer(composioReducer, { status: 'loading' })
-  const [wsStatus, setWsStatus] = useState<WebSearchStatus | null>(null)
+  const [wsState, setWsState] = useState<WsState>({ status: 'loading' })
   const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Clear the reload timer on unmount so it never fires on a dead component
@@ -53,21 +59,47 @@ export default function IntegrationsView() {
 
   async function loadComposio() {
     dispatch({ type: 'LOADING' })
-    const status = await getComposioStatus().catch(() => ({ has_key: false }))
+    let status: ComposioStatus
+    try {
+      status = await getComposioStatus()
+    } catch (e) {
+      dispatch({
+        type: 'FAILED',
+        message: e instanceof ApiError ? e.message : 'No se pudo contactar con el servidor de integraciones.',
+      })
+      return
+    }
+
     if (!status.has_key) {
       dispatch({ type: 'NO_KEY' })
       return
     }
-    const [connected, apps] = await Promise.all([
-      listComposioConnected().catch(() => [] as ComposioApp[]),
-      listComposioApps().catch(() => [] as ComposioApp[]),
+
+    // Connected/apps errors are surfaced individually to avoid blocking the status row.
+    // Returning [] on these is safe — we tell the user which part failed.
+    const [connected, apps] = await Promise.allSettled([
+      listComposioConnected(),
+      listComposioApps(),
     ])
-    dispatch({ type: 'READY', info: status, connected, apps })
+    dispatch({
+      type: 'READY',
+      info: status,
+      connected: connected.status === 'fulfilled' ? connected.value : [],
+      apps: apps.status === 'fulfilled' ? apps.value : [],
+    })
   }
 
   async function loadWebSearch() {
-    const st = await getWebSearchStatus()
-    setWsStatus(st)
+    setWsState({ status: 'loading' })
+    try {
+      const st = await getWebSearchStatus()
+      setWsState({ status: 'ready', data: st })
+    } catch (e) {
+      setWsState({
+        status: 'error',
+        message: e instanceof ApiError ? e.message : 'No se pudo cargar el estado de búsqueda web.',
+      })
+    }
   }
 
   useEffect(() => {
@@ -83,32 +115,58 @@ export default function IntegrationsView() {
     <>
       <header className="view-header">
         <h1 className="view-title">Integraciones</h1>
-        <p className="view-subtitle">Conecta Lumen a tus apps vía Composio. Más de 250 conectores disponibles.</p>
+        <p className="view-subtitle">Conecta Lumen a tus apps. Más de 250 conectores disponibles vía Composio.</p>
       </header>
 
       <div className="view-body cv-view-body">
         {/* ── Web search (Brave) ─────────────────────────────────────────── */}
         <section className="cv-section" aria-label="Búsqueda web">
           <h2 className="cv-section-label">Búsqueda web</h2>
-          <WebSearchCard status={wsStatus} onSaved={() => { loadWebSearch(); show('Brave activado — tus búsquedas ya usan Brave', 'ok') }} onToast={show} />
+          {wsState.status === 'loading' && <div className="cv-skeleton" aria-busy="true" />}
+          {wsState.status === 'error' && (
+            <div role="alert">
+              <p className="state-error">{wsState.message}</p>
+              <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={loadWebSearch} style={{ marginTop: 8 }}>
+                Reintentar
+              </button>
+            </div>
+          )}
+          {wsState.status === 'ready' && (
+            <WebSearchCard
+              status={wsState.data}
+              onSaved={() => { loadWebSearch(); show('Brave activado — las búsquedas del agente ya usan Brave', 'ok') }}
+              onToast={show}
+            />
+          )}
         </section>
 
         {/* ── Composio status ────────────────────────────────────────────── */}
         <section className="cv-section" aria-label="Estado Composio">
-          <h2 className="cv-section-label">Estado Composio</h2>
+          <h2 className="cv-section-label">Composio — conecta tus apps</h2>
           {composioState.status === 'loading' && (
             <div className="cv-skeleton" aria-busy="true" />
           )}
           {composioState.status === 'no-key' && (
-            <ComposioSetupCard onSaved={() => { loadComposio(); show('Composio conectado', 'ok') }} onToast={show} />
+            <ComposioSetupCard
+              onSaved={() => {
+                loadComposio()
+                show('Composio conectado — ahora puedes conectar tus apps', 'ok')
+              }}
+              onToast={show}
+            />
           )}
           {composioState.status === 'error' && (
-            <p className="state-error" role="alert">{composioState.message}</p>
+            <div role="alert">
+              <p className="state-error">{composioState.message}</p>
+              <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={loadComposio} style={{ marginTop: 8 }}>
+                Reintentar
+              </button>
+            </div>
           )}
           {composioState.status === 'ready' && (
             <div className="integration-status-ok" aria-label="Composio activo">
               <span className="integration-status-ok__check" aria-hidden="true">✓</span>
-              Composio activo · Entity: <code>{composioState.info.entity_id ?? ''}</code>
+              Composio activo · Tu cuenta: <code>{composioState.info.entity_id ?? ''}</code>
             </div>
           )}
         </section>
@@ -159,7 +217,7 @@ export default function IntegrationsView() {
                             if (r?.redirect_url) {
                               window.open(r.redirect_url, '_blank', 'noopener,noreferrer')
                             }
-                            show(`Conectando ${a.name ?? a.slug}…`, 'info')
+                            show(`Conectando ${a.name ?? a.slug}… completa la autorización en el navegador`, 'info')
                             reloadTimerRef.current = setTimeout(loadComposio, 3000)
                           } catch (e) {
                             show(e instanceof Error ? e.message : 'Error', 'error')
@@ -231,7 +289,7 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
 
   async function handleSave() {
     const key = keyRef.current?.value.trim() ?? ''
-    if (!key) { onToast('Introduce una API key', 'warn'); return }
+    if (!key) { onToast('Introduce una clave API', 'warn'); return }
     setSaving(true)
     try {
       await setComposioApiKey(key)
@@ -244,21 +302,23 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
 
   return (
     <div className="cv-teach-card">
-      <p className="cv-teach-intro">Conecta Lumen a tus apps (Gmail, Slack, Notion y +250) vía Composio. Es gratis para empezar.</p>
+      <p className="cv-teach-intro">
+        Composio conecta Lumen a tus apps del día a día (Gmail, Slack, Notion y más de 250). Es gratis para empezar.
+      </p>
       <p className="cv-teach-intro">
         1) Entra en{' '}
         <a href="https://app.composio.dev/developers" target="_blank" rel="noopener noreferrer">app.composio.dev</a>
-        {' '}· 2) Crea una cuenta gratis · 3) En <strong>Settings → API Keys</strong> genera una key (<code>ak_…</code>) y pégala aquí.
+        {' '}· 2) Crea una cuenta gratis · 3) En <strong>Settings → API Keys</strong> genera una clave (<code>ak_…</code>) y pégala aquí.
       </p>
       <div className="cv-form-inline">
-        <label className="sr-only" htmlFor="composio-apikey">API key de Composio</label>
+        <label className="sr-only" htmlFor="composio-apikey">Clave API de Composio</label>
         {/* Secret: password input, never echoed back */}
         <input
           id="composio-apikey"
           ref={keyRef}
           className="cv-input"
           type="password"
-          placeholder="API key de Composio"
+          placeholder="Clave API de Composio"
           autoComplete="new-password"
           onKeyDown={e => { if (e.key === 'Enter') handleSave() }}
         />
@@ -277,7 +337,7 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
 // ── Web search (Brave) card ───────────────────────────────────────────────────
 
 interface WebSearchCardProps {
-  status: WebSearchStatus | null
+  status: WebSearchStatus
   onSaved: () => void
   onToast: (msg: string, kind: 'ok' | 'warn' | 'error') => void
 }
@@ -288,7 +348,7 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
 
   async function handleSave() {
     const key = keyRef.current?.value.trim() ?? ''
-    if (!key) { onToast('Pega tu API key de Brave', 'warn'); return }
+    if (!key) { onToast('Pega tu clave API de Brave', 'warn'); return }
     setSaving(true)
     try {
       const r = await setWebSearchKey('brave', key)
@@ -307,7 +367,7 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
       </div>
       <p className="cv-teach-intro">
         Lumen ya busca en la web (DuckDuckGo, sin configurar). Para resultados más fiables y de mayor
-        calidad, añade una API key gratuita de Brave Search.
+        calidad, añade una clave API gratuita de Brave Search.
       </p>
       <p className="cv-hint">
         1) Entra en{' '}
@@ -315,23 +375,21 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
           api.search.brave.com
         </a>
         {'  ·  '}2) Crea una cuenta y elige el plan gratuito (Free){'  ·  '}
-        3) Genera una API key y pégala aquí.
+        3) Genera una clave API y pégala aquí.
       </p>
-      {status && (
-        <div className={`websearch-status${status.brave ? ' is-active' : ''}`} aria-live="polite">
-          {status.brave
-            ? '✓ Brave activo · DuckDuckGo de reserva'
-            : 'Activo: DuckDuckGo (sin key)'}
-        </div>
-      )}
+      <div className={`websearch-status${status.brave ? ' is-active' : ''}`} aria-live="polite">
+        {status.brave
+          ? '✓ Brave activo · DuckDuckGo de reserva'
+          : 'Activo: DuckDuckGo (sin clave)'}
+      </div>
       <div className="cv-form-inline">
-        <label className="sr-only" htmlFor="brave-key">Brave Search API key</label>
+        <label className="sr-only" htmlFor="brave-key">Clave API de Brave Search</label>
         <input
           id="brave-key"
           ref={keyRef}
           className="cv-input"
           type="password"
-          placeholder="Brave Search API key"
+          placeholder="Clave API de Brave Search"
           autoComplete="new-password"
           onKeyDown={e => { if (e.key === 'Enter') handleSave() }}
         />
@@ -346,4 +404,3 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
     </div>
   )
 }
-

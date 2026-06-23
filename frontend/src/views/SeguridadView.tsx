@@ -35,6 +35,7 @@ import type {
 } from '../api/types'
 import ApprovalCard from '../components/ApprovalCard'
 import MfaEnroll from '../components/MfaEnroll'
+import { useConfirmDialog } from '../components/ConfirmDialog'
 
 // ── Approvals section ─────────────────────────────────────────────────────────
 
@@ -81,9 +82,9 @@ function ApprovalsSection() {
 // ── Governance section ────────────────────────────────────────────────────────
 
 const PRESETS: Array<[string, string, string]> = [
-  ['equilibrado', 'Equilibrado', 'Todo activo salvo lo más delicado (recomendado)'],
-  ['permisivo', 'Permisivo', 'Todo activo — tu responsabilidad'],
-  ['bloqueado', 'Bloqueado', 'Todo desactivado (máximo bloqueo)'],
+  ['equilibrado', 'Equilibrado', 'Todo activo salvo las acciones de mayor riesgo (recomendado)'],
+  ['permisivo', 'Permisivo', 'Todo activo — el agente actúa sin restricciones, bajo tu responsabilidad'],
+  ['bloqueado', 'Bloqueado', 'Todo desactivado — el agente no puede ejecutar ninguna acción'],
 ]
 
 // Human-readable names for known category slugs.
@@ -304,6 +305,7 @@ function GovernanceSection() {
   const [polRiddle, setPolRiddle] = useState('')
   const [mfaError, setMfaError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
   const load = useCallback(async () => {
     const [m, p] = await Promise.all([mfaStatus(), getPolicies()])
@@ -455,16 +457,21 @@ function GovernanceSection() {
 
   async function handleMfaDangers(checked: boolean) {
     if (!validateMfa()) return
-    if (!checked && !window.confirm(
-      'Vas a permitir que el agente ejecute comandos PELIGROSOS en autónomo sin tu aprobación.\n' +
-      'La jaula sigue conteniendo el daño, pero TÚ te haces responsable.\n\n¿Continuar?'
-    )) {
-      return
+    if (!checked) {
+      const ok = await confirm({
+        title: 'Desactivar verificación en acciones peligrosas',
+        description:
+          'El agente podrá ejecutar acciones de alto riesgo en modo autónomo sin pedirte confirmación. ' +
+          'La protección de la jaula sigue activa, pero tú asumes la responsabilidad. ¿Continuar?',
+        confirmLabel: 'Desactivar',
+        variant: 'danger',
+      })
+      if (!ok) return
     }
     setBusy(true)
     try {
       await setMfaOnDangers(checked, polTotp, polRiddle || null)
-      sileo.success({ title: checked ? 'MFA en peligrosos: ACTIVO' : 'MFA en peligrosos: desactivado' })
+      sileo.success({ title: checked ? 'Verificación en peligrosos: activa' : 'Verificación en peligrosos: desactivada' })
       setPol(prev => prev ? { ...prev, mfa_on_dangers: checked } : prev)
     } catch (err) {
       sileo.error({ title: `No se pudo cambiar: ${err instanceof Error ? err.message : err}` })
@@ -493,6 +500,7 @@ function GovernanceSection() {
 
   return (
     <>
+      {ConfirmDialogNode}
       {/* MFA enrollment */}
       <section className="cv-section">
         <div className="cv-section-label">Tu verificación (MFA)</div>
@@ -752,8 +760,8 @@ function EgressSection() {
       <div className="cv-section-label">Permisos de red — dominios permitidos</div>
       <div className="seg-card">
         <p className="seg-card__intro">
-          Por defecto el agente no accede a ninguna web (default-deny). Autoriza aquí los dominios
-          que quieras permitir (p.ej. <code>pypi.org</code>, <code>github.com</code>).
+          Por defecto el agente no puede acceder a ningún sitio web. Añade aquí los dominios
+          a los que quieras darle acceso (p.ej. <code>pypi.org</code>, <code>github.com</code>).
           Aplica al navegador y al terminal del agente.
         </p>
         <div className="cv-form-inline">
@@ -1015,7 +1023,7 @@ export default function SeguridadView() {
       <div className="view-header" style={{ padding: 0, border: 'none' }}>
         <h1 className="view-title">Seguridad y gobernanza</h1>
         <p className="view-subtitle">
-          Aprobaciones HITL, políticas del agente, escaneos y cadena de auditoría.
+          Aprobaciones, políticas del agente, escaneos y cadena de auditoría.
         </p>
       </div>
 

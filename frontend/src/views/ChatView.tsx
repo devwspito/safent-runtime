@@ -627,6 +627,16 @@ export default function ChatView() {
   const userScrolledRef = useRef(false)
   const pinRef = useRef(true)
 
+  // Wire the starter-prompt saved by OnboardingView — pre-fill the composer
+  // on first mount so the user lands ready to send.
+  useEffect(() => {
+    const stored = sessionStorage.getItem('lumen_starter_prompt')
+    if (stored) {
+      sessionStorage.removeItem('lumen_starter_prompt')
+      setComposerText(stored)
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   const isStreaming = status.phase === 'streaming' || status.phase === 'sending'
   const showWelcome = messages.length === 0
 

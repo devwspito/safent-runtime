@@ -2,6 +2,7 @@ import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, ApiError } from '../api/client'
 import type { McpServer, McpRegistryEntry } from '../api/types'
+import { useConfirmDialog } from '../components/ConfirmDialog'
 
 // Curated catalog — mirrors mcp.js MCP_CATALOG (npx-only verified servers).
 const MCP_CATALOG: McpRegistryEntry[] = [
@@ -9,7 +10,7 @@ const MCP_CATALOG: McpRegistryEntry[] = [
     server_id: 'github',
     label: 'GitHub',
     tag: 'Dev',
-    description: 'MCP oficial de GitHub: repos, issues, PRs, código.',
+    description: 'Acceso a tus repositorios, issues y pull requests de GitHub.',
     argv: ['npx', '-y', '@modelcontextprotocol/server-github'],
     repository: 'https://github.com/github/github-mcp-server',
   },
@@ -23,9 +24,9 @@ const MCP_CATALOG: McpRegistryEntry[] = [
   },
   {
     server_id: 'filesystem',
-    label: 'Filesystem',
+    label: 'Archivos locales',
     tag: 'Sistema',
-    description: 'Lectura/escritura de ficheros locales con HITL.',
+    description: 'Lee y escribe ficheros locales. Cada acción requiere tu permiso.',
     argv: ['npx', '-y', '@modelcontextprotocol/server-filesystem', '/var/lib/hermes/workspace'],
     repository: 'https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem',
   },
@@ -36,7 +37,7 @@ function slugify(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 60) || 'mcp-server'
+    .slice(0, 60) || 'herramienta'
 }
 
 function getRunner(argv: string | string[] | undefined): string {
@@ -86,6 +87,13 @@ function reducer(_s: State, a: Action): State {
   }
 }
 
+// Registry search — separate discriminated state so the main list stays intact
+type RegistryState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'success'; results: McpRegistryEntry[] }
+  | { status: 'error'; message: string }
+
 function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok', durationMs = 4000) {
   if (kind === 'ok') sileo.success({ title: message, duration: durationMs })
   else if (kind === 'error') sileo.error({ title: message, duration: durationMs })
@@ -94,19 +102,19 @@ function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok', durationMs 
 
 export default function McpView() {
   const [state, dispatch] = useReducer(reducer, { status: 'loading' })
-  const [registryResults, setRegistryResults] = useState<McpRegistryEntry[]>([])
-  const [registryLoading, setRegistryLoading] = useState(false)
+  const [registryState, setRegistryState] = useState<RegistryState>({ status: 'idle' })
   const regInputRef = useRef<HTMLInputElement>(null)
+  const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
   function load() {
     dispatch({ type: 'LOADING' })
     listMcpServers()
-      // Ruflo is a first-class Lumen integration, not a user-managed MCP server.
+      // Ruflo is a first-class Lumen integration, not a user-managed tool set.
       // The backend already hides it but we filter defensively client-side too.
       .then(servers => dispatch({ type: 'LOADED', servers: servers.filter(s => s.slug !== 'ruflo') }))
       .catch((e: unknown) => dispatch({
         type: 'FAILED',
-        message: e instanceof ApiError ? e.message : 'No se pudieron cargar los servidores MCP.',
+        message: e instanceof ApiError ? e.message : 'No se pudieron cargar las herramientas externas.',
       }))
   }
 
@@ -119,7 +127,7 @@ export default function McpView() {
   async function installEntry(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void) {
     const runner = getRunner(entry.argv)
     if (runner && runner !== 'npx') {
-      show(`Solo se admiten servidores npx por ahora (este usa ${runner}).`, 'warn', 7000)
+      show(`Solo se admiten herramientas npx por ahora (esta usa ${runner}).`, 'warn', 7000)
       onDone()
       return
     }
@@ -137,9 +145,9 @@ export default function McpView() {
       })
       const name = entry.label ?? entry.name ?? ''
       if (res && res.tool_count === 0) {
-        show(`"${name}" se conectó pero no expone herramientas. Revisa su configuración.`, 'warn', 7000)
+        show(`"${name}" se conectó pero no tiene herramientas disponibles. Revisa su configuración.`, 'warn', 7000)
       } else {
-        show(`Servidor "${name}" añadido`, 'ok')
+        show(`"${name}" añadida — tus agentes ya pueden usarla`, 'ok')
       }
       load()
     } catch (e) {
@@ -152,27 +160,31 @@ export default function McpView() {
   async function searchRegistry() {
     const q = regInputRef.current?.value.trim() ?? ''
     if (q.length < 2) return
-    setRegistryLoading(true)
+    setRegistryState({ status: 'loading' })
     try {
       const results = await searchMcpRegistry(q)
       const arr = Array.isArray(results) ? results : []
-      setRegistryResults(arr)
-    } finally {
-      setRegistryLoading(false)
+      setRegistryState({ status: 'success', results: arr })
+    } catch (e) {
+      setRegistryState({
+        status: 'error',
+        message: e instanceof ApiError ? e.message : 'No se pudo buscar en el registro.',
+      })
     }
   }
 
   return (
     <>
+      {ConfirmDialogNode}
       <header className="view-header">
-        <h1 className="view-title">Servidores MCP</h1>
-        <p className="view-subtitle">Model Context Protocol. Conecta servidores de herramientas externos.</p>
+        <h1 className="view-title">Herramientas externas</h1>
+        <p className="view-subtitle">Conecta conjuntos de herramientas externos para ampliar las capacidades del agente.</p>
       </header>
 
       <div className="view-body cv-view-body">
         {/* ── Active servers ──────────────────────────────────────────────── */}
-        <section className="cv-section" aria-label="Servidores activos">
-          <h2 className="cv-section-label">Servidores activos</h2>
+        <section className="cv-section" aria-label="Herramientas activas">
+          <h2 className="cv-section-label">Activas</h2>
           {state.status === 'loading' && <div className="cv-skeleton" aria-busy="true" />}
           {state.status === 'error' && (
             <div role="alert">
@@ -182,7 +194,7 @@ export default function McpView() {
           )}
           {state.status === 'success' && (
             state.servers.length === 0
-              ? <p className="cv-empty">Sin servidores MCP. Añade uno.</p>
+              ? <p className="cv-empty">Sin herramientas conectadas. Añade una.</p>
               : (
                 <ul className="cv-list" role="list">
                   {state.servers.map(s => (
@@ -191,10 +203,16 @@ export default function McpView() {
                         server={s}
                         onRemove={async () => {
                           const name = s.label ?? s.server_id ?? ''
-                          if (!window.confirm(`¿Eliminar "${name}"?`)) return
+                          const ok = await confirm({
+                            title: `¿Eliminar "${name}"?`,
+                            description: 'El agente dejará de tener acceso a estas herramientas.',
+                            confirmLabel: 'Eliminar',
+                            variant: 'danger',
+                          })
+                          if (!ok) return
                           try {
                             await removeMcpServer(s.server_id ?? s.id ?? '')
-                            show('Servidor eliminado', 'ok')
+                            show('Conjunto de herramientas eliminado', 'ok')
                             load()
                           } catch (e) {
                             show(e instanceof Error ? e.message : 'Error', 'error')
@@ -209,8 +227,8 @@ export default function McpView() {
         </section>
 
         {/* ── Suggested catalog ───────────────────────────────────────────── */}
-        <section className="cv-section" aria-label="Servidores sugeridos">
-          <h2 className="cv-section-label">Sugeridos</h2>
+        <section className="cv-section" aria-label="Herramientas sugeridas">
+          <h2 className="cv-section-label">Sugeridas</h2>
           <div className="mcp-cards-grid">
             {MCP_CATALOG.map(entry => (
               <CatalogCard
@@ -224,31 +242,39 @@ export default function McpView() {
         </section>
 
         {/* ── Official registry search ─────────────────────────────────── */}
-        <section className="cv-section" aria-label="Registro oficial MCP">
-          <h2 className="cv-section-label">Registro oficial MCP</h2>
+        <section className="cv-section" aria-label="Buscar más herramientas">
+          <h2 className="cv-section-label">Buscar más herramientas</h2>
           <div className="cv-search-row">
-            <label className="sr-only" htmlFor="mcp-registry-input">Buscar en el registro oficial</label>
+            <label className="sr-only" htmlFor="mcp-registry-input">Buscar herramientas externas</label>
             <input
               id="mcp-registry-input"
               ref={regInputRef}
               className="cv-input"
               type="search"
-              placeholder="Buscar en el registro oficial (github, slack, postgres…)"
+              placeholder="Buscar (github, slack, postgres…)"
               autoComplete="off"
               onKeyDown={e => { if (e.key === 'Enter') searchRegistry() }}
             />
             <button
               className="cv-btn cv-btn--secondary cv-btn--sm"
               onClick={searchRegistry}
-              disabled={registryLoading}
+              disabled={registryState.status === 'loading'}
             >
-              {registryLoading ? 'Buscando…' : 'Buscar'}
+              {registryState.status === 'loading' ? 'Buscando…' : 'Buscar'}
             </button>
           </div>
-          <p className="cv-hint">Conectado a registry.modelcontextprotocol.io</p>
-          {registryResults.length > 0 && (
+          <p className="cv-hint">Conectado al registro oficial de herramientas externas</p>
+          {registryState.status === 'error' && (
+            <div role="alert">
+              <p className="state-error">{registryState.message}</p>
+              <button className="cv-btn cv-btn--secondary cv-btn--sm" onClick={searchRegistry} style={{ marginTop: 8 }}>
+                Reintentar
+              </button>
+            </div>
+          )}
+          {registryState.status === 'success' && registryState.results.length > 0 && (
             <div className="mcp-cards-grid">
-              {registryResults.map((entry, i) => (
+              {registryState.results.map((entry, i) => (
                 <CatalogCard
                   key={`${entry.server_id ?? entry.id ?? entry.name ?? i}`}
                   entry={entry}
@@ -258,15 +284,15 @@ export default function McpView() {
               ))}
             </div>
           )}
-          {!registryLoading && registryResults.length === 0 && regInputRef.current?.value && (
-            <p className="cv-empty">Sin resultados en el registro.</p>
+          {registryState.status === 'success' && registryState.results.length === 0 && (
+            <p className="cv-empty">Sin resultados.</p>
           )}
         </section>
 
         {/* ── Manual add ──────────────────────────────────────────────────── */}
         <section className="cv-section" aria-label="Añadir manualmente">
           <h2 className="cv-section-label">Añadir manualmente</h2>
-          <AddMcpForm onAdded={() => { show('Servidor MCP añadido', 'ok'); load() }} onToast={show} />
+          <AddMcpForm onAdded={() => { show('Herramienta añadida — tus agentes ya pueden usarla', 'ok'); load() }} onToast={show} />
         </section>
       </div>
     </>
@@ -284,13 +310,13 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
   const argv = Array.isArray(server.argv) ? server.argv.join(' ') : (server.argv ?? '')
   const healthy = String(server.health ?? '').toLowerCase() === 'healthy'
   const hasHealth = server.health != null && server.health !== ''
-  const tools = server.tool_count != null ? `${server.tool_count} tools` : ''
+  const tools = server.tool_count != null ? `${server.tool_count} herramienta${server.tool_count === 1 ? '' : 's'}` : ''
 
   return (
     <div className="mcp-row">
       <div className="mcp-row__info">
         <div className="mcp-row__name">
-          {server.label ?? server.server_id ?? 'MCP Server'}
+          {server.label ?? server.server_id ?? 'Herramienta externa'}
           {hasHealth && (
             <span className={`mcp-health-chip${healthy ? ' is-ok' : ' is-down'}`}>
               {healthy ? '●' : '○'} {tools || String(server.health)}
@@ -298,12 +324,21 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
           )}
           {!hasHealth && tools && <span className="mcp-health-chip">{tools}</span>}
         </div>
-        {argv && <div className="mcp-row__cmd">{argv}</div>}
+        {/* Show the launch command under a technical details toggle */}
+        {argv && (
+          <details style={{ marginTop: 2 }}>
+            <summary className="mcp-row__cmd" style={{ cursor: 'pointer', listStyle: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: 10, opacity: 0.5 }}>▶</span>
+              <span style={{ fontSize: 'var(--text-caption)', opacity: 0.6 }}>Ver detalles técnicos</span>
+            </summary>
+            <div className="mcp-row__cmd" style={{ marginTop: 4 }}>{argv}</div>
+          </details>
+        )}
       </div>
       <button
         className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
         onClick={onRemove}
-        aria-label={`Eliminar servidor MCP ${server.label ?? ''}`}
+        aria-label={`Eliminar ${server.label ?? 'herramienta externa'}`}
       >
         ✕
       </button>
@@ -361,19 +396,28 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
         <div className="mcp-card__head">
           <span className="mcp-card__name">{entry.label ?? entry.name ?? id}</span>
           {entry.tag && <span className="mcp-card__tag">{entry.tag}</span>}
-          {needsEnv && <span className="mcp-card__tag">BYOK</span>}
+          {needsEnv && <span className="mcp-card__tag">Requiere tu clave API</span>}
         </div>
         {entry.description && <div className="mcp-card__desc">{entry.description}</div>}
-        {argv && <div className="mcp-card__cmd">{argv}</div>}
+        {/* Technical details collapsed by default */}
+        {argv && (
+          <details style={{ marginTop: 4 }}>
+            <summary style={{ cursor: 'pointer', listStyle: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: 10, opacity: 0.5 }}>▶</span>
+              <span className="mcp-card__cmd" style={{ opacity: 0.6 }}>Ver detalles técnicos</span>
+            </summary>
+            <div className="mcp-card__cmd" style={{ marginTop: 2 }}>{argv}</div>
+          </details>
+        )}
         {unsupported && entry.unsupported_reason && (
           <div className="mcp-card__cmd">{entry.unsupported_reason}</div>
         )}
         {unsupported && nonNpx && !entry.unsupported_reason && (
-          <div className="mcp-card__cmd">Solo se admiten servidores npx por ahora (este usa {runner}).</div>
+          <div className="mcp-card__cmd">Solo se admiten herramientas npx por ahora (esta usa {runner}).</div>
         )}
       </div>
 
-      {/* Inline BYOK form — shown when the entry requires env vars */}
+      {/* Inline key-entry form — shown when the entry requires configuration */}
       {showEnvForm && (
         <div className="cv-form-stack" style={{ marginTop: 'var(--sp-3)' }}>
           {envSchema.map(field => (
@@ -423,7 +467,7 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
             disabled={already || unsupported || installing}
             onClick={handleInstallClick}
           >
-            {already ? 'Añadido' : unsupported ? 'No disponible' : installing ? 'Añadiendo…' : 'Añadir'}
+            {already ? 'Añadida' : unsupported ? 'No disponible' : installing ? 'Añadiendo…' : 'Añadir'}
           </button>
         )}
       </div>
@@ -447,7 +491,7 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
   async function handleAdd() {
     const label = labelRef.current?.value.trim() ?? ''
     const argvRaw = argvRef.current?.value.trim() ?? ''
-    if (!label || !argvRaw) { onToast('Nombre y comando son obligatorios', 'warn'); return }
+    if (!label || !argvRaw) { onToast('Nombre y comando de arranque son obligatorios', 'warn'); return }
 
     const argv = argvRaw.split(/\s+/).filter(Boolean)
     const envRaw = envRef.current?.value.trim() ?? ''
@@ -467,9 +511,9 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
       })
       const name = label
       if (res && res.tool_count === 0) {
-        onToast(`"${name}" se conectó pero no expone herramientas. Revisa su configuración.`, 'warn')
+        onToast(`"${name}" se conectó pero no tiene herramientas disponibles. Revisa su configuración.`, 'warn')
       } else {
-        onToast('Servidor MCP añadido', 'ok')
+        onToast('Herramienta añadida — tus agentes ya pueden usarla', 'ok')
       }
       if (labelRef.current) labelRef.current.value = ''
       if (argvRef.current) argvRef.current.value = ''
@@ -482,7 +526,7 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
 
   return (
     <div className="cv-form-card">
-      <h3 className="cv-form-title">Añadir servidor MCP</h3>
+      <h3 className="cv-form-title">Añadir herramienta externa</h3>
       <label className="cv-label" htmlFor="mcp-label">Nombre</label>
       <input
         id="mcp-label"
@@ -492,7 +536,7 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
         placeholder="Replicate, Brave…"
         autoComplete="off"
       />
-      <label className="cv-label" htmlFor="mcp-argv">Comando (argv separado por espacios)</label>
+      <label className="cv-label" htmlFor="mcp-argv">Comando de arranque</label>
       <input
         id="mcp-argv"
         ref={argvRef}
@@ -501,7 +545,7 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
         placeholder="npx -y @modelcontextprotocol/server-brave-search"
         autoComplete="off"
       />
-      <label className="cv-label" htmlFor="mcp-env">Variables de entorno (KEY=VALUE, una por línea)</label>
+      <label className="cv-label" htmlFor="mcp-env">Variables de configuración (CLAVE=VALOR, una por línea)</label>
       <textarea
         id="mcp-env"
         ref={envRef}
@@ -521,4 +565,3 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
     </div>
   )
 }
-

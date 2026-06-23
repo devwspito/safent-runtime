@@ -3966,3 +3966,63 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   }
 }
 
+/* ── ConfirmDialog ────────────────────────────────────────────────────────── */
+
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .60);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 400;
+  padding: var(--sp-4);
+  backdrop-filter: blur(2px);
+}
+
+.confirm-card {
+  background: var(--surface);
+  border: 1px solid var(--line2);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-floating);
+  width: 100%;
+  max-width: 400px;
+  padding: var(--sp-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.confirm-card__title {
+  font-size: var(--text-subtitle);
+  font-weight: 650;
+  color: var(--ink);
+  letter-spacing: -.02em;
+  line-height: 1.3;
+  margin: 0;
+}
+
+.confirm-card__desc {
+  font-size: var(--text-body);
+  color: var(--ink2);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.confirm-card__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+}
+
+/* Solid danger button variant (used in destructive confirms) */
+.cv-btn--danger-solid:not(:disabled) {
+  background: var(--danger) !important;
+  color: #fff !important;
+  border-color: var(--danger) !important;
+}
+.cv-btn--danger-solid:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 80%, #000) !important;
+}
+
