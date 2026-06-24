@@ -2414,7 +2414,6 @@ class DbusRuntimeServiceWiring:
                        created_at, conversation_id, parameters_redacted
                 FROM pending_approvals
                 WHERE status = 'pending'
-                  AND created_at > datetime('now', '-30 minutes')
                 ORDER BY created_at ASC
                 LIMIT ?
                 """,

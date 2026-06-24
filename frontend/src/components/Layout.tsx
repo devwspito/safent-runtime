@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { listConversations } from '../api/client'
+import { listConversations, listPendingApprovals } from '../api/client'
 import { useChat } from '../hooks/useChat'
 import type { ConversationSummary } from '../api/types'
 
@@ -289,6 +289,24 @@ export default function Layout({ hasActiveProvider, activeProviderReload }: Layo
   // fire an immediate poll without waiting for the 3 s interval.
   const [approvalRefreshTick, setApprovalRefreshTick] = useState(0)
 
+  // Global pending-approvals count → badge on the Seguridad nav. HITL cards from
+  // NON-chat cycles (scheduled / autonomous tasks; conversation_id=null) don't
+  // anchor to a chat thread, so without this they'd be invisible outside the
+  // Security view. The badge guarantees the owner always sees there's something
+  // waiting to approve.
+  const [pendingCount, setPendingCount] = useState(0)
+  useEffect(() => {
+    let alive = true
+    const poll = () => {
+      listPendingApprovals()
+        .then(a => { if (alive) setPendingCount(Array.isArray(a) ? a.length : 0) })
+        .catch(() => { /* transient — keep last known count */ })
+    }
+    poll()
+    const id = setInterval(poll, 6000)
+    return () => { alive = false; clearInterval(id) }
+  }, [approvalRefreshTick])
+
   async function handleSendMessage(text: string) {
     await chat.sendMessage(text)
     setApprovalRefreshTick(t => t + 1)
@@ -344,6 +362,28 @@ export default function Layout({ hasActiveProvider, activeProviderReload }: Layo
                   >
                     {icon}
                     {label}
+                    {to === '/seguridad' && pendingCount > 0 && (
+                      <span
+                        role="status"
+                        aria-label={`${pendingCount} aprobaciones pendientes`}
+                        style={{
+                          marginLeft: 'auto',
+                          background: 'var(--color-danger, #dc2626)',
+                          color: '#fff',
+                          borderRadius: '999px',
+                          minWidth: '18px',
+                          height: '18px',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          padding: '0 5px',
+                        }}
+                      >
+                        {pendingCount}
+                      </span>
+                    )}
                   </NavLink>
                 </li>
               ))}

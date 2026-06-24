@@ -131,7 +131,9 @@ class SqliteApprovalGate:
         Los parámetros se redactan defensivamente (CTRL-14). `tool_name` se persiste
         para que la capa MFA clasifique la delicadeza por tool (no por el risk genérico).
         `action_digest` liga la aprobación a la acción exacta (chokepoint nativo).
-        `conversation_id` (task_id del hook) ancla la tarjeta al hilo del chat.
+        `conversation_id` es el id REAL de la conversación de chat (resuelto por el
+        engine vía conversation_task_registry, NO el task_id del ciclo) — ancla la
+        tarjeta de aprobación al hilo que el dueño está mirando.
         """
         operator_id = str(consent_context.operator_id) if consent_context.operator_id else ""
         now = datetime.now(tz=UTC).isoformat()

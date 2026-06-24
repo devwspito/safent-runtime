@@ -289,6 +289,68 @@ class TestUs2ApprovalFlow:
 
 
 # ---------------------------------------------------------------------------
+# HITL conversation anchoring: broker.dispatch forwards conversation_id so the
+# in-chat approval card matches the thread. Regression for "never saw a card"
+# (conversation_id used to be a random per-cycle task_id → filtered out).
+# ---------------------------------------------------------------------------
+
+
+class TestConversationIdAnchoring:
+    async def test_dispatch_persists_conversation_id_on_pending(
+        self, broker_env, tmp_path: Path
+    ) -> None:
+        """A HIGH dispatch with conversation_id persists it on the pending row, so
+        the in-chat widget (which filters by the active thread) renders the card."""
+        import sqlite3
+
+        broker: CapabilityBroker = broker_env["broker"]
+        proposal = _proposal()
+        conv = "11111111-2222-3333-4444-555555555555"
+
+        outcome = await broker.dispatch(
+            proposal, _ctx(), hitl_approval_token=None, conversation_id=conv
+        )
+        assert outcome.status == ExecutionStatus.PENDING_APPROVAL
+
+        conn = sqlite3.connect(str(tmp_path / "shell-state.db"))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT conversation_id, tool_name FROM pending_approvals WHERE proposal_id = ?",
+            (str(proposal.proposal_id),),
+        ).fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row["conversation_id"] == conv, (
+            "conversation_id must round-trip so the in-chat card anchors to the thread"
+        )
+        assert row["tool_name"] == "write_file"
+
+    async def test_dispatch_without_conversation_id_stores_null(
+        self, broker_env, tmp_path: Path
+    ) -> None:
+        """Non-chat cycles dispatch with no conversation_id → stored as NULL (the
+        card surfaces in the Security view, not anchored to a chat thread)."""
+        import sqlite3
+
+        broker: CapabilityBroker = broker_env["broker"]
+        proposal = _proposal()
+
+        await broker.dispatch(proposal, _ctx(), hitl_approval_token=None)
+
+        conn = sqlite3.connect(str(tmp_path / "shell-state.db"))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT conversation_id FROM pending_approvals WHERE proposal_id = ?",
+            (str(proposal.proposal_id),),
+        ).fetchone()
+        conn.close()
+
+        assert row is not None
+        assert row["conversation_id"] is None
+
+
+# ---------------------------------------------------------------------------
 # T032 (parte ancla): FakeExternalAnchor detecta cadena local reescrita
 # ---------------------------------------------------------------------------
 

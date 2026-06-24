@@ -120,8 +120,9 @@ def ensure_capabilities_schema(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
     # Migración conversation_id (C — anclar tarjeta al hilo del chat, 2026-06-23).
-    # task_id del hook hermes-agent se almacena aquí para que el FE pueda anclar
-    # la tarjeta de aprobación al hilo de conversación correcto.
+    # Guarda el id REAL de la conversación de chat (resuelto por el engine vía
+    # conversation_task_registry) para que el FE ancle la tarjeta de aprobación al
+    # hilo correcto. (Antes se guardaba el task_id aleatorio del ciclo → no casaba.)
     try:
         conn.execute("ALTER TABLE pending_approvals ADD COLUMN conversation_id TEXT")
     except sqlite3.OperationalError:

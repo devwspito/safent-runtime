@@ -189,7 +189,8 @@ def _to_frontend(row: dict, store: MfaStore) -> dict:
         # Show WHAT is being approved (redacted), not just the tool name (red-team
         # finding 5 transparency: the owner approves a specific action).
         "parameters": row.get("parameters_redacted", {}),
-        # C — chat anchor: task_id from the hook (None for pre-migration rows).
+        # C — chat anchor: the REAL chat conversation_id (None for pre-migration
+        # rows or non-chat cycles like scheduled/autonomous tasks).
         "conversation_id": row.get("conversation_id") or None,
         # D — tier + enrollment state so the card can ask only what's required.
         "required_level": classify_level(risk, tool_name).value,
