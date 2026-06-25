@@ -208,10 +208,18 @@ class DbusAuthorizationError(PermissionError):
 
 @dataclass(frozen=True, slots=True)
 class HitlApprovalResult:
-    """Resultado de ApproveAction — token opaco + operador verificado."""
+    """Resultado de ApproveAction — token opaco + operador verificado.
+
+    thread_resumed: True when a blocked conversation thread was found and
+    signalled (LIVE block-and-resume: the exact tool call will execute).
+    False when no thread was waiting — either the proposal timed out (the
+    event slot was cleaned up) or the approval arrived after the turn ended.
+    POST-execution approvals are NOT silently treated as success.
+    """
 
     approval_token: str
     approved_by: UUID
+    thread_resumed: bool = True  # default True for non-native-danger tasks (no event)
 
 
 class DbusRuntimeServiceWiring:
@@ -2442,14 +2450,21 @@ class DbusRuntimeServiceWiring:
         # The security hook blocked the conversation thread on a threading.Event
         # registered under this proposal_id. Signal it now so the EXACT same tool
         # call is resumed (approved) without any re-prompt or re-attempt.
+        # signalled=True  → LIVE: thread was waiting, will execute the exact call.
+        # signalled=False → POST: no thread waiting (timed out or turn ended).
         from hermes.runtime.security_hook import signal_native_danger_approval  # noqa: PLC0415
         signalled = signal_native_danger_approval(str(proposal_id), "approved")
         logger.info(
-            "hermes.dbus.hitl_native_danger_signalled: proposal=%s signalled=%s",
+            "hermes.dbus.hitl_native_danger_signalled: proposal=%s signalled=%s "
+            "(signalled=False means POST-execution — no blocked thread found)",
             proposal_id, signalled,
         )
 
-        return HitlApprovalResult(approval_token=token, approved_by=approved_by)
+        return HitlApprovalResult(
+            approval_token=token,
+            approved_by=approved_by,
+            thread_resumed=signalled,
+        )
 
     async def reject_action(
         self,

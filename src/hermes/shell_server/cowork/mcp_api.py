@@ -29,13 +29,19 @@ logger = logging.getLogger("hermes.shell_server.cowork.mcp_api")
 
 
 class AddMcpServerRequest(BaseModel):
-    # Mirrors the daemon's add_mcp_server draft 1:1 (server_id/label/argv/env) so
+    # Mirrors the daemon's add_mcp_server draft 1:1 (server_id/label/argv/env/force) so
     # the frontend → shell-server → daemon contract is a single shape. argv[0]
     # must be an allowed runner (npx/uvx/node/python3); the daemon validates.
     server_id: str = Field(min_length=1, max_length=120)
     label: str | None = Field(default=None)
     argv: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict, description="BYOK env vars")
+    # Owner sovereign override: set to True only AFTER the owner's MFA was verified
+    # by POST /api/v1/security/decisions (security_api.py → _require_owner_mfa).
+    # The daemon re-checks with its own inline override logic (allow_target + rescan).
+    # Without this field the frontend's force=true was silently dropped by Pydantic,
+    # so the daemon always saw force=False and the FAIL gate was never lifted.
+    force: bool = Field(default=False)
 
 
 # ------------------------------------------------------------------
@@ -76,6 +82,10 @@ def create_mcp_router() -> APIRouter:
             "label": body.label or body.server_id,
             "argv": body.argv,
             "env": body.env,
+            # Propagate the sovereign override flag so the daemon's scan gate sees it.
+            # The MFA was already verified by the caller in POST /api/v1/security/decisions
+            # before this add is retried with force=True.
+            "force": body.force,
         }
         try:
             return await proxy.call_mutator("add_mcp_server", json.dumps(draft))

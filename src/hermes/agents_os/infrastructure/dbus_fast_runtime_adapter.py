@@ -244,7 +244,12 @@ class Runtime1ServiceInterface(ServiceInterface):
         ApprovalGateError is caught here and re-raised as a structured D-Bus error whose
         error name encodes the gate reason (e.g. org.hermes.Error.ApprovalGate.mfa_required)
         so that the client adapter (_translate_dbus_error) can reconstruct the exact reason
-        code without string-matching the human-readable message."""
+        code without string-matching the human-readable message.
+
+        Returns JSON string: {"token": "<opaque>", "live": bool}
+          live=true  → LIVE block-and-resume: blocked thread signalled, exact call will run.
+          live=false → POST-execution: no thread was waiting (timeout/turn ended), action
+                       did NOT execute; the owner should ask the agent again."""
         from hermes.capabilities.infrastructure.sqlite_approval_gate import (  # noqa: PLC0415
             ApprovalGateError,
         )
@@ -263,7 +268,7 @@ class Runtime1ServiceInterface(ServiceInterface):
             raise DBusError(
                 f"org.hermes.Error.ApprovalGate.{reason}", str(exc)
             ) from exc
-        return result.approval_token
+        return json.dumps({"token": result.approval_token, "live": result.thread_resumed})
 
     @method()
     async def Reject(self, proposal_id: "s", reason: "s") -> "b":  # noqa: N802,F821,UP037

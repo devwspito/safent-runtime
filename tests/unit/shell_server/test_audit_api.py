@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from hermes.agents_os.domain.ports.surface_adapter_port import CapturedAction, ReplayStatus
+from hermes.agents_os.domain.surface_kind import SurfaceKind
+from hermes.capabilities.infrastructure.skill_store_adapter import SkillStoreAdapter
 from hermes.shell_server.audit_api import create_audit_router
 
 pytestmark = pytest.mark.unit
+
+_FAKE_KEY = b"hermes-test-signing-key-32bytes!"
+
+
+class _InMemoryKms:
+    async def get_signing_key(self, *, tenant_id: object, key_id: str) -> bytes:  # noqa: ARG002
+        return _FAKE_KEY
 
 
 @pytest.fixture
@@ -18,6 +29,16 @@ def client(tmp_path: Path) -> TestClient:
     app = FastAPI()
     app.include_router(create_audit_router(tmp_path / "audit.db"))
     return TestClient(app)
+
+
+@pytest.fixture
+def db_path(tmp_path: Path) -> Path:
+    """Shared DB path pre-initialised by the audit router (same file)."""
+    path = tmp_path / "audit.db"
+    # Initialise schema the same way the shell-server does at startup.
+    from hermes.shell_server.audit_api import init_schema
+    init_schema(path)
+    return path
 
 
 class TestAudit:
@@ -37,6 +58,95 @@ class TestSkills:
         r = client.get("/api/v1/skills")
         assert r.status_code == 200
         assert r.json() == []
+
+    async def test_agent_created_skill_appears_in_list(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: agent/chat-created skill (HITL-approved skill_manage path)
+        must appear in GET /api/v1/skills after SkillStoreAdapter.replay() succeeds.
+
+        This exercises the full daemon→DB→shell-server read path:
+          skill_manage HITL approved
+          → SkillStoreAdapter._upsert_skill
+          → _persist_to_db (INSERT INTO skill_packages_view)
+          → GET /api/v1/skills reads the same DB
+          → skill visible in the Habilidades list.
+        """
+        db = tmp_path / "shared.db"
+        skill_root = tmp_path / "skills"
+
+        # Simulate daemon side: SkillStoreAdapter ensures schema at __init__,
+        # then replay() writes the skill after HITL approval.
+        adapter = SkillStoreAdapter(
+            kms=_InMemoryKms(),
+            db_path=db,
+            skill_store_root=skill_root,
+            runtime_version="test",
+        )
+        skill_md = (
+            "---\n"
+            "name: chat-created-skill\n"
+            "description: Created by the agent via skill_manage\n"
+            "version: '1'\n"
+            "---\n\n"
+            "## When\n- always\n\n"
+            "## Procedure\n1. do the thing\n\n"
+            "## Pitfalls\n- none\n\n"
+            "## Verification\n- check the thing\n"
+        )
+        action = CapturedAction(
+            surface_kind=SurfaceKind.SKILL_STORE,
+            intent_desc="nous skill_manage create",
+            payload={"action": "create", "name": "chat-created-skill", "content": skill_md},
+            tenant_id=uuid4(),
+            human_operator_id=uuid4(),
+        )
+        outcome = await adapter.replay(action)
+        assert outcome.status == ReplayStatus.EXECUTED_OK, outcome.error
+
+        # Simulate shell-server side: read from the same DB via GET /api/v1/skills.
+        app = FastAPI()
+        app.include_router(create_audit_router(db))
+        client = TestClient(app)
+
+        r = client.get("/api/v1/skills")
+        assert r.status_code == 200
+        skills = r.json()
+        names = [s["skill_name"] for s in skills]
+        assert "chat-created-skill" in names, (
+            f"Agent-created skill missing from GET /api/v1/skills. "
+            f"Got: {names}"
+        )
+        skill = next(s for s in skills if s["skill_name"] == "chat-created-skill")
+        assert skill["state"] == "validated"
+        assert skill["signing_method"] == "v2"
+
+    async def test_skill_store_adapter_ensures_schema_on_empty_db(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: SkillStoreAdapter.__init__ must initialise skill_packages_view
+        even when the DB is new (shell-server not yet started), so a HITL-approved
+        skill_manage never silently loses the row due to missing table.
+        """
+        db = tmp_path / "fresh.db"
+        skill_root = tmp_path / "skills"
+
+        # DB is brand new — no schema at all.
+        assert not db.exists()
+
+        adapter = SkillStoreAdapter(
+            kms=_InMemoryKms(),
+            db_path=db,
+            skill_store_root=skill_root,
+        )
+
+        # DB must exist and skill_packages_view must be queryable after __init__.
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT COUNT(*) AS n FROM skill_packages_view").fetchone()
+        conn.close()
+        assert rows["n"] == 0  # empty but schema is there
 
 
 class TestConsents:

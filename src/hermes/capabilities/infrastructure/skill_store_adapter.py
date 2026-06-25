@@ -100,6 +100,23 @@ class SkillStoreAdapter:
         self._db_path = db_path
         self._skill_store_root = skill_store_root or Path("/var/lib/hermes/skills")
         self._runtime_version = runtime_version
+        # Ensure skill_packages_view schema + migrations exist in the shared DB
+        # before the first _persist_to_db call. Without this, the daemon can
+        # process a HITL-approved skill_manage before SkillGovernanceService or
+        # the shell-server has run init_schema, causing the INSERT to fail with
+        # "no such table: skill_packages_view" (schema missing) or a missing-column
+        # error (validated_at / signing_method not yet migrated). Same pattern as
+        # SkillGovernanceService.__init__: fail-soft so a misconfigured keystore
+        # never blocks boot, only rejects individual proposals.
+        try:
+            from hermes.shell_server.audit_api import init_schema  # noqa: PLC0415
+            init_schema(db_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "hermes.skill_store.schema_ensure_failed: %s — "
+                "skill_manage proposals may fail until the shell-server initialises the schema",
+                exc,
+            )
 
     @property
     def surface_kind(self) -> SurfaceKind:

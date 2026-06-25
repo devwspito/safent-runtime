@@ -129,14 +129,31 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
         )
 
         try:
-            await request.app.state.control_plane.approve(
+            raw = await request.app.state.control_plane.approve(
                 channel=channel, proposal_id=parsed_id,
                 mfa_factors=mfa_factors)
+            # raw is a JSON string from the D-Bus adapter: {"token": ..., "live": bool}
+            # live=True  → LIVE: the blocked conversation thread was signalled; the
+            #              exact tool call is executing right now.
+            # live=False → POST: no thread was waiting (timed out / turn already ended);
+            #              the tool did NOT execute; owner must ask the agent again.
+            # For non-D-Bus adapters (tests / future adapters) raw may be a plain
+            # string or None — default to live=True to avoid false "expired" messages
+            # on paths that don't track threading.
+            live: bool = True
+            if isinstance(raw, str):
+                import json as _json  # noqa: PLC0415
+                try:
+                    parsed = _json.loads(raw)
+                    if isinstance(parsed, dict) and "live" in parsed:
+                        live = bool(parsed["live"])
+                except (ValueError, TypeError):
+                    pass  # non-JSON string → keep live=True default
             logger.info(
-                "hermes.cowork.approvals.approved proposal=%s totp=%s",
-                proposal_id, "yes" if mfa_factors else "no",
+                "hermes.cowork.approvals.approved proposal=%s totp=%s live=%s",
+                proposal_id, "yes" if mfa_factors else "no", live,
             )
-            return {"ok": True, "decision": body.decision}
+            return {"ok": True, "decision": body.decision, "live": live}
         except ApprovalGateError as exc:
             gate_reason = getattr(exc, "reason", "approval_failed")
             status = 401 if gate_reason in {"mfa_required", "invalid_totp",

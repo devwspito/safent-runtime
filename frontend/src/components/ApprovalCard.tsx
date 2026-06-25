@@ -167,8 +167,30 @@ export default function ApprovalCard({
   async function doApprove(totp?: string) {
     setCardState({ phase: 'resolving', action: 'allow' })
     try {
-      await resolveApproval(approval.proposal_id, 'once', { totp: totp ?? null })
-      sileo.success({ title: t('approval.toast.allowed') })
+      const res = await resolveApproval(approval.proposal_id, 'once', { totp: totp ?? null }) as {
+        ok?: boolean
+        live?: boolean
+        decision?: string
+      } | null | undefined
+      // live=true  → LIVE block-and-resume: the blocked thread was signalled and the
+      //              exact tool call is executing now → honest "ran" feedback.
+      // live=false → POST: the turn had already ended or timed out before this approval
+      //              arrived → the action did NOT run; tell the owner to ask again.
+      // live=undefined (old server / non-D-Bus path) → treat as live (keep existing UX).
+      const isLive = res == null || res.live !== false
+      if (isLive) {
+        // i18n key to add: 'approval.toast.executed' → 'Acción aprobada y ejecutada.'
+        // Using inline until i18n.ts is updated (reserved effort).
+        sileo.success({ title: 'Acción aprobada y ejecutada.' })
+      } else {
+        sileo.warning({
+          title: 'La solicitud ya había caducado — acción no ejecutada.',
+          description: 'El agente ya había terminado. Vuelve a pedírselo.',
+        })
+        setCardState({ phase: 'expired' })
+        onResolved()
+        return
+      }
       onResolved()
     } catch (err) {
       const msg = err instanceof Error ? err.message : ''

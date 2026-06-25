@@ -69,14 +69,16 @@ def clear(task_id: str) -> None:
 def snapshot() -> list[dict[str, str]]:
     """Return a point-in-time copy of all in-flight tool entries.
 
-    Each item: {"agent_id": str, "tool": str, "since": str (ISO-8601)}.
-    Returns an empty list on error.
+    Each item: {"task_id": str, "agent_id": str, "tool": str, "since": str (ISO-8601)}.
+    task_id is the conversation/task this tool belongs to — callers (e.g. the chat
+    view) MUST filter by it so concurrent tasks/agents never cross-contaminate one
+    conversation's live indicator. Returns an empty list on error.
     """
     try:
         with _lock:
             return [
-                {"agent_id": v["agent_id"], "tool": v["tool"], "since": v["since"]}
-                for v in _registry.values()
+                {"task_id": k, "agent_id": v["agent_id"], "tool": v["tool"], "since": v["since"]}
+                for k, v in _registry.items()
             ]
     except Exception:  # noqa: BLE001
         logger.debug("hermes.live_activity.snapshot_failed")

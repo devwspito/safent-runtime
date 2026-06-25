@@ -7,6 +7,7 @@ import { getAgentRoster, getRuntimeStatus, listMcpServers, createAgent, setActiv
 import type { AgentRoster, RosterAgent, RosterDepartment, RuntimeStatus, CreateAgentPayload, UpdateAgentPayload } from '../api/types'
 import type { LumenAgent, LumenRuntimeStatus } from './office-live/engine/office-state'
 import { useConfirmDialog } from '../components/ConfirmDialog'
+import { useT } from '../lib/i18n'
 
 // ── Lazy-load the canvas so the rAF loop only starts when En-vivo is shown ──
 
@@ -81,6 +82,7 @@ interface DeptSelectorProps {
 }
 
 function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
+  const t = useT()
   // showCustom tracks whether the user explicitly chose "Nuevo departamento…"
   // We never mirror value back into a separate local state — the parent owns it.
   const [showCustom, setShowCustom] = useState(false)
@@ -122,11 +124,11 @@ function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
           value={value}
           onChange={handleSelectChange}
         >
-          <option value="">Sin departamento</option>
+          <option value="">{t('agents.dept.none')}</option>
           {existingNames.map((name) => (
             <option key={name} value={name}>{name}</option>
           ))}
-          <option value="__new__">Nuevo departamento…</option>
+          <option value="__new__">{t('agents.dept.new')}</option>
         </select>
       ) : (
         <div style={{ display: 'flex', gap: 'var(--sp-2)' }}>
@@ -137,7 +139,7 @@ function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
             className="office-field-input"
             value={value}
             onChange={handleCustomChange}
-            placeholder="Nombre del nuevo departamento"
+            placeholder={t('agents.dept.new.placeholder')}
             maxLength={60}
             style={{ flex: 1 }}
           />
@@ -146,7 +148,7 @@ function DeptSelector({ departments, value, onChange, id }: DeptSelectorProps) {
             className="office-btn office-btn--ghost"
             style={{ height: 36, padding: '0 var(--sp-3)', fontSize: 'var(--text-label)' }}
             onClick={handleClear}
-            aria-label="Borrar búsqueda"
+            aria-label={t('agents.dept.clear.aria')}
           >
             <X size={16} aria-hidden="true" />
           </button>
@@ -171,6 +173,7 @@ interface AgentFormModalProps {
 }
 
 function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSaved }: AgentFormModalProps) {
+  const t = useT()
   const initial = editTarget
     ? { name: editTarget.name, description: editTarget.description, department: editTarget.department ?? '' }
     : prefill ?? { name: '', description: '', department: '' }
@@ -188,15 +191,9 @@ function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSav
   const firstInputRef = useRef<HTMLInputElement>(null)
 
   const titleByMode: Record<AgentFormMode, string> = {
-    create: 'Nuevo agente',
-    clone: 'Clonar agente',
-    edit: 'Editar agente',
-  }
-
-  const submitLabelByMode: Record<AgentFormMode, [string, string]> = {
-    create: ['Creando…', 'Crear agente'],
-    clone: ['Clonando…', 'Crear copia'],
-    edit: ['Guardando…', 'Guardar cambios'],
+    create: t('agents.form.title.create'),
+    clone:  t('agents.form.title.clone'),
+    edit:   t('agents.form.title.edit'),
   }
 
   useEffect(() => {
@@ -208,7 +205,7 @@ function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSav
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!name.trim()) { setError('El nombre es obligatorio.'); return }
+    if (!name.trim()) { setError(t('agents.form.err.name')); return }
     setPending(true)
     setError(null)
     try {
@@ -248,14 +245,24 @@ function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSav
         onSaved(rosterAgent)
       }
     } catch (err: unknown) {
-      const fallback = mode === 'edit' ? 'Error al guardar el agente.' : 'Error al crear el agente.'
+      const fallback = mode === 'edit' ? t('agents.form.err.edit') : t('agents.form.err.create')
       setError(err instanceof Error ? err.message : fallback)
     } finally {
       setPending(false)
     }
   }
 
-  const [pendingLabel, submitLabel] = submitLabelByMode[mode]
+  const pendingLabel = mode === 'create'
+    ? t('agents.form.submit.creating')
+    : mode === 'clone'
+      ? t('agents.form.submit.cloning')
+      : t('agents.form.submit.saving')
+
+  const submitLabel = mode === 'create'
+    ? t('agents.form.submit.create')
+    : mode === 'clone'
+      ? t('agents.form.submit.clone')
+      : t('agents.form.submit.edit')
 
   return (
     <div
@@ -274,7 +281,7 @@ function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSav
             type="button"
             className="office-modal-close"
             onClick={onClose}
-            aria-label="Cerrar"
+            aria-label={t('agents.form.close')}
           >
             <X size={16} aria-hidden="true" />
           </button>
@@ -283,12 +290,12 @@ function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSav
         <form onSubmit={handleSubmit} noValidate className="office-modal-form">
           {mode === 'clone' && (
             <p style={{ fontSize: 'var(--text-label)', color: 'var(--ink3)' }}>
-              Copia personalizable de un agente. Puedes modificarla libremente.
+              {t('agents.form.clone.hint')}
             </p>
           )}
 
           <div className="office-field">
-            <label htmlFor={nameId} className="office-field-label">Nombre *</label>
+            <label htmlFor={nameId} className="office-field-label">{t('agents.form.name.label')}</label>
             <input
               ref={firstInputRef}
               id={nameId}
@@ -300,12 +307,12 @@ function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSav
               aria-required="true"
               aria-describedby={error ? errorId : undefined}
               maxLength={80}
-              placeholder="Ej: Asistente ventas"
+              placeholder={t('agents.form.name.placeholder')}
             />
           </div>
 
           <div className="office-field">
-            <label htmlFor={descId} className="office-field-label">Descripción</label>
+            <label htmlFor={descId} className="office-field-label">{t('agents.form.desc.label')}</label>
             <textarea
               id={descId}
               value={description}
@@ -313,12 +320,12 @@ function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSav
               className="office-field-input office-field-textarea"
               maxLength={500}
               rows={3}
-              placeholder="Describe la tarea principal del agente…"
+              placeholder={t('agents.form.desc.placeholder')}
             />
           </div>
 
           <div className="office-field">
-            <label htmlFor={deptId} className="office-field-label">Departamento</label>
+            <label htmlFor={deptId} className="office-field-label">{t('agents.form.dept.label')}</label>
             <DeptSelector
               id={deptId}
               departments={departments}
@@ -340,7 +347,7 @@ function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSav
               className="office-btn office-btn--ghost"
               disabled={pending}
             >
-              Cancelar
+              {t('agents.form.cancel')}
             </button>
             <button
               type="submit"
@@ -369,6 +376,7 @@ interface AgentDrawerProps {
 }
 
 function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetch }: AgentDrawerProps) {
+  const t = useT()
   const navigate = useNavigate()
   const initials = agent.name.charAt(0).toUpperCase()
   const isFactory = agent.source === 'ruflo'
@@ -389,9 +397,9 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
       setActivating(true)
       try {
         await setActiveAgent(agent.id)
-        sileo.success({ title: `${agent.name} ahora está activo` })
+        sileo.success({ title: t('agents.drawer.toast.activated').replace('{name}', agent.name) })
       } catch {
-        sileo.warning({ title: `No se pudo activar ${agent.name}` })
+        sileo.warning({ title: t('agents.drawer.toast.activate_err').replace('{name}', agent.name) })
       } finally {
         setActivating(false)
       }
@@ -402,19 +410,19 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
 
   async function handleDelete() {
     const ok = await confirm({
-      title: `¿Eliminar "${agent.name}"?`,
-      description: 'El agente se eliminará permanentemente. Esta acción no se puede deshacer.',
-      confirmLabel: 'Eliminar',
+      title: t('agents.drawer.confirm.title').replace('{name}', agent.name),
+      description: t('agents.drawer.confirm.desc'),
+      confirmLabel: t('agents.drawer.confirm.confirm'),
       variant: 'danger',
     })
     if (!ok) return
     try {
       await deleteAgent(agent.id)
-      sileo.success({ title: `${agent.name} eliminado` })
+      sileo.success({ title: t('agents.drawer.toast.deleted').replace('{name}', agent.name) })
       onClose()
       onRefetch()
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'No se pudo eliminar el agente.'
+      const msg = err instanceof Error ? err.message : t('agents.drawer.toast.delete_err')
       // 403 means the backend protected it (Cerebro / default agent)
       sileo.error({ title: msg })
     }
@@ -450,7 +458,7 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
                 <p className="agent-role" style={{ margin: 0 }}>{deptLabel}</p>
               )}
             </div>
-            {isDefault && <span className="badge">Cerebro</span>}
+            {isDefault && <span className="badge">{t('agents.badge.default')}</span>}
             {isFactory && (
               <span
                 className="badge"
@@ -459,10 +467,10 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
                   color: 'var(--ok)',
                 }}
               >
-                Del sistema
+                {t('agents.badge.factory')}
               </span>
             )}
-            <button type="button" className="office-modal-close" onClick={onClose} aria-label="Cerrar"><X size={16} aria-hidden="true" /></button>
+            <button type="button" className="office-modal-close" onClick={onClose} aria-label={t('agents.drawer.close')}><X size={16} aria-hidden="true" /></button>
           </div>
 
           <div className="office-drawer-body">
@@ -483,8 +491,8 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
                 borderRadius: 'var(--r-sm)',
               }}>
                 {isDefault
-                  ? 'No editable (puedes clonarlo para crear tu propia versión).'
-                  : 'Agente del sistema — clónalo para personalizar.'}
+                  ? t('agents.drawer.readonly.default')
+                  : t('agents.drawer.readonly.factory')}
               </p>
             )}
 
@@ -495,7 +503,7 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
                 aria-hidden="true"
               />
               <span style={{ fontSize: 'var(--text-label)', color: 'var(--ink3)' }}>
-                {isWorking ? 'Trabajando' : 'En línea'}
+                {isWorking ? t('agents.status.working') : t('agents.status.online')}
               </span>
             </div>
 
@@ -506,9 +514,9 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
                 onClick={handleChat}
                 disabled={activating}
                 aria-busy={activating}
-                title="Activar este agente y abrir el chat"
+                title={t('agents.drawer.chat.title')}
               >
-                {activating ? 'Activando…' : 'Chatear'}
+                {activating ? t('agents.drawer.activating') : t('agents.drawer.chat')}
               </button>
 
               {(isFactory || isDefault) && (
@@ -517,7 +525,7 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
                   className="office-btn office-btn--ghost"
                   onClick={() => { onClone(agent); onClose() }}
                 >
-                  Clonar y personalizar
+                  {t('agents.drawer.clone')}
                 </button>
               )}
 
@@ -528,14 +536,14 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
                     className="office-btn office-btn--ghost"
                     onClick={() => { navigate('/programadas'); onClose() }}
                   >
-                    Programar tarea
+                    {t('agents.drawer.schedule')}
                   </button>
                   <button
                     type="button"
                     className="office-btn office-btn--ghost"
                     onClick={() => setShowEditModal(true)}
                   >
-                    Editar
+                    {t('agents.drawer.edit')}
                   </button>
                   <button
                     type="button"
@@ -543,7 +551,7 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
                     style={{ color: 'var(--danger)' }}
                     onClick={handleDelete}
                   >
-                    Borrar
+                    {t('agents.drawer.delete')}
                   </button>
                 </>
               )}
@@ -578,6 +586,7 @@ interface AgentCardProps {
 }
 
 function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
+  const t = useT()
   const initials = agent.name.charAt(0).toUpperCase()
   const isFactory = agent.source === 'ruflo'
 
@@ -588,7 +597,10 @@ function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
       tabIndex={0}
       onClick={onClick}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
-      aria-label={`${agent.name}${isWorking ? ', trabajando' : ''}. Click para ver detalle.`}
+      aria-label={isWorking
+        ? t('agents.card.aria').replace('{name}', agent.name)
+        : t('agents.card.aria_idle').replace('{name}', agent.name)
+      }
       style={{ cursor: 'pointer' }}
     >
       <div className="agent-card-header">
@@ -604,7 +616,7 @@ function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
           {agent.department && <p className="agent-role">{agent.department}</p>}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', flexShrink: 0 }}>
-          {agent.is_default && <span className="badge">Cerebro</span>}
+          {agent.is_default && <span className="badge">{t('agents.badge.default')}</span>}
           {isFactory && (
             <span
               className="badge"
@@ -614,13 +626,13 @@ function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
                 fontSize: 'var(--text-micro)',
               }}
             >
-              Del sistema
+              {t('agents.badge.factory')}
             </span>
           )}
           <span
             className="office-status-dot"
             style={{ background: isWorking ? 'var(--warn)' : 'var(--ok)' }}
-            aria-label={isWorking ? 'Trabajando' : 'En línea'}
+            aria-label={isWorking ? t('agents.status.working') : t('agents.status.online')}
             role="img"
           />
         </div>
@@ -641,12 +653,13 @@ interface DepartmentSectionProps {
 }
 
 function DepartmentSection({ dept, activeIds, onAgentClick, onCreateClick, sectionIndex }: DepartmentSectionProps) {
+  const t = useT()
   const headingId = `section-dept-${dept.id}`
   const isCustomDept = dept.kind === 'custom'
 
   const descriptionByKind: Record<string, string> = {
-    cerebro: 'Orquestador principal — coordina todos los agentes.',
-    factory: 'Agentes especializados del sistema — solo lectura.',
+    cerebro: t('agents.dept.cerebro.desc'),
+    factory: t('agents.dept.factory.desc'),
     custom: '',
   }
 
@@ -655,7 +668,7 @@ function DepartmentSection({ dept, activeIds, onAgentClick, onCreateClick, secti
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--sp-3)' }}>
         <h2 id={headingId} className="office-section-title">{dept.name}</h2>
         {dept.kind === 'factory' && (
-          <span style={{ fontSize: 'var(--text-caption)', color: 'var(--ink4)' }}>Sistema</span>
+          <span style={{ fontSize: 'var(--text-caption)', color: 'var(--ink4)' }}>{t('agents.dept.factory.tag')}</span>
         )}
       </div>
       {descriptionByKind[dept.kind] && (
@@ -680,10 +693,10 @@ function DepartmentSection({ dept, activeIds, onAgentClick, onCreateClick, secti
               type="button"
               className="agent-card office-create-card"
               onClick={onCreateClick}
-              aria-label="Crear nuevo agente"
+              aria-label={t('agents.card.create.aria')}
             >
               <span className="office-create-icon" aria-hidden="true">+</span>
-              <span className="office-create-label">Crear agente</span>
+              <span className="office-create-label">{t('agents.card.create.label')}</span>
             </button>
           </li>
         )}
@@ -710,6 +723,7 @@ interface ClonePrefill {
 }
 
 function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgentClick }: TarjetasViewProps) {
+  const t = useT()
   const [showCreateModal, setShowCreateModal] = useState(false)
 
   const activeIds = activeAgentIds(runtimeStatus)
@@ -754,15 +768,15 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
         {/* ── Empty-state for custom agents when no custom departments exist ── */}
         {!hasCustomDepts && (
           <section aria-labelledby="section-mis-agentes" className="office-section">
-            <h2 id="section-mis-agentes" className="office-section-title">Mis agentes</h2>
-            <p className="state-label" style={{ padding: 0 }}>No tienes agentes personalizados aún.</p>
+            <h2 id="section-mis-agentes" className="office-section-title">{t('agents.dept.mine.title')}</h2>
+            <p className="state-label" style={{ padding: 0 }}>{t('agents.dept.mine.empty')}</p>
             <button
               type="button"
               className="office-btn office-btn--ghost"
               style={{ marginTop: 'var(--sp-4)', alignSelf: 'flex-start' }}
               onClick={() => setShowCreateModal(true)}
             >
-              + Crear agente
+              + {t('agents.card.create.label')}
             </button>
           </section>
         )}
@@ -782,14 +796,14 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
         {/* ── System swarm indicator (when detected via MCP but roster doesn't show it) ── */}
         {hasRuflo && factoryDepts.length === 0 && (
           <section aria-labelledby="section-system-swarm" className="office-section">
-            <h2 id="section-system-swarm" className="office-section-title">Agentes del sistema</h2>
+            <h2 id="section-system-swarm" className="office-section-title">{t('agents.dept.swarm.title')}</h2>
             <p className="office-section-desc">
-              Agentes del sistema conectados — disponibles para el agente en tiempo real.
+              {t('agents.dept.swarm.desc')}
               {runtimeStatus.ruflo_active && (
                 <span
                   className="office-status-dot"
                   style={{ background: 'var(--ok)', marginLeft: 8, verticalAlign: 'middle' }}
-                  aria-label="Activo"
+                  aria-label={t('agents.dept.swarm.active')}
                   role="img"
                 />
               )}
@@ -825,6 +839,7 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
 // ── OfficeView (root) ─────────────────────────────────────────────────────────
 
 export default function OfficeView() {
+  const t = useT()
   const [tab, setTab] = useState<Tab>('live')
   const [state, dispatch] = useReducer(dataReducer, { status: 'loading' })
   const [showCreateFromHeader, setShowCreateFromHeader] = useState(false)
@@ -844,10 +859,10 @@ export default function OfficeView() {
       const hasRuflo = mcpServers.some((s) => s.slug === 'ruflo')
       dispatch({ type: 'LOADED', roster, runtimeStatus, hasRuflo })
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'No se pudo cargar la oficina.'
+      const message = err instanceof Error ? err.message : t('agents.loading')
       dispatch({ type: 'FAILED', message })
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     let cancelled = false
@@ -864,14 +879,14 @@ export default function OfficeView() {
         }
       } catch (err: unknown) {
         if (!cancelled) {
-          const message = err instanceof Error ? err.message : 'No se pudo cargar la oficina.'
+          const message = err instanceof Error ? err.message : t('agents.loading')
           dispatch({ type: 'FAILED', message })
         }
       }
     }
     void run()
     return () => { cancelled = true }
-  }, [])
+  }, [t])
 
   // ── Runtime status polling (4 s) ────────────────────────────────────────
   useEffect(() => {
@@ -916,19 +931,21 @@ export default function OfficeView() {
     ? state.runtimeStatus
     : { state: 'idle', active_task_count: 0 }
 
+  const subtitle = state.status === 'ready'
+    ? (totalAgentCount === 1
+        ? t('agents.subtitle.ready').replace('{count}', String(totalAgentCount))
+        : t('agents.subtitle.ready_pl').replace('{count}', String(totalAgentCount))
+      ) + t('agents.subtitle.suffix')
+    : t('agents.subtitle.loading') + t('agents.subtitle.suffix')
+
   return (
     <div className="office-view">
       {/* ── Header with segmented toggle ── */}
       <header className="view-header office-view-header">
         <div className="office-header-row">
           <div>
-            <h1 className="view-title">Agentes</h1>
-            <p className="view-subtitle">
-              {state.status === 'ready'
-                ? `Tu equipo de ${totalAgentCount} agente${totalAgentCount !== 1 ? 's' : ''}`
-                : 'Tu equipo de IA'}
-              {' — tarjetas o piso en vivo'}
-            </p>
+            <h1 className="view-title">{t('view.agentes')}</h1>
+            <p className="view-subtitle">{subtitle}</p>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-3)' }}>
@@ -938,20 +955,20 @@ export default function OfficeView() {
                 className="office-btn office-btn--primary"
                 style={{ fontSize: 'var(--text-label)', padding: '0 var(--sp-4)', height: 36 }}
                 onClick={() => setShowCreateFromHeader(true)}
-                aria-label="Crear nuevo agente"
+                aria-label={t('agents.create.aria')}
               >
-                + Crear agente
+                {t('agents.create.btn')}
               </button>
             )}
 
-            <div className="office-seg-toggle" role="group" aria-label="Vista de la oficina">
+            <div className="office-seg-toggle" role="group" aria-label={t('agents.tab.aria')}>
               <button
                 type="button"
                 className={`office-seg-btn${tab === 'tarjetas' ? ' office-seg-btn--active' : ''}`}
                 onClick={() => setTab('tarjetas')}
                 aria-pressed={tab === 'tarjetas'}
               >
-                Tarjetas
+                {t('agents.tab.cards')}
               </button>
               <button
                 type="button"
@@ -959,7 +976,7 @@ export default function OfficeView() {
                 onClick={() => setTab('live')}
                 aria-pressed={tab === 'live'}
               >
-                En vivo
+                {t('agents.tab.live')}
               </button>
             </div>
           </div>
@@ -970,7 +987,7 @@ export default function OfficeView() {
       <div className="office-body">
         {state.status === 'loading' && (
           <div className="state-container" aria-live="polite" aria-busy="true">
-            <p className="state-label">Cargando la oficina…</p>
+            <p className="state-label">{t('agents.loading')}</p>
           </div>
         )}
 
@@ -983,14 +1000,14 @@ export default function OfficeView() {
         {state.status === 'ready' && totalAgentCount === 0 && (
           <div className="state-container" style={{ textAlign: 'center' }}>
             <p className="state-label" style={{ marginBottom: 'var(--sp-4)' }}>
-              Aún no tienes agentes.
+              {t('agents.empty.text')}
             </p>
             <button
               type="button"
               className="office-btn office-btn--primary"
               onClick={() => setShowCreateFromHeader(true)}
             >
-              Crear tu primer agente
+              {t('agents.empty.cta')}
             </button>
           </div>
         )}
@@ -1021,12 +1038,12 @@ export default function OfficeView() {
                   type="button"
                   className="office-fullscreen-btn"
                   onClick={toggleFullscreen}
-                  aria-label="Pantalla completa"
-                  title="Pantalla completa"
+                  aria-label={t('agents.fullscreen')}
+                  title={t('agents.fullscreen')}
                 >⛶</button>
                 <Suspense fallback={
                   <div className="state-container">
-                    <p className="state-label">Cargando mapa…</p>
+                    <p className="state-label">{t('agents.map.loading')}</p>
                   </div>
                 }>
                   <OfficeCanvas
@@ -1064,9 +1081,9 @@ export default function OfficeView() {
           onClone={(agent) => {
             setSelectedAgent(null)
             setClonePrefillRoot({
-              name: `${agent.name} (copia)`,
+              name: `${agent.name}${t('agents.clone.name_suffix')}`,
               description: agent.description,
-              department: 'Mis agentes',
+              department: t('agents.clone.default_dept'),
             })
             setShowCloneModalRoot(true)
           }}

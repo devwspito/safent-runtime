@@ -23,7 +23,7 @@ export interface RuntimeStatus {
   state: string
   active_task_count: number
   active_agent_id?: string
-  activity?: Array<{ agent_id: string; tool?: string }>
+  activity?: Array<{ task_id?: string; agent_id: string; tool?: string }>
   ruflo_active?: boolean
 }
 

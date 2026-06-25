@@ -171,6 +171,8 @@ const translations = {
     'skills.state.deprecated':  'Desactualizada',
     'skills.state.validated':   'Verificada',
     'skills.promote':           'Permitir al agente usarla sin preguntar',
+    'skills.installed.label':   'Activas',
+    'skills.installed.empty':   'Sin habilidades activas',
     'skills.teach.header':      'Crear una habilidad a medida',
     'skills.teach.synth':       'Procesando la demostración…',
     'skills.teach.stop':        'Terminar y guardar habilidad',
@@ -185,6 +187,97 @@ const translations = {
 
     // Calendar view
     'cal.status.failed':        'No se completó',
+
+    // Agents / Office view — header & tabs
+    'agents.subtitle.ready':      'Tu equipo de {count} agente',
+    'agents.subtitle.ready_pl':   'Tu equipo de {count} agentes',
+    'agents.subtitle.loading':    'Tu equipo de IA',
+    'agents.subtitle.suffix':     ' — tarjetas o piso en vivo',
+    'agents.tab.cards':           'Tarjetas',
+    'agents.tab.live':            'En vivo',
+    'agents.tab.aria':            'Vista de la oficina',
+    'agents.create.btn':          '+ Crear agente',
+    'agents.create.aria':         'Crear nuevo agente',
+
+    // Agents / Office view — loading / empty states
+    'agents.loading':             'Cargando la oficina…',
+    'agents.map.loading':         'Cargando mapa…',
+    'agents.empty.text':          'Aún no tienes agentes.',
+    'agents.empty.cta':           'Crear tu primer agente',
+
+    // Agents / Office view — fullscreen
+    'agents.fullscreen':          'Pantalla completa',
+
+    // Agents / Office view — department section chrome
+    'agents.dept.cerebro.desc':   'Orquestador principal — coordina todos los agentes.',
+    'agents.dept.factory.desc':   'Agentes especializados del sistema — solo lectura.',
+    'agents.dept.factory.tag':    'Sistema',
+    'agents.dept.mine.title':     'Mis agentes',
+    'agents.dept.mine.empty':     'No tienes agentes personalizados aún.',
+    'agents.dept.swarm.title':    'Agentes del sistema',
+    'agents.dept.swarm.desc':     'Agentes del sistema conectados — disponibles para el agente en tiempo real.',
+    'agents.dept.swarm.active':   'Activo',
+
+    // Agents / Office view — agent card & status
+    'agents.card.aria':           '{name}, trabajando. Click para ver detalle.',
+    'agents.card.aria_idle':      '{name}. Click para ver detalle.',
+    'agents.status.working':      'Trabajando',
+    'agents.status.online':       'En línea',
+    'agents.badge.default':       'Cerebro',
+    'agents.badge.factory':       'Del sistema',
+
+    // Agents / Office view — create card
+    'agents.card.create.aria':    'Crear nuevo agente',
+    'agents.card.create.label':   'Crear agente',
+
+    // Agents / Office view — agent drawer
+    'agents.drawer.close':        'Cerrar',
+    'agents.drawer.chat':         'Chatear',
+    'agents.drawer.activating':   'Activando…',
+    'agents.drawer.chat.title':   'Activar este agente y abrir el chat',
+    'agents.drawer.clone':        'Clonar y personalizar',
+    'agents.drawer.schedule':     'Programar tarea',
+    'agents.drawer.edit':         'Editar',
+    'agents.drawer.delete':       'Borrar',
+    'agents.drawer.readonly.default': 'No editable (puedes clonarlo para crear tu propia versión).',
+    'agents.drawer.readonly.factory': 'Agente del sistema — clónalo para personalizar.',
+    'agents.drawer.toast.activated':  '{name} ahora está activo',
+    'agents.drawer.toast.activate_err': 'No se pudo activar {name}',
+    'agents.drawer.confirm.title':    '¿Eliminar "{name}"?',
+    'agents.drawer.confirm.desc':     'El agente se eliminará permanentemente. Esta acción no se puede deshacer.',
+    'agents.drawer.confirm.confirm':  'Eliminar',
+    'agents.drawer.toast.deleted':    '{name} eliminado',
+    'agents.drawer.toast.delete_err': 'No se pudo eliminar el agente.',
+    'agents.clone.name_suffix':       ' (copia)',
+    'agents.clone.default_dept':      'Mis agentes',
+
+    // Agents / Office view — form modal
+    'agents.form.title.create':   'Nuevo agente',
+    'agents.form.title.clone':    'Clonar agente',
+    'agents.form.title.edit':     'Editar agente',
+    'agents.form.close':          'Cerrar',
+    'agents.form.clone.hint':     'Copia personalizable de un agente. Puedes modificarla libremente.',
+    'agents.form.name.label':     'Nombre *',
+    'agents.form.name.placeholder': 'Ej: Asistente ventas',
+    'agents.form.desc.label':     'Descripción',
+    'agents.form.desc.placeholder': 'Describe la tarea principal del agente…',
+    'agents.form.dept.label':     'Departamento',
+    'agents.form.err.name':       'El nombre es obligatorio.',
+    'agents.form.err.create':     'Error al crear el agente.',
+    'agents.form.err.edit':       'Error al guardar el agente.',
+    'agents.form.submit.create':  'Crear agente',
+    'agents.form.submit.creating':'Creando…',
+    'agents.form.submit.clone':   'Crear copia',
+    'agents.form.submit.cloning': 'Clonando…',
+    'agents.form.submit.edit':    'Guardar cambios',
+    'agents.form.submit.saving':  'Guardando…',
+    'agents.form.cancel':         'Cancelar',
+
+    // Agents / Office view — dept selector
+    'agents.dept.none':           'Sin departamento',
+    'agents.dept.new':            'Nuevo departamento…',
+    'agents.dept.new.placeholder':'Nombre del nuevo departamento',
+    'agents.dept.clear.aria':     'Borrar búsqueda',
   },
 
   en: {
@@ -337,6 +430,8 @@ const translations = {
     'skills.state.deprecated':  'Outdated',
     'skills.state.validated':   'Verified',
     'skills.promote':           'Let the agent use it without asking',
+    'skills.installed.label':   'Active',
+    'skills.installed.empty':   'No active skills',
     'skills.teach.header':      'Create a custom skill',
     'skills.teach.synth':       'Processing the demonstration…',
     'skills.teach.stop':        'Finish and save skill',
@@ -351,6 +446,97 @@ const translations = {
 
     // Calendar view
     'cal.status.failed':        'Did not complete',
+
+    // Agents / Office view — header & tabs
+    'agents.subtitle.ready':      'Your team of {count} agent',
+    'agents.subtitle.ready_pl':   'Your team of {count} agents',
+    'agents.subtitle.loading':    'Your AI team',
+    'agents.subtitle.suffix':     ' — cards or live floor',
+    'agents.tab.cards':           'Cards',
+    'agents.tab.live':            'Live',
+    'agents.tab.aria':            'Office view',
+    'agents.create.btn':          '+ New agent',
+    'agents.create.aria':         'Create new agent',
+
+    // Agents / Office view — loading / empty states
+    'agents.loading':             'Loading the office…',
+    'agents.map.loading':         'Loading map…',
+    'agents.empty.text':          'You have no agents yet.',
+    'agents.empty.cta':           'Create your first agent',
+
+    // Agents / Office view — fullscreen
+    'agents.fullscreen':          'Full screen',
+
+    // Agents / Office view — department section chrome
+    'agents.dept.cerebro.desc':   'Main orchestrator — coordinates all agents.',
+    'agents.dept.factory.desc':   'Specialized system agents — read-only.',
+    'agents.dept.factory.tag':    'System',
+    'agents.dept.mine.title':     'My agents',
+    'agents.dept.mine.empty':     'You have no custom agents yet.',
+    'agents.dept.swarm.title':    'System agents',
+    'agents.dept.swarm.desc':     'System agents connected — available to the agent in real time.',
+    'agents.dept.swarm.active':   'Active',
+
+    // Agents / Office view — agent card & status
+    'agents.card.aria':           '{name}, working. Click to view details.',
+    'agents.card.aria_idle':      '{name}. Click to view details.',
+    'agents.status.working':      'Working',
+    'agents.status.online':       'Online',
+    'agents.badge.default':       'Brain',
+    'agents.badge.factory':       'System',
+
+    // Agents / Office view — create card
+    'agents.card.create.aria':    'Create new agent',
+    'agents.card.create.label':   'New agent',
+
+    // Agents / Office view — agent drawer
+    'agents.drawer.close':        'Close',
+    'agents.drawer.chat':         'Chat',
+    'agents.drawer.activating':   'Activating…',
+    'agents.drawer.chat.title':   'Activate this agent and open the chat',
+    'agents.drawer.clone':        'Clone and customize',
+    'agents.drawer.schedule':     'Schedule task',
+    'agents.drawer.edit':         'Edit',
+    'agents.drawer.delete':       'Delete',
+    'agents.drawer.readonly.default': 'Not editable (you can clone it to create your own version).',
+    'agents.drawer.readonly.factory': 'System agent — clone it to customize.',
+    'agents.drawer.toast.activated':  '{name} is now active',
+    'agents.drawer.toast.activate_err': 'Could not activate {name}',
+    'agents.drawer.confirm.title':    'Delete "{name}"?',
+    'agents.drawer.confirm.desc':     'The agent will be permanently deleted. This action cannot be undone.',
+    'agents.drawer.confirm.confirm':  'Delete',
+    'agents.drawer.toast.deleted':    '{name} deleted',
+    'agents.drawer.toast.delete_err': 'Could not delete the agent.',
+    'agents.clone.name_suffix':       ' (copy)',
+    'agents.clone.default_dept':      'My agents',
+
+    // Agents / Office view — form modal
+    'agents.form.title.create':   'New agent',
+    'agents.form.title.clone':    'Clone agent',
+    'agents.form.title.edit':     'Edit agent',
+    'agents.form.close':          'Close',
+    'agents.form.clone.hint':     'A customizable copy of an agent. You can modify it freely.',
+    'agents.form.name.label':     'Name *',
+    'agents.form.name.placeholder': 'E.g. Sales assistant',
+    'agents.form.desc.label':     'Description',
+    'agents.form.desc.placeholder': 'Describe the agent\'s main task…',
+    'agents.form.dept.label':     'Department',
+    'agents.form.err.name':       'Name is required.',
+    'agents.form.err.create':     'Error creating the agent.',
+    'agents.form.err.edit':       'Error saving the agent.',
+    'agents.form.submit.create':  'Create agent',
+    'agents.form.submit.creating':'Creating…',
+    'agents.form.submit.clone':   'Create copy',
+    'agents.form.submit.cloning': 'Cloning…',
+    'agents.form.submit.edit':    'Save changes',
+    'agents.form.submit.saving':  'Saving…',
+    'agents.form.cancel':         'Cancel',
+
+    // Agents / Office view — dept selector
+    'agents.dept.none':           'No department',
+    'agents.dept.new':            'New department…',
+    'agents.dept.new.placeholder':'New department name',
+    'agents.dept.clear.aria':     'Clear',
   },
 } as const
 

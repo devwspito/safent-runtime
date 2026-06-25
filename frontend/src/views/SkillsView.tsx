@@ -107,6 +107,7 @@ interface PendingSkillInstall {
 }
 
 export default function SkillsView() {
+  const t = useT()
   const [state, dispatch] = useReducer(installedReducer, { status: 'loading' })
   const [installedHubNames, setInstalledHubNames] = useState<Set<string>>(new Set())
   const [hubResults, setHubResults] = useState<HubSkillResult[]>([])
@@ -509,8 +510,8 @@ export default function SkillsView() {
 
           {/* ── Installed skills ─────────────────────────────────────────── */}
           <StaggerItem>
-            <section className="cv-section" aria-label="Skills instaladas">
-              <h2 className="cv-section-label">Instaladas</h2>
+            <section className="cv-section" aria-label="Skills activas">
+              <h2 className="cv-section-label">{t('skills.installed.label')}</h2>
 
               {state.status === 'loading' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }} aria-busy="true">
@@ -532,7 +533,7 @@ export default function SkillsView() {
                   ? (
                     <EmptyState
                       icon={<Zap size={36} />}
-                      title="Sin habilidades instaladas"
+                      title={t('skills.installed.empty')}
                       action={
                         <Button
                           variant="secondary"
