@@ -4,6 +4,7 @@ import { listConversations, listPendingApprovals } from '../api/client'
 import { useChat } from '../hooks/useChat'
 import type { ConversationSummary } from '../api/types'
 import NotificationsPanel from './NotificationsPanel'
+import { useT, useLocale } from '../lib/i18n'
 
 // activeProviderReload lets child views (ProvidersView) trigger a re-check after
 // connecting a model. The "Falta conectar un modelo" nudge was removed — the chat
@@ -128,18 +129,21 @@ function PlusIcon() {
   )
 }
 
-const NAV_ITEMS: NavItem[] = [
-  { to: '/chat',         label: 'Chat',            icon: <ChatIcon /> },
-  { to: '/programadas',  label: 'Programadas',     icon: <TasksIcon /> },
-  { to: '/agentes',      label: 'Agentes',         icon: <AgentsIcon /> },
-  { to: '/skills',       label: 'Habilidades',     icon: <SkillsIcon /> },
-  { to: '/integraciones',label: 'Integraciones',   icon: <IntegrationsIcon /> },
-  { to: '/mcp',          label: 'Herramientas',    icon: <McpIcon /> },
-  { to: '/archivos',     label: 'Archivos',        icon: <ArchivosIcon /> },
-  { to: '/proveedores',  label: 'Proveedores',     icon: <ProvidersIcon /> },
-  { to: '/seguridad',    label: 'Seguridad',       icon: <SecurityIcon /> },
-  { to: '/memoria',      label: 'Memoria',         icon: <MemoriaIcon /> },
-]
+function useNavItems(): NavItem[] {
+  const t = useT()
+  return [
+    { to: '/chat',          label: t('nav.chat'),          icon: <ChatIcon /> },
+    { to: '/programadas',   label: t('nav.programadas'),   icon: <TasksIcon /> },
+    { to: '/agentes',       label: t('nav.agentes'),       icon: <AgentsIcon /> },
+    { to: '/skills',        label: t('nav.skills'),        icon: <SkillsIcon /> },
+    { to: '/integraciones', label: t('nav.integraciones'), icon: <IntegrationsIcon /> },
+    { to: '/mcp',           label: t('nav.mcp'),           icon: <McpIcon /> },
+    { to: '/archivos',      label: t('nav.archivos'),      icon: <ArchivosIcon /> },
+    { to: '/proveedores',   label: t('nav.proveedores'),   icon: <ProvidersIcon /> },
+    { to: '/seguridad',     label: t('nav.seguridad'),     icon: <SecurityIcon /> },
+    { to: '/memoria',       label: t('nav.memoria'),       icon: <MemoriaIcon /> },
+  ]
+}
 
 // ── Recientes ─────────────────────────────────────────────────────────────────
 
@@ -293,6 +297,9 @@ function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps)
 
 export default function Layout({ activeProviderReload }: LayoutProps) {
   const navigate = useNavigate()
+  const navItems = useNavItems()
+  const t = useT()
+  const { locale, setLocale } = useLocale()
   // activeProviderReload is exposed on the outlet context so views like
   // ProvidersView can signal an immediate re-check after connecting a model.
   // The hook already self-heals via a 5 s poll; this enables instant feedback.
@@ -368,7 +375,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
           <div className="sidebar-nav">
             <div className="sidebar-section-label">Navegación</div>
             <ul role="list">
-              {NAV_ITEMS.map(({ to, label, icon }) => (
+              {navItems.map(({ to, label, icon }) => (
                 <li key={to}>
                   <NavLink
                     to={to}
@@ -408,10 +415,30 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
           </div>
         </div>
 
-        {/* User chip */}
+        {/* Language selector + user chip */}
         <div className="sidebar-user">
           <div className="user-avatar" aria-hidden="true">U</div>
           <span className="sidebar-user-name">Lumen</span>
+          <div className="sidebar-lang" role="group" aria-label={t('settings.language')}>
+            <button
+              type="button"
+              className={`sidebar-lang-btn${locale === 'es' ? ' sidebar-lang-btn--active' : ''}`}
+              onClick={() => setLocale('es')}
+              aria-pressed={locale === 'es'}
+              title={t('settings.lang.es')}
+            >
+              ES
+            </button>
+            <button
+              type="button"
+              className={`sidebar-lang-btn${locale === 'en' ? ' sidebar-lang-btn--active' : ''}`}
+              onClick={() => setLocale('en')}
+              aria-pressed={locale === 'en'}
+              title={t('settings.lang.en')}
+            >
+              EN
+            </button>
+          </div>
         </div>
       </nav>
 

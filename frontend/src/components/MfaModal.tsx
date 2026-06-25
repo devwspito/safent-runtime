@@ -1,15 +1,17 @@
 /**
- * MfaModal — collects a TOTP code before a sensitive action.
+ * MfaModal — collects a TOTP verification code before a sensitive action.
  *
- * The parent fires the API call; this modal only collects and validates
- * the TOTP input, then calls onSign. API errors should be surfaced via
- * sileo toasts by the parent.
+ * Interaction contract:
+ *   - Stays OPEN if the code is incorrect; shows inline error + refocuses input.
+ *   - Calls onSign when the code is ready to be submitted; the parent drives
+ *     the API call and decides when to close.
+ *   - Closes (onCancel) on Escape / backdrop click / Cancel button.
  */
 
 import { createPortal } from 'react-dom'
-import { useEffect, useRef, useState } from 'react'
+import { useId, useRef, useState, useEffect } from 'react'
 import { X } from 'lucide-react'
-import { sileo } from 'sileo'
+import { useT } from '../lib/i18n'
 
 export type MfaTier = 'mfa'
 
@@ -24,9 +26,14 @@ export interface MfaModalProps {
 }
 
 export default function MfaModal({ title, onSign, onCancel }: MfaModalProps) {
+  const t = useT()
   const [totp, setTotp] = useState('')
+  const [inlineError, setInlineError] = useState('')
   const totpRef = useRef<HTMLInputElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
+
+  const titleId = useId()
+  const errorId = useId()
 
   useEffect(() => {
     totpRef.current?.focus()
@@ -59,15 +66,15 @@ export default function MfaModal({ title, onSign, onCancel }: MfaModalProps) {
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!totp.trim()) {
-      sileo.error({ title: 'Introduce tu código MFA de 6 dígitos.' })
+    const code = totp.trim()
+    if (!code) {
+      setInlineError(t('mfa.err.empty'))
       totpRef.current?.focus()
       return
     }
-    onSign({ totp: totp.trim() })
+    setInlineError('')
+    onSign({ totp: code })
   }
-
-  const titleId = 'mfa-modal-title'
 
   return createPortal(
     <div
@@ -96,21 +103,31 @@ export default function MfaModal({ title, onSign, onCancel }: MfaModalProps) {
 
         <form className="mfa-modal__body" onSubmit={handleSubmit}>
           <div className="mfa-modal__field">
-            <label htmlFor="mfa-modal-totp" className="cv-label">
-              Código MFA
+            <label htmlFor={`${titleId}-totp`} className="cv-label">
+              {t('mfa.title.code')}
             </label>
             <input
-              id="mfa-modal-totp"
+              id={`${titleId}-totp`}
               ref={totpRef}
               className="cv-input"
               inputMode="numeric"
               autoComplete="one-time-code"
               maxLength={8}
-              placeholder="6 dígitos"
-              aria-label="Código MFA de 6 dígitos"
+              placeholder={t('mfa.placeholder')}
+              aria-label={t('mfa.title.code')}
+              aria-describedby={inlineError ? errorId : undefined}
+              aria-invalid={!!inlineError}
               value={totp}
-              onChange={e => setTotp(e.target.value)}
+              onChange={e => {
+                setTotp(e.target.value)
+                if (inlineError) setInlineError('')
+              }}
             />
+            {inlineError && (
+              <p id={errorId} role="alert" className="mfa-modal__inline-error">
+                {inlineError}
+              </p>
+            )}
           </div>
 
           <div className="mfa-modal__actions">
@@ -119,13 +136,13 @@ export default function MfaModal({ title, onSign, onCancel }: MfaModalProps) {
               className="cv-btn cv-btn--ghost cv-btn--sm"
               onClick={onCancel}
             >
-              Cancelar
+              {t('mfa.btn.cancel')}
             </button>
             <button
               type="submit"
               className="cv-btn cv-btn--primary cv-btn--sm"
             >
-              Firmar
+              {t('mfa.btn.confirm')}
             </button>
           </div>
         </form>

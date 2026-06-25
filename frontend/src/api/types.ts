@@ -341,6 +341,8 @@ export interface PendingApproval {
   summary: string
   target?: string
   parameters?: Record<string, unknown>
+  /** Raw technical description for the "Ver detalles técnicos" disclosure panel. */
+  technical_detail?: string
   /** task_id from the pre_tool_call hook; null for rows written before migration */
   conversation_id?: string | null
   /** Always 'mfa' in the TOTP-only model */

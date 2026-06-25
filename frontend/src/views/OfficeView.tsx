@@ -283,7 +283,7 @@ function AgentFormModal({ departments, mode, editTarget, prefill, onClose, onSav
         <form onSubmit={handleSubmit} noValidate className="office-modal-form">
           {mode === 'clone' && (
             <p style={{ fontSize: 'var(--text-label)', color: 'var(--ink3)' }}>
-              Copia personalizable de un agente Ruflo. Puedes modificarla libremente.
+              Copia personalizable de un agente. Puedes modificarla libremente.
             </p>
           )}
 
@@ -459,7 +459,7 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
                   color: 'var(--ok)',
                 }}
               >
-                Ruflo
+                Del sistema
               </span>
             )}
             <button type="button" className="office-modal-close" onClick={onClose} aria-label="Cerrar"><X size={16} aria-hidden="true" /></button>
@@ -484,7 +484,7 @@ function AgentDrawer({ agent, departments, isWorking, onClose, onClone, onRefetc
               }}>
                 {isDefault
                   ? 'No editable (puedes clonarlo para crear tu propia versión).'
-                  : 'Agente gestionado por Ruflo — clónalo para personalizar.'}
+                  : 'Agente del sistema — clónalo para personalizar.'}
               </p>
             )}
 
@@ -614,7 +614,7 @@ function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
                 fontSize: 'var(--text-micro)',
               }}
             >
-              Ruflo
+              Del sistema
             </span>
           )}
           <span
@@ -646,7 +646,7 @@ function DepartmentSection({ dept, activeIds, onAgentClick, onCreateClick, secti
 
   const descriptionByKind: Record<string, string> = {
     cerebro: 'Orquestador principal — coordina todos los agentes.',
-    factory: 'Agentes especializados del swarm Ruflo — solo lectura.',
+    factory: 'Agentes especializados del sistema — solo lectura.',
     custom: '',
   }
 
@@ -655,7 +655,7 @@ function DepartmentSection({ dept, activeIds, onAgentClick, onCreateClick, secti
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--sp-3)' }}>
         <h2 id={headingId} className="office-section-title">{dept.name}</h2>
         {dept.kind === 'factory' && (
-          <span style={{ fontSize: 'var(--text-caption)', color: 'var(--ink4)' }}>Ruflo</span>
+          <span style={{ fontSize: 'var(--text-caption)', color: 'var(--ink4)' }}>Sistema</span>
         )}
       </div>
       {descriptionByKind[dept.kind] && (
@@ -779,12 +779,12 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
           />
         ))}
 
-        {/* ── Ruflo swarm indicator (when detected via MCP but roster doesn't show it) ── */}
+        {/* ── System swarm indicator (when detected via MCP but roster doesn't show it) ── */}
         {hasRuflo && factoryDepts.length === 0 && (
-          <section aria-labelledby="section-ruflo" className="office-section">
-            <h2 id="section-ruflo" className="office-section-title">Swarm Ruflo</h2>
+          <section aria-labelledby="section-system-swarm" className="office-section">
+            <h2 id="section-system-swarm" className="office-section-title">Agentes del sistema</h2>
             <p className="office-section-desc">
-              Ruflo conectado — el agente puede invocar herramientas del swarm en tiempo real.
+              Agentes del sistema conectados — disponibles para el agente en tiempo real.
               {runtimeStatus.ruflo_active && (
                 <span
                   className="office-status-dot"
@@ -805,7 +805,7 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
           paddingTop: 'var(--sp-4)',
           paddingBottom: 'var(--sp-2)',
         }}>
-          Powered by Ruflo
+          Lumen
         </p>
       </div>
 
