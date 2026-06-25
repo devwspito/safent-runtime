@@ -143,7 +143,29 @@ export default function SkillsView() {
       const hubArr = Array.isArray(hub) ? hub : []
       const names = new Set(hubArr.flatMap(h => [h.name, h.skill_name, h.identifier].filter(Boolean) as string[]))
       setInstalledHubNames(names)
-      dispatch({ type: 'LOADED', skills: Array.isArray(skills) ? skills : [] })
+      // INSTALADAS must show BOTH native skills AND hub-installed packages. listSkills
+      // only returns the native/synthesized set; a skill installed from the hub lands
+      // in listHubSkills. Without merging, a just-installed hub skill showed "Instalada"
+      // in search but never appeared in the INSTALADAS list. Adapt hub items to the
+      // Skill shape and dedup against the native ones (same key → native wins).
+      const native = Array.isArray(skills) ? skills : []
+      const keyOf = (s: { skill_name?: string; name?: string; slug?: string; identifier?: string }) =>
+        (s.skill_name ?? s.name ?? s.slug ?? s.identifier ?? '').trim().toLowerCase()
+      const nativeKeys = new Set(native.map(keyOf).filter(Boolean))
+      const hubOnly: Skill[] = hubArr
+        .filter(h => { const k = keyOf(h); return k && !nativeKeys.has(k) })
+        .map(h => {
+          const id = h.identifier ?? h.slug ?? h.skill_name ?? h.name ?? ''
+          return {
+            package_id: id,
+            skill_id: id,
+            skill_name: h.skill_name ?? h.name ?? id,
+            name: h.name ?? h.skill_name ?? id,
+            slug: h.slug ?? h.identifier,
+            state: 'installed',
+          }
+        })
+      dispatch({ type: 'LOADED', skills: [...native, ...hubOnly] })
     } catch (e) {
       dispatch({
         type: 'FAILED',

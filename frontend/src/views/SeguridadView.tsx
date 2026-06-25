@@ -100,10 +100,25 @@ function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
 // ── Governance section ────────────────────────────────────────────────────────
 
 const PRESETS: Array<[string, string, string]> = [
-  ['equilibrado', 'Equilibrado', 'Todo activo salvo las acciones de mayor riesgo (recomendado)'],
-  ['permisivo', 'Permisivo', 'Todo activo — el agente actúa sin restricciones, bajo tu responsabilidad'],
-  ['bloqueado', 'Bloqueado', 'Todo desactivado — el agente no puede ejecutar ninguna acción'],
+  ['equilibrado', 'Equilibrado', 'Herramientas estándar activas; las de mayor riesgo (most_delicate) requieren tu aprobación explícita'],
+  ['permisivo', 'Permisivo', 'Todas las herramientas activas — el agente actúa sin restricciones, bajo tu responsabilidad'],
+  ['bloqueado', 'Bloqueado', 'Todas las herramientas desactivadas — el agente no puede ejecutar ninguna acción'],
 ]
+
+/**
+ * Mirror of the backend's _preset_default (tool_policy.py:224-229).
+ * Returns what `enabled` would be for a given tool under the target preset,
+ * before any per-tool overrides.  Used only for client-side preview.
+ *
+ * EQUILIBRADO: off only for most_delicate tools (those that require explicit
+ * owner opt-in). Everything else is on.
+ */
+function presetPreviewEnabled(entry: PolicyCatalogEntry, preset: string): boolean {
+  if (preset === 'permisivo') return true
+  if (preset === 'bloqueado') return false
+  // equilibrado: disabled only for most_delicate
+  return entry.delicacy !== 'most_delicate'
+}
 
 const CATEGORY_LABELS: Record<string, string> = {
   apps:          'Apps',
@@ -362,7 +377,15 @@ function GovernanceSection() {
   useEffect(() => { load() }, [load])
 
   const { capabilityGroups, defenseGroups } = useMemo(() => {
-    const catalog = pol?.catalog ?? []
+    const rawCatalog = pol?.catalog ?? []
+    // When a preset is pending (user clicked a preset button but hasn't saved yet),
+    // project the catalog's `enabled` fields through the preset preview so the accordion
+    // shows what will happen after save — not the stale committed state.
+    const previewPreset = pendingPreset && pendingPreset !== pol?.preset ? pendingPreset : null
+    const catalog = previewPreset
+      ? rawCatalog.map(e => ({ ...e, enabled: presetPreviewEnabled(e, previewPreset) }))
+      : rawCatalog
+
     const grouped = new Map<string, PolicyCatalogEntry[]>()
     for (const entry of catalog) {
       const list = grouped.get(entry.category) ?? []
@@ -379,7 +402,7 @@ function GovernanceSection() {
       }
     }
     return { capabilityGroups: capability, defenseGroups: defense }
-  }, [pol?.catalog])
+  }, [pol?.catalog, pol?.preset, pendingPreset])
 
   const legacyToolNames = useMemo(() => {
     if ((pol?.catalog?.length ?? 0) > 0) return []
@@ -647,7 +670,7 @@ function GovernanceSection() {
                   transition={TWEEN}
                 >
                   <span className="seg-pol-preset-hint">
-                    Vista previa: «{pendingPreset}». Guarda para aplicarlo.
+                    Vista previa del preset «{pendingPreset}» — las capacidades de abajo ya reflejan el cambio. Guarda para aplicarlo.
                   </span>
                   <button
                     type="button"

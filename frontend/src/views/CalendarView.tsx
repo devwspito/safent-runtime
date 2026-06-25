@@ -152,7 +152,7 @@ function statusMeta(status: string): { label: string } {
 
 // ── State types ───────────────────────────────────────────────────────────────
 
-type ViewMode = 'board' | 'list'
+type ViewMode = 'board' | 'list' | 'runs'
 
 interface CalState {
   tasks: ConfiguredTask[]
@@ -292,8 +292,6 @@ export default function CalendarView() {
 
       <div className="view-body cv-view-body">
         <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-8)' }}>
-
-          {/* ── Scheduled tasks section ─────────────────────────────────────── */}
           <StaggerItem>
             <section className="cv-section" aria-label="Tareas programadas">
               <div className="cv-section-head">
@@ -304,6 +302,8 @@ export default function CalendarView() {
                       className={`seg-toggle__btn${viewMode === 'board' ? ' is-active' : ''}`}
                       role="tab"
                       aria-selected={viewMode === 'board'}
+                      aria-controls="tab-panel-calendar"
+                      id="tab-calendar"
                       onClick={() => setViewMode('board')}
                     >
                       Calendario
@@ -312,9 +312,21 @@ export default function CalendarView() {
                       className={`seg-toggle__btn${viewMode === 'list' ? ' is-active' : ''}`}
                       role="tab"
                       aria-selected={viewMode === 'list'}
+                      aria-controls="tab-panel-list"
+                      id="tab-list"
                       onClick={() => setViewMode('list')}
                     >
                       Lista
+                    </button>
+                    <button
+                      className={`seg-toggle__btn${viewMode === 'runs' ? ' is-active' : ''}`}
+                      role="tab"
+                      aria-selected={viewMode === 'runs'}
+                      aria-controls="tab-panel-runs"
+                      id="tab-runs"
+                      onClick={() => setViewMode('runs')}
+                    >
+                      Ejecuciones
                     </button>
                   </div>
                 </div>
@@ -333,10 +345,18 @@ export default function CalendarView() {
               )}
 
               {!state.loading && !state.error && (
-                <>
-                  {/* ── Month calendar ── */}
+                <AnimatePresence mode="wait" initial={false}>
                   {viewMode === 'board' && (
-                    <>
+                    <motion.div
+                      key="calendar"
+                      id="tab-panel-calendar"
+                      role="tabpanel"
+                      aria-labelledby="tab-calendar"
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -4 }}
+                      transition={SPRING}
+                    >
                       <MonthCalendar
                         tasks={state.tasks}
                         calRef={calRef}
@@ -345,78 +365,88 @@ export default function CalendarView() {
                         onDayClick={(date) => openModal(date)}
                         onTaskClick={setDetailTask}
                       />
-                      {state.tasks.length === 0 && (
-                        <EmptyState
-                          icon={<Calendar size={36} />}
-                          title="Sin tareas programadas"
-                          description="Haz clic en un día del calendario para crear una."
-                        />
-                      )}
-                    </>
+                    </motion.div>
                   )}
 
-                  {/* ── List view ─────────────────────────────────────────────── */}
                   {viewMode === 'list' && (
-                    state.tasks.length === 0
-                      ? (
-                        <EmptyState
-                          icon={<Calendar size={36} />}
-                          title="Sin tareas programadas"
-                          action={
-                            <Button variant="primary" size="sm" onClick={() => openModal()}>
-                              Crear primera tarea
-                            </Button>
-                          }
-                        />
-                      )
-                      : (
-                        <ul className="cv-list" role="list">
-                          <AnimatePresence initial={false}>
-                            {state.tasks.map(task => (
-                              <AnimatedListItem key={task.trigger_id ?? task.task_id ?? task.id}>
-                                <ConfiguredTaskRow
-                                  task={task}
-                                  onViewDetail={setDetailTask}
-                                  onToggle={handleToggle}
-                                  onDelete={handleDelete}
-                                />
-                              </AnimatedListItem>
-                            ))}
-                          </AnimatePresence>
-                        </ul>
-                      )
+                    <motion.div
+                      key="list"
+                      id="tab-panel-list"
+                      role="tabpanel"
+                      aria-labelledby="tab-list"
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -4 }}
+                      transition={SPRING}
+                    >
+                      {state.tasks.length === 0
+                        ? (
+                          <EmptyState
+                            icon={<Calendar size={36} />}
+                            title="No hay tareas programadas"
+                            action={
+                              <Button variant="primary" size="sm" onClick={() => openModal()}>
+                                Crear primera tarea
+                              </Button>
+                            }
+                          />
+                        )
+                        : (
+                          <ul className="cv-list" role="list">
+                            <AnimatePresence initial={false}>
+                              {state.tasks.map(task => (
+                                <AnimatedListItem key={task.trigger_id ?? task.task_id ?? task.id}>
+                                  <ConfiguredTaskRow
+                                    task={task}
+                                    onViewDetail={setDetailTask}
+                                    onToggle={handleToggle}
+                                    onDelete={handleDelete}
+                                  />
+                                </AnimatedListItem>
+                              ))}
+                            </AnimatePresence>
+                          </ul>
+                        )
+                      }
+                    </motion.div>
                   )}
-                </>
+
+                  {viewMode === 'runs' && (
+                    <motion.div
+                      key="runs"
+                      id="tab-panel-runs"
+                      role="tabpanel"
+                      aria-labelledby="tab-runs"
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -4 }}
+                      transition={SPRING}
+                    >
+                      {state.recentTasks.length === 0
+                        ? (
+                          <EmptyState
+                            icon={<Calendar size={28} />}
+                            title="No hay ejecuciones todavia"
+                          />
+                        )
+                        : (
+                          <ul className="cv-list" role="list">
+                            <AnimatePresence initial={false}>
+                              {state.recentTasks.map(task => (
+                                <AnimatedListItem key={task.task_id}>
+                                  <RecentTaskRow task={task} />
+                                </AnimatedListItem>
+                              ))}
+                            </AnimatePresence>
+                          </ul>
+                        )
+                      }
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               )}
             </section>
           </StaggerItem>
-
-          {/* ── Recent runs ─────────────────────────────────────────────────── */}
-          <StaggerItem>
-            <section className="cv-section" aria-label="Ejecuciones recientes">
-              <h2 className="cv-section-label">Ejecuciones recientes</h2>
-              {state.recentTasks.length === 0
-                ? (
-                  <EmptyState
-                    icon={<Calendar size={28} />}
-                    title="Sin ejecuciones recientes"
-                  />
-                )
-                : (
-                  <ul className="cv-list" role="list">
-                    <AnimatePresence initial={false}>
-                      {state.recentTasks.map(task => (
-                        <AnimatedListItem key={task.task_id}>
-                          <RecentTaskRow task={task} />
-                        </AnimatedListItem>
-                      ))}
-                    </AnimatePresence>
-                  </ul>
-                )
-              }
-            </section>
-          </StaggerItem>
-
         </Stagger>
       </div>
 
