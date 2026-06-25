@@ -284,10 +284,15 @@ export function useChat(): UseChatReturn {
           activeAssistantIdRef.current = assistantMsgId
           setReconnecting(true)
 
+          // The FIRST frame of any kind proves the re-attach succeeded and the stream
+          // is live again — so we're no longer "reconnecting". Clearing only on done/error
+          // (below) left "Reconectando…" stuck for the whole task even while frames flowed.
+          const markConnected = () => setReconnecting(false)
           const callbacks: StreamCallbacks = {
-            onDelta(chunk) { dispatch({ type: 'DELTA', id: assistantMsgId, chunk }) },
-            onThinking(chunk) { dispatch({ type: 'THINKING', id: assistantMsgId, chunk }) },
+            onDelta(chunk) { markConnected(); dispatch({ type: 'DELTA', id: assistantMsgId, chunk }) },
+            onThinking(chunk) { markConnected(); dispatch({ type: 'THINKING', id: assistantMsgId, chunk }) },
             onToolCall(frame: Extract<StreamFrame, { kind: 'tool_call' }>) {
+              markConnected()
               const d = frame.tool_call ?? (frame as Record<string, unknown>)
               const name = (d.tool as string | undefined) ?? (d.tool_name as string | undefined) ?? 'herramienta'
               const label = (d.label as string | undefined) ?? String(name).replace(/_/g, ' ')
@@ -295,7 +300,7 @@ export function useChat(): UseChatReturn {
               dispatch({ type: 'TOOL_CALL', id: assistantMsgId, step: { name, label, target } })
               dispatch({ type: 'THINKING_DONE', id: assistantMsgId })
             },
-            onStatus(msg) { dispatch({ type: 'STATUS_STREAMING', text: msg }) },
+            onStatus(msg) { markConnected(); dispatch({ type: 'STATUS_STREAMING', text: msg }) },
             onDone() {
               dispatch({ type: 'STREAM_DONE', id: assistantMsgId })
               streamRef.current = null
