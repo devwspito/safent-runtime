@@ -1,12 +1,14 @@
-"""Audit + Skills + Consent endpoints — leen estructuras del agents_os.
+"""Audit + Skills endpoints — proyección de solo lectura del estado nativo.
 
-Audit: lista audit entries firmadas del AuditHashChainSigner.
-Skills: lista SkillPackages firmadas (state, version, surface_kinds).
-Consents: lista capabilities concedidas + revocadas.
+Audit: lista audit entries firmadas que el AuditHashChainSigner nativo proyecta
+  a `audit_entries_view` (`sqlite_audit_repository._try_project_to_view`). Esta
+  capa SOLO lee esa proyección — no inventa filas ni firma nada.
+Skills: lista skills desde el daemon (`list_skills_native`), fuente única en disco.
 
-Por ahora MOCK con datos sintéticos al boot (porque hermes-runtime.service
-no expone DBus todavía — F11). Cuando F11 esté listo, las queries van
-contra la DB compartida con el runtime.
+Consents: NO se sirven aquí. La fuente única es el ConsentManager nativo
+  (D-Bus grant_consent/revoke_consent/list_consents → `consent_grants`), que es
+  lo que consulta el gate. El antiguo store paralelo `consents_view` + sus
+  endpoints REST se eliminaron (divergían del gate real y de la cadena firmada).
 """
 
 from __future__ import annotations
@@ -14,14 +16,10 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-
-from hermes.agents_os.application.consent_manager import Capability, ConsentScope
 
 logger = logging.getLogger(__name__)
 
@@ -44,17 +42,6 @@ CREATE TABLE IF NOT EXISTS composio_skills (
   toolkit_slug TEXT NOT NULL,
   intent_text  TEXT NOT NULL,
   created_at   TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS consents_view (
-  consent_id         TEXT PRIMARY KEY,
-  capability         TEXT NOT NULL,
-  scope              TEXT NOT NULL,
-  granted_at         TEXT NOT NULL,
-  granted_through    TEXT NOT NULL,
-  expires_at         TEXT,
-  revoked_at         TEXT,
-  revoked_reason     TEXT
 );
 """
 
@@ -94,60 +81,6 @@ def _run_skill_migrations(db_path: Path) -> None:
             except Exception as exc:  # noqa: BLE001
                 if "duplicate column" not in str(exc).lower():
                     logger.warning("skill migration skipped: %s — %s", sql[:60], exc)
-
-
-def _seed_demo_data(db_path: Path) -> None:
-    """Inserta unas entries demo para que la UI tenga qué mostrar."""
-    with _conn(db_path) as c:
-        existing = c.execute(
-            "SELECT COUNT(*) AS n FROM audit_entries_view"
-        ).fetchone()
-        if existing["n"] > 0:
-            return
-        now = datetime.now(tz=UTC)
-
-        # Audit entries demo (las que de verdad emite el runtime).
-        for i, (kind, actor, desc) in enumerate(
-            [
-                (
-                    "node_install_created",
-                    "wizard",
-                    "Nodo creado: personal-desktop arm64",
-                ),
-                (
-                    "tenant_bound",
-                    "wizard",
-                    "Tenant bound: default",
-                ),
-                (
-                    "consent_granted",
-                    "hermes-user",
-                    "Capability documents concedida (session)",
-                ),
-                (
-                    "ota_queued",
-                    "system",
-                    "OTA v0.4.0 → v0.4.1 queued (channel stable)",
-                ),
-            ]
-        ):
-            c.execute(
-                """
-                INSERT INTO audit_entries_view (
-                  entry_id, timestamp, actor, audit_kind, category,
-                  description, signature_short
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(uuid4()),
-                    (now - timedelta(minutes=10 - i)).isoformat(),
-                    actor,
-                    kind,
-                    None,
-                    desc,
-                    "abcd1234…",
-                ),
-            )
 
 
 class AuditEntryDTO(BaseModel):
@@ -207,29 +140,6 @@ class SkillDetailsDTO(BaseModel):
     instructions: str | None = None
     instructions_path: str | None = None
     created_at: str | None = None  # alias for signed_at, for frontend convenience
-
-
-class ConsentDTO(BaseModel):
-    consent_id: str
-    capability: str
-    scope: str
-    granted_at: str
-    granted_through: str
-    expires_at: str | None
-    revoked_at: str | None
-    revoked_reason: str | None
-
-
-class GrantConsentRequest(BaseModel):
-    """Validated request body for POST /consents.
-
-    FastAPI rejects unknown or empty capability values with 422 before the
-    handler executes, ensuring only known OS capabilities are persisted.
-    """
-
-    capability: Capability
-    scope: ConsentScope = ConsentScope.SESSION
-    granted_through: str = "hermes_shell"
 
 
 def _row_to_skill_dto(row) -> SkillPackageDTO:
@@ -348,7 +258,6 @@ def _read_skill_instructions(skill_id: str) -> tuple[str | None, str | None]:
 
 def create_audit_router(db_path: Path) -> APIRouter:
     init_schema(db_path)
-    _seed_demo_data(db_path)
     router = APIRouter(prefix="/api/v1", tags=["audit"])
 
     # ---------------- Audit ----------------
@@ -579,69 +488,11 @@ def create_audit_router(db_path: Path) -> APIRouter:
         return _row_to_skill_dto_from_dict(result)
 
     # ---------------- Consents ----------------
-    @router.get("/consents", response_model=list[ConsentDTO])
-    async def list_consents(include_revoked: bool = False) -> list[ConsentDTO]:
-        sql = "SELECT * FROM consents_view"
-        if not include_revoked:
-            sql += " WHERE revoked_at IS NULL"
-        sql += " ORDER BY granted_at DESC"
-        with _conn(db_path) as c:
-            rows = c.execute(sql).fetchall()
-        return [
-            ConsentDTO(
-                consent_id=r["consent_id"],
-                capability=r["capability"],
-                scope=r["scope"],
-                granted_at=r["granted_at"],
-                granted_through=r["granted_through"],
-                expires_at=r["expires_at"],
-                revoked_at=r["revoked_at"],
-                revoked_reason=r["revoked_reason"],
-            )
-            for r in rows
-        ]
-
-    @router.post("/consents", response_model=ConsentDTO, status_code=201)
-    async def grant_consent(req: GrantConsentRequest) -> ConsentDTO:
-        consent_id = str(uuid4())
-        now = datetime.now(tz=UTC).isoformat()
-        with _conn(db_path) as c:
-            c.execute(
-                """
-                INSERT INTO consents_view (
-                  consent_id, capability, scope, granted_at, granted_through
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    consent_id,
-                    req.capability.value,
-                    req.scope.value,
-                    now,
-                    req.granted_through,
-                ),
-            )
-        return ConsentDTO(
-            consent_id=consent_id,
-            capability=req.capability.value,
-            scope=req.scope.value,
-            granted_at=now,
-            granted_through=req.granted_through,
-            expires_at=None,
-            revoked_at=None,
-            revoked_reason=None,
-        )
-
-    @router.delete("/consents/{consent_id}", status_code=204)
-    async def revoke_consent(consent_id: str) -> None:
-        now = datetime.now(tz=UTC).isoformat()
-        with _conn(db_path) as c:
-            res = c.execute(
-                "UPDATE consents_view SET revoked_at = ?, "
-                "revoked_reason = 'user_revoked' WHERE consent_id = ? "
-                "AND revoked_at IS NULL",
-                (now, consent_id),
-            )
-            if res.rowcount == 0:
-                raise HTTPException(404, "consent not found or revoked")
+    # Los consents NO se sirven aquí: la fuente única es el ConsentManager nativo
+    # (D-Bus grant_consent/revoke_consent/list_consents → tabla consent_grants),
+    # que es lo que consulta el gate del daemon. La app QML de seguridad ya habla
+    # ese D-Bus directamente. La antigua tabla-store paralela `consents_view` +
+    # sus endpoints REST se eliminaron: eran un segundo store que NO pasaba por la
+    # cadena firmada ni por el gate → divergía de la gobernanza real.
 
     return router
