@@ -1644,7 +1644,7 @@ async def _run(*, systemd_notify: bool) -> None:
     # (degradación honesta: el stream llega pero GetConversation no devuelve assistant).
     _orchestrator_conversation_repo = None
     try:
-        from hermes.shell_server.chat.conversation_repo import (  # noqa: PLC0415
+        from hermes.tasks.infrastructure.sqlite_conversation_repo import (  # noqa: PLC0415
             SQLiteConversationRepository as _SQLiteConvRepo,
         )
         _orchestrator_conversation_repo = _SQLiteConvRepo(db_path=_DB_PATH)
@@ -2031,7 +2031,7 @@ def _start_dbus_adapter_if_available(
         # store (mismas tablas conversations/messages en shell-state.db). Verbos
         # D-Bus de lectura/borrado; el HTTP del shell-server se borra al cerrar M2.
         try:
-            from hermes.shell_server.chat.conversation_repo import (  # noqa: PLC0415
+            from hermes.tasks.infrastructure.sqlite_conversation_repo import (  # noqa: PLC0415
                 SQLiteConversationRepository,
             )
 

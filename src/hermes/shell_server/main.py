@@ -790,7 +790,7 @@ def create_app() -> FastAPI:
 
     repo = SQLiteProviderRepository(db_path=_DB_PATH, vault=vault)
     _seed_providers_if_empty(repo)
-    from hermes.shell_server.chat.conversation_repo import (
+    from hermes.tasks.infrastructure.sqlite_conversation_repo import (
         SQLiteConversationRepository,
     )
 

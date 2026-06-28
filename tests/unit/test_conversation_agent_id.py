@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from hermes.shell_server.chat.conversation_repo import SQLiteConversationRepository
+from hermes.tasks.infrastructure.sqlite_conversation_repo import SQLiteConversationRepository
 
 
 def test_tag_and_filter_by_agent(tmp_path):

@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from hermes.shell_server.chat.conversation_repo import (
+from hermes.tasks.infrastructure.sqlite_conversation_repo import (
     ConversationNotFound,
     SQLiteConversationRepository,
 )

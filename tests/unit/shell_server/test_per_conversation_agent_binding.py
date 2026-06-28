@@ -25,7 +25,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from hermes.agents.domain.agent import DEFAULT_AGENT_ID
-from hermes.shell_server.chat.conversation_repo import SQLiteConversationRepository
+from hermes.tasks.infrastructure.sqlite_conversation_repo import SQLiteConversationRepository
 from hermes.tasks.control_plane.application.control_plane_service import (
     ControlPlaneService,
 )

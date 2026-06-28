@@ -17,7 +17,7 @@ from hermes.agents_os.infrastructure.dbus_runtime_service import (
     DbusAuthorizationError,
     DbusRuntimeServiceWiring,
 )
-from hermes.shell_server.chat.conversation_repo import SQLiteConversationRepository
+from hermes.tasks.infrastructure.sqlite_conversation_repo import SQLiteConversationRepository
 from hermes.tasks.testing.in_memory_agent_state import InMemoryAgentState
 
 pytestmark = pytest.mark.unit
