@@ -406,11 +406,38 @@ class ProxyConnectionHandler:
         writer.write(_CONNECT_ESTABLISHED)
         await writer.drain()
 
-        # SNI audit only in open-logged mode (no blocking). MUST forward the
-        # consumed ClientHello bytes upstream or the TLS handshake breaks
-        # (ERR_SSL_PROTOCOL_ERROR).
-        first_bytes = await _maybe_log_sni(reader, target.host)
+        # ENFORCE the blocklist/denylist on the REAL SNI even in open-logged mode.
+        # open-logged allows by default, but the SNI was previously LOGGED ONLY, so
+        # a blocklisted/denied domain riding an allowed CONNECT host (domain
+        # fronting: `CONNECT allowed-cdn.com` + `SNI=blocked-malware.com`) bypassed
+        # the malware blocklist over HTTPS. Now: peek the ClientHello, and if the
+        # SNI is denied, drop the tunnel WITHOUT forwarding the ClientHello (no TLS
+        # session reaches the blocked backend). A missing/unparseable SNI is
+        # tolerated here (open-logged), unlike default-deny.
+        try:
+            first_bytes = await asyncio.wait_for(
+                reader.read(_SNI_PEEK_SIZE), timeout=_SNI_PEEK_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            first_bytes = b""
         if first_bytes:
+            try:
+                sni_host = parse_sni(first_bytes).sni
+            except SNIParseError:
+                sni_host = None
+            if sni_host is not None:
+                sni_decision = self._policy.evaluate(domain=sni_host, session_id=client_ip)
+                if not sni_decision.allowed:
+                    self._audit.record(sni_decision)
+                    logger.info(
+                        "hermes.egress_proxy.deny",
+                        extra={"domain": sni_host, "session_id": client_ip, "source": "sni-open-logged"},
+                    )
+                    _safe_close(remote_writer)
+                    _safe_close(writer)
+                    return
+            # Allowed (or no SNI) → forward the consumed ClientHello upstream or the
+            # TLS handshake breaks (ERR_SSL_PROTOCOL_ERROR).
             remote_writer.write(first_bytes)
             await remote_writer.drain()
 
@@ -571,34 +598,6 @@ async def _read_host_header(reader: asyncio.StreamReader) -> str | None:
         if line.lower().startswith("host:"):
             return line[5:].strip()
     return None
-
-
-async def _maybe_log_sni(
-    reader: asyncio.StreamReader, declared_host: str
-) -> bytes:
-    """Lee el ClientHello para audit (OPEN_LOGGED only, best-effort) y lo DEVUELVE.
-
-    CRÍTICO: estos bytes son el inicio del handshake TLS del cliente. Hay que
-    devolverlos para que el caller los reenvíe al upstream — si se consumieran y
-    descartaran, el servidor remoto nunca recibiría el ClientHello y el TLS
-    fallaría con ERR_SSL_PROTOCOL_ERROR. No bloquea: si no hay datos en 0.1s,
-    devuelve b"" (el pipe normal moverá el handshake).
-    """
-    try:
-        peek_bytes = await asyncio.wait_for(reader.read(512), timeout=0.1)
-    except asyncio.TimeoutError:
-        return b""
-    if peek_bytes:
-        try:
-            hello = parse_sni(peek_bytes)
-            if hello.sni != declared_host:
-                logger.debug(
-                    "hermes.egress_proxy.sni_mismatch",
-                    extra={"declared": declared_host, "sni": hello.sni},
-                )
-        except SNIParseError:
-            pass
-    return peek_bytes
 
 
 async def _pipe_half(

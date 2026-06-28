@@ -197,6 +197,60 @@ class TestConnectHandler:
         assert "evil.attacker.example" in sink.allowed_domains()
 
     @pytest.mark.asyncio
+    async def test_open_logged_blocks_denylisted_sni_behind_allowed_connect_host(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Anti domain-fronting: in OPEN_LOGGED a denylisted SNI riding an allowed
+        CONNECT host must be blocked (the SNI was previously logged only)."""
+        engine = EgressPolicyEngine(
+            global_policy=SessionPolicy(
+                session_id="__global__",
+                mode=EgressMode.OPEN_LOGGED,
+                domains_denylist=frozenset({"blocked.example"}),
+            )
+        )
+        sink = InMemoryAuditSink()
+        # Stub DNS resolution so the handler reaches the SNI check (fake domains
+        # don't resolve; real resolution is not what this test exercises).
+        async def _fake_resolve(host):
+            return "1.2.3.4"
+        monkeypatch.setattr(
+            "hermes.egress_proxy.infrastructure.proxy_handler._resolve_external_ip",
+            _fake_resolve,
+        )
+        connect = b"CONNECT allowed-cdn.example:443 HTTP/1.1\r\n\r\n"
+        tls = _make_tls_client_hello("blocked.example")  # fronted SNI
+        await _run_connect_handler(connect, engine, sink, monkeypatch, tls_payload=tls)
+        # CONNECT host was allowed so 200 is sent, but the denylisted SNI is then
+        # blocked and recorded as denied.
+        assert "blocked.example" in sink.denied_domains()
+
+    @pytest.mark.asyncio
+    async def test_open_logged_allows_normal_sni_behind_connect_host(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-denylisted SNI still tunnels (open browsing preserved)."""
+        engine = EgressPolicyEngine(
+            global_policy=SessionPolicy(
+                session_id="__global__",
+                mode=EgressMode.OPEN_LOGGED,
+                domains_denylist=frozenset({"blocked.example"}),
+            )
+        )
+        sink = InMemoryAuditSink()
+        async def _fake_resolve(host):
+            return "1.2.3.4"
+        monkeypatch.setattr(
+            "hermes.egress_proxy.infrastructure.proxy_handler._resolve_external_ip",
+            _fake_resolve,
+        )
+        connect = b"CONNECT site.example:443 HTTP/1.1\r\n\r\n"
+        tls = _make_tls_client_hello("site.example")
+        written = await _run_connect_handler(connect, engine, sink, monkeypatch, tls_payload=tls)
+        assert b"200" in written
+        assert "blocked.example" not in sink.denied_domains()
+
+    @pytest.mark.asyncio
     async def test_default_deny_blocks_unlisted_domain_with_sni(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
