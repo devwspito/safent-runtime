@@ -143,6 +143,10 @@ class SqliteAgentRegistry:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, isolation_level=None)
         conn.row_factory = sqlite3.Row
+        # busy_timeout per connection: the daemon and shell-server share this DB,
+        # so a concurrent writer must wait (bounded) instead of an immediate
+        # "database is locked". WAL is set once at init (a persistent DB property).
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     # ------------------------------------------------------------------

@@ -120,6 +120,14 @@ ExecStart=/bin/sh -c '\
 # Solo el veth del browser; no habilitar ip_forward global (innecesario).
 ExecStart=/bin/sh -c 'sysctl -w net.ipv4.conf.veth-hbr-host.forwarding=1'
 
+# ── Anti-pivot IPv6 ───────────────────────────────────────────────────────────
+# El anti-pivot (browser-host.nft / browser-ns.nft) matchea `ip daddr` → es
+# IPv4-only. Sin esto, un link-local IPv6 (fe80::) auto-asignado al veth abriría
+# una ruta al gateway del host / loopback / metadata (fd00:ec2::254) por IPv6 que
+# las reglas IPv4 no cubren. Apagamos IPv6 en ambos lados del veth y dentro del netns.
+ExecStart=/bin/sh -c 'sysctl -w net.ipv6.conf.veth-hbr-host.disable_ipv6=1 || true'
+ExecStart=/bin/sh -c 'ip netns exec hermes-browser sysctl -w net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1 net.ipv6.conf.veth-hbr-ns.disable_ipv6=1 || true'
+
 # ── Reglas nftables host side ─────────────────────────────────────────────────
 # table inet hermes_browser_egress: forward policy drop + anti-pivot RFC1918 +
 # permite solo browser→proxy:3128 + DNS; postrouting masquerade del proxy.
@@ -160,6 +168,10 @@ ExecStart=/bin/sh -c '\
 
 # ── Reenvío por interfaz (per-iface) ──────────────────────────────────────────
 ExecStart=/bin/sh -c 'sysctl -w net.ipv4.conf.veth-hmcp-host.forwarding=1'
+
+# ── Anti-pivot IPv6 (mismo motivo que el browser: nft es IPv4-only) ───────────
+ExecStart=/bin/sh -c 'sysctl -w net.ipv6.conf.veth-hmcp-host.disable_ipv6=1 || true'
+ExecStart=/bin/sh -c 'ip netns exec hermes-mcp sysctl -w net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1 net.ipv6.conf.veth-hmcp-ns.disable_ipv6=1 || true'
 
 # ── Reglas nftables host side (fichero estático) ──────────────────────────────
 # table inet hermes_mcp_egress: forward drop + anti-pivot + solo mcp→proxy:3128;

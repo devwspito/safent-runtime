@@ -31,10 +31,10 @@ table inet hermes_host {
         meta l4proto ipv6-icmp accept comment "ICMPv6 (NDP imprescindible en IPv6)"
         ip protocol icmp accept comment "ICMP (ping/diagnóstico)"
 
-        # ⚠️ TEMPORAL-VERIFICACIÓN — SSH(22)+clipboard(7519) para verificar
-        # onboarding/login por el hostfwd de QEMU. QUITAR en la imagen final.
-        tcp dport 22 accept comment "TEMPORAL-VERIFICACIÓN ssh"
-        tcp dport 7519 accept comment "TEMPORAL-VERIFICACIÓN clipboard"
+        # (Removed: the TEMPORAL-VERIFICACIÓN ssh(22)+clipboard(7519) inbound
+        # accepts. They were dev-only probes marked "QUITAR en la imagen final" but
+        # shipped via the Containerfile COPY — an SSH + clipboard inbound surface.
+        # Remote access is ONLY via the cloudflared tunnel; nothing inbound.)
 
         # Lumen desktop app (appliance): la app nativa arranca este VM bajo QEMU en
         # el Mac/PC del dueño y abre la UI por hostfwd → llega al NIC del guest desde
@@ -55,6 +55,9 @@ table inet hermes_host {
         ip saddr 10.200.0.2 ip daddr 10.200.0.1 tcp dport 3128 accept comment "browser netns → egress proxy"
 
         # SIN dport inbound: el acceso remoto es SOLO vía el túnel cloudflared.
-        log prefix "hermes_host INPUT DROP: " level warn
+        # `drop` EXPLÍCITO (además del policy drop): el log decía "INPUT DROP" pero
+        # no dropeaba — solo el policy drop denegaba. Hacerlo explícito evita que un
+        # futuro `accept` al final abra inbound en silencio.
+        log prefix "hermes_host INPUT DROP: " level warn drop
     }
 }

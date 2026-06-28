@@ -445,7 +445,11 @@ class SqliteApprovalGate:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path), isolation_level=None)
         conn.row_factory = sqlite3.Row
-        # F-08: espera acotada ante contención de lock bajo N workers.
+        # WAL: pending_approvals is written by the daemon executor thread and the
+        # D-Bus thread (approve/verify_token) concurrently; WAL lets a reader and a
+        # writer coexist instead of hitting "database is locked". F-08: busy_timeout
+        # bounds the wait under N workers.
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
