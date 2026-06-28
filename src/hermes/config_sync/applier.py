@@ -358,6 +358,11 @@ class PolicyApplier:
                 continue
 
             # Check for existing local (non-cloud) key before overwriting.
+            # KNOWN GAP (backlog): the daemon's get_composio_status returns only
+            # {configured, entity_id} — no has_key/managed_by — so this guard is
+            # currently dead and the cloud key always overwrites. Honoring "don't
+            # clobber a local key" needs a managed_by column on the integration
+            # store (Fase 5); left as-is to preserve cloud key-rotation until then.
             status = await self._proxy.call_dict("get_composio_status")
             if status.get("has_key") and not status.get("managed_by") == _CLOUD_MANAGED:
                 # A locally-configured key exists; do not overwrite it.

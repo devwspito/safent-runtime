@@ -96,8 +96,11 @@ def signal_native_danger_approval(proposal_id: str, choice: str) -> bool:
     )
     return True
 
-# Terminal tool names as reported to the hook.
-_TERMINAL_TOOLS: frozenset[str] = frozenset({"run_command", "run_terminal", "terminal"})
+# Terminal tool names as reported to the hook. `process` is a caged exec tool
+# (nous_engine routes it like `terminal`, running its `command` arg verbatim), so
+# it MUST go through the hardline floor + self-jailbreak + command guards too —
+# without it here, an entire exec surface bypassed all three.
+_TERMINAL_TOOLS: frozenset[str] = frozenset({"run_command", "run_terminal", "terminal", "process"})
 # Execute-code tool names.
 _CODE_TOOLS: frozenset[str] = frozenset({"execute_code", "run_code"})
 
@@ -156,7 +159,9 @@ def _check_command_guards_native(command_str: str) -> str | None:
         from tools.approval import check_all_command_guards  # noqa: PLC0415
 
         result = check_all_command_guards(command_str, "local")
-        if not result.get("approved", True):
+        # Fail-closed: a malformed guard result (missing "approved") must BLOCK,
+        # matching this module's fail-closed posture — never default to allow.
+        if not result.get("approved", False):
             return result.get("message") or "BLOCKED by native command guard"
     except ImportError:
         pass
@@ -169,7 +174,8 @@ def _check_code_guard_native(code_str: str) -> str | None:
         from tools.approval import check_execute_code_guard  # noqa: PLC0415
 
         result = check_execute_code_guard(code_str, "local")
-        if not result.get("approved", True):
+        # Fail-closed: a malformed guard result (missing "approved") must BLOCK.
+        if not result.get("approved", False):
             return result.get("message") or "BLOCKED by native code guard"
     except ImportError:
         pass

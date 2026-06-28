@@ -65,18 +65,32 @@ def totp_now(secret_b32: str, *, at: float | None = None) -> str:
     return _hotp(secret_b32, int(now // _STEP))
 
 
-def verify_totp(secret_b32: str, code: str, *, at: float | None = None) -> bool:
-    """Constant-time verify a TOTP code within the clock-skew window. Fail-closed."""
+def verify_totp_counter(secret_b32: str, code: str, *, at: float | None = None) -> int | None:
+    """Verify a TOTP code; return the matched step counter, or None.
+
+    Returning the counter lets the caller enforce single-use (reject any counter
+    <= the last consumed one) — RFC 6238 §5.2. Constant-time, fail-closed.
+    """
     if not isinstance(code, str) or not code.strip().isdigit():
-        return False
+        return None
     code = code.strip().zfill(_DIGITS)
     now = time.time() if at is None else at
     current = int(now // _STEP)
-    ok = False
+    matched = -1
     for w in range(-_WINDOW, _WINDOW + 1):
         # iterate the whole window (no early return) to avoid timing leaks
-        ok |= hmac.compare_digest(_hotp(secret_b32, current + w), code)
-    return ok
+        if hmac.compare_digest(_hotp(secret_b32, current + w), code):
+            matched = current + w
+    return matched if matched >= 0 else None
+
+
+def verify_totp(secret_b32: str, code: str, *, at: float | None = None) -> bool:
+    """Constant-time verify a TOTP code within the clock-skew window. Fail-closed.
+
+    NOTE: stateless — does NOT protect against replay within the window. Use
+    MfaStore.verify (which tracks the last consumed counter) for single-use.
+    """
+    return verify_totp_counter(secret_b32, code, at=at) is not None
 
 
 def generate_secret() -> str:
@@ -167,8 +181,14 @@ class MfaStore:
         secret = d.get("totp_secret")
         if not secret:
             return False, "mfa_not_enrolled"
-        if not verify_totp(secret, totp or ""):
+        matched = verify_totp_counter(secret, totp or "")
+        if matched is None:
             return False, "invalid_totp"
+        # Single-use: reject any code whose step counter was already consumed
+        # (replay within the ±window). Persist the high-water mark on success.
+        last = d.get("totp_last_counter")
+        if isinstance(last, int) and matched <= last:
+            return False, "totp_replayed"
         if level is ProtectionLevel.MFA_HUMANITY:
             # the challenge text is issued+checked by the API layer; here we only
             # require that a humanity proof was supplied (the API validates it).
@@ -181,4 +201,7 @@ class MfaStore:
             got = hashlib.sha256((rs + (riddle_answer or "").strip().lower()).encode()).hexdigest()
             if not hmac.compare_digest(got, rh):
                 return False, "invalid_riddle"
+        # Consume the code: persist the step counter so it cannot be replayed.
+        d["totp_last_counter"] = matched
+        self._save(d)
         return True, "ok"
