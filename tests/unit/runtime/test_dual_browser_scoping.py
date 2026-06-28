@@ -54,13 +54,13 @@ _CDP_URL = "http://127.0.0.1:9333"
 class TestThreadLocalCdpScope:
     def test_scope_sets_and_clears_url(self) -> None:
         assert get_thread_cdp_url() is None
-        with cerebro_cdp_scope(_CDP_URL):
+        with cerebro_cdp_scope(lambda: _CDP_URL):
             assert get_thread_cdp_url() == _CDP_URL
         assert get_thread_cdp_url() is None
 
     def test_scope_clears_on_exception(self) -> None:
         with pytest.raises(ValueError):
-            with cerebro_cdp_scope(_CDP_URL):
+            with cerebro_cdp_scope(lambda: _CDP_URL):
                 raise ValueError("boom")
         assert get_thread_cdp_url() is None
 
@@ -86,7 +86,8 @@ class TestRunConversationWithCdp:
     def _make_agent(self, captured: list) -> Any:
         agent = MagicMock()
 
-        def run_conversation(msg, *, conversation_history=None):
+        def run_conversation(msg, *, conversation_history=None, task_id=None,
+                             stream_callback=None):
             captured.append(get_thread_cdp_url())
             return {"narrative": "ok", "api_calls": 0}
 
@@ -98,7 +99,7 @@ class TestRunConversationWithCdp:
     def test_cerebro_cycle_sets_cdp_in_thread(self) -> None:
         captured: list = []
         agent = self._make_agent(captured)
-        _run_conversation_with_cdp(agent, "hello", None, _CDP_URL)
+        _run_conversation_with_cdp(agent, "hello", None, lambda: _CDP_URL)
         assert captured == [_CDP_URL]
 
     def test_worker_cycle_no_cdp_in_thread(self) -> None:
@@ -109,7 +110,7 @@ class TestRunConversationWithCdp:
 
     def test_cdp_cleared_after_cerebro_run(self) -> None:
         agent = self._make_agent([])
-        _run_conversation_with_cdp(agent, "hello", None, _CDP_URL)
+        _run_conversation_with_cdp(agent, "hello", None, lambda: _CDP_URL)
         assert get_thread_cdp_url() is None
 
 
@@ -178,65 +179,85 @@ class TestIsCerebroAgent:
 
 
 # ---------------------------------------------------------------------------
-# 6: NousReasoningEngine._resolve_cerebro_cdp
+# 6: NousReasoningEngine._make_cerebro_cdp_provider
 # ---------------------------------------------------------------------------
+# Updated for the LAZY provider API: _resolve_cerebro_cdp (async, returned the URL)
+# was refactored into _make_cerebro_cdp_provider(agent_id, loop) → returns a zero-arg
+# provider callable (or None) that bridges ensure_running() to the engine loop via
+# run_coroutine_threadsafe. We exercise it with a real loop in a background thread.
+
+import asyncio as _asyncio
+import threading as _threading
+from contextlib import contextmanager as _contextmanager
 
 
-class TestResolveCerebroCdp:
+@_contextmanager
+def _background_loop():
+    loop = _asyncio.new_event_loop()
+    t = _threading.Thread(target=loop.run_forever, daemon=True)
+    t.start()
+    try:
+        yield loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        t.join(timeout=2)
+        loop.close()
+
+
+class TestMakeCerebroCdpProvider:
     def setup_method(self) -> None:
         self.engine = _make_engine_bare()
+        # Isolate Priority 2 (Cerebro): no jailed browser in these tests.
+        self.engine._jailed_browser_manager = None
 
-    @pytest.mark.asyncio
-    async def test_no_manager_returns_none(self) -> None:
+    def test_no_manager_returns_none(self) -> None:
         self.engine._cerebro_browser_manager = None
-        result = await self.engine._resolve_cerebro_cdp("default")
-        assert result is None
+        with _background_loop() as loop:
+            assert self.engine._make_cerebro_cdp_provider("default", loop) is None
 
-    @pytest.mark.asyncio
-    async def test_worker_agent_returns_none(self) -> None:
+    def test_worker_agent_returns_none(self) -> None:
         manager = AsyncMock()
-        manager.ensure_running = AsyncMock()
         manager.cdp_url = _CDP_URL
         self.engine._cerebro_browser_manager = manager
-        result = await self.engine._resolve_cerebro_cdp("worker-123")
-        assert result is None
-        manager.ensure_running.assert_not_called()
+        with _background_loop() as loop:
+            # Not a Cerebro agent + no jailed browser → no provider.
+            assert self.engine._make_cerebro_cdp_provider("worker-123", loop) is None
 
-    @pytest.mark.asyncio
-    async def test_cerebro_returns_cdp_url(self) -> None:
+    def test_cerebro_provider_returns_cdp_url(self) -> None:
         from hermes.agents.domain.agent import DEFAULT_AGENT_ID
 
         manager = AsyncMock()
         manager.ensure_running = AsyncMock()
         manager.cdp_url = _CDP_URL
         self.engine._cerebro_browser_manager = manager
+        with _background_loop() as loop:
+            provider = self.engine._make_cerebro_cdp_provider(DEFAULT_AGENT_ID, loop)
+            assert provider is not None
+            assert provider() == _CDP_URL
+            manager.ensure_running.assert_awaited()
 
-        result = await self.engine._resolve_cerebro_cdp(DEFAULT_AGENT_ID)
-        assert result == _CDP_URL
-        manager.ensure_running.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_manager_error_returns_none_failsoft(self) -> None:
+    def test_manager_error_provider_returns_none_failsoft(self) -> None:
         from hermes.agents.domain.agent import DEFAULT_AGENT_ID
 
         manager = AsyncMock()
         manager.ensure_running.side_effect = RuntimeError("browser failed")
         self.engine._cerebro_browser_manager = manager
+        with _background_loop() as loop:
+            provider = self.engine._make_cerebro_cdp_provider(DEFAULT_AGENT_ID, loop)
+            assert provider is not None
+            assert provider() is None  # fail-soft, not raised
 
-        result = await self.engine._resolve_cerebro_cdp(DEFAULT_AGENT_ID)
-        assert result is None  # fail-soft, not raised
-
-    @pytest.mark.asyncio
-    async def test_no_cdp_url_after_start_returns_none(self) -> None:
+    def test_no_cdp_url_after_start_returns_none(self) -> None:
         from hermes.agents.domain.agent import DEFAULT_AGENT_ID
 
         manager = AsyncMock()
         manager.ensure_running = AsyncMock()
         manager.cdp_url = None  # browser started but no port yet
         self.engine._cerebro_browser_manager = manager
-
-        result = await self.engine._resolve_cerebro_cdp(DEFAULT_AGENT_ID)
-        assert result is None
+        with _background_loop() as loop:
+            provider = self.engine._make_cerebro_cdp_provider(DEFAULT_AGENT_ID, loop)
+            assert provider is not None
+            assert provider() is None
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +420,7 @@ class TestNoCdpBleedToWorker:
 
         def cerebro_thread() -> None:
             # Enter scope first, signal worker, then hold scope open.
-            with cerebro_cdp_scope(_CDP_URL):
+            with cerebro_cdp_scope(lambda: _CDP_URL):
                 barrier.wait()  # signal worker to read
                 barrier.wait()  # wait for worker to finish reading
 

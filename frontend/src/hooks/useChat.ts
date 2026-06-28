@@ -891,11 +891,14 @@ export function useChat(): UseChatReturn {
     stopStream()
     try {
       const detail = await getConversation(id)
-      const messages: ChatMessage[] = detail.messages
+      // Null-guard messages + content (parity with the mount-restore path): the
+      // mirror can return a null content for some message kinds; m.content used
+      // raw threw inside the try and made the conversation unopenable.
+      const messages: ChatMessage[] = (detail.messages ?? [])
         .filter(m => m.role === 'user' || m.role === 'assistant')
         .map(m => {
           if (m.role === 'user') {
-            return { type: 'user' as const, id: genUUID(), text: m.content }
+            return { type: 'user' as const, id: genUUID(), text: m.content ?? '' }
           }
           return {
             type: 'assistant' as const,
@@ -905,7 +908,7 @@ export function useChat(): UseChatReturn {
             thinkingDone: true,
             toolSteps: [],
             activityText: '',
-            renderedHtml: renderMarkdown(m.content),
+            renderedHtml: renderMarkdown(m.content ?? ''),
             isStreaming: false,
           }
         })

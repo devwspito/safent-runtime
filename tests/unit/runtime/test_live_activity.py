@@ -82,7 +82,9 @@ class TestSnapshot:
     def test_snapshot_entry_shape(self):
         live_activity.record("t1", "agent-a", "mcp__ruflo__swarm_init")
         entry = live_activity.snapshot()[0]
-        assert set(entry.keys()) == {"agent_id", "tool", "since"}
+        # snapshot now includes task_id so concurrent tasks/agents can be filtered
+        # per conversation (the chat view filters by it).
+        assert set(entry.keys()) == {"task_id", "agent_id", "tool", "since"}
 
 
 class TestThreadSafety:
