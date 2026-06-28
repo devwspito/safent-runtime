@@ -545,9 +545,11 @@ class PolicyApplier:
     ) -> bool:
         draft = _agent_draft(spec)
         if spec.agent_id in cloud_managed:
-            resp = await self._proxy.call_mutator(
-                "update_agent", spec.agent_id, json.dumps(draft)
-            )
+            # Guarded mutator (parity with create_agent): a raw proxy call here
+            # would propagate a transient/AccessDenied error out of apply() and
+            # abort the WHOLE sync with no rollback, stranding a half-applied
+            # bundle and never advancing the version.
+            resp = await self._call_mutator("update_agent", spec.agent_id, json.dumps(draft))
         else:
             draft["agent_id"] = spec.agent_id
             draft["managed_by"] = _CLOUD_MANAGED
@@ -557,15 +559,22 @@ class PolicyApplier:
             return False
 
         created_id = (resp or {}).get("agent_id") or (resp or {}).get("id") or spec.agent_id
+        # Bind capabilities through the guarded mutator too: bind_capability may be
+        # bus-denied for the config-sync uid, and a raw call would abort the sync.
+        # Fail-soft — a bind failure marks the agent partially-applied (caller
+        # records it) without taking down the rest of the bundle.
+        bind_ok = True
         for cap in spec.capabilities:
-            await self._proxy.call_mutator(
+            resp_bind = await self._call_mutator(
                 "bind_capability_to_agent",
                 created_id,
                 cap.get("kind", "skill"),
                 cap.get("id", ""),
                 cap.get("version", ""),
             )
-        return True
+            if not _is_ok_lenient(resp_bind):
+                bind_ok = False
+        return bind_ok
 
     async def _delete_agent(self, agent_id: str) -> bool:
         try:

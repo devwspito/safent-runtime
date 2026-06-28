@@ -131,7 +131,11 @@ class FeatureGuardMiddleware(BaseHTTPMiddleware):
                 assoc = store.get()
                 lic = assoc.license if assoc else {}
                 raw_views = lic.get("views") if lic else None
-                if isinstance(raw_views, list):
+                # An EMPTY list must fall back to the default set, not lock the
+                # owner out of the entire management UI. A bundle that omits views
+                # lands license.views=[] (LicenseSpec default); treating [] as
+                # "deny everything" bricks the associate to chat-only.
+                if isinstance(raw_views, list) and raw_views:
                     views: frozenset[str] = frozenset(raw_views)
                 else:
                     # Fall back to the API's default associate set.
