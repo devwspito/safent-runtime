@@ -2,7 +2,7 @@ import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { AlertCircle, Cloud, Cpu, Globe, Server } from 'lucide-react'
 import {
-  listProviders, listNativeProviders, addProvider, setActiveProvider,
+  listProviders, listNativeProviders, addProvider, configureNativeProvider, setActiveProvider,
   testProvider, deleteProvider, startProviderOAuth, getProviderOAuthStatus,
   ApiError,
 } from '../api/client'
@@ -363,25 +363,27 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
     if (!apiKeyInput.trim()) { onToast('Introduce la clave API', 'warn'); return }
     setAddingKey(true)
     try {
-      await addProvider({
-        provider_id: id,
-        alias: provider.alias ?? provider.name,
+      // Native catalogue providers go through /providers/native (kind + api_key);
+      // the daemon resolves the default model. Using addProvider() → /providers
+      // 422s (it requires default_model and rejects provider_id).
+      const created = await configureNativeProvider({
+        kind: provider.kind ?? provider.category ?? id,
         api_key: apiKeyInput.trim(),
-        kind: provider.kind ?? provider.category,
       })
+      const realId = created?.provider_id || id
       setShowKeyForm(false)
       setApiKeyInput('')
 
       let testPassed = false
       try {
-        const r = await testProvider(id)
+        const r = await testProvider(realId)
         testPassed = r?.ok === true
       } catch {
         testPassed = false
       }
 
       if (testPassed) {
-        await setActiveProvider(id)
+        await setActiveProvider(realId)
         setAddConnFailed(false)
         onToast(`${name} conectado y verificado — pruébalo en el chat`, 'ok')
         onRefresh()

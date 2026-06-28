@@ -249,6 +249,23 @@ export function addProvider(payload: Record<string, unknown>): Promise<Provider>
   return request<Provider>('/providers', { method: 'POST', body: JSON.stringify(payload) })
 }
 
+/**
+ * Configure a NATIVE catalogue provider (OpenAI, Anthropic, …) by kind + api_key.
+ * The native catalogue path must NOT use addProvider() → POST /providers, which
+ * requires `default_model` and rejects `provider_id` (422). The daemon resolves
+ * the default model for a native kind itself.
+ */
+export function configureNativeProvider(payload: {
+  kind: string
+  api_key: string
+  set_active?: boolean
+}): Promise<Provider> {
+  return request<Provider>('/providers/native', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 export function setActiveProvider(providerId: string): Promise<unknown> {
   return request<unknown>(`/providers/${encodeURIComponent(providerId)}/activate`, { method: 'POST' })
 }
