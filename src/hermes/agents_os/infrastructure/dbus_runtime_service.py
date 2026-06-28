@@ -691,6 +691,100 @@ class DbusRuntimeServiceWiring:
         p = self._provider_repo.get_active()
         return self._provider_to_dict(p) if p is not None else {}
 
+    # ------------------------------------------------------------------
+    # Native provider sync — collapses Lumen SQL store → hermes_cli NATIVO.
+    # ------------------------------------------------------------------
+
+    def _sync_to_native_provider(
+        self,
+        provider: "Any",  # hermes.shell_server.providers.domain.Provider
+        api_key: "str | None",
+        *,
+        set_active: bool = False,
+    ) -> None:
+        """Write provider config to hermes_cli NATIVO path (fail-soft).
+
+        Maps ProviderKind → native provider_id via native_sync.kind_to_native_target,
+        then mirrors to HERMES_HOME/.env + config.yaml using the same helpers as
+        configure_native_provider.  If hermes_cli is unavailable or the kind has
+        no api_key (e.g. NOUS OAuth), this is a no-op — the SQL store remains the
+        fallback source as before.
+
+        The call is intentionally fire-and-log: native write failures MUST NOT
+        break the Lumen flow (the SQL store is still valid fallback per the cascade
+        in provider_config_source.resolve_model_config).
+        """
+        try:
+            from hermes.shell_server.providers.native_sync import kind_to_native_target  # noqa: PLC0415
+            from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("hermes.dbus.native_sync_unavailable: %s", exc)
+            return
+
+        try:
+            target = kind_to_native_target(provider.kind)
+
+            # NOUS and OAuth providers have no api_key path — skip write.
+            if not target.env_var:
+                return
+
+            key = (api_key or "").strip()
+            if not key:
+                return
+
+            # Validate env_var against PROVIDER_REGISTRY so we never write to
+            # an invented env-var: prefer the registry's declared api_key_env_vars
+            # over our static table when the provider_id exists in the registry.
+            registry_cfg = PROVIDER_REGISTRY.get(target.provider_id)
+            env_var = target.env_var
+            if registry_cfg is not None:
+                declared_vars = getattr(registry_cfg, "api_key_env_vars", ()) or ()
+                if declared_vars:
+                    env_var = declared_vars[0]
+
+            _write_hermes_env(env_var, key)
+
+            bu = (provider.base_url or "").strip()
+            if bu and target.base_url_env_var:
+                _write_hermes_env(target.base_url_env_var, bu)
+                if registry_cfg is not None:
+                    declared_bu_var = getattr(registry_cfg, "base_url_env_var", "") or ""
+                    if declared_bu_var and declared_bu_var != target.base_url_env_var:
+                        _write_hermes_env(declared_bu_var, bu)
+
+            if set_active:
+                _write_hermes_model_config(
+                    target.provider_id,
+                    (provider.default_model or "").strip(),
+                    bu,
+                )
+
+            # Inject into live process env so the running daemon resolves the
+            # key on the next cycle without restart (mirrors configure_native_provider).
+            try:
+                import os as _os  # noqa: PLC0415
+                _os.environ[env_var] = key
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("hermes.dbus.native_sync_env_load_failed: %s", exc)
+
+            if set_active and self._active_provider_svc is not None:
+                self._active_provider_svc.force_refresh()
+
+            logger.info(
+                "hermes.dbus.native_sync_ok",
+                extra={
+                    "kind": str(provider.kind),
+                    "native_id": target.provider_id,
+                    "set_active": set_active,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "hermes.dbus.native_sync_failed kind=%s: %s",
+                getattr(provider, "kind", "?"),
+                exc,
+            )
+
     def add_provider(self, *, draft_json: str, sender_uid: int) -> dict:
         """Crea provider. draft: {kind, alias, default_model, base_url, api_key, set_active}."""
         self._authorize_and_resolve(sender_uid, operation="add_provider")
@@ -714,9 +808,11 @@ class DbusRuntimeServiceWiring:
         # is gated against local edits/deletes (REST layer) + reconcilable.
         provider.managed_by = d.get("managed_by") or None
         saved = self._provider_repo.add(provider=provider, api_key=api_key)
-        if d.get("set_active"):
+        set_active = bool(d.get("set_active"))
+        if set_active:
             self._provider_repo.set_active(provider_id=saved.provider_id)
             saved.is_active = True
+        self._sync_to_native_provider(saved, api_key, set_active=set_active)
         return self._provider_to_dict(saved)
 
     def update_provider(self, *, provider_id: str, draft_json: str, sender_uid: int) -> dict:
@@ -737,14 +833,18 @@ class DbusRuntimeServiceWiring:
             current.enabled = bool(d["enabled"])
         if d.get("managed_by") is not None:
             current.managed_by = d["managed_by"]
-        self._provider_repo.update(provider=current, api_key=d.get("api_key") or None)
+        api_key = d.get("api_key") or None
+        self._provider_repo.update(provider=current, api_key=api_key)
         # Honor set_active on update too (parity with add_provider): the cloud
         # bundle marks the agent's provider_alias active, and re-publishes route
         # through update_provider once the row exists. Without this the engine
         # keeps no active model and chat fails with "HERMES_MODEL no definido".
-        if d.get("set_active"):
+        set_active = bool(d.get("set_active"))
+        if set_active:
             self._provider_repo.set_active(provider_id=pid)
-        return self._provider_to_dict(self._provider_repo.get(provider_id=pid))
+        updated = self._provider_repo.get(provider_id=pid)
+        self._sync_to_native_provider(updated, api_key, set_active=set_active)
+        return self._provider_to_dict(updated)
 
     def delete_provider(self, *, provider_id: str, sender_uid: int) -> bool:
         self._authorize_and_resolve(sender_uid, operation="delete_provider")
@@ -759,9 +859,20 @@ class DbusRuntimeServiceWiring:
 
         pid = _UUID(provider_id)
         self._provider_repo.set_active(provider_id=pid)
+        p = self._provider_repo.get(provider_id=pid)
+        # Reveal the stored api_key so _sync_to_native_provider can forward it.
+        api_key: "str | None" = None
+        try:
+            api_key = self._provider_repo.reveal_api_key(provider_id=pid)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("hermes.dbus.set_active_reveal_failed: %s", exc)
+        self._sync_to_native_provider(p, api_key, set_active=True)
+        # force_refresh is called inside _sync_to_native_provider when set_active=True
+        # and _active_provider_svc is present.  Call it here too as safety net for
+        # the case where _sync_to_native fails (fail-soft path leaves svc stale).
         if self._active_provider_svc is not None:
             self._active_provider_svc.force_refresh()
-        return self._provider_to_dict(self._provider_repo.get(provider_id=pid))
+        return self._provider_to_dict(p)
 
     async def test_provider(self, *, provider_id: str, sender_uid: int) -> dict:
         """Valida el provider a través del runtime REAL (Nous), no de un dialecto
