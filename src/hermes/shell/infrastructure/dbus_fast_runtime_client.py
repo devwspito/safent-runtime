@@ -278,6 +278,11 @@ class FakeDbusInterface:
     async def call_SignComposioSkill(self, draft_json: str) -> str:  # noqa: N802
         return draft_json
 
+    async def call_CreateSkillFromText(self, name: str, skill_md: str) -> str:  # noqa: N802
+        """Stub: returns a minimal skill dict (no daemon in offline mode)."""
+        import json as _json  # noqa: PLC0415
+        return _json.dumps({"package_id": "", "skill_id": "", "skill_name": name, "version": 1})
+
     # Gobernanza de plataformas (feature 010, stubs offline).
     async def call_ListPlatformModels(self) -> str:  # noqa: N802
         return "[]"
@@ -665,6 +670,9 @@ class RealDbusInterface:
 
     async def call_SignComposioSkill(self, draft_json: str) -> str:  # noqa: N802
         return await self._iface.call_sign_composio_skill(draft_json)
+
+    async def call_CreateSkillFromText(self, name: str, skill_md: str) -> str:  # noqa: N802
+        return await self._iface.call_create_skill_from_text(name, skill_md)
 
     # --- Gobernanza de plataformas (feature 010, JSON sobre D-Bus) ---
 

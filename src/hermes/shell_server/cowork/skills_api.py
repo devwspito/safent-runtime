@@ -199,16 +199,16 @@ def create_skills_hub_router() -> APIRouter:
           1. Pre-scan the operator's free text (cheap reject before any LLM call).
           2. Synthesize the SKILL.md via the active provider.
           3. Scan the GENERATED SKILL.md (the model could echo a payload).
-          4. Only if both pass: write the file + register the (v2-signed) row so
-             the agent can discover it and the Skills UI lists it.
+          4. Only if both pass: delegate to the daemon via D-Bus (create_skill_from_text),
+             which uses SkillStoreAdapter as the single authorized writer.
 
         A CRITICAL trojan pattern at step 1 or 3 → 422, nothing persisted.
+        A daemon unavailable (None proxy or D-Bus error) → 503.
         """
         from hermes.shell_server.skills.skill_synthesis import (  # noqa: PLC0415
             NoActiveProvider,
-            register_skill_row,
+            synthesize_and_persist,
             synthesize_skill_md,
-            write_skill_file,
         )
 
         name = body.name.strip()
@@ -222,10 +222,7 @@ def create_skills_hub_router() -> APIRouter:
         if repo is None:
             raise HTTPException(503, "Proveedores no disponibles.")
 
-        # skill_packages_view lives in the shell-state DB (same one main.py and
-        # the training router use). Resolve it the same way so the v2-signed row
-        # the minter writes is the row the signature check later verifies.
-        db_path = _resolve_skills_db_path(request)
+        proxy = getattr(request.app.state, "dbus_proxy", None)
 
         # 1) Gate the operator's free text before spending an LLM call.
         assert_skill_text_safe(description)
@@ -247,24 +244,26 @@ def create_skills_hub_router() -> APIRouter:
         #    the description even if step 1's regexes didn't trip on the prose.
         advisory = assert_skill_text_safe(skill_md)
 
-        # 4) Persist only after both scans pass.
-        from datetime import UTC, datetime  # noqa: PLC0415
-
+        # 4) Persist via the daemon (single authorized writer) after both scans pass.
         try:
-            path = write_skill_file(name=name, skill_md=skill_md)
-            now = datetime.now(tz=UTC).isoformat()
-            meta = register_skill_row(
-                db_path=db_path, name=name, skill_md=skill_md, signed_at=now
+            meta = await synthesize_and_persist(
+                repo=repo,
+                name=name,
+                description=description,
+                dbus_proxy=proxy,
             )
+        except HTTPException:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("hermes.skills.synthesize persist failed")
             raise HTTPException(502, "No se pudo guardar la skill. Reintenta.") from exc
 
-        meta["path"] = str(path)
         meta["security_findings"] = advisory  # HIGH/MEDIUM advisories for the UI
         logger.info(
             "hermes.skills.synthesize ok skill=%s package=%s advisories=%d",
-            meta.get("skill_id"), meta.get("package_id"), len(advisory),
+            meta.get("skill_id") or meta.get("skill_name"),
+            meta.get("package_id"),
+            len(advisory),
         )
         return {"ok": True, "skill": meta}
 
@@ -304,21 +303,6 @@ def create_skills_hub_router() -> APIRouter:
             return {"op_id": op_id, "status": "unknown"}
 
     return router
-
-
-def _resolve_skills_db_path(request: Request):
-    """Path to the shell-state DB that holds skill_packages_view.
-
-    Prefers an explicit app.state override (tests / future DI); otherwise mirrors
-    shell_server.main._DB_PATH (env HERMES_SHELL_DB, default shell-state.db).
-    """
-    import os  # noqa: PLC0415
-    from pathlib import Path  # noqa: PLC0415
-
-    override = getattr(request.app.state, "skills_db_path", None)
-    if override is not None:
-        return Path(override)
-    return Path(os.environ.get("HERMES_SHELL_DB") or "/var/lib/hermes/shell-state.db")
 
 
 def _raise_503(exc: AgentUnavailable, operation: str) -> None:

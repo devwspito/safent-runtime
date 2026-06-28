@@ -43,7 +43,7 @@ class TestRuntimeEntrypointWiring:
         import hermes.runtime.__main__ as m
         consent_manager = m._build_consent_manager()
 
-        broker, intent_log, approval_gate = m._build_real_broker(
+        broker, intent_log, approval_gate, *_ = m._build_real_broker(
             db_path=db_path,
             consent_manager=consent_manager,
             firmer=firmer,
@@ -73,7 +73,7 @@ class TestRuntimeEntrypointWiring:
         state = SqliteAgentState(db_path=db_path)
         consent_manager = m._build_consent_manager()
 
-        broker, _intent_log, _gate = m._build_real_broker(
+        broker, _intent_log, _gate, *_ = m._build_real_broker(
             db_path=db_path,
             consent_manager=consent_manager,
             firmer=firmer,
@@ -107,7 +107,7 @@ class TestRuntimeEntrypointWiring:
         state = SqliteAgentState(db_path=db_path)
         consent_manager = m._build_consent_manager()
 
-        broker, _il, _gate = m._build_real_broker(
+        broker, _il, _gate, *_ = m._build_real_broker(
             db_path=db_path,
             consent_manager=consent_manager,
             firmer=firmer,

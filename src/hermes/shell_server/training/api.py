@@ -516,10 +516,17 @@ def create_training_router(
             synthesize_and_persist,
         )
 
+        proxy = getattr(request.app.state, "dbus_proxy", None)
+
         try:
             meta = await synthesize_and_persist(
-                db_path=db_path, repo=repo, name=name, description=description
+                repo=repo,
+                name=name,
+                description=description,
+                dbus_proxy=proxy,
             )
+        except HTTPException:
+            raise
         except NoActiveProvider as exc:
             raise HTTPException(409, "Conecta un modelo en Proveedores para crear skills.") from exc
         except Exception as exc:  # noqa: BLE001

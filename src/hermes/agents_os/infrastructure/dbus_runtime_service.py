@@ -325,6 +325,10 @@ class DbusRuntimeServiceWiring:
         # SQLiteAssociationStore — used by license enforcement (Fase 3a).
         # None → CE mode assumed (no license checks).
         association_store: "Any | None" = None,
+        # SkillStoreAdapter — único escritor de SKILL.md firmados. Inyectado
+        # desde __main__ (el mismo que se registra en SurfaceAdapterDispatcher).
+        # None → create_skill_from_text no disponible (degradación honesta).
+        skill_store_adapter: "Any | None" = None,
     ) -> None:
         self._state = agent_state
         self._gate = approval_gate
@@ -370,6 +374,9 @@ class DbusRuntimeServiceWiring:
         # SQLiteAssociationStore — license enforcement (Fase 3a).
         # None → CE mode assumed; no create_agent or enqueue restrictions apply.
         self._association_store = association_store  # SQLiteAssociationStore | None
+        # SkillStoreAdapter — único escritor autorizado de SKILL.md firmados.
+        # None → create_skill_from_text devuelve error (degradación honesta).
+        self._skill_store_adapter = skill_store_adapter  # SkillStoreAdapter | None
 
     # ------------------------------------------------------------------
     # Kill-switch (CTRL-12 / KILL-1)
@@ -2650,6 +2657,72 @@ class DbusRuntimeServiceWiring:
                 "skill_name": draft.get("skill_name"),
                 "by_uid": sender_uid,
             },
+        )
+        return result
+
+    async def create_skill_from_text(
+        self,
+        *,
+        name: str,
+        skill_md: str,
+        sender_uid: int,
+    ) -> dict:
+        """Crea una skill firmada pasando el texto SKILL.md al escritor único nativo.
+
+        Delega en SkillStoreAdapter.replay() (SurfaceKind.SKILL_STORE, action=create)
+        — el mismo camino que usa el agente autónomo vía HITL. Esto garantiza que
+        el frontmatter de gobernanza y la firma v2 sean idénticos a los emitidos por
+        skill_manage, haciendo las skills promovibles y verificables.
+
+        Contrato del outcome: {package_id, skill_id, name, state, signing_method}.
+
+        Raises:
+            DbusAuthorizationError: UID no autorizado.
+            RuntimeError: skill_store_adapter no inyectado.
+            RuntimeError: el adapter rechazó o falló la escritura (fail-closed).
+        """
+        self._authorize(sender_uid, operation="create_skill_from_text")
+
+        if self._skill_store_adapter is None:
+            raise RuntimeError(
+                "skill_store_adapter no inyectado en el wiring — "
+                "asegura que hermes-keygen.service completó antes del runtime"
+            )
+
+        from hermes.agents_os.domain.ports.surface_adapter_port import (  # noqa: PLC0415
+            CapturedAction,
+            ReplayStatus,
+        )
+        from hermes.agents_os.domain.surface_kind import SurfaceKind  # noqa: PLC0415
+        from uuid import uuid4 as _uuid4  # noqa: PLC0415
+
+        action = CapturedAction(
+            surface_kind=SurfaceKind.SKILL_STORE,
+            intent_desc=f"shell-server skill synthesis: {name}",
+            payload={"action": "create", "name": name, "content": skill_md},
+            tenant_id=None,
+            human_operator_id=_uid_to_uuid(sender_uid),
+        )
+
+        outcome = await self._skill_store_adapter.replay(action)
+
+        if outcome.status not in (ReplayStatus.EXECUTED_OK,):
+            raise RuntimeError(
+                f"create_skill_from_text rechazado por SkillStoreAdapter: "
+                f"status={outcome.status.value} error={outcome.error!r}"
+            )
+
+        result = dict(outcome.result)
+        # Map adapter result keys to the shape callers expect:
+        # outcome.result has {package_id, skill_id, name, state, signing_method}
+        # Callers use {package_id, skill_id, skill_name, version, path}.
+        # We include both forms; callers pick what they need.
+        result.setdefault("skill_name", result.pop("name", name))
+        result.setdefault("version", 1)
+        logger.info(
+            "hermes.dbus.create_skill_from_text.ok name=%s package_id=%s",
+            name,
+            result.get("package_id"),
         )
         return result
 

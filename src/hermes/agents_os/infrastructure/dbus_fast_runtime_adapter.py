@@ -563,6 +563,20 @@ class Runtime1ServiceInterface(ServiceInterface):
         )
         return json.dumps(result)
 
+    @method()
+    async def CreateSkillFromText(self, name: "s", skill_md: "s") -> "s":  # noqa: N802,F821,UP037
+        """Crea una skill firmada desde texto SKILL.md generado por el shell-server.
+
+        Delega en SkillStoreAdapter.replay() vía el wiring — escritor único nativo.
+        Devuelve JSON {package_id, skill_id, skill_name, version, state, signing_method}.
+        by = UID del bus (shell-server service uid, CWE-862).
+        """
+        sender_uid = await self._resolve_current_sender_uid()
+        result = await self._wiring.create_skill_from_text(
+            name=name, skill_md=skill_md, sender_uid=sender_uid
+        )
+        return json.dumps(result)
+
     # ------------------------------------------------------------------
     # GATE 0 / M1 — Providers OS-nativos (D-Bus, ya no HTTP). JSON sobre el bus.
     # Lecturas: sin authZ. Mutadores: by = sender_uid del operador (directo).

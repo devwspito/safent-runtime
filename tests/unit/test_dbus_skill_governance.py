@@ -396,3 +396,149 @@ class TestDbusRuntimeClientSkillMethods:
         result = await client.sign_composio_skill(draft)
         # FakeDbusInterface echoes the draft_json back; client parses it.
         assert result == draft
+
+
+# ---------------------------------------------------------------------------
+# create_skill_from_text — wiring delegates to SkillStoreAdapter (new verb)
+# ---------------------------------------------------------------------------
+
+
+class _FakeSkillStoreAdapter:
+    """Fake SkillStoreAdapter: captures the CapturedAction and returns a canned outcome."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+        self._result = {
+            "package_id": "pkg-aaa",
+            "skill_id": "skl-bbb",
+            "name": "test-skill",
+            "state": "validated",
+            "signing_method": "v2",
+        }
+
+    @property
+    def surface_kind(self):
+        from hermes.agents_os.domain.surface_kind import SurfaceKind  # noqa: PLC0415
+        return SurfaceKind.SKILL_STORE
+
+    async def replay(self, action, *, hitl_approval_token=None, consent_token=None):
+        from hermes.agents_os.domain.ports.surface_adapter_port import ReplayOutcome  # noqa: PLC0415
+        self.calls.append(action)
+        return ReplayOutcome.ok(action.action_id, result=dict(self._result))
+
+
+_SKILL_MD = """\
+---
+description: Skill de prueba para el wiring D-Bus.
+---
+# Test Skill
+
+## Objetivo
+Verificar que create_skill_from_text construye la CapturedAction correcta.
+
+## Cuándo usarla
+En tests unitarios.
+
+## Pasos
+1. Llamar al método.
+
+## Herramientas
+ninguna
+
+## Límites y seguridad
+Solo en tests.
+"""
+
+
+class TestCreateSkillFromTextWiring:
+    def test_requires_authorized_uid(self, tmp_path: Path) -> None:
+        """Unauthorized UID raises DbusAuthorizationError before touching the adapter."""
+        wiring = DbusRuntimeServiceWiring(
+            agent_state=None,
+            approval_gate=None,
+            authorized_uids=frozenset({_OPERATOR_UID}),
+            skill_store_adapter=_FakeSkillStoreAdapter(),
+        )
+        with pytest.raises(DbusAuthorizationError):
+            asyncio.run(
+                wiring.create_skill_from_text(
+                    name="my-skill", skill_md=_SKILL_MD, sender_uid=999
+                )
+            )
+
+    def test_no_adapter_raises_runtime_error(self) -> None:
+        """When skill_store_adapter is None the method raises RuntimeError (fail-closed)."""
+        wiring = DbusRuntimeServiceWiring(
+            agent_state=None,
+            approval_gate=None,
+            authorized_uids=frozenset({_OPERATOR_UID}),
+            skill_store_adapter=None,
+        )
+        with pytest.raises(RuntimeError, match="skill_store_adapter"):
+            asyncio.run(
+                wiring.create_skill_from_text(
+                    name="my-skill", skill_md=_SKILL_MD, sender_uid=_OPERATOR_UID
+                )
+            )
+
+    def test_happy_path_builds_correct_captured_action(self) -> None:
+        """create_skill_from_text constructs a CREATE CapturedAction and delegates."""
+        from hermes.agents_os.domain.surface_kind import SurfaceKind  # noqa: PLC0415
+
+        fake_adapter = _FakeSkillStoreAdapter()
+        wiring = DbusRuntimeServiceWiring(
+            agent_state=None,
+            approval_gate=None,
+            authorized_uids=frozenset({_OPERATOR_UID}),
+            skill_store_adapter=fake_adapter,
+        )
+        result = asyncio.run(
+            wiring.create_skill_from_text(
+                name="my-skill", skill_md=_SKILL_MD, sender_uid=_OPERATOR_UID
+            )
+        )
+
+        # Adapter was called exactly once.
+        assert len(fake_adapter.calls) == 1
+        action = fake_adapter.calls[0]
+
+        # CapturedAction has the correct surface and payload.
+        assert action.surface_kind == SurfaceKind.SKILL_STORE
+        assert action.payload["action"] == "create"
+        assert action.payload["name"] == "my-skill"
+        assert action.payload["content"] == _SKILL_MD
+
+        # Return dict contains expected keys.
+        assert result["package_id"] == "pkg-aaa"
+        assert result["skill_id"] == "skl-bbb"
+        assert result["skill_name"] == "test-skill"
+        assert result["version"] == 1
+
+    def test_adapter_rejection_raises_runtime_error(self) -> None:
+        """When the adapter returns REJECTED_BY_POLICY, the wiring raises RuntimeError."""
+        from hermes.agents_os.domain.ports.surface_adapter_port import (  # noqa: PLC0415
+            CapturedAction,
+            ReplayOutcome,
+        )
+        from hermes.agents_os.domain.surface_kind import SurfaceKind  # noqa: PLC0415
+
+        class _BlockingAdapter:
+            surface_kind = SurfaceKind.SKILL_STORE
+
+            async def replay(self, action, **_):
+                return ReplayOutcome.rejected_by_policy(
+                    action.action_id, reason="trojan content detected"
+                )
+
+        wiring = DbusRuntimeServiceWiring(
+            agent_state=None,
+            approval_gate=None,
+            authorized_uids=frozenset({_OPERATOR_UID}),
+            skill_store_adapter=_BlockingAdapter(),
+        )
+        with pytest.raises(RuntimeError, match="rechazado por SkillStoreAdapter"):
+            asyncio.run(
+                wiring.create_skill_from_text(
+                    name="evil-skill", skill_md=_SKILL_MD, sender_uid=_OPERATOR_UID
+                )
+            )

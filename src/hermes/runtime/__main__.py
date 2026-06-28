@@ -1175,7 +1175,7 @@ def _build_real_broker(
         # taint-forced-HITL (anti-inyección) y HIGH NUNCA se eximen (ver broker).
         autonomous_default=os.environ.get("HERMES_AUTONOMOUS_DEFAULT", "0") != "0",
     )
-    return broker, intent_log, approval_gate, app_launch_adapter, install_executor
+    return broker, intent_log, approval_gate, app_launch_adapter, install_executor, skill_store_adapter
 
 
 def _load_signing_key_or_fail() -> bytes:
@@ -1401,7 +1401,7 @@ async def _run(*, systemd_notify: bool) -> None:
         )
         install_executor = None
 
-    broker, intent_log, approval_gate, app_launch_adapter, _install_executor_ref = _build_real_broker(
+    broker, intent_log, approval_gate, app_launch_adapter, _install_executor_ref, _skill_store_adapter_ref = _build_real_broker(
         db_path=db_path,
         consent_manager=consent_manager,
         firmer=firmer,
@@ -1731,6 +1731,9 @@ async def _run(*, systemd_notify: bool) -> None:
         worker_count_fn=orchestrator.active_worker_count,
         # Notification store: written by orchestrator, read via D-Bus by shell-server.
         notification_store=_orchestrator_notification_store,
+        # SkillStoreAdapter — único escritor de SKILL.md firmados (construido en
+        # _build_real_broker para que use el mismo db_path que el SurfaceAdapterDispatcher).
+        skill_store_adapter=_skill_store_adapter_ref,
     )
 
     # JailedBrowser eager start: pre-warm the confined headless Chromium so the
@@ -1933,6 +1936,7 @@ def _start_dbus_adapter_if_available(
     install_executor=None,
     worker_count_fn=None,  # Callable[[], int] | None — live in-flight count
     notification_store=None,  # SqliteNotificationStore | None — bell feature
+    skill_store_adapter=None,  # SkillStoreAdapter | None — único escritor firmado
 ) -> "tuple[object | None, asyncio.Task | None]":
     """Arranca el adapter D-Bus si dbus-fast está instalado y hay bus de sistema.
 
@@ -2106,6 +2110,10 @@ def _start_dbus_adapter_if_available(
             notification_store=notification_store,
             # Fase 3 — Enterprise license hard-block (None → Community Edition).
             association_store=_association_store,
+            # SkillStoreAdapter — único escritor de SKILL.md firmados. El mismo
+            # que se registra en SurfaceAdapterDispatcher; se inyecta aquí para
+            # que create_skill_from_text use el escritor nativo (no duplicado).
+            skill_store_adapter=skill_store_adapter,
         )
 
         # Step 2 of two-step DbusInstallExecutor construction: inject the live

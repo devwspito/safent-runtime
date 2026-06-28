@@ -7,32 +7,22 @@ what a human teacher would: turn the demonstration (name + the operator's writte
 description / narration of the steps) into a generalizable SKILL.md the agent can
 later execute by *reasoning*, not by replaying clicks.
 
-Two artifacts are produced so the skill is both usable and visible:
-  1. $HERMES_HOME/skills/<slug>/SKILL.md  → the agent auto-discovers + uses it.
-  2. a row in skill_packages_view         → the Skills UI lists it (state=validated).
-
-Audio (Whisper) is intentionally out of scope here — synthesis is text-driven.
+Persistence is delegated to the daemon via a D-Bus verb (create_skill_from_text),
+which uses SkillStoreAdapter — the SINGLE authorized writer of signed SKILL.md
+files. This guarantees that governance frontmatter and the v2 HMAC signature
+are identical to those produced by skill_manage (HITL path), making web-minted
+skills promotable and verifiable at execution time.
 """
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
-import os
 import re
-import sqlite3
-from datetime import UTC, datetime
-from pathlib import Path
 from uuid import uuid4
 
 import httpx
 
 logger = logging.getLogger(__name__)
-
-# Where the agent (daemon) discovers on-disk skills. Kept in sync with the
-# daemon's HERMES_HOME (see dbus_runtime_service._list_native_hermes_agent_skills).
-_DEFAULT_HERMES_HOME = "/var/lib/hermes/hermes-home"
 
 _SYSTEM_PROMPT = (
     "Eres el cerebro de un sistema operativo agéntico. Conviertes la demostración "
@@ -44,6 +34,7 @@ _SYSTEM_PROMPT = (
     "===SKILL_END===\n"
     "No uses ``` dentro. Dentro del bloque, formato exacto:\n"
     "---\n"
+    "name: <slug-en-minúsculas-con-guiones>\n"
     "description: <una línea, qué hace y cuándo usarla>\n"
     "---\n"
     "# <Nombre de la skill>\n\n"
@@ -66,8 +57,30 @@ def slugify(name: str) -> str:
     return s or f"skill-{uuid4().hex[:8]}"
 
 
-def _hermes_home() -> Path:
-    return Path(os.environ.get("HERMES_HOME") or _DEFAULT_HERMES_HOME)
+def _ensure_frontmatter_fields(content: str, name: str, description: str) -> str:
+    """Garantiza name/description/version en el frontmatter — los exige el
+    SkillMdDocument nativo (parse_skill_md). El LLM suele emitir solo
+    `description`; sin `name`/`version` el SkillStoreAdapter rechaza el documento.
+    Inyecta los que falten (slug, descripción, version=1) sin fiarnos del modelo.
+    """
+    slug = slugify(name)
+    desc_default = (description or name).splitlines()[0][:200] if (description or name) else slug
+    if not content.lstrip().startswith("---"):
+        return f"---\nname: {slug}\ndescription: {desc_default}\nversion: 1\n---\n\n{content}"
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return content  # frontmatter malformado — no lo tocamos
+    fm = parts[1]
+    inject = ""
+    if not re.search(r"(?m)^\s*name\s*:", fm):
+        inject += f"name: {slug}\n"
+    if not re.search(r"(?m)^\s*description\s*:", fm):
+        inject += f"description: {desc_default}\n"
+    if not re.search(r"(?m)^\s*version\s*:", fm):
+        inject += "version: 1\n"
+    if not inject:
+        return content
+    return f"---\n{inject}{fm.lstrip(chr(10))}---{parts[2]}"
 
 
 async def synthesize_skill_md(
@@ -149,93 +162,43 @@ async def synthesize_skill_md(
         # Ensure a minimal frontmatter so discovery picks up a description.
         first_line = (description or name).splitlines()[0][:120] if (description or name) else name
         content = f"---\ndescription: {first_line}\n---\n{content}"
+    # SkillMdDocument nativo exige name/description/version — garantízalos.
+    content = _ensure_frontmatter_fields(content, name, description)
     return content
-
-
-def write_skill_file(*, name: str, skill_md: str, hermes_home: Path | None = None) -> Path:
-    """Write SKILL.md under $HERMES_HOME/skills/<slug>/ so the agent loads it."""
-    root = (hermes_home or _hermes_home()) / "skills" / slugify(name)
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / "SKILL.md"
-    path.write_text(skill_md, encoding="utf-8")
-    return path
-
-
-def register_skill_row(*, db_path: Path, name: str, skill_md: str, signed_at: str) -> dict:
-    """Insert a validated row into skill_packages_view so the Skills UI lists it.
-
-    Signs the SKILL.md with the native keystore key (v2) for integrity. Best-effort:
-    if signing is unavailable the row is still written without a signature.
-    """
-    skill_id = slugify(name)
-    version = _next_version(db_path, skill_id)
-    signature_hex = None
-    signing_method = "v2"
-    try:
-        from hermes.shell_server.training.persist import resolve_signing_key  # noqa: PLC0415
-
-        key, signing_method = resolve_signing_key(db_path)
-        canonical = f"{skill_id}\n{version}\n{skill_md}".encode()
-        signature_hex = hmac.new(key, canonical, hashlib.sha256).hexdigest()
-    except Exception:  # noqa: BLE001 — keystore may be absent in dev
-        logger.warning("skill_synthesis: signing unavailable; writing unsigned row")
-        signing_method = "v2"
-
-    package_id = str(uuid4())
-    with _conn(db_path) as c:
-        c.execute(
-            """
-            INSERT OR REPLACE INTO skill_packages_view (
-              package_id, skill_id, skill_name, version, state,
-              surface_kinds, signed_at, signature_short, signing_method, signature_hex
-            ) VALUES (?, ?, ?, ?, 'validated', 'native', ?, ?, ?, ?)
-            """,
-            (
-                package_id,
-                skill_id,
-                name,
-                version,
-                signed_at,
-                signature_hex[:12] if signature_hex else None,
-                signing_method,
-                signature_hex,
-            ),
-        )
-    return {
-        "package_id": package_id,
-        "skill_id": skill_id,
-        "skill_name": name,
-        "version": version,
-    }
-
-
-def _next_version(db_path: Path, skill_id: str) -> int:
-    with _conn(db_path) as c:
-        row = c.execute(
-            "SELECT MAX(version) AS v FROM skill_packages_view WHERE skill_id = ?",
-            (skill_id,),
-        ).fetchone()
-    return (row["v"] if row and row["v"] is not None else 0) + 1
-
-
-def _conn(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 async def synthesize_and_persist(
     *,
-    db_path: Path,
     repo,
     name: str,
     description: str,
+    dbus_proxy,
 ) -> dict:
-    """Full path: LLM → SKILL.md → write file + register row. Returns metadata."""
+    """Full path: LLM → SKILL.md → daemon (SkillStoreAdapter) → signed artefact.
+
+    Delegates persistence to the daemon via D-Bus verb create_skill_from_text,
+    which uses SkillStoreAdapter as the single authorized writer. Returns a dict
+    with {package_id, skill_id, skill_name, version, path, state, signing_method}.
+
+    Raises:
+        NoActiveProvider: no active LLM provider.
+        fastapi.HTTPException(503): daemon unavailable (dbus_proxy is None).
+        hermes.tasks.control_plane.domain.ports.AgentUnavailable: D-Bus call failed.
+    """
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    if dbus_proxy is None:
+        raise HTTPException(
+            status_code=503,
+            detail="skill synthesis requires the daemon (hermes-runtime is not running)",
+        )
+
     skill_md = await synthesize_skill_md(name=name, description=description, repo=repo)
-    path = write_skill_file(name=name, skill_md=skill_md)
-    now = datetime.now(tz=UTC).isoformat()
-    meta = register_skill_row(db_path=db_path, name=name, skill_md=skill_md, signed_at=now)
-    meta["path"] = str(path)
-    logger.info("skill_synthesis: created skill=%s package=%s", meta["skill_id"], meta["package_id"])
+    meta = await dbus_proxy.call_dict("create_skill_from_text", name, skill_md)
+
+    logger.info(
+        "skill_synthesis: created skill=%s package=%s",
+        meta.get("skill_id") or meta.get("skill_name"),
+        meta.get("package_id"),
+    )
     return meta
