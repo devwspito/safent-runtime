@@ -26,6 +26,7 @@ Security:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -135,7 +136,7 @@ def assert_skill_text_safe(*sources: str) -> list[dict]:
 # ------------------------------------------------------------------
 
 
-def create_skills_hub_router() -> APIRouter:
+def create_skills_hub_router(db_path: Path) -> APIRouter:
     router = APIRouter(prefix="/api/v1/skills/hub", tags=["skills"])
 
     @router.get("")
@@ -218,19 +219,15 @@ def create_skills_hub_router() -> APIRouter:
                 422, "Indica un nombre y describe qué hace la skill para crearla."
             )
 
-        repo = getattr(request.app.state, "repo", None)
-        if repo is None:
-            raise HTTPException(503, "Proveedores no disponibles.")
-
         proxy = getattr(request.app.state, "dbus_proxy", None)
 
         # 1) Gate the operator's free text before spending an LLM call.
         assert_skill_text_safe(description)
 
-        # 2) Synthesize.
+        # 2) Synthesize via the native resolver — no local repo copy of the key.
         try:
             skill_md = await synthesize_skill_md(
-                name=name, description=description, repo=repo
+                name=name, description=description, db_path=db_path
             )
         except NoActiveProvider as exc:
             raise HTTPException(
@@ -247,7 +244,7 @@ def create_skills_hub_router() -> APIRouter:
         # 4) Persist via the daemon (single authorized writer) after both scans pass.
         try:
             meta = await synthesize_and_persist(
-                repo=repo,
+                db_path=db_path,
                 name=name,
                 description=description,
                 dbus_proxy=proxy,

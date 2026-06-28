@@ -507,10 +507,6 @@ def create_training_router(
         if not description:
             raise HTTPException(422, "Describe qué hace la skill y sus pasos para poder crearla.")
 
-        repo = getattr(request.app.state, "repo", None)
-        if repo is None:
-            raise HTTPException(503, "Proveedores no disponibles.")
-
         from hermes.shell_server.skills.skill_synthesis import (  # noqa: PLC0415
             NoActiveProvider,
             synthesize_and_persist,
@@ -520,7 +516,7 @@ def create_training_router(
 
         try:
             meta = await synthesize_and_persist(
-                repo=repo,
+                db_path=db_path,
                 name=name,
                 description=description,
                 dbus_proxy=proxy,

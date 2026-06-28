@@ -1293,7 +1293,7 @@ def create_app() -> FastAPI:
     app.include_router(create_roster_router())
     app.include_router(create_agents_router())
     app.include_router(create_composio_router())
-    app.include_router(create_skills_hub_router())
+    app.include_router(create_skills_hub_router(_DB_PATH))
     app.include_router(create_mcp_router())
     app.include_router(create_tasks_router())
     app.include_router(create_security_router())

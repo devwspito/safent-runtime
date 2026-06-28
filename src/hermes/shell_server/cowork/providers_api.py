@@ -63,47 +63,6 @@ async def _reject_if_cloud_managed(
             )
 
 
-def _mirror_provider_to_local_repo(request: Request, body) -> None:
-    """Best-effort: persist the provider (incl. key) into shell-server's local
-    SQLiteProviderRepository so the shell can make its own LLM calls. The daemon
-    remains authoritative for the agent; this is a parallel copy for the bridge."""
-    repo = getattr(request.app.state, "repo", None)
-    if repo is None:
-        return
-    try:
-        from hermes.shell_server.providers.domain import (  # noqa: PLC0415
-            ProviderAliasConflict,
-            ProviderKind,
-            new_provider,
-        )
-
-        try:
-            kind = ProviderKind(body.kind)
-        except ValueError:
-            logger.warning("provider mirror: unknown kind %s", body.kind)
-            return
-
-        prov = new_provider(
-            alias=body.alias,
-            kind=kind,
-            default_model=body.default_model,
-            base_url=body.base_url,
-            has_api_key=bool(body.api_key),
-        )
-        try:
-            repo.add(provider=prov, api_key=body.api_key)
-        except ProviderAliasConflict:
-            existing = next((p for p in repo.list_all() if p.alias == body.alias), None)
-            if existing is None:
-                return
-            prov.provider_id = existing.provider_id
-            repo.update(provider=prov, api_key=body.api_key)
-        if body.set_active:
-            repo.set_active(provider_id=prov.provider_id)
-    except Exception:  # noqa: BLE001 — never block provider creation
-        logger.warning("provider mirror to local repo failed", exc_info=True)
-
-
 # ------------------------------------------------------------------
 # Pydantic request schemas
 # ------------------------------------------------------------------
@@ -204,10 +163,6 @@ def create_providers_router() -> APIRouter:
             _raise_503(exc, "add_provider")
             return {}  # unreachable; _raise_503 raises
 
-        # Mirror into shell-server's local repo so the shell can make its own LLM
-        # calls (skill synthesis, the "LiteLLM bridge"). Best-effort: never block
-        # provider creation if the mirror fails.
-        _mirror_provider_to_local_repo(request, body)
         return result
 
     @router.post("/{provider_id}/activate")

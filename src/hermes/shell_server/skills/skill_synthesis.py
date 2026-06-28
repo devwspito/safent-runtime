@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -87,29 +88,34 @@ async def synthesize_skill_md(
     *,
     name: str,
     description: str,
-    repo,        # SQLiteProviderRepository (app.state.repo)
+    db_path: Path,
     timeout: float = 90.0,
 ) -> str:
     """Call the active provider's LLM to produce a SKILL.md document.
 
+    Resolves model/api_key/base_url via the native resolver (resolve_model_config)
+    so no second copy of the API key is held in the shell-server's local repo.
+
     Raises NoActiveProvider if no provider is active, or httpx/ValueError on
     transport/response errors (caller maps these to a friendly message).
     """
-    provider = repo.get_active()
-    if provider is None:
+    from hermes.runtime.provider_config_source import resolve_model_config  # noqa: PLC0415
+
+    config = resolve_model_config(db_path)
+    if config is None:
         raise NoActiveProvider("no hay un proveedor de modelo activo")
 
-    api_key = None
-    try:
-        api_key = repo.reveal_api_key(provider_id=provider.provider_id)
-    except Exception:  # noqa: BLE001 — key optional for keyless local endpoints
-        api_key = None
-
-    base_url = (provider.base_url or "").rstrip("/")
+    base_url = (config.base_url or "").rstrip("/")
     if not base_url:
-        # Cloud kinds (openai/anthropic) without a base_url aren't reachable from
-        # the shell-server directly; require an OpenAI-compatible base_url.
+        # Cloud providers without a base_url aren't directly reachable from the
+        # shell-server; an OpenAI-compatible base_url is required.
         raise NoActiveProvider("el proveedor activo no expone un base_url compatible")
+
+    # config.model es litellm-style ("<provider>/<model>", p.ej.
+    # "openai-api/qwen3.6-35b-a3b"). Esta es una llamada HTTP CRUDA a un endpoint
+    # OpenAI-compatible (no litellm), que espera el nombre de modelo SIN el prefijo
+    # de provider — si no, el endpoint responde 404. Quita el primer segmento.
+    endpoint_model = config.model.split("/", 1)[1] if "/" in config.model else config.model
 
     user_msg = (
         f"Nombre de la skill: {name}\n\n"
@@ -117,7 +123,7 @@ async def synthesize_skill_md(
         "Genera el SKILL.md."
     )
     payload = {
-        "model": provider.default_model,
+        "model": endpoint_model,
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_msg},
@@ -130,8 +136,8 @@ async def synthesize_skill_md(
         "chat_template_kwargs": {"enable_thinking": False},
     }
     headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    if config.api_key:
+        headers["Authorization"] = f"Bearer {config.api_key}"
 
     async with httpx.AsyncClient(timeout=timeout) as http:
         resp = await http.post(f"{base_url}/chat/completions", json=payload, headers=headers)
@@ -169,7 +175,7 @@ async def synthesize_skill_md(
 
 async def synthesize_and_persist(
     *,
-    repo,
+    db_path: Path,
     name: str,
     description: str,
     dbus_proxy,
@@ -193,7 +199,7 @@ async def synthesize_and_persist(
             detail="skill synthesis requires the daemon (hermes-runtime is not running)",
         )
 
-    skill_md = await synthesize_skill_md(name=name, description=description, repo=repo)
+    skill_md = await synthesize_skill_md(name=name, description=description, db_path=db_path)
     meta = await dbus_proxy.call_dict("create_skill_from_text", name, skill_md)
 
     logger.info(
