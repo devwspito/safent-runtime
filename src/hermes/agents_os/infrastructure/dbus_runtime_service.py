@@ -3337,6 +3337,13 @@ class DbusRuntimeServiceWiring:
         if not updated:
             raise ValueError(f"update_scheduled_task: trigger {trigger_id!r} not found or not enabled")
 
+        _neus_cron_update_job(
+            trigger_id,
+            prompt=instruction,
+            schedule=cron,
+            name=label,
+        )
+
         updated_task = await self.get_scheduled_task(trigger_id=trigger_id)
         logger.info(
             "hermes.dbus.scheduled_task_updated",
@@ -3565,6 +3572,10 @@ class DbusRuntimeServiceWiring:
             schedule=cron,
             name=title or task_instruction[:50],
             one_shot=one_shot,
+            origin={
+                "trigger_instance_id": str(trigger.trigger_instance_id),
+                "source": "lumen_scheduled_task",
+            },
         )
 
         logger.info(
@@ -3607,6 +3618,7 @@ class DbusRuntimeServiceWiring:
             trigger_instance_id=tid,
             admin_uuid=_uid_to_uuid(sender_uid),
         )
+        _neus_cron_remove_job(trigger_id)
         logger.info(
             "hermes.dbus.scheduled_task_deleted",
             extra={"trigger_id": trigger_id, "by_uid": sender_uid},
@@ -3645,6 +3657,7 @@ class DbusRuntimeServiceWiring:
             enabled=enabled,
             admin_uuid=_uid_to_uuid(sender_uid),
         )
+        _neus_cron_set_enabled(trigger_id, enabled=enabled)
         logger.info(
             "hermes.dbus.scheduled_task_enabled_set",
             extra={"trigger_id": trigger_id, "enabled": enabled, "by_uid": sender_uid},
@@ -6276,6 +6289,7 @@ def _neus_cron_create_job(
     schedule: str,
     name: str,
     one_shot: bool,
+    origin: dict | None = None,
 ) -> str | None:
     """Write a new job to Neus cron/jobs.json. Returns the Neus job id or None.
 
@@ -6283,6 +6297,9 @@ def _neus_cron_create_job(
     (trigger_repo.authorize) has passed. Fail-soft: logs and returns None on
     any error so the outer create_scheduled_task can still succeed (auth row
     already committed).
+
+    `origin` is stored verbatim on the job and used later to look up the job
+    by trigger_instance_id without requiring a separate mapping table.
     """
     try:
         from cron.jobs import create_job  # noqa: PLC0415
@@ -6291,11 +6308,142 @@ def _neus_cron_create_job(
         return None
     try:
         repeat = 1 if one_shot else None
-        job = create_job(prompt=prompt, schedule=schedule, name=name, repeat=repeat)
+        kwargs: dict = dict(prompt=prompt, schedule=schedule, name=name, repeat=repeat)
+        if origin is not None:
+            kwargs["origin"] = origin
+        job = create_job(**kwargs)
         return str(job.get("id", ""))
     except Exception as exc:  # noqa: BLE001
         logger.warning("hermes.dbus.neus_cron_create_job failed: %s", exc)
         return None
+
+
+def _neus_cron_find_job_id_by_trigger(trigger_id: str) -> str | None:
+    """Scan cron.jobs to find the job whose origin.trigger_instance_id matches.
+
+    Returns the Neus job id string, or None if not found or on any error.
+    Fail-soft: cron.jobs absent or any exception → None (never raises).
+    """
+    try:
+        from cron.jobs import list_jobs  # noqa: PLC0415
+    except ImportError:
+        logger.warning("hermes.dbus.neus_cron_find: cron.jobs unavailable")
+        return None
+    try:
+        for job in list_jobs(include_disabled=True):
+            origin = job.get("origin") or {}
+            if isinstance(origin, dict) and origin.get("trigger_instance_id") == trigger_id:
+                return str(job["id"])
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.dbus.neus_cron_find failed trigger=%s: %s", trigger_id, exc)
+        return None
+
+
+def _neus_cron_update_job(
+    trigger_id: str,
+    *,
+    prompt: str | None = None,
+    schedule: str | None = None,
+    name: str | None = None,
+) -> bool:
+    """Update mutable fields on the Neus job that maps to trigger_id.
+
+    Only fields that are not None are included in the update payload.
+    Returns True on success, False if job not found or on any error.
+    Fail-soft: never raises.
+    """
+    job_id = _neus_cron_find_job_id_by_trigger(trigger_id)
+    if job_id is None:
+        logger.warning(
+            "hermes.dbus.neus_cron_update: no job found for trigger=%s", trigger_id
+        )
+        return False
+    try:
+        from cron.jobs import update_job  # noqa: PLC0415
+    except ImportError:
+        logger.warning("hermes.dbus.neus_cron_update: cron.jobs unavailable")
+        return False
+    updates: dict = {}
+    if prompt is not None:
+        updates["prompt"] = prompt
+    if schedule is not None:
+        updates["schedule"] = schedule
+    if name is not None:
+        updates["name"] = name
+    if not updates:
+        return True
+    try:
+        update_job(job_id, updates)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "hermes.dbus.neus_cron_update failed job=%s trigger=%s: %s",
+            job_id, trigger_id, exc,
+        )
+        return False
+
+
+def _neus_cron_remove_job(trigger_id: str) -> bool:
+    """Remove the Neus job that maps to trigger_id from cron.jobs.
+
+    Returns True on success, False if job not found or on any error.
+    Fail-soft: never raises.
+    """
+    job_id = _neus_cron_find_job_id_by_trigger(trigger_id)
+    if job_id is None:
+        logger.warning(
+            "hermes.dbus.neus_cron_remove: no job found for trigger=%s", trigger_id
+        )
+        return False
+    try:
+        from cron.jobs import remove_job  # noqa: PLC0415
+    except ImportError:
+        logger.warning("hermes.dbus.neus_cron_remove: cron.jobs unavailable")
+        return False
+    try:
+        remove_job(job_id)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "hermes.dbus.neus_cron_remove failed job=%s trigger=%s: %s",
+            job_id, trigger_id, exc,
+        )
+        return False
+
+
+def _neus_cron_set_enabled(trigger_id: str, *, enabled: bool) -> bool:
+    """Pause or resume the Neus job that maps to trigger_id.
+
+    enabled=True  → resume_job
+    enabled=False → pause_job
+
+    Returns True on success, False if job not found or on any error.
+    Fail-soft: never raises.
+    """
+    job_id = _neus_cron_find_job_id_by_trigger(trigger_id)
+    if job_id is None:
+        logger.warning(
+            "hermes.dbus.neus_cron_set_enabled: no job found for trigger=%s", trigger_id
+        )
+        return False
+    try:
+        if enabled:
+            from cron.jobs import resume_job  # noqa: PLC0415
+            resume_job(job_id)
+        else:
+            from cron.jobs import pause_job  # noqa: PLC0415
+            pause_job(job_id, "disabled via lumen dashboard")
+        return True
+    except ImportError:
+        logger.warning("hermes.dbus.neus_cron_set_enabled: cron.jobs unavailable")
+        return False
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "hermes.dbus.neus_cron_set_enabled failed job=%s trigger=%s enabled=%s: %s",
+            job_id, trigger_id, enabled, exc,
+        )
+        return False
 
 
 def _neus_job_to_task_dict(job: dict) -> dict:

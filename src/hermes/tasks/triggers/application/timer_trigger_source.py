@@ -193,7 +193,6 @@ class SchedulerTimerSource:
         """Revoca el trigger one-shot tras su primera ejecución exitosa."""
         try:
             from datetime import UTC, datetime  # noqa: PLC0415
-            from uuid import UUID  # noqa: PLC0415
 
             now_iso = datetime.now(tz=UTC).isoformat()
             instance_id = str(trigger.trigger_instance_id)  # type: ignore[attr-defined]
@@ -224,6 +223,9 @@ class SchedulerTimerSource:
                 "hermes.triggers.timer.one_shot_revoke_failed",
                 extra={"instance_id": str(getattr(trigger, "trigger_instance_id", "?"))},
             )
+        _neus_cron_remove_job_soft(
+            str(getattr(trigger, "trigger_instance_id", ""))
+        )
 
     async def _sleep_interruptible(self, seconds: float) -> None:
         """Duerme hasta `seconds` o hasta que shutdown sea señalizado."""
@@ -252,3 +254,39 @@ def _parse_iso(iso: str) -> datetime:
     from datetime import datetime as datetime_cls  # noqa: PLC0415
 
     return _as_utc(datetime_cls.fromisoformat(iso))
+
+
+def _neus_cron_remove_job_soft(trigger_id: str) -> None:
+    """Elimina la entrada del catálogo Neus (cron.jobs) de un one-shot tras disparar.
+
+    Vive en este módulo (no en dbus_runtime_service) para evitar un import circular
+    con la capa tasks. Totalmente fail-soft: cron.jobs ausente, job no encontrado, o
+    cualquier excepción se loguea (WARNING) y se traga — la lógica del timer no se
+    ve afectada. Encuentra el job por origin.trigger_instance_id (R6).
+    """
+    if not trigger_id:
+        return
+    try:
+        from cron.jobs import list_jobs, remove_job  # noqa: PLC0415
+    except ImportError:
+        logger.warning("hermes.triggers.timer.one_shot_cron_remove: cron.jobs unavailable")
+        return
+    try:
+        job_id: str | None = None
+        for job in list_jobs(include_disabled=True):
+            origin = job.get("origin") or {}
+            if isinstance(origin, dict) and origin.get("trigger_instance_id") == trigger_id:
+                job_id = str(job["id"])
+                break
+        if job_id is None:
+            return
+        remove_job(job_id)
+        logger.info(
+            "hermes.triggers.timer.one_shot_cron_removed",
+            extra={"trigger_id": trigger_id, "job_id": job_id},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "hermes.triggers.timer.one_shot_cron_remove_failed trigger=%s: %s",
+            trigger_id, exc,
+        )
