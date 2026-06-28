@@ -785,6 +785,54 @@ class DbusRuntimeServiceWiring:
                 exc,
             )
 
+    def migrate_active_provider_to_native(self) -> None:
+        """One-shot startup migration: push SQL active provider → native config.
+
+        Runs once at daemon boot (called from __main__ after wiring is built).
+        Idempotent: if the native config already has an active provider
+        (_load_native_model_config is not None) this is a no-op.  Fail-soft:
+        any error is logged and swallowed — a broken provider MUST NOT prevent
+        the daemon from starting.
+        """
+        try:
+            from hermes.runtime.provider_config_source import (  # noqa: PLC0415
+                _load_native_model_config,
+            )
+
+            if _load_native_model_config() is not None:
+                logger.debug("hermes.dbus.migrate_provider.already_native")
+                return
+
+            if self._provider_repo is None:
+                return
+
+            active = self._provider_repo.get_active()
+            if active is None:
+                logger.debug("hermes.dbus.migrate_provider.no_sql_active")
+                return
+
+            api_key: str | None = None
+            if active.has_api_key:
+                try:
+                    api_key = self._provider_repo.reveal_api_key(
+                        provider_id=active.provider_id
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "hermes.dbus.migrate_provider.reveal_failed: %s", exc
+                    )
+
+            self._sync_to_native_provider(active, api_key, set_active=True)
+            logger.info(
+                "hermes.dbus.migrate_provider.done",
+                extra={
+                    "alias": active.alias,
+                    "kind": str(active.kind),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.migrate_provider.failed: %s", exc)
+
     def add_provider(self, *, draft_json: str, sender_uid: int) -> dict:
         """Crea provider. draft: {kind, alias, default_model, base_url, api_key, set_active}."""
         self._authorize_and_resolve(sender_uid, operation="add_provider")

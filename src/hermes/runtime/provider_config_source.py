@@ -133,19 +133,19 @@ def _load_native_model_config() -> ModelConfig | None:
     )
 
 
-def resolve_model_config(db_path: Path) -> ModelConfig | None:
-    """Cascade: Path NATIVO (config.yaml) → Path SQL (DB) → env. None si ninguno.
+def resolve_model_config(db_path: Path) -> ModelConfig | None:  # noqa: ARG001
+    """Cascade: native config (hermes_cli config.yaml/.env) → env. None si ninguno.
 
-    Esta es la fuente que el engine consulta POR CICLO: cambiar el provider en el
-    onboarding o en Settings surte efecto en la siguiente tarea, sin reiniciar el
-    daemon. El path NATIVO va PRIMERO porque es el que escribe la UI nueva
-    (Catálogo nativo / `configure_native_provider` por D-Bus). El path SQL queda
-    como fallback histórico (provider creado vía "+ Añadir" en versiones viejas).
+    Esta es la fuente que el engine consulta POR CICLO. El path NATIVO
+    (hermes_cli config.yaml + HERMES_HOME/.env) es la ÚNICA fuente de
+    resolución desde R5 Stage C. El path SQL (Lumen store) fue retirado del
+    cascade: al arrancar, `migrate_active_provider_to_native` lo sincroniza al
+    nativo UNA SOLA VEZ de forma idempotente.
+
+    `db_path` se mantiene en la firma por compatibilidad de llamadas existentes;
+    ya no se usa en este cascade.
     """
     config = _load_native_model_config()
-    if config is not None:
-        return config
-    config = load_active_model_config(db_path)
     if config is not None:
         return config
     from hermes.runtime.model_config import HermesModelNotConfiguredError  # noqa: PLC0415

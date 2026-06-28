@@ -110,20 +110,33 @@ def test_resolve_falls_back_to_env_when_no_provider(
     assert config.model == "anthropic/claude-3-5-haiku-20241022"
 
 
-def test_resolve_prefers_active_provider_over_env(
+def test_resolve_prefers_native_config_over_env(
     db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("HERMES_MODEL", "anthropic/claude-3-5-haiku-20241022")
-    repo = _repo(db_path)
-    provider = new_provider(
-        alias="prefer-me", kind=ProviderKind.OPENAI, default_model="gpt-5.4-nano"
-    )
-    repo.add(provider=provider, api_key=None)
-    repo.set_active(provider_id=provider.provider_id)
+    """R5 Stage C: native config wins over env; SQL store is no longer in cascade.
 
-    config = resolve_model_config(db_path)
+    The old SQL-based cascade has been removed.  The startup migration
+    (migrate_active_provider_to_native) pushes SQL → native once at boot;
+    after that native is the single source of truth per-cycle.
+
+    This test simulates the post-migration state: native config present →
+    resolve_model_config returns it, ignoring env.
+    """
+    from unittest.mock import patch
+    from hermes.runtime.model_config import ModelConfig
+
+    monkeypatch.setenv("HERMES_MODEL", "anthropic/claude-3-5-haiku-20241022")
+
+    fake_native = ModelConfig.from_provider(model="openai/gpt-5.4-nano", api_key=None, base_url=None)
+
+    with patch(
+        "hermes.runtime.provider_config_source._load_native_model_config",
+        return_value=fake_native,
+    ):
+        config = resolve_model_config(db_path)
+
     assert config is not None
-    assert config.model == "openai/gpt-5.4-nano"  # provider gana al env
+    assert config.model == "openai/gpt-5.4-nano"  # native gana al env
 
 
 def test_resolve_returns_none_when_neither(

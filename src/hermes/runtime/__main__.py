@@ -2116,6 +2116,12 @@ def _start_dbus_adapter_if_available(
             skill_store_adapter=skill_store_adapter,
         )
 
+        # R5 Stage C — one-shot migration: push SQL active provider → native config.
+        # Must run before the first agent cycle reads resolve_model_config().
+        # Fail-soft: any error inside migrate_active_provider_to_native is
+        # caught and logged there; it NEVER propagates here.
+        wiring.migrate_active_provider_to_native()
+
         # Step 2 of two-step DbusInstallExecutor construction: inject the live
         # wiring so install/search/connect tools can reach the wiring functions.
         # Fail-soft: if install_executor is None (build failed above), skip.
