@@ -49,6 +49,12 @@ class ClaimTokenMismatch(ValueError):
     """I7: el claim_token no coincide con el del item — transición rechazada."""
 
 
+class WorkQueueIntegrityError(RuntimeError):
+    """enqueue: la fila violó un CHECK del esquema y el OR IGNORE la habría
+    descartado en silencio (p.ej. el pairing trigger_kind↔trigger_instance_id).
+    Se eleva en vez de tragarse para que el fallo sea visible, no fantasma."""
+
+
 class SqliteWorkQueue:
     """Cola durable sobre SQLite WAL. Implementa WorkQueuePort."""
 
@@ -77,19 +83,26 @@ class SqliteWorkQueue:
         # dedicada para que el índice idx_agent_tasks_conversation funcione
         # y la invariante I5 del esquema SQLite quede satisfecha.
         conversation_id = item.payload.get("conversation_id") or None
+        # CHECK trigger_kind↔trigger_instance_id (data-model 006): timer/
+        # system_event/self_enqueue ⇒ trigger_instance_id NOT NULL (y NULL para
+        # manual_enqueue/chat_message). El gate lo deja en el payload; sin espejarlo
+        # a la columna dedicada el CHECK rechaza la fila y el INSERT OR IGNORE la
+        # descarta EN SILENCIO → la tarea programada dispara pero nunca se encola ni
+        # se ejecuta.
+        trigger_instance_id = item.payload.get("trigger_instance_id") or None
         with self._connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
                 INSERT OR IGNORE INTO agent_tasks (
                     task_id, trigger_kind, enqueued_by, operator_id,
                     instruction, payload_json, tenant_id, dedup_key,
                     priority, status, max_retries, kind, conversation_id,
-                    created_at, updated_at
+                    trigger_instance_id, created_at, updated_at
                 ) VALUES (
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, 'pending', ?, ?, ?,
-                    ?, ?
+                    ?, ?, ?
                 )
                 """,
                 (
@@ -105,9 +118,27 @@ class SqliteWorkQueue:
                     item.max_attempts,
                     str(item.kind),
                     conversation_id,
+                    trigger_instance_id,
                     now_iso,
                     now_iso,
                 ),
+            )
+            inserted = cur.rowcount
+        # Fail-loud: OR IGNORE solo debe absorber la carrera de dedup_key (ya cubierta
+        # arriba por find_by_dedup_key). rowcount==0 sin un dedup vivo = violación de
+        # invariante del esquema (p.ej. I6) que ANTES se perdía en silencio.
+        if inserted == 0:
+            existing = (
+                await self.find_by_dedup_key(item.dedup_key)
+                if item.dedup_key is not None
+                else None
+            )
+            if existing is not None:
+                return existing
+            raise WorkQueueIntegrityError(
+                f"agent_tasks rechazó el item {item.id} "
+                f"(trigger_kind={item.trigger_kind!r}, "
+                f"trigger_instance_id={trigger_instance_id!r}): viola un CHECK del esquema"
             )
         return item
 

@@ -333,6 +333,48 @@ class TestSqliteWorkQueueEnqueue:
         assert result.id == item.id
         assert result.status is TaskStatus.PENDING
 
+    async def test_enqueue_timer_persists_and_is_claimable(self, db_path: Path) -> None:
+        """Regresión 2026-06-28: un item 'timer' con trigger_instance_id en payload
+        DEBE persistir y ser reclamable. Antes, enqueue no espejaba la columna
+        trigger_instance_id → el CHECK trigger_kind↔trigger_instance_id rechazaba la
+        fila y el INSERT OR IGNORE la descartaba EN SILENCIO: la tarea programada
+        disparaba pero nunca se encolaba ni ejecutaba.
+        """
+        from hermes.tasks.infrastructure.sqlite_work_queue import SqliteWorkQueue  # noqa: PLC0415
+        q = SqliteWorkQueue(db_path=db_path)
+        item = WorkItem.new(
+            tenant_id=_TENANT,
+            trigger_kind="timer",
+            payload={
+                "enqueued_by": "00000000-0000-0000-0000-0000000003e8",
+                "instruction": "escribe proof.txt",
+                "trigger_instance_id": str(uuid4()),
+            },
+            dedup_key="timer-x-2026-06-28T18:00:00+00:00",
+        )
+        result = await q.enqueue(item)
+        assert result.id == item.id
+        claimed = await q.claim_next()
+        assert claimed is not None
+        assert claimed.id == item.id  # realmente quedó en la cola, no se perdió
+
+    async def test_enqueue_timer_without_instance_id_fails_loud(self, db_path: Path) -> None:
+        """Fail-loud: un item de trigger que viola el CHECK ya no se traga en
+        silencio — eleva WorkQueueIntegrityError en vez de fingir que se encoló."""
+        from hermes.tasks.infrastructure.sqlite_work_queue import (  # noqa: PLC0415
+            SqliteWorkQueue,
+            WorkQueueIntegrityError,
+        )
+        q = SqliteWorkQueue(db_path=db_path)
+        item = WorkItem.new(
+            tenant_id=_TENANT,
+            trigger_kind="timer",
+            payload={"enqueued_by": "00000000-0000-0000-0000-0000000003e8"},
+            dedup_key="timer-no-instance",
+        )
+        with pytest.raises(WorkQueueIntegrityError):
+            await q.enqueue(item)
+
     async def test_enqueue_rejects_without_enqueued_by(self, db_path: Path) -> None:
         """CTRL-10: enqueue rechaza items sin enqueued_by en payload."""
         from hermes.tasks.infrastructure.sqlite_work_queue import SqliteWorkQueue, MissingEnqueuedBy  # noqa: PLC0415

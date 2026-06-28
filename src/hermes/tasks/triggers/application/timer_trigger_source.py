@@ -24,8 +24,8 @@ import asyncio
 import contextlib
 import logging
 from typing import TYPE_CHECKING
-from uuid import UUID
 
+from hermes.tasks.cron_schedule import prev_fire
 from hermes.tasks.triggers.domain.authorized_trigger_ports import AuthorizedTriggerType
 
 if TYPE_CHECKING:
@@ -63,10 +63,10 @@ class SchedulerTimerSource:
         self._repo = repo
         self._poll_interval_s = poll_interval_s
         self._shutdown = asyncio.Event()
-        # Último SLOT programado disparado por instancia (hora de calendario, no
-        # wall-clock del disparo). Es el "floor" que evita re-disparar el mismo
-        # slot del cron en sucesivos polls y backfillar slots perdidos.
-        self._last_fired: dict[UUID, datetime] = {}
+        # NO mantenemos floor en memoria: el "último disparo" es estado NATIVO de
+        # Nous (created_at del agent_task más reciente del trigger, vía
+        # list_triggers_with_last_run). Un dict en memoria lo duplicaría y se
+        # perdería en restart → re-disparo de un slot ya ejecutado.
 
     async def run_forever(self) -> None:
         """Bucle del timer. Termina con request_shutdown() o cancelación."""
@@ -88,56 +88,51 @@ class SchedulerTimerSource:
     # ------------------------------------------------------------------
 
     async def _tick(self) -> None:
-        """Evalúa todos los timers habilitados y dispara los que tocan."""
+        """Evalúa todos los timers habilitados y dispara los que tocan.
+
+        Lee el estado NATIVO (trigger + su last_run_at persistido = created_at del
+        agent_task más reciente). No hay copia en memoria que se desincronice.
+        """
         from datetime import UTC, datetime  # noqa: PLC0415
         try:
-            triggers = await self._repo.list_enabled()
+            rows = self._repo.list_triggers_with_last_run()
         except Exception:
-            logger.exception("hermes.triggers.timer.list_enabled_failed")
+            logger.exception("hermes.triggers.timer.list_failed")
             return
 
-        timer_triggers = [t for t in triggers if t.trigger_type is AuthorizedTriggerType.TIMER]
         now = datetime.now(tz=UTC)
-
-        for trigger in timer_triggers:
-            slot = self._due_slot(trigger, now)
+        for trigger, last_run_at, _last_status in rows:
+            if trigger.trigger_type is not AuthorizedTriggerType.TIMER:
+                continue
+            slot = self._due_slot(trigger, last_run_at, now)
             if slot is None:
                 continue
             await self._fire(trigger, slot)
-            # Avanza el floor exactamente al slot disparado: el próximo get_prev
-            # debe ser estrictamente posterior para volver a disparar.
-            self._last_fired[trigger.trigger_instance_id] = slot
 
-    def _due_slot(self, trigger: object, now: datetime) -> datetime | None:
-        """Slot de calendario vencido que aún no hemos disparado, o None.
+    def _due_slot(
+        self, trigger: object, last_run_at: str | None, now: datetime
+    ) -> datetime | None:
+        """Slot de calendario vencido que aún no se ha disparado, o None.
 
-        Evalúa la expresión cron real (`scope_value`) con croniter y devuelve el
-        slot programado más reciente ≤ now SOLO si es posterior al floor (último
-        slot disparado, o la hora de autorización en el primer ciclo). Devolver
-        el `get_prev` (no `get_next` iterando) garantiza que un daemon que estuvo
-        caído NO backfillee ráfagas de slots perdidos: dispara como mucho el más
-        reciente. Fail-closed: sin croniter o cron inválido → None (no inventa).
+        Usa el vocabulario de cron único (`prev_fire`) — el MISMO que el control
+        plane (next_fire) — para el slot programado más reciente ≤ now, y lo
+        dispara SOLO si es posterior al floor. El floor es el `last_run_at`
+        PERSISTIDO del nativo (o `authorized_at` si nunca disparó), no un dict en
+        memoria: así es correcto tras restart y no backfillea ráfagas. Fail-soft:
+        cron inválido/ausente → None (no inventa horario).
         """
         cron_expr = (getattr(trigger, "scope_value", "") or "").strip()
         instance_id = trigger.trigger_instance_id  # type: ignore[attr-defined]
         # '*' = scope wildcard de admin (no es un calendario) → nunca auto-dispara.
         if not cron_expr or cron_expr == "*":
             return None
-        floor = self._last_fired.get(instance_id)
-        if floor is None:
-            floor = _as_utc(trigger.authorized_at)  # type: ignore[attr-defined]
-        try:
-            from datetime import datetime as datetime_cls  # noqa: PLC0415
-
-            from croniter import croniter  # noqa: PLC0415
-
-            prev_slot = croniter(cron_expr, now).get_prev(datetime_cls)
-        except ImportError:
-            logger.warning(
-                "hermes.triggers.timer.croniter_missing instance=%s", instance_id
-            )
-            return None
-        except Exception:
+        floor = (
+            _parse_iso(last_run_at)
+            if last_run_at
+            else _as_utc(trigger.authorized_at)  # type: ignore[attr-defined]
+        )
+        prev_slot = prev_fire(cron_expr, before=now)
+        if prev_slot is None:
             logger.warning(
                 "hermes.triggers.timer.bad_cron instance=%s cron=%r",
                 instance_id, cron_expr,
@@ -250,3 +245,10 @@ def _as_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
+
+
+def _parse_iso(iso: str) -> datetime:
+    """Parsea el last_run_at persistido (ISO de agent_tasks.created_at) a UTC aware."""
+    from datetime import datetime as datetime_cls  # noqa: PLC0415
+
+    return _as_utc(datetime_cls.fromisoformat(iso))

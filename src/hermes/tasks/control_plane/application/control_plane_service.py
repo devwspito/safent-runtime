@@ -491,22 +491,15 @@ def _cron_next_fire(
     *,
     after: datetime,
 ) -> datetime | None:
-    """Compute next cron fire time after `after` for a standard 5-field expression.
+    """Próximo disparo cron tras `after` (None si no computable).
 
-    Delegates to croniter (MIT) — handles the full crontab grammar (ranges,
-    steps, lists, named months/days). Returns None for unrecognised expressions
-    rather than raising — the caller treats None as "not computable".
-
-    Clock-injectable: pass `after` explicitly — never calls datetime.now().
+    Delega en el vocabulario único `tasks.cron_schedule.next_fire` — el MISMO que
+    usa el timer source (prev_fire), para no tener dos sitios envolviendo croniter.
+    Se mantiene este nombre porque dbus_runtime_service lo importa.
     """
-    try:
-        from croniter import croniter  # noqa: PLC0415
+    from hermes.tasks.cron_schedule import next_fire  # noqa: PLC0415
 
-        return croniter(cron_expr, after).get_next(datetime)
-    except (ValueError, KeyError, TypeError, ImportError):
-        # ImportError: croniter ausente (entorno de dev) → next_run_at no computable.
-        # En la imagen horneada croniter SÍ está; nunca debe tumbar el tablero.
-        return None
+    return next_fire(cron_expr, after=after)
 
 
 # Días de la semana en cron (0/7=domingo … 6=sábado) → nombre en español.
