@@ -931,6 +931,7 @@ class GovernedAIAgent:
         tenant_id: UUID | None = None,
         external_catalog: _ExternalToolCatalog | None = None,
         tool_call_emitter: "Callable[[str, dict[str, Any]], None] | None" = None,
+        active_agent_id: str = "",
         **kwargs: Any,
     ) -> None:
         AIAgent = _import_ai_agent()
@@ -941,6 +942,10 @@ class GovernedAIAgent:
         self._consent_context = consent_context
         self._engine_loop = engine_loop
         self._tenant_id = tenant_id or UUID(int=0)
+        # Provenance: the agent_id that owns this cycle. Injected at build time
+        # from DecisionContext.agent_id (resolved in run_cycle before this ctor).
+        # Used to stamp memory write proposals with _provenance_agent_id.
+        self._active_agent_id: str = active_agent_id or "unknown"
         # F3: catálogo de tools externas (Composio + MCP).
         self._external_catalog: _ExternalToolCatalog = (
             external_catalog or _ExternalToolCatalog(())
@@ -2039,6 +2044,7 @@ class NousReasoningEngine:
         agent = self._build_governed_agent(
             model_config, system_prompt, loop, tenant_id, external_catalog,
             consent_context=per_cycle_consent,
+            active_agent_id=str(active_agent_id) if active_agent_id else "",
         )
         _register_external_specs_in_nous(external_specs, agent)
 
@@ -2464,6 +2470,7 @@ class NousReasoningEngine:
         external_catalog: _ExternalToolCatalog | None = None,
         *,
         consent_context: "ConsentContext | None" = None,
+        active_agent_id: str = "",
     ) -> GovernedAIAgent:
         """Construye GovernedAIAgent headless con broker, gate y catálogo externo.
 
@@ -2549,6 +2556,7 @@ class NousReasoningEngine:
             tenant_id=tenant_id,
             external_catalog=external_catalog,
             tool_call_emitter=self._chunk_sink_emitter,
+            active_agent_id=active_agent_id,
             **_extra_knobs,
         )
         return agent
@@ -3327,6 +3335,8 @@ def _patch_memory_tool(agent: "GovernedAIAgent") -> None:
         function_args: dict[str, Any] = {
             "action": action,
             "target": target,
+            # Provenance: stamp the writing agent. Reserved key — never from LLM input.
+            "_provenance_agent_id": agent._active_agent_id,
         }
         if content is not None:
             function_args["content"] = content

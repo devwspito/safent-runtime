@@ -96,12 +96,15 @@ class MemorySurfaceAdapter:
         target = action.payload.get("target", "memory")
         content = action.payload.get("content", "")
         old_text = action.payload.get("old_text", "")
+        # Provenance: injected by _gated_memory_tool under a reserved key.
+        # Falls back to "unknown" — fail-soft, never blocks the write.
+        agent_id: str = str(action.payload.get("_provenance_agent_id") or "unknown")
 
         tenant_id = action.tenant_id or UUID(int=0)
         store = TenantMemoryStore(root=self._memory_root, tenant_id=tenant_id)
 
         try:
-            return self._dispatch_action(action, store, mem_action, target, content, old_text)
+            return self._dispatch_action(action, store, mem_action, target, content, old_text, agent_id)
         except PiiRejectedError as exc:
             logger.warning(
                 "hermes.memory_adapter.pii_rejected tenant=%s action=%s: %s",
@@ -130,11 +133,12 @@ class MemorySurfaceAdapter:
         target: str,
         content: str,
         old_text: str,
+        agent_id: str = "unknown",
     ) -> ReplayOutcome:
         if mem_action == "add":
-            result = store.add(target, content)
+            result = store.add(target, content, agent_id=agent_id)
         elif mem_action == "replace":
-            result = store.replace(target, old_text, content)
+            result = store.replace(target, old_text, content, agent_id=agent_id)
         elif mem_action == "remove":
             result = store.remove(target, old_text)
         else:

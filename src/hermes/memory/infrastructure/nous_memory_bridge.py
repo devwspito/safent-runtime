@@ -114,9 +114,12 @@ class NousMemoryBridge:
 
         Entries that fail the secondary PII scan are replaced with a
         placeholder — defense-in-depth against stale/bypassed entries.
+        Provenance annotation (agent_id) is appended as a soft suffix —
+        fail-soft: if read_with_provenance is unavailable we fall back to
+        read() without annotation.
         """
         try:
-            entries = self._store.read(target)
+            raw_entries = self._store.read_with_provenance(target)
         except Exception as exc:
             logger.warning(
                 "hermes.memory_bridge.read_error tenant=%s target=%s: %s",
@@ -126,11 +129,19 @@ class NousMemoryBridge:
             )
             return ""
 
-        if not entries:
+        if not raw_entries:
             return ""
 
-        safe_entries = [_scan_entry(e, target) for e in entries]
-        non_empty = [e for e in safe_entries if e]
+        annotated: list[str] = []
+        for entry in raw_entries:
+            content = entry.get("content", "")
+            agent_id = entry.get("agent_id", "unknown")
+            scanned = _scan_entry(content, target)
+            if scanned:
+                suffix = f"  ·({agent_id})" if agent_id not in ("unknown", "legacy") else ""
+                annotated.append(scanned + suffix)
+
+        non_empty = [e for e in annotated if e]
         if not non_empty:
             return ""
 
