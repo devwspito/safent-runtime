@@ -20,11 +20,12 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 
 from hermes.capabilities.tool_policy import Preset, ToolPolicyStore
-from hermes.shell_server.security.mfa import MfaStore, ProtectionLevel
+from hermes.shell_server.security.mfa import MfaStore
+from hermes.shell_server.security.owner_mfa_gate import require_owner_mfa
 
 logger = logging.getLogger("hermes.shell_server.cowork.policies_api")
 
@@ -65,7 +66,7 @@ def create_policies_router(
 
     @router.post("/api/v1/policies/preset")
     async def set_preset(body: PresetBody) -> dict:
-        _require_owner_mfa(mfa_store, body.totp)
+        require_owner_mfa(mfa_store, body.totp, action="cambiar las políticas de seguridad")
         store.apply_preset(Preset(body.preset))
         # The browser egress plane follows the preset: PERMISIVO opens the netns-isolated
         # browser to the open web (open-logged) so research actually works; Equilibrado/
@@ -81,7 +82,7 @@ def create_policies_router(
 
     @router.post("/api/v1/policies/tool")
     async def set_tool(body: ToolBody) -> dict:
-        _require_owner_mfa(mfa_store, body.totp)
+        require_owner_mfa(mfa_store, body.totp, action="cambiar las políticas de seguridad")
         store.set_tool(body.tool, body.enabled)
         logger.info(
             "hermes.cowork.policies.tool_set tool=%s enabled=%s", body.tool, body.enabled
@@ -92,7 +93,7 @@ def create_policies_router(
     async def set_tools(body: ToolsBody) -> dict:
         # Batch: the owner edits many checkboxes locally and saves once → ONE MFA prompt
         # for the whole change set (not one per toggle).
-        _require_owner_mfa(mfa_store, body.totp)
+        require_owner_mfa(mfa_store, body.totp, action="cambiar las políticas de seguridad")
         for tool, enabled in body.tools.items():
             store.set_tool(tool, enabled)
         logger.info("hermes.cowork.policies.tools_set count=%d", len(body.tools))
@@ -103,25 +104,10 @@ def create_policies_router(
         # The escape hatch: turning MFA-on-dangers OFF makes cage-escaping dangers run
         # autonomously (owner-responsible). DISABLING the danger gate is the agent's
         # self-widening vector → gated on the owner's TOTP, which the caged agent cannot mint.
-        _require_owner_mfa(mfa_store, body.totp)
+        require_owner_mfa(mfa_store, body.totp, action="cambiar las políticas de seguridad")
         store.set_mfa_on_dangers(body.enabled)
         logger.info("hermes.cowork.policies.mfa_on_dangers_set enabled=%s", body.enabled)
         return {"ok": True, "mfa_on_dangers": body.enabled}
 
     return router
 
-
-def _require_owner_mfa(mfa_store: MfaStore, totp: str) -> None:
-    """Changing the security policy gates on the owner's TOTP (TOTP-only model,
-    owner decision 2026-06-24). Fail-closed: not enrolled or bad code → reject. The caged
-    agent cannot mint the TOTP (owner-only 0600 secret), so it cannot open its own cage."""
-    if not mfa_store.is_enrolled():
-        raise HTTPException(status_code=403, detail={
-            "code": "mfa_not_enrolled",
-            "message": "Configura el MFA antes de cambiar las políticas de seguridad."})
-    ok, reason = mfa_store.verify(level=ProtectionLevel.MFA, totp=totp or "")
-    if not ok:
-        logger.warning("hermes.cowork.policies.mfa_denied reason=%s", reason)
-        raise HTTPException(status_code=401, detail={
-            "code": reason,
-            "message": "Cambiar las políticas exige tu código MFA."})

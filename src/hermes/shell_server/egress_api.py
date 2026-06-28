@@ -29,7 +29,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from hermes.shell_server.security.mfa import MfaStore, ProtectionLevel
+from hermes.shell_server.security.mfa import MfaStore
+from hermes.shell_server.security.owner_mfa_gate import require_owner_mfa
 
 logger = logging.getLogger("hermes.shell_server.egress")
 
@@ -230,20 +231,6 @@ def _normalize(domain: str) -> str:
     return domain.strip().lower().removeprefix("*.").rstrip(".")
 
 
-def _require_owner_mfa(mfa_store: MfaStore, totp: str) -> None:
-    """Changing the network mode is a security-posture change: gate on owner TOTP."""
-    if not mfa_store.is_enrolled():
-        raise HTTPException(status_code=403, detail={
-            "code": "mfa_not_enrolled",
-            "message": "Configura el MFA antes de cambiar el modo de red."})
-    ok, reason = mfa_store.verify(level=ProtectionLevel.MFA, totp=totp or "")
-    if not ok:
-        logger.warning("hermes.egress.mode_mfa_denied reason=%s", reason)
-        raise HTTPException(status_code=401, detail={
-            "code": reason,
-            "message": "Cambiar el modo de red exige tu código MFA."})
-
-
 # ---------------------------------------------------------------------------
 # Pydantic schemas
 # ---------------------------------------------------------------------------
@@ -289,7 +276,7 @@ def create_egress_router(mfa: MfaStore | None = None) -> APIRouter:
                 status_code=422,
                 detail={"code": "invalid_mode", "message": f"mode must be 'allow' or 'deny', got {body.mode!r}"},
             )
-        _require_owner_mfa(mfa_store, body.totp)
+        require_owner_mfa(mfa_store, body.totp, action="cambiar el modo de red")
         _save_mode(body.mode)
         ok = _apply_network_mode(body.mode)
         logger.info("hermes.egress.mode_changed mode=%s pushed=%s", body.mode, ok)
