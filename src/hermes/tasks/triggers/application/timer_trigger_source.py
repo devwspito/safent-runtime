@@ -29,6 +29,8 @@ from uuid import UUID
 from hermes.tasks.triggers.domain.authorized_trigger_ports import AuthorizedTriggerType
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from hermes.tasks.triggers.application.trigger_gate import TriggerGate
     from hermes.tasks.triggers.infrastructure.sqlite_authorized_trigger_repository import (
         SqliteAuthorizedTriggerRepository,
@@ -61,8 +63,10 @@ class SchedulerTimerSource:
         self._repo = repo
         self._poll_interval_s = poll_interval_s
         self._shutdown = asyncio.Event()
-        # Tracking de últimos disparos para evitar duplicados dentro del ciclo
-        self._last_fired: dict[UUID, float] = {}
+        # Último SLOT programado disparado por instancia (hora de calendario, no
+        # wall-clock del disparo). Es el "floor" que evita re-disparar el mismo
+        # slot del cron en sucesivos polls y backfillar slots perdidos.
+        self._last_fired: dict[UUID, datetime] = {}
 
     async def run_forever(self) -> None:
         """Bucle del timer. Termina con request_shutdown() o cancelación."""
@@ -85,7 +89,7 @@ class SchedulerTimerSource:
 
     async def _tick(self) -> None:
         """Evalúa todos los timers habilitados y dispara los que tocan."""
-        import time  # noqa: PLC0415
+        from datetime import UTC, datetime  # noqa: PLC0415
         try:
             triggers = await self._repo.list_enabled()
         except Exception:
@@ -93,26 +97,65 @@ class SchedulerTimerSource:
             return
 
         timer_triggers = [t for t in triggers if t.trigger_type is AuthorizedTriggerType.TIMER]
-        now = time.monotonic()
+        now = datetime.now(tz=UTC)
 
         for trigger in timer_triggers:
-            if not self._should_fire(trigger.trigger_instance_id, now):
+            slot = self._due_slot(trigger, now)
+            if slot is None:
                 continue
-            await self._fire(trigger)
-            self._last_fired[trigger.trigger_instance_id] = now
+            await self._fire(trigger, slot)
+            # Avanza el floor exactamente al slot disparado: el próximo get_prev
+            # debe ser estrictamente posterior para volver a disparar.
+            self._last_fired[trigger.trigger_instance_id] = slot
 
-    def _should_fire(self, instance_id: UUID, now: float) -> bool:
-        """Heurística simple: un timer dispara si no se disparó en el último ciclo."""
-        last = self._last_fired.get(instance_id, 0.0)
-        return (now - last) >= self._poll_interval_s
+    def _due_slot(self, trigger: object, now: datetime) -> datetime | None:
+        """Slot de calendario vencido que aún no hemos disparado, o None.
 
-    async def _fire(self, trigger: object) -> None:
+        Evalúa la expresión cron real (`scope_value`) con croniter y devuelve el
+        slot programado más reciente ≤ now SOLO si es posterior al floor (último
+        slot disparado, o la hora de autorización en el primer ciclo). Devolver
+        el `get_prev` (no `get_next` iterando) garantiza que un daemon que estuvo
+        caído NO backfillee ráfagas de slots perdidos: dispara como mucho el más
+        reciente. Fail-closed: sin croniter o cron inválido → None (no inventa).
+        """
+        cron_expr = (getattr(trigger, "scope_value", "") or "").strip()
+        instance_id = trigger.trigger_instance_id  # type: ignore[attr-defined]
+        # '*' = scope wildcard de admin (no es un calendario) → nunca auto-dispara.
+        if not cron_expr or cron_expr == "*":
+            return None
+        floor = self._last_fired.get(instance_id)
+        if floor is None:
+            floor = _as_utc(trigger.authorized_at)  # type: ignore[attr-defined]
+        try:
+            from datetime import datetime as datetime_cls  # noqa: PLC0415
+
+            from croniter import croniter  # noqa: PLC0415
+
+            prev_slot = croniter(cron_expr, now).get_prev(datetime_cls)
+        except ImportError:
+            logger.warning(
+                "hermes.triggers.timer.croniter_missing instance=%s", instance_id
+            )
+            return None
+        except Exception:
+            logger.warning(
+                "hermes.triggers.timer.bad_cron instance=%s cron=%r",
+                instance_id, cron_expr,
+            )
+            return None
+        prev_slot = _as_utc(prev_slot)
+        return prev_slot if prev_slot > floor else None
+
+    async def _fire(self, trigger: object, slot: datetime) -> None:
         """Dispara un trigger de timer a través del gate (fail-closed).
 
         P3: usa task_instruction almacenada en el trigger como instrucción del
         work item. Si está vacía, cae al fallback descriptivo anterior.
         target_agent_id (si el calendario lo fijó) se pasa al gate → viaja en el
         payload del WorkItem → el consumidor lo ejecuta con ESE agente.
+
+        `slot` es la hora de calendario que toca disparar; ancla el dedup_key para
+        que el mismo slot del cron sea idempotente entre polls y crash-loops.
         """
         try:
             # P3: instrucción almacenada supera al fallback genérico.
@@ -129,7 +172,7 @@ class SchedulerTimerSource:
                 trigger_type=AuthorizedTriggerType.TIMER,
                 scope_value=trigger.scope_value,  # type: ignore[attr-defined]
                 instruction=instruction,
-                dedup_key=f"timer-{trigger.trigger_instance_id}-{_hour_bucket()}",  # type: ignore[attr-defined]
+                dedup_key=f"timer-{trigger.trigger_instance_id}-{slot.isoformat()}",  # type: ignore[attr-defined]
                 target_agent_id=target_agent_id,
             )
             if task_id is not None:
@@ -196,8 +239,14 @@ class SchedulerTimerSource:
             )
 
 
-def _hour_bucket() -> str:
-    """Dedup key estable dentro de la misma hora UTC (evita duplicados en crash-loops)."""
-    from datetime import UTC, datetime  # noqa: PLC0415
-    now = datetime.now(tz=UTC)
-    return f"{now.year}-{now.month:02d}-{now.day:02d}T{now.hour:02d}"
+def _as_utc(dt: datetime) -> datetime:
+    """Normaliza a UTC tz-aware para comparar slots y floors sin TypeError.
+
+    Filas viejas pueden tener `authorized_at` naive; croniter devuelve aware si
+    el `start` es aware. Unificamos todo a UTC.
+    """
+    from datetime import UTC  # noqa: PLC0415
+
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
