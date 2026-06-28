@@ -163,6 +163,11 @@ COPY ops/agents-os-edition/dbus/org.hermes.Runtime1.conf /usr/share/dbus-1/syste
 COPY ops/agents-os-edition/netns/          /etc/nftables/hermes/
 COPY ops/agents-os-edition/modules-load.d/ /etc/modules-load.d/
 COPY ops/agents-os-edition/seed/mcp-servers.json /usr/share/hermes/seed/
+# Namespace-pivot seccomp data for the browser-jail shim. The shim reads this exact
+# path; when absent it soft-degrades (no per-process CLONE_NEWUSER backstop). Baking
+# it makes the in-unit defense-in-depth real instead of relying solely on the outer
+# container seccomp profile.
+COPY ops/agents-os-edition/seccomp/chromium-browser.json /usr/share/hermes/seccomp/chromium-browser.json
 
 # ── Egress blocklist (hagezi "light" — bundled at build time) ─────────────────
 # Proxy reads /usr/share/hermes/egress-blocklist.txt at boot and applies it as an

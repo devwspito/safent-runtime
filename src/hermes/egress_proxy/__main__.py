@@ -162,13 +162,16 @@ def _resolve_global_mode() -> EgressMode:
     try:
         return EgressMode(_EGRESS_MODE_RAW)
     except ValueError:
-        # Fail to OPEN_LOGGED (the owner's default "ALLOW" intent) rather than
-        # DEFAULT_DENY so the product works out of the box. The blocklist still applies.
+        # Fail CLOSED on an INVALID value (typo/garbage in HERMES_EGRESS_MODE): an
+        # unparseable config must NOT silently open egress. This does NOT change the
+        # product default — an unset/valid HERMES_EGRESS_MODE still resolves to its
+        # value (default OPEN_LOGGED). Only a corrupt value now denies-by-default.
         logger.warning(
-            "HERMES_EGRESS_MODE valor inválido %r — usando open-logged (modo ALLOW por defecto)",
+            "HERMES_EGRESS_MODE valor inválido %r — fail-closed a default-deny "
+            "(un config corrupto no debe abrir egress)",
             _EGRESS_MODE_RAW,
         )
-        return EgressMode.OPEN_LOGGED
+        return EgressMode.DEFAULT_DENY
 
 
 async def _run(*, systemd_notify: bool) -> None:

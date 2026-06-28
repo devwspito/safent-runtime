@@ -1,0 +1,8 @@
+{
+  "_comment": "Namespace-pivot seccomp data for the browser-jail shim (hermes-browser-launcher::_install_seccomp). NOT an OCI profile — the shim reads syscallNumbers[arch] + cloneNewuserFlag and builds a cBPF that TRAPs clone/unshare(CLONE_NEWUSER in arg0) and setns(CLONE_NEWUSER in arg1) and ENOSYS-es clone3, blocking the CLONE_NEWUSER LPE staging primitive while allowing flag-less clone/fork/threads. aarch64 numbers verified against the container kernel headers; x86_64 are the stable Linux x86_64 ABI (clone=56, unshare=272, setns=308, clone3=435).",
+  "cloneNewuserFlag": 268435456,
+  "syscallNumbers": {
+    "x86_64":  { "clone": 56,  "unshare": 272, "setns": 308, "clone3": 435 },
+    "aarch64": { "clone": 220, "unshare": 97,  "setns": 268, "clone3": 435 }
+  }
+}
