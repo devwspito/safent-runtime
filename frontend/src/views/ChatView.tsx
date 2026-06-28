@@ -27,6 +27,7 @@ import ContextPanel from '../components/ContextPanel'
 import PendingApprovalsInChat from '../components/PendingApprovalsInChat'
 import { useT } from '../lib/i18n'
 import { toolLabel } from '../lib/toolLabels'
+import { useFeatures } from '../hooks/useFeatures'
 import styles from './ChatView.module.css'
 
 // ── Static strings ─────────────────────────────────────────────────────────
@@ -420,6 +421,25 @@ function useActiveProvider() {
 function ModelPicker() {
   const navigate = useNavigate()
   const provider = useActiveProvider()
+  const { allowed } = useFeatures()
+
+  // Cloud-managed associate: the `proveedores` view is gated, so listProviders()
+  // 403s and `provider` stays null — but a model IS resolved server-side from the
+  // org's policy. Showing "Sin modelo" (and linking to a blocked view) is wrong:
+  // surface that the model is org-managed and make the chip inert instead.
+  const orgManaged = !allowed('proveedores')
+
+  if (orgManaged) {
+    return (
+      <span
+        className={styles.modelPicker}
+        title="El modelo lo gestiona tu organización"
+        aria-label="Modelo gestionado por tu organización"
+      >
+        <span className={styles.modelPickerLabel}>Modelo gestionado</span>
+      </span>
+    )
+  }
 
   const label = provider
     ? (provider.default_model ?? provider.alias ?? provider.name ?? 'Modelo activo')

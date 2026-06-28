@@ -154,8 +154,18 @@ export async function renderSecurityView(container) {
 
   _wireEgressPermissions();
 
+  // Governance carries the MFA enrollment + policy presets (each preset POST is
+  // owner-MFA gated server-side). A SILENT catch here used to hide a render
+  // failure, leaving the owner with no policy/MFA UI and no clue why — surface it
+  // instead so a broken governance section is visible, not swallowed.
   const govMount = document.getElementById('governance-mount');
-  if (govMount) renderGovernance(govMount).catch(() => {});
+  if (govMount) {
+    renderGovernance(govMount).catch((err) => {
+      govMount.innerHTML =
+        `<div class="cv-empty">No se pudo cargar gobernanza (MFA y políticas): ${esc(err && err.message || err)}</div>`;
+      showToast('No se pudo cargar la sección de gobernanza (MFA y políticas).', 'error');
+    });
+  }
 }
 
 function _setEgressStatus(msg, kind = '') {

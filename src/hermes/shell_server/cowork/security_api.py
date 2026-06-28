@@ -43,7 +43,8 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from hermes.shell_server.security.mfa import MfaStore, ProtectionLevel
+from hermes.shell_server.security.mfa import MfaStore
+from hermes.shell_server.security.owner_mfa_gate import require_owner_mfa
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
 logger = logging.getLogger("hermes.shell_server.cowork.security_api")
@@ -52,23 +53,6 @@ logger = logging.getLogger("hermes.shell_server.cowork.security_api")
 # override, modelo "todo elevable"). These require the owner's TOTP (TOTP-only model),
 # same bar as changing a security policy. A plain "deny"/"block" needs no MFA.
 _OVERRIDE_DECISIONS = frozenset({"allow", "approve", "allowed", "allow_once", "install", "installed"})
-
-
-def _require_owner_mfa(mfa_store: MfaStore, totp: str) -> None:
-    """Verify owner TOTP for a sovereign install override. 401 on failure.
-
-    TOTP-only model (owner decision 2026-06-24): same bar as every other gated action.
-    The caged agent cannot mint the TOTP (owner-only 0600 secret), so it cannot override
-    the antivirus verdict on its own."""
-    if not mfa_store.is_enrolled():
-        raise HTTPException(status_code=403, detail={"code": "mfa_not_enrolled",
-            "message": "Configura el MFA antes de permitir una instalación que el "
-            "antivirus marcó (es una acción soberana del dueño)."})
-    ok, reason = mfa_store.verify(level=ProtectionLevel.MFA, totp=totp or "")
-    if not ok:
-        raise HTTPException(status_code=401, detail={"code": reason,
-            "message": "Permitir un paquete con veredicto FAIL exige tu código MFA. "
-            "Quedará auditado."})
 
 
 # ------------------------------------------------------------------
@@ -185,7 +169,11 @@ def create_security_router() -> APIRouter:
         TOTP (audited). Plain deny needs none. fail-hard on daemon unavailable.
         """
         if body.decision.strip().lower() in _OVERRIDE_DECISIONS:
-            _require_owner_mfa(MfaStore(), body.totp)
+            require_owner_mfa(
+                MfaStore(),
+                body.totp or "",
+                action="permitir una instalación que el antivirus marcó (queda auditado)",
+            )
         proxy = request.app.state.dbus_proxy
         try:
             return await proxy.call_mutator(
