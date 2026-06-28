@@ -85,6 +85,11 @@ class AgentDraft:
     provider_alias: str | None = None
     # Nullable: None → locally created (owner). "cloud" → pushed by config-sync.
     managed_by: str | None = None
+    # Optional stable identity. None → the registry mints a fresh uuid (native UI
+    # create). Non-null → use this id verbatim, so the cloud config-sync upsert is
+    # idempotent (the native agent id == the cloud agent_template_id); without it
+    # every sync re-creates the agent → duplicates → LicenseExceeded.
+    agent_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

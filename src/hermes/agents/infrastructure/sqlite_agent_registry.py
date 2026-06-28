@@ -289,7 +289,10 @@ class SqliteAgentRegistry:
     def create_agent(self, draft: AgentDraft) -> Agent:
         now = datetime.now(tz=UTC)
         agent = Agent(
-            agent_id=uuid4().hex,
+            # Honor a caller-provided id (cloud config-sync passes the stable
+            # agent_template_id so re-syncs upsert instead of duplicating); fall
+            # back to a fresh uuid for native UI creates.
+            agent_id=draft.agent_id or uuid4().hex,
             name=draft.name,
             role=draft.role,
             register=draft.register,

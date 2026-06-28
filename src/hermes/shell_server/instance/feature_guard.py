@@ -52,6 +52,9 @@ _PREFIX_FEATURE_MAP: tuple[tuple[str, str], ...] = (
     ("/api/v1/egress",      "seguridad"),
     ("/api/v1/policies",    "seguridad"),
     ("/api/v1/approvals",   "seguridad"),
+    # MFA/2FA management is part of the Seguridad view; without this mapping the
+    # endpoint is default-denied (403) on associates and the 2FA panel can't load.
+    ("/api/v1/mfa",         "seguridad"),
     ("/api/v1/memory",      "memoria"),
     ("/api/v1/workspace",   "archivos"),
     ("/api/v1/archivos",    "archivos"),

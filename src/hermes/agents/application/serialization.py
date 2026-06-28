@@ -60,7 +60,11 @@ def draft_from_dict(data: dict[str, Any]) -> AgentDraft:
     raw_managed_by = data.get("managed_by")
     managed_by: str | None = str(raw_managed_by).strip() or None if raw_managed_by is not None else None
 
+    raw_agent_id = data.get("agent_id")
+    agent_id: str | None = str(raw_agent_id).strip() or None if raw_agent_id is not None else None
+
     return AgentDraft(
+        agent_id=agent_id,
         name=str(data.get("name", "")).strip(),
         role=str(data.get("role", "")),
         register=str(data.get("register", "")),

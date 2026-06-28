@@ -642,7 +642,9 @@ class PolicyApplier:
             return result if isinstance(result, dict) else {"ok": bool(result)}
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "hermes.config_sync.applier.mutator_failed",
+                "hermes.config_sync.applier.mutator_failed verb=%s reason=%s",
+                verb,
+                str(exc),
                 extra={"verb": verb, "reason": str(exc)},
             )
             return {"ok": False}

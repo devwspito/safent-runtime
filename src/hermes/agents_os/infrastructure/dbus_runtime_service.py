@@ -5701,6 +5701,13 @@ def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
     env = dict(_os.environ)
     env["npm_config_cache"] = _MCP_NPM_CACHE
     env["UV_CACHE_DIR"] = _MCP_UV_CACHE
+    # uv populates its cache/tool dir by hard-linking/renaming the built artifact;
+    # when UV_CACHE_DIR and the install target straddle a mount boundary (the
+    # container volume layout does), uv dies with "Invalid cross-device link
+    # (os error 18)" and the MCP prefetch fails → the whole bundle stops
+    # converging. Copy instead of link, exactly as the runtime path already does
+    # (stdio_mcp_client.py). Parity fix — the prefetch path was missing it.
+    env["UV_LINK_MODE"] = "copy"
 
     if ecosystem == "npm":
         npm = _shutil.which("npm")
