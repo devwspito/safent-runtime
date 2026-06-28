@@ -47,11 +47,10 @@ class TestSignalLiveVsPost:
     """signal_native_danger_approval returns True (LIVE) xor False (POST)."""
 
     def _inject_slot(self, proposal_id: str) -> dict:
-        from hermes.runtime.security_hook import _pending_events, _pending_events_lock
+        from hermes.runtime.security_hook import _register_pending_event
         event = threading.Event()
         slot: dict = {"event": event, "choice": None}
-        with _pending_events_lock:
-            _pending_events[proposal_id] = slot
+        _register_pending_event(proposal_id, slot)
         return slot
 
     def _remove_slot(self, proposal_id: str) -> None:

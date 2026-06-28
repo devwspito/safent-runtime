@@ -1449,8 +1449,8 @@ class GovernedAIAgent:
         """
         from hermes.runtime.security_hook import (  # noqa: PLC0415
             _NATIVE_DANGER_OWNER_WAIT_S,
-            _pending_events,
-            _pending_events_lock,
+            _register_pending_event,
+            _unregister_pending_event,
         )
 
         gate = getattr(self._broker, "_approval_gate", None)
@@ -1471,8 +1471,7 @@ class GovernedAIAgent:
 
         event = _threading.Event()
         slot: dict = {"event": event, "choice": None}
-        with _pending_events_lock:
-            _pending_events[pid_str] = slot
+        _register_pending_event(pid_str, slot)
 
         choice: str | None = None
         try:
@@ -1503,8 +1502,7 @@ class GovernedAIAgent:
                     )
                 choice = slot.get("choice")
         finally:
-            with _pending_events_lock:
-                _pending_events.pop(pid_str, None)
+            _unregister_pending_event(pid_str, slot)
 
         if choice != "approved":
             return json.dumps(
@@ -2508,8 +2506,12 @@ class NousReasoningEngine:
         # timeouts are ENV-driven (HERMES_API_TIMEOUT / HERMES_STREAM_STALE_TIMEOUT
         # / HERMES_STREAM_READ_TIMEOUT). Forward our configured value to the env
         # knob Nous actually reads, never as an unsupported kwarg.
-        if model_config.timeout_seconds != 90:
-            os.environ["HERMES_API_TIMEOUT"] = str(model_config.timeout_seconds)
+        # ALWAYS set it to THIS cycle's value (default included): the old
+        # `!= 90` skip left a custom value stale in os.environ so the next
+        # default-timeout cycle silently inherited it. (Full isolation under a
+        # >1 worker pool needs a per-request timeout in Nous — env is process
+        # global; tracked as backlog.)
+        os.environ["HERMES_API_TIMEOUT"] = str(model_config.timeout_seconds)
         if model_config.max_iterations != 8:
             _extra_knobs["max_iterations"] = model_config.max_iterations
         # Reasoning models served WITHOUT a vLLM reasoning parser (Qwen3.x,
@@ -2767,17 +2769,35 @@ def _run_conversation_streaming_or_fallback(
         return agent.run_conversation(
             user_message, conversation_history=history, task_id=task_id
         )
+    # Count emitted deltas: the non-streaming retry re-runs the WHOLE turn, so it
+    # is only safe when the stream failed BEFORE any token (the gpt-4o-mini
+    # request-level 400). If the stream already emitted deltas, the model may have
+    # already executed tool calls (send_message, write_file, …) — re-running would
+    # duplicate those side effects, so we re-raise instead of retrying.
+    emitted = {"n": 0}
+
+    def _counting_cb(*args: Any, **kwargs: Any) -> Any:
+        emitted["n"] += 1
+        return stream_callback(*args, **kwargs)
+
     try:
         return agent.run_conversation(
             user_message,
             conversation_history=history,
             task_id=task_id,
-            stream_callback=stream_callback,
+            stream_callback=_counting_cb,
         )
     except Exception as exc:  # noqa: BLE001 — a streaming-path failure must not break chat
+        if emitted["n"] > 0:
+            logger.warning(
+                "hermes.nous_engine.streaming_failed_after_%d_deltas — re-raising "
+                "(NOT retrying: a non-stream rerun would duplicate tool side effects)",
+                emitted["n"],
+            )
+            raise
         logger.warning(
             "hermes.nous_engine.streaming_failed_fallback_nonstream error=%s — "
-            "retrying without streaming (chat continues; provider/model likely "
+            "retrying without streaming (no deltas emitted; provider/model likely "
             "rejects the Responses-API reasoning include)",
             exc,
         )

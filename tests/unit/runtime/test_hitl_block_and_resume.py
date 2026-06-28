@@ -45,13 +45,12 @@ class TestSignalNativeDangerApproval:
     """signal_native_danger_approval: signalling mechanics and cleanup."""
 
     def _inject_slot(self, proposal_id: str) -> dict:
-        """Inject a slot directly into _pending_events for testing."""
-        from hermes.runtime.security_hook import _pending_events, _pending_events_lock
+        """Inject a slot via the public registry helper for testing."""
+        from hermes.runtime.security_hook import _register_pending_event
 
         event = threading.Event()
         slot = {"event": event, "choice": None}
-        with _pending_events_lock:
-            _pending_events[proposal_id] = slot
+        _register_pending_event(proposal_id, slot)
         return slot
 
     def _remove_slot(self, proposal_id: str) -> None:

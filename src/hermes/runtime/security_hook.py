@@ -65,8 +65,31 @@ _ASYNC_BRIDGE_TIMEOUT_S: float = 5.0
 # but the LLM ignored that instruction or produced slightly different args).
 # Thread-safe: writes under _pending_events_lock; reads are atomic dict lookups.
 # ---------------------------------------------------------------------------
-_pending_events: dict[str, dict] = {}  # proposal_id → {"event": Event, "choice": str|None}
+# proposal_id (str) → LIST of waiter slots. A deterministic proposal_id means two
+# CONCURRENT cycles proposing the same (tool, args) share an id; keying a single
+# slot let the second registration overwrite the first, so only one waiter ever
+# resumed and the other timed out even after the owner approved (cross-conversation
+# HITL interference). A list lets every concurrent waiter for that id be signalled;
+# re-dispatch is idempotent on proposal_id (broker dedupes the actual execution).
+_pending_events: dict[str, list[dict]] = {}  # proposal_id → [{"event": Event, "choice": str|None}]
 _pending_events_lock = threading.Lock()
+
+
+def _register_pending_event(proposal_id_str: str, slot: dict) -> None:
+    """Append a waiter slot for proposal_id (concurrency-safe)."""
+    with _pending_events_lock:
+        _pending_events.setdefault(proposal_id_str, []).append(slot)
+
+
+def _unregister_pending_event(proposal_id_str: str, slot: dict) -> None:
+    """Remove THIS waiter's slot (by identity); drop the key when empty."""
+    with _pending_events_lock:
+        slots = _pending_events.get(proposal_id_str)
+        if slots is None:
+            return
+        _pending_events[proposal_id_str] = [s for s in slots if s is not slot]
+        if not _pending_events[proposal_id_str]:
+            _pending_events.pop(proposal_id_str, None)
 
 # How long the hook waits for the owner before auto-denying (seconds).
 _NATIVE_DANGER_OWNER_WAIT_S: float = float(
@@ -81,18 +104,21 @@ def signal_native_danger_approval(proposal_id: str, choice: str) -> bool:
     the token. Returns True if a waiting thread was found and signalled, False if
     no thread is waiting (e.g. the hook already timed out).
 
-    Thread-safe. choice ∈ {"approved", "denied"}.
+    Thread-safe. choice ∈ {"approved", "denied"}. Wakes EVERY concurrent waiter
+    registered under this proposal_id (see _pending_events docstring).
     """
     with _pending_events_lock:
-        slot = _pending_events.get(str(proposal_id))
-    if slot is None:
+        slots = list(_pending_events.get(str(proposal_id), ()))
+    if not slots:
         return False
-    slot["choice"] = choice
-    slot["event"].set()
+    for slot in slots:
+        slot["choice"] = choice
+        slot["event"].set()
     logger.info(
-        "hermes.security_hook.native_danger_signalled: proposal=%s choice=%s",
+        "hermes.security_hook.native_danger_signalled: proposal=%s choice=%s waiters=%d",
         proposal_id,
         choice,
+        len(slots),
     )
     return True
 
@@ -1424,8 +1450,7 @@ def _resolve_native_danger_approval(
         # Register the Event AFTER the row exists so approve_action can find it.
         event = threading.Event()
         slot: dict = {"event": event, "choice": None}
-        with _pending_events_lock:
-            _pending_events[proposal_id_str] = slot
+        _register_pending_event(proposal_id_str, slot)
 
         logger.info(
             "hermes.security_hook.native_danger_waiting: proposal=%s tool=%s — "
@@ -1436,9 +1461,9 @@ def _resolve_native_danger_approval(
         # Block the conversation thread until the owner acts or timeout.
         resolved = event.wait(timeout=_NATIVE_DANGER_OWNER_WAIT_S)
 
-        # Clean up slot regardless of outcome.
-        with _pending_events_lock:
-            _pending_events.pop(proposal_id_str, None)
+        # Clean up THIS waiter's slot regardless of outcome (leave any concurrent
+        # waiter's slot intact).
+        _unregister_pending_event(proposal_id_str, slot)
 
         if not resolved:
             logger.warning(
