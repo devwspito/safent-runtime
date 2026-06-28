@@ -347,12 +347,12 @@ RUN systemctl enable \
 # The ARG is re-declared after the FROM so it is in scope for this RUN layer.
 ARG LUMEN_EDITION=community
 RUN mkdir -p /usr/share/hermes && echo "${LUMEN_EDITION}" > /usr/share/hermes/edition
-# Enterprise edition: enable the config-sync service so it starts at boot.
-# Community edition: the unit is present in the image (COPY above) but stays
-# disabled — it is a no-op without a pairing association anyway.
-RUN if [ "${LUMEN_EDITION}" = "enterprise" ]; then \
-      systemctl enable hermes-config-sync.service 2>&1 | tail -3 || true ; \
-    fi
+# Cloud config-sync: enable it UNCONDITIONALLY (both editions). The unit's
+# ConditionPathExists=/var/lib/hermes/instance/.enterprise keeps it inert in
+# community edition (no pairing marker) and auto-starts it the moment an instance
+# is paired — the CE image runs in associate mode, so gating on build-time
+# LUMEN_EDITION would (and did) leave paired CE instances without policy sync.
+RUN systemctl enable hermes-config-sync.service 2>&1 | tail -3 || true
 
 # podman-machine (macOS) compat: systemd's per-unit MemoryPressureWatch tries to bind the
 # unit's cgroup memory.pressure into its namespace; in the Mac podman VM's cgroup view this

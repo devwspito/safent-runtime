@@ -193,7 +193,22 @@ def create_instance_router(db_path: Path, vault: "SecretsVault") -> APIRouter:
             logger.warning("hermes.instance.features.error", extra={"reason": str(exc)})
             return FeaturesResponse(edition="community", views=list(_ALL_VIEWS))
 
-        views = list(_ALL_VIEWS) if edition == "community" else list(_ASSOCIATE_DEFAULT_VIEWS)
+        if edition == "community":
+            return FeaturesResponse(edition=edition, views=list(_ALL_VIEWS))
+
+        # Associate: the granted views travel in license.views (LicenseSpec),
+        # persisted by config_sync via store.update_license(). The sidebar MUST
+        # reflect the same set the FeatureGuardMiddleware enforces — otherwise the
+        # UI hides/shows the wrong views. Fall back to the minimum associate set
+        # until the first cloud policy lands.
+        views = list(_ASSOCIATE_DEFAULT_VIEWS)
+        try:
+            assoc = store.get()
+            raw_views = assoc.license.get("views") if assoc and assoc.license else None
+            if isinstance(raw_views, list) and raw_views:
+                views = list(raw_views)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.instance.features.license_read_error", extra={"reason": str(exc)})
         return FeaturesResponse(edition=edition, views=views)
 
     return router

@@ -20,6 +20,13 @@ After=network-online.target hermes-runtime.service hermes-keygen.service
 Wants=network-online.target hermes-keygen.service
 Requires=hermes-runtime.service
 PartOf=hermes-workspace.target
+# Activation gate WITHOUT a bespoke ops script: the unit is enabled by default
+# (see [Install]) but only RUNS when the instance is paired. The enterprise
+# marker is written to the persistent volume on `lumen pair` and removed on
+# `lumen unpair`, so this condition makes the sync a no-op in community edition
+# (no restart-loop) and auto-starts it on every boot once paired. The loop also
+# self-exits if is_associated() is false (defence in depth).
+ConditionPathExists=/var/lib/hermes/instance/.enterprise
 
 [Service]
 Type=simple
@@ -55,8 +62,8 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 
 [Install]
-# NOTE: do NOT add to WantedBy here — enable is gated by EE activation (Fase 6).
-# The ops script that enables this unit will run:
-#   systemctl enable --now hermes-config-sync.service
-# which writes the symlink into multi-user.target.wants/ at runtime.
+# Enabled by default in the image (Containerfile: systemctl enable). The
+# ConditionPathExists gate above keeps it inert until the instance is paired,
+# so there is no separate "Fase 6 activation script" to forget — pairing writes
+# the marker and the next boot (or `lumen pair` starting it) brings sync up.
 WantedBy=hermes-workspace.target

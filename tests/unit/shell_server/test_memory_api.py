@@ -131,7 +131,7 @@ class TestGetMemoryEntry:
         p = _proxy(get_return=full_entry)
         client = TestClient(_make_app(p))
         client.get("/api/v1/memory/facts:3")
-        p.call_dict.assert_called_once_with("GetMemoryEntry", "facts:3")
+        p.call_dict.assert_called_once_with("get_memory_entry", "facts:3")
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +176,8 @@ class TestDeleteMemoryEntry:
         p.call_dict = AsyncMock(return_value={"ok": True})
         client = TestClient(_make_app(p))
         client.delete("/api/v1/memory/memory:5")
-        # The DELETE endpoint calls ForgetMemoryEntry; GET calls GetMemoryEntry.
-        # Verify the delete call was made with the forget verb.
+        # The DELETE endpoint calls forget_memory_entry; GET calls
+        # get_memory_entry (dbus-fast exposes call_<snake_case> — a PascalCase
+        # verb fails closed → 503/empty UI; see test_dbus_proxy_verb_names).
         calls = [call.args[0] for call in p.call_dict.call_args_list]
-        assert "ForgetMemoryEntry" in calls
+        assert "forget_memory_entry" in calls

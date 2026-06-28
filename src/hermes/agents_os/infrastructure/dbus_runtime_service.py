@@ -731,6 +731,12 @@ class DbusRuntimeServiceWiring:
         if d.get("managed_by") is not None:
             current.managed_by = d["managed_by"]
         self._provider_repo.update(provider=current, api_key=d.get("api_key") or None)
+        # Honor set_active on update too (parity with add_provider): the cloud
+        # bundle marks the agent's provider_alias active, and re-publishes route
+        # through update_provider once the row exists. Without this the engine
+        # keeps no active model and chat fails with "HERMES_MODEL no definido".
+        if d.get("set_active"):
+            self._provider_repo.set_active(provider_id=pid)
         return self._provider_to_dict(self._provider_repo.get(provider_id=pid))
 
     def delete_provider(self, *, provider_id: str, sender_uid: int) -> bool:

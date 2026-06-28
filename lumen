@@ -17,6 +17,14 @@ IMAGE="${LUMEN_IMAGE:-ghcr.io/devwspito/lumen:latest}"
 ENTERPRISE_IMAGE="${LUMEN_ENTERPRISE_IMAGE:-ghcr.io/devwspito/lumen-enterprise:latest}"
 NAME="${LUMEN_NAME:-lumen}"
 PORT_PIN="${LUMEN_PORT:-}"
+# Enterprise cloud the instance pairs/syncs against. Empty for community edition.
+# Forwarded into the container at run (-e) AND to the pair handshake (--cloud) so
+# the personalized curl one-liner (LUMEN_CLOUD_ENDPOINT=... lumen pair) reaches
+# the tenant's cloud instead of the default https://cloud.lumen.run.
+CLOUD_ENDPOINT="${LUMEN_CLOUD_ENDPOINT:-}"
+# Named volume that holds the persistent state (config, identity, skills, memory).
+# Override LUMEN_DATA_VOLUME to run more than one isolated instance on one host.
+DATA_VOLUME="${LUMEN_DATA_VOLUME:-lumen-data}"
 SECCOMP_URL="${LUMEN_SECCOMP_URL:-https://raw.githubusercontent.com/devwspito/lumen-runtime/main/ops/container/seccomp/lumen.json}"
 SECCOMP_DIR="${HOME:-/tmp}/.lumen"
 SECCOMP="$SECCOMP_DIR/lumen-seccomp.json"
@@ -41,7 +49,14 @@ _is_enterprise() {
 
 # Return the image to use: enterprise if the marker exists, community otherwise.
 _image() {
-  if _is_enterprise; then echo "$ENTERPRISE_IMAGE"; else echo "$IMAGE"; fi
+  # Paired instances prefer the enterprise image, but it only ships in a later
+  # phase. Until the tag is present locally the CE image runs in associate mode
+  # just fine, so fall back to it instead of failing the run on a missing image.
+  if _is_enterprise && "$RT" image inspect "$ENTERPRISE_IMAGE" >/dev/null 2>&1; then
+    echo "$ENTERPRISE_IMAGE"
+  else
+    echo "$IMAGE"
+  fi
 }
 
 # macOS: the cage runs inside a podman machine, which MUST be rootful.
@@ -84,12 +99,13 @@ _run() {
   if [ -n "$PORT_PIN" ]; then publish="127.0.0.1:${PORT_PIN}:7517"; else publish="127.0.0.1::7517"; fi
   "$RT" run -d --name "$NAME" --systemd=always \
     -p "$publish" \
+    ${CLOUD_ENDPOINT:+-e LUMEN_CLOUD_ENDPOINT=$CLOUD_ENDPOINT} \
     --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
     --security-opt seccomp="$SECCOMP" \
     --security-opt unmask=/sys/kernel/security \
     --security-opt label=disable \
     -v /sys/kernel/security:/sys/kernel/security:ro \
-    -v lumen-data:/var/lib/hermes \
+    -v "$DATA_VOLUME":/var/lib/hermes \
     --shm-size=1g \
     "$_active_image" >/dev/null
 }
@@ -209,9 +225,12 @@ cmd_pair() {
   # Run the pairing handshake inside the container.
   # Code is passed via stdin (not argv) to avoid exposure in process listings.
   echo "[*] Running pairing handshake..."
-  printf '%s' "$_code" | "$RT" exec -i "$NAME" python3 -m hermes.instance pair --stdin || { echo "[x] Pairing failed."; exit 1; }
+  printf '%s' "$_code" | "$RT" exec -i "$NAME" python3 -m hermes.instance pair --stdin ${CLOUD_ENDPOINT:+--cloud "$CLOUD_ENDPOINT"} || { echo "[x] Pairing failed."; exit 1; }
   # Write the enterprise marker so future _run / update uses the enterprise image.
   "$RT" exec "$NAME" sh -c "mkdir -p /var/lib/hermes/instance && touch $_ENTERPRISE_MARKER" >/dev/null 2>&1 || true
+  # Start cloud policy sync now (the unit is ConditionPathExists-gated on the
+  # marker we just wrote). Best-effort — a restart would also bring it up.
+  "$RT" exec "$NAME" systemctl start hermes-config-sync.service >/dev/null 2>&1 || true
   echo "[ok] Enterprise association complete.  Restart Lumen to activate: lumen restart"
 }
 
