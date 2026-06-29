@@ -20,15 +20,8 @@ FROM mcr.microsoft.com/playwright:v1.59.0-noble
 # editions (see below); the real activation is RUNTIME pairing state — the
 # .enterprise marker + is_associated() — so a paired CE image runs as the
 # associate. The 'enterprise' tag is therefore functionally redundant.
-#   community  (default) — label "community".
-#   enterprise           — label "enterprise". Same image otherwise.
-#
-# Build the EE tag:
-#   podman build --build-arg LUMEN_EDITION=enterprise \
-#                -f ops/container/Containerfile \
-#                -t ghcr.io/devwspito/lumen-enterprise:latest .
-#
-# Build the CE tag (default):
+# There is ONE runtime image; LUMEN_EDITION defaults to "community" and only
+# stamps the label. Build it:
 #   podman build -f ops/container/Containerfile \
 #                -t ghcr.io/devwspito/lumen:latest .
 ARG LUMEN_EDITION=community

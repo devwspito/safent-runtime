@@ -13,8 +13,11 @@
 # The model, Composio, Brave, agents and skills are all configured IN THE UI.
 set -e
 
+# ONE runtime image for both community and associate (paired) operation. The
+# image carries no edition-specific code: pairing state (the .enterprise marker +
+# is_associated()) is what activates associate behavior at runtime, so the same
+# image runs both roles. There is intentionally no separate "enterprise" image.
 IMAGE="${LUMEN_IMAGE:-ghcr.io/devwspito/lumen:latest}"
-ENTERPRISE_IMAGE="${LUMEN_ENTERPRISE_IMAGE:-ghcr.io/devwspito/lumen-enterprise:latest}"
 NAME="${LUMEN_NAME:-lumen}"
 PORT_PIN="${LUMEN_PORT:-}"
 # Enterprise cloud the instance pairs/syncs against. Empty for community edition.
@@ -39,24 +42,16 @@ OS="$(uname -s 2>/dev/null || echo unknown)"
 _exists()  { "$RT" inspect "$NAME" >/dev/null 2>&1; }
 _running() { [ "$("$RT" inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || echo false)" = true ]; }
 
-# Enterprise marker — written to the persistent volume on pair, removed on unpair.
-# Stored inside the volume so it survives container recreates.
+# Pairing marker — written to the persistent volume on pair, removed on unpair.
+# Stored inside the volume so it survives container recreates. config-sync's
+# systemd ConditionPathExists keys off this marker, so the launcher keeps writing
+# it; it no longer selects a different image (there is only one).
 _ENTERPRISE_MARKER="/var/lib/hermes/instance/.enterprise"
 
-_is_enterprise() {
-  _exists && "$RT" exec "$NAME" test -f "$_ENTERPRISE_MARKER" >/dev/null 2>&1
-}
-
-# Return the image to use: enterprise if the marker exists, community otherwise.
+# Single image for every role. Kept as a function so existing call sites are
+# untouched and a future per-instance image override stays a one-line change.
 _image() {
-  # Paired instances prefer the enterprise image, but it only ships in a later
-  # phase. Until the tag is present locally the CE image runs in associate mode
-  # just fine, so fall back to it instead of failing the run on a missing image.
-  if _is_enterprise && "$RT" image inspect "$ENTERPRISE_IMAGE" >/dev/null 2>&1; then
-    echo "$ENTERPRISE_IMAGE"
-  else
-    echo "$IMAGE"
-  fi
+  echo "$IMAGE"
 }
 
 # macOS: the cage runs inside a podman machine, which MUST be rootful.
@@ -90,7 +85,7 @@ _ensure_seccomp() {
 }
 
 # Recreate the container with the hardened cage (loopback + min caps + seccomp).
-# Uses _image() so enterprise instances keep their tag after an update.
+# Uses _image() (single runtime image, paired or not).
 _run() {
   _ensure_machine
   _ensure_seccomp
@@ -203,10 +198,10 @@ cmd_update() {
 }
 
 # ---- enterprise pairing -----------------------------------------------------
-# NOTE: lumen-enterprise:latest is the image tag produced by Phase 6 of the
-# pairing roadmap.  Until that tag exists the pull will fail gracefully — the
-# pairing metadata is still written to the volume so the CE image runs in
-# associate mode once the enterprise tag ships.
+# Pairing turns this SAME image into the cloud-managed associate at runtime — no
+# separate image to pull. The handshake writes the association row + the
+# .enterprise marker; the marker gates config-sync (ConditionPathExists), which
+# then pulls and applies signed cloud policy.
 
 cmd_pair() {
   _code="$1"
@@ -214,9 +209,6 @@ cmd_pair() {
     echo "[x] Usage: lumen pair <code>"; exit 1
   fi
   _ensure_machine
-  # Pull the enterprise image (best-effort — CE image still works in associate mode).
-  echo "[*] Pulling the enterprise image (Phase 6 tag — may not exist yet)..."
-  "$RT" pull "$ENTERPRISE_IMAGE" 2>/dev/null || echo "[!] Enterprise image not yet available — continuing with CE image in associate mode."
   # Ensure the container is running before we exec into it.
   if ! _running; then
     echo "[*] Starting Lumen to complete pairing..."
@@ -226,7 +218,7 @@ cmd_pair() {
   # Code is passed via stdin (not argv) to avoid exposure in process listings.
   echo "[*] Running pairing handshake..."
   printf '%s' "$_code" | "$RT" exec -i "$NAME" python3 -m hermes.instance pair --stdin ${CLOUD_ENDPOINT:+--cloud "$CLOUD_ENDPOINT"} || { echo "[x] Pairing failed."; exit 1; }
-  # Write the enterprise marker so future _run / update uses the enterprise image.
+  # Write the pairing marker so config-sync's ConditionPathExists gate opens.
   "$RT" exec "$NAME" sh -c "mkdir -p /var/lib/hermes/instance && touch $_ENTERPRISE_MARKER" >/dev/null 2>&1 || true
   # Start cloud policy sync now (the unit is ConditionPathExists-gated on the
   # marker we just wrote). Best-effort — a restart would also bring it up.
@@ -240,7 +232,7 @@ cmd_unpair() {
     echo "[x] Lumen must be running to unpair.  Start it with: lumen start"; exit 1
   fi
   "$RT" exec "$NAME" python3 -m hermes.instance unpair || { echo "[x] Unpair failed."; exit 1; }
-  # Remove the enterprise marker so future runs use the CE image.
+  # Remove the pairing marker so config-sync goes inert again (community mode).
   "$RT" exec "$NAME" rm -f "$_ENTERPRISE_MARKER" >/dev/null 2>&1 || true
   echo "[ok] Instance unpaired.  Restart Lumen to revert to community edition: lumen restart"
 }
@@ -268,7 +260,7 @@ lumen - control your local Lumen
   lumen update     pull the latest version and apply it (keeps your config)
   lumen status     is it running? on which port?
   lumen logs       follow the container journal
-  lumen pair <code>   associate with an enterprise tenant (switches to enterprise image)
+  lumen pair <code>   associate with an enterprise tenant (same image, associate mode)
   lumen unpair        remove the enterprise association (reverts to community edition)
 EOF
 }
