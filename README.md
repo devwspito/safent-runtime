@@ -7,16 +7,29 @@
 
 ## Install (one line)
 
-macOS (Apple Silicon / Intel) and Linux (amd64 / arm64):
+Same container, same security cage on every OS. Pick your platform:
 
+### Linux (amd64 / arm64)
 ```sh
 curl -fsSL https://raw.githubusercontent.com/devwspito/lumen-runtime/main/get-lumen.sh | sh
 ```
+Requires **podman** or **docker** on a **Landlock-capable kernel** (≥ 5.13 — standard on current distros).
 
-This pulls the public hardened image, runs it with the security cage, and opens your
-browser at a per-boot unique token. The model, Composio, Brave, agents and skills are all
-configured in the UI. Requires **podman** or **docker** (on macOS, a **rootful** podman
-machine). Windows: experimental via WSL2.
+### macOS (Apple Silicon / Intel)
+```sh
+curl -fsSL https://raw.githubusercontent.com/devwspito/lumen-runtime/main/get-lumen.sh | sh
+```
+Runs inside a **rootful podman machine** (the installer creates it). Details: [dist-mac/INSTALL-mac.md](dist-mac/INSTALL-mac.md).
+
+### Windows (10 / 11) — PowerShell
+```powershell
+iwr -useb https://raw.githubusercontent.com/devwspito/lumen-runtime/main/get-lumen.ps1 | iex
+```
+Requires **WSL2** (`wsl --install`) + **Podman Desktop**, on a **WSL2 kernel ≥ 6.6** (`wsl --update`). Runs inside a rootful podman machine — the **same cage** as Linux/macOS. Details: [dist-win/INSTALL-win.md](dist-win/INSTALL-win.md).
+
+All three pull the same public hardened image, run it with the security cage, and open your
+browser at a per-boot unique token. The model, Composio, agents and skills are all
+configured in the UI.
 
 ## Control it from the terminal — the `lumen` command
 
