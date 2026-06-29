@@ -28,12 +28,49 @@ from hermes.domain.cycle_output import TokenUsage
 from hermes.shell_server.metering.agent_stats_api import (
     _active_agent_ids,
     _agent_stat,
+    _dedup_key,
     _EMPTY_TODAY,
     _build_agent_stats,
 )
 from hermes.shell_server.metering.usage_repo import SQLiteUsageRepository
 
 pytestmark = pytest.mark.unit
+
+
+# ---------------------------------------------------------------------------
+# SSE stream dedup — runtime.captured_at must NOT count as a change
+# (regression: a fresh per-call timestamp defeated the dedup, re-pushing a full
+#  frame every tick and starving the keepalive branch).
+# ---------------------------------------------------------------------------
+def test_dedup_key_ignores_captured_at():
+    """Two snapshots that differ ONLY in runtime.captured_at have the same key."""
+    base = {
+        "runtime": {"state": "idle", "active_task_count": 0, "available": True},
+        "stats": {"available": True, "agents": []},
+    }
+    a = {"runtime": {**base["runtime"], "captured_at": "2026-06-29T00:00:00+00:00"}, "stats": base["stats"]}
+    b = {"runtime": {**base["runtime"], "captured_at": "2026-06-29T00:00:02+00:00"}, "stats": base["stats"]}
+    assert _dedup_key(a) == _dedup_key(b)
+
+
+def test_dedup_key_detects_real_state_change():
+    """A real change (idle → working) yields a different key."""
+    idle = {
+        "runtime": {"state": "idle", "active_task_count": 0, "captured_at": "t1"},
+        "stats": {"available": True, "agents": []},
+    }
+    working = {
+        "runtime": {"state": "working", "active_task_count": 1, "captured_at": "t2"},
+        "stats": {"available": True, "agents": []},
+    }
+    assert _dedup_key(idle) != _dedup_key(working)
+
+
+def test_dedup_key_detects_stats_change():
+    """A change in per-agent stats (today usage) also yields a different key."""
+    a = {"runtime": {"state": "idle", "captured_at": "t1"}, "stats": {"available": True, "agents": [{"agent_id": "x", "today": {"tasks": 0}}]}}
+    b = {"runtime": {"state": "idle", "captured_at": "t2"}, "stats": {"available": True, "agents": [{"agent_id": "x", "today": {"tasks": 3}}]}}
+    assert _dedup_key(a) != _dedup_key(b)
 
 
 # ---------------------------------------------------------------------------

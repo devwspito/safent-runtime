@@ -26,7 +26,7 @@ import {
 } from '../components/ui/motion'
 import styles from './McpView.module.css'
 
-// Curated catalog — mirrors mcp.js MCP_CATALOG (npx-only verified servers).
+// Curated catalog of verified one-click MCP servers (npx/uvx).
 const MCP_CATALOG: McpRegistryEntry[] = [
   {
     server_id: 'github',
@@ -214,9 +214,15 @@ export default function McpView() {
   }
 
   async function installEntry(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void) {
+    // npx (npm) and uvx (PyPI) both resolve to a published package the content +
+    // CVE scanners can fetch and statically analyze, so the verdict is REAL. Other
+    // runners (local node/python3 scripts, inline commands) have no inspectable
+    // coordinate → kept out of the one-click path; the backend scan also treats an
+    // MCP with no published package as non-analyzable (owner review, never PASS).
     const runner = getRunner(entry.argv)
-    if (runner && runner !== 'npx') {
-      show(`Solo se admiten herramientas npx por ahora (esta usa ${runner}).`, 'warn', 7000)
+    const ALLOWED_RUNNERS = ['npx', 'uvx']
+    if (runner && !ALLOWED_RUNNERS.includes(runner)) {
+      show(`Por ahora se admiten herramientas npx y uvx (esta usa ${runner}).`, 'warn', 7000)
       onDone()
       return
     }

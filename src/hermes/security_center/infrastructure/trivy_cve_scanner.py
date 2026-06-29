@@ -96,9 +96,16 @@ class TriviaCveScanner:
             if risks is None:
                 return self._unanalyzable(f"dir:{target.source_url}")
             return risks
-        # 3) Nothing fetchable/local for trivy (e.g. a hub SKILL.md with no deps):
-        #    covered by the content/lint scanners. This is NOT a coverage gap — there
-        #    is no dependency tree to CVE-scan — so it is the ONE case that returns [].
+        # 3) Nothing fetchable/local for trivy:
+        #    - A hub SKILL.md with no deps: legitimately nothing to CVE-scan → []
+        #      (the content/lint scanners cover it; there is no dependency tree).
+        #    - An MCP SERVER with no published package and no source dir runs code
+        #      we cannot inspect at all (a local `node srv.js` / `python3 srv.py`,
+        #      or an inline runner). Absence of analysis must NOT read as PASS, so
+        #      emit a cve:unanalyzable HIGH → _compose_score caps it to WARN/FAIL
+        #      and the owner reviews it. (security: no silent PASS for opaque MCPs)
+        if "mcp" in (target.kind or "").lower():
+            return self._unanalyzable("mcp:sin-paquete-publicado-inspeccionable")
         return []
 
     async def _scan_package(

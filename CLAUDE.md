@@ -29,7 +29,7 @@ set NoNewPrivileges PER-UNIT. Use `ops/container/run-lumen.sh` (or replicate its
 - `src/hermes/` — the entire product (one Python package, `hermes`):
   - daemon + **Nous** reasoning engine (`runtime/`),
   - **Lumen UI** (`lumen/` — QML compositor + apps),
-  - **Office UI** (`shell_server/webui/js/office.js` — live agent floor) + the Cowork web UI (`shell_server/webui/`),
+  - **React web app** (`frontend/` → built to `/opt/lumen-webapp`, served at `/app/`): chat, Office "agent floor" (`frontend/src/views/OfficeView.tsx`), security, skills, MCP, providers, memory. The single official UI (the legacy vanilla `shell_server/webui/` was removed),
   - MCP / skills / composio (`tool_search`/`tool_call`, **ruflo** swarm).
 - `ops/container/` — the Playwright Containerfile (the delivery).
 - `ops/agent-cage/` — OpenShell cage (binary + systemd drop-in).

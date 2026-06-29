@@ -117,10 +117,9 @@ where = ["src"]
 # (CSS_PATH relativo al módulo app.py).
 "hermes.tui" = ["*.tcss"]
 "hermes.shell_server.mirror" = ["static/*.html"]
-# Lumen Cowork web UI — static assets served by shell-server (StaticFiles at
-# /webui). Keyed on the shell_server package (webui/ has no __init__.py); without
-# this the wheel ships no UI and the baked image serves a blank page.
-"hermes.shell_server" = ["webui/*.html", "webui/*.css", "webui/*.md", "webui/*.json", "webui/js/*.js", "webui/assets/*", "webui/vendor/*.js", "webui/vendor/*.mjs"]
+# The React web app is the single official UI; the Containerfile builds it into
+# /opt/lumen-webapp (it is not shipped inside the wheel). The legacy vanilla
+# shell_server/webui/ was removed, so there is no package-data to declare here.
 # Cert CA de freeTSA bakeado en el paquete (no por ruta de repo — se rompía
 # instalado en /usr/lib, ver tsa_external_anchor._load_bundled_cert).
 "hermes.capabilities.infrastructure" = ["*.crt"]

@@ -3,7 +3,7 @@ import { useNavigate, useOutletContext } from 'react-router-dom'
 import { sileo } from 'sileo'
 import { X, AlertTriangle, Users, RefreshCw, Maximize2 } from 'lucide-react'
 
-import { getAgentRoster, getRuntimeStatus, listMcpServers, createAgent, updateAgent, deleteAgent, getDefaultRoster, setDefaultRoster, getAgentStats } from '../api/client'
+import { getAgentRoster, getRuntimeStatus, listMcpServers, createAgent, updateAgent, deleteAgent, getDefaultRoster, setDefaultRoster, getAgentStats, openRuntimeStream } from '../api/client'
 import type { AgentRoster, RosterAgent, RosterDepartment, RuntimeStatus, CreateAgentPayload, UpdateAgentPayload, AgentStatsResponse } from '../api/types'
 import type { LumenAgent, LumenRuntimeStatus } from './office-live/engine/office-state'
 import { useConfirmDialog } from '../components/ConfirmDialog'
@@ -873,7 +873,6 @@ export default function OfficeView() {
   const [selectedAgent, setSelectedAgent] = useState<RosterAgent | null>(null)
   const [showCloneModalRoot, setShowCloneModalRoot] = useState(false)
   const [clonePrefillRoot, setClonePrefillRoot] = useState<ClonePrefill | null>(null)
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // ── Default roster toggle ────────────────────────────────────────────────
   const [defaultRosterEnabled, setDefaultRosterEnabled] = useState(true)
@@ -923,21 +922,12 @@ export default function OfficeView() {
     return () => { cancelled = true }
   }, [t])
 
-  // ── Runtime status + agent stats polling (4 s) ──────────────────────────
+  // ── Runtime status + agent stats: live SSE push (replaces the 4 s poll) ──
   useEffect(() => {
-    pollRef.current = setInterval(async () => {
-      try {
-        const [runtimeStatus, agentStats] = await Promise.all([
-          getRuntimeStatus(),
-          getAgentStats(),
-        ])
-        dispatch({ type: 'STATUS_UPDATE', runtimeStatus, agentStats })
-      } catch { /* silent — stale status on network hiccup is acceptable */ }
-    }, 4_000)
-
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current)
-    }
+    const close = openRuntimeStream(({ runtime, stats }) => {
+      dispatch({ type: 'STATUS_UPDATE', runtimeStatus: runtime, agentStats: stats })
+    })
+    return close
   }, [])
 
   const handleCanvasAgentClick = useCallback((agentId: string, _agentName: string) => {

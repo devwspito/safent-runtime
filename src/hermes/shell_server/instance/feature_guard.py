@@ -73,9 +73,6 @@ _ALWAYS_ALLOWED_PREFIXES: frozenset[str] = frozenset({
     "/healthz",
     "/metrics",
     "/app/",
-    "/webui/",
-    "/classic",
-    "/ws/",
 })
 
 # Exact paths that are always allowed (e.g. the SPA root redirect).

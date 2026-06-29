@@ -12,6 +12,7 @@ from hermes.security_center.infrastructure.composio_allowlist import ComposioAll
 from hermes.security_center.infrastructure.heuristic_fallback import HeuristicFallbackScanner
 from hermes.security_center.infrastructure.mcp_tool_linter import McpToolLinter
 from hermes.security_center.infrastructure.provenance_scanner import ProvenanceScanner
+from hermes.security_center.infrastructure.trivy_cve_scanner import TriviaCveScanner
 
 pytestmark = pytest.mark.unit
 
@@ -19,6 +20,36 @@ pytestmark = pytest.mark.unit
 def _target(**kwargs) -> InstallTarget:
     base = {"kind": "mcp_server", "identifier": "test"}
     return InstallTarget(**{**base, **kwargs})
+
+
+# ---------------------------------------------------------------------------
+# TriviaCveScanner — no-coordinate is non-analyzable for MCP, [] for skill
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_cve_mcp_without_coordinate_is_unanalyzable():
+    """An MCP whose code can't be fetched (no published pkg, no source dir) must
+    NOT read as PASS — emit a cve:unanalyzable HIGH so the score caps to WARN/FAIL."""
+    risks = await TriviaCveScanner().scan(_target(kind="mcp", identifier="local-server"))
+    assert len(risks) == 1
+    assert risks[0].severity == Severity.HIGH
+    assert (risks[0].evidence_ref or "").startswith("cve:unanalyzable")
+
+
+@pytest.mark.asyncio
+async def test_cve_mcp_local_runner_is_unanalyzable():
+    """A `node srv.js` / `python3 srv.py` MCP has no fetchable coordinate → unanalyzable."""
+    risks = await TriviaCveScanner().scan(
+        _target(kind="mcp_server", identifier="x", argv=["node", "server.js"])
+    )
+    assert len(risks) == 1
+    assert (risks[0].evidence_ref or "").startswith("cve:unanalyzable")
+
+
+@pytest.mark.asyncio
+async def test_cve_skill_without_coordinate_returns_empty():
+    """A hub SKILL.md with no deps legitimately has no dependency tree → [] (content/lint cover it)."""
+    risks = await TriviaCveScanner().scan(_target(kind="skill", identifier="some-skill"))
+    assert risks == []
 
 
 # ---------------------------------------------------------------------------

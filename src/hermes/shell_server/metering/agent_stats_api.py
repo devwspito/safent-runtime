@@ -35,12 +35,16 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 
 from hermes.shell_server.metering.usage_repo import SQLiteUsageRepository
 
@@ -51,6 +55,17 @@ _DB_PATH = Path(
 )
 
 _EMPTY_TODAY: dict[str, Any] = {"tokens": 0, "cost_usd": 0.0, "tasks": 0}
+
+# Office floor live stream (SSE). One connection per client; the server pushes a
+# new snapshot only when it changed, with a periodic keepalive so proxies don't
+# drop the idle connection. Replaces the old 4 s client poll.
+_STREAM_TICK_S = 2.0
+_STREAM_KEEPALIVE_S = 20.0
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",  # disable proxy buffering so frames flush immediately
+}
 
 
 def _active_agent_ids(runtime_status: dict[str, Any]) -> frozenset[str]:
@@ -108,17 +123,91 @@ def create_agent_stats_router() -> APIRouter:
             logger.exception("hermes.agent_stats.build_failed")
             return {"available": False, "agents": []}
 
+    @router.get("/api/v1/runtime/agent-stream")
+    async def runtime_stream(request: Request) -> StreamingResponse:
+        """SSE push of the live Office floor: runtime status + per-agent stats.
+
+        Replaces the 4 s client poll with a single server-pushed stream. Emits a
+        frame only when the snapshot changes (one D-Bus round-trip per tick), plus
+        a periodic keepalive so idle connections survive. Fail-soft per tick.
+        """
+
+        async def _gen() -> Any:
+            last_key: str | None = None
+            idle_s = 0.0
+            while True:
+                if await request.is_disconnected():
+                    break
+                snapshot = await _build_runtime_snapshot(request)
+                # Dedup on the SEMANTIC snapshot: runtime.captured_at is a fresh
+                # per-call timestamp with no frontend consumer, so it must NOT count
+                # as a change — otherwise every tick reads as "changed", a full frame
+                # is re-pushed every _STREAM_TICK_S and the keepalive branch never
+                # fires (idle proxies would then drop the connection).
+                dedup_key = _dedup_key(snapshot)
+                if dedup_key != last_key:
+                    last_key = dedup_key
+                    idle_s = 0.0
+                    yield f"data: {json.dumps(snapshot, default=str)}\n\n"
+                else:
+                    idle_s += _STREAM_TICK_S
+                    if idle_s >= _STREAM_KEEPALIVE_S:
+                        idle_s = 0.0
+                        yield ": keepalive\n\n"
+                await asyncio.sleep(_STREAM_TICK_S)
+
+        return StreamingResponse(
+            _gen(), media_type="text/event-stream", headers=_SSE_HEADERS
+        )
+
     return router
 
 
-async def _build_agent_stats(request: Request) -> dict[str, Any]:
-    proxy = request.app.state.dbus_proxy
+def _dedup_key(snapshot: dict[str, Any]) -> str:
+    """Stable change-detection key for the Office snapshot.
 
-    runtime_status: dict[str, Any] = {}
+    Excludes runtime.captured_at (a fresh per-call timestamp with no frontend
+    consumer) so an unchanged floor does not read as a change every tick — which
+    would re-push a full frame every tick and starve the keepalive branch.
+    """
+    runtime = {
+        k: v for k, v in snapshot.get("runtime", {}).items() if k != "captured_at"
+    }
+    return json.dumps(
+        {"runtime": runtime, "stats": snapshot.get("stats")}, default=str, sort_keys=True
+    )
+
+
+async def _build_runtime_snapshot(request: Request) -> dict[str, Any]:
+    """Combined Office-floor snapshot: one get_runtime_status feeds both views."""
+    proxy = request.app.state.dbus_proxy
     try:
         runtime_status = await proxy.call_dict("get_runtime_status")
-    except Exception:  # noqa: BLE001
-        logger.warning("hermes.agent_stats.dbus_unavailable — proceeding without live state")
+        runtime_status.setdefault("available", True)
+    except Exception:  # noqa: BLE001 — daemon transient/unavailable
+        runtime_status = {
+            "state": "idle",
+            "active_task_count": 0,
+            "available": False,
+            "captured_at": datetime.now(tz=UTC).isoformat(),
+        }
+    stats = await _build_agent_stats(request, runtime_status=runtime_status)
+    return {"runtime": runtime_status, "stats": stats}
+
+
+async def _build_agent_stats(
+    request: Request, *, runtime_status: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    proxy = request.app.state.dbus_proxy
+
+    # The stream caller fetches runtime status once and passes it in to avoid a
+    # second D-Bus round-trip per tick; the plain endpoint fetches it here.
+    if runtime_status is None:
+        runtime_status = {}
+        try:
+            runtime_status = await proxy.call_dict("get_runtime_status")
+        except Exception:  # noqa: BLE001
+            logger.warning("hermes.agent_stats.dbus_unavailable — proceeding without live state")
 
     active_ids = _active_agent_ids(runtime_status)
 
@@ -135,7 +224,7 @@ async def _build_agent_stats(request: Request) -> dict[str, Any]:
         for a in raw_agents
     ]
 
-    available = bool(runtime_status)
+    available = runtime_status.get("available", bool(runtime_status))
     return {"available": available, "agents": agents}
 
 

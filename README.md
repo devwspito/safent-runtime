@@ -53,7 +53,7 @@ MFA enrollment and provider settings persist in the `lumen-data` volume.
 - **Daemon** — the Lumen runtime + the **Nous** reasoning engine.
 - **The cage** — OpenShell confinement substrate (`ops/agent-cage/`) + netns/egress moat + Landlock + seccomp. The agent's terminal/browser/MCP run sandboxed.
 - **Lumen UI** — QML compositor + apps (`src/hermes/lumen/`: chat, tasks, security, skills, integrations, memory).
-- **Office UI** — live "agent floor" web view (`src/hermes/shell_server/webui/js/office.js`), part of the Lumen Cowork web UI.
+- **Office UI** — live "agent floor" web view (`frontend/src/views/OfficeView.tsx`), part of the Lumen React web app.
 - **MCP / skills / composio** — `tool_search`/`tool_call` discovery (incl. **ruflo** multi-agent swarm), skills, composio.
 
 ## Build

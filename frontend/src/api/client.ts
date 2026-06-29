@@ -505,6 +505,31 @@ export function getAgentStats(): Promise<AgentStatsResponse> {
   )
 }
 
+/** A live Office-floor snapshot pushed over SSE. */
+export interface RuntimeSnapshot {
+  runtime: RuntimeStatus
+  stats: AgentStatsResponse
+}
+
+/**
+ * Subscribe to the live Office floor via SSE (runtime status + agent stats).
+ * Replaces the old 4 s poll: one connection, the server pushes on change.
+ * EventSource auto-reconnects on a dropped connection. Returns a disposer.
+ */
+export function openRuntimeStream(
+  onSnapshot: (snap: RuntimeSnapshot) => void,
+): () => void {
+  const es = new EventSource('/api/v1/runtime/agent-stream')
+  es.onmessage = (event: MessageEvent) => {
+    try {
+      onSnapshot(JSON.parse(event.data as string) as RuntimeSnapshot)
+    } catch {
+      /* ignore a malformed frame — the next tick supersedes it */
+    }
+  }
+  return () => es.close()
+}
+
 // ── Chat ──────────────────────────────────────────────────────────────────────
 
 /**

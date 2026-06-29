@@ -1,8 +1,8 @@
 /**
- * useChat — manages a single chat conversation with live WebSocket streaming.
+ * useChat — manages a single chat conversation with live SSE streaming.
  *
- * Mirrors the logic in vanilla chat.js (sendMessage / attachLiveStream) but
- * expressed as a React hook with immutable state instead of direct DOM mutation.
+ * Implements the sendMessage / live-stream-attach flow as a React hook with
+ * immutable state (instead of direct DOM mutation), resuming via Last-Event-ID.
  *
  * Resilience strategy (belt-and-suspenders, same model as Office/Live):
  *   - The WS stream is the fast path — frame-by-frame deltas while it flows.
@@ -793,7 +793,7 @@ export function useChat(): UseChatReturn {
 
     stopStream()
 
-    // Own the conversation id client-side (mirrors vanilla chat.js genUUID pattern)
+    // Own the conversation id client-side (generate it locally before the first send)
     let convId = state.convId
     const isNewConversation = !convId
     if (!convId) {

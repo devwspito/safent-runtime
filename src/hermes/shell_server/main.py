@@ -4,13 +4,16 @@ Escucha SOLO en 127.0.0.1:7517. Expone:
 
   /healthz
   /api/v1/profile                       perfil del SO (personal-desktop, etc)
-  /api/v1/runtime/status                estado del agente (mock por ahora)
+  /api/v1/runtime/status                estado live del agente (D-Bus get_runtime_status)
+  /api/v1/runtime/agent-stream          SSE: floor de la Office (status + stats) en push
 
   /api/v1/chat                          POST mensaje → encola vía ControlPlanePort
                                          Devuelve {task_id, stream_path}
-  /ws/tasks/{task_id}                   WebSocket stream de tarea (daemon-owned)
-
+  /api/v1/chat/stream/{task_id}         SSE del chat (Last-Event-ID → resume); lee el
+                                         socket interno del daemon /ws/tasks/{id}
   /api/v1/chat/conversations            Mirror read-only del historial
+
+  UI: la app React (servida en /app/, / redirige ahí) es la única UI oficial.
 """
 
 from __future__ import annotations
@@ -1314,115 +1317,16 @@ def create_app() -> FastAPI:
 
     app.include_router(create_instance_router(_DB_PATH, vault))
 
-    # ------------------------------------------------------------------
-    # Static web UI — mounted LAST so it never shadows /api/v1/* or /ws/*.
-    # The webui/ directory is owned by the frontend engineer; we only mount it.
-    # html=True makes FastAPI serve index.html for bare directory requests so
-    # client-side routing works (GET / → index.html).
-    # If the directory is absent (dev without a frontend build), skip silently
-    # so the API server still starts cleanly.
-    # ------------------------------------------------------------------
-    _webui_dir = Path(__file__).parent / "webui"
-    if _webui_dir.is_dir():
-        from fastapi.staticfiles import StaticFiles  # noqa: PLC0415
-        from fastapi.responses import FileResponse  # noqa: PLC0415
-        from starlette.types import Scope  # noqa: PLC0415
-
-        class _NoCacheStatic(StaticFiles):
-            """Serve assets with no-cache so the browser always revalidates.
-
-            The web UI is a single-page app whose ES modules import each other by
-            relative path with no content hash in the URL. With the default
-            (no Cache-Control) browsers apply heuristic caching and keep serving
-            stale modules after an update — so a deploy/bake silently doesn't show.
-            Forcing revalidation (etag/last-modified still make it a cheap 304)
-            keeps the UI always fresh without disabling caching entirely.
-            """
-
-            async def get_response(self, path: str, scope: Scope):  # noqa: ANN001
-                resp = await super().get_response(path, scope)
-                resp.headers["Cache-Control"] = "no-cache, must-revalidate"
-                return resp
-
-        # Assets are served under /webui/* — this MATCHES the absolute paths the
-        # frontend uses in index.html (<link href="/webui/style.css">,
-        # <script src="/webui/js/app.js">, /webui/assets/...). The JS modules
-        # import each other relatively (./foo.js), so they resolve under /webui/
-        # too. Mounted before the bare "/" route; /api/* and /ws/* are registered
-        # earlier so neither is shadowed.
-        app.mount("/webui", _NoCacheStatic(directory=str(_webui_dir)), name="webui")
-
-        # The React SPA is now the default UI at "/" (see the React block below,
-        # which registers a "/" → "/app/" redirect). The legacy vanilla UI stays
-        # reachable at "/classic". If the React bundle is ABSENT (dev without
-        # `npm run build`), we fall back to serving the vanilla UI at "/" too, so
-        # the server is never UI-less.
-        _react_dist_present = Path(
-            os.environ.get("LUMEN_REACT_DIST", "/opt/lumen-webapp")
-        ).is_dir()
-
-        @app.get("/classic", include_in_schema=False)
-        async def _serve_webui_index(request: Request):  # noqa: ANN202
-            # C3 PASS-5: do NOT serve the stable operator token to unauthenticated
-            # GET /. The owner proves possession of the bootstrap secret (?k=… or
-            # the X-Lumen-Bootstrap header — its PLAINTEXT is root:root 0400 inside
-            # the root-owned /var/lib/hermes-bootstrap/bootstrap/ dir, readable
-            # ONLY from the host side, see _load_bootstrap_commitment).
-            # The shell-server holds only a non-invertible COMMITMENT, so it can
-            # VERIFY a presented secret but cannot itself forge the handshake — and
-            # neither can any in-container uid-880/uid-886 process, which at most
-            # reads the same commitment. On a match we mint a SHORT-LIVED ROTATING
-            # session token and inject THAT; scraping the page yields no usable
-            # mutator credential. Without a valid secret the SPA still loads
-            # (read-only browse), it simply can't mutate. The token never crosses
-            # the network boundary (loopback publish) and is not the master key.
-            import json as _json_mod  # noqa: PLC0415
-
-            from fastapi.responses import HTMLResponse  # noqa: PLC0415
-
-            presented = (
-                request.query_params.get("k")
-                or request.headers.get("x-lumen-bootstrap", "")
-            )
-            page = (_webui_dir / "index.html").read_text(encoding="utf-8")
-            if presented and _commitment_matches(
-                app.state.shell_bootstrap_commitment or "", presented
-            ):
-                session_token = app.state.mint_session_token()
-                # JSON-encode the minted value so it can never break out of the JS
-                # string literal (defense in depth).
-                inject = (
-                    "<script>window.__LUMEN_TOKEN__="
-                    + _json_mod.dumps(session_token)
-                    + ";</script>"
-                )
-                page = page.replace("</head>", inject + "</head>", 1)
-            # no-store: the response may carry a freshly minted session token AND
-            # the request URL may carry the bootstrap secret — neither must be
-            # persisted by any intermediary or the browser disk cache.
-            return HTMLResponse(page, headers={"Cache-Control": "no-store"})
-
-        if not _react_dist_present:
-            # No React bundle → vanilla is also the root UI (dev fallback).
-            app.add_api_route("/", _serve_webui_index, include_in_schema=False)
-
-        logger.info("hermes.shell_server.webui.mounted", extra={"path": str(_webui_dir)})
-    else:
-        logger.info(
-            "hermes.shell_server.webui.absent",
-            extra={"path": str(_webui_dir), "note": "web UI not bundled — API-only mode"},
-        )
 
     # ------------------------------------------------------------------
-    # React SPA — served at /app/ in parallel with the vanilla UI at /.
-    # The vanilla UI remains untouched; /app/ is the progressive replacement.
+    # React SPA — the single official UI, served at /app/ ( / redirects here).
     # Absent at build time (dev without frontend build) → skipped silently.
     #
     # Baked path: /opt/lumen-webapp  (set by Containerfile).
     # Override for local dev: LUMEN_REACT_DIST env var.
     #
-    # Token injection: same mechanism as the vanilla UI — the bootstrap
-    # handshake injects window.__LUMEN_TOKEN__ into the served index.html.
+    # Token injection: the bootstrap handshake injects window.__LUMEN_TOKEN__
+    # into the served index.html.
     # The placeholder comment <!--lumen-token-injection-placeholder--> in
     # frontend/index.html marks where the <script> tag is inserted (defence
     # in depth: even if </head> appears twice, the placeholder is unique).
