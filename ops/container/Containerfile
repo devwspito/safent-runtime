@@ -14,11 +14,14 @@
 # would force the dev-mode bypass = silent loss of the confinement moat.
 FROM mcr.microsoft.com/playwright:v1.59.0-noble
 
-# LUMEN_EDITION controls the image variant produced at build time.
-#   community  (default) — CE: hermes-config-sync is present but NOT enabled;
-#                          the sync service is a no-op without a pairing anyway.
-#   enterprise           — EE: hermes-config-sync is enabled in the image so the
-#                          sync loop starts automatically after pairing on boot.
+# LUMEN_EDITION only writes a COSMETIC label string to /usr/share/hermes/edition
+# (surfaced on /api/v1/profile, consumed by nothing). It does NOT gate any unit,
+# view, capability, or security control. hermes-config-sync is enabled in BOTH
+# editions (see below); the real activation is RUNTIME pairing state — the
+# .enterprise marker + is_associated() — so a paired CE image runs as the
+# associate. The 'enterprise' tag is therefore functionally redundant.
+#   community  (default) — label "community".
+#   enterprise           — label "enterprise". Same image otherwise.
 #
 # Build the EE tag:
 #   podman build --build-arg LUMEN_EDITION=enterprise \

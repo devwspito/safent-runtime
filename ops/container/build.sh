@@ -8,9 +8,13 @@
 #   ./ops/container/build.sh --push     # push after building (requires registry auth)
 #
 # The Containerfile accepts ARG LUMEN_EDITION=community (default) | enterprise.
-# Both tags share the same base layers; only the edition marker file and the
-# systemctl-enable for hermes-config-sync differ, so the EE build reuses the CE
-# layer cache and is fast.
+# The two tags are FUNCTIONALLY IDENTICAL images: the ONLY build-time difference
+# is the cosmetic label string written to /usr/share/hermes/edition (surfaced on
+# /api/v1/profile, read by nothing). hermes-config-sync is enabled in BOTH
+# editions; what actually makes it run is RUNTIME pairing state (the .enterprise
+# marker + is_associated()), not the build. The EE build reuses the CE layer
+# cache and is fast — and the EE tag is effectively redundant (a paired CE image
+# already runs in associate mode).
 #
 # DO NOT run builds from CI/CD as a developer — the pipeline owns publishing.
 # This script is for local validation only.

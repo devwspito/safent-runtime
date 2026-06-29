@@ -3,12 +3,12 @@
 # Pulls a signed PolicyBundle from the cloud endpoint, verifies the
 # Ed25519 signature, and applies the policy via the local D-Bus verbs.
 #
-# Gated on Enterprise Edition (EE): this unit is INSTALLED in the image
-# (the Containerfile COPY picks it up from ops/agents-os-edition/systemd/)
-# but NOT enabled by default.  The EE activation gate (Fase 6) enables it
-# with `systemctl enable --now hermes-config-sync.service` during tenant
-# onboarding after the instance has been successfully paired (is_associated()
-# returns True).
+# Enabled UNCONDITIONALLY in every image (the Containerfile systemctl-enables it
+# for both editions). It stays inert until the instance is paired: the
+# ConditionPathExists gate below blocks start until the .enterprise marker exists
+# (written by `lumen pair`), and config_sync itself exits early if
+# not is_associated(). So a plain community image becomes the associate the
+# moment it is paired — no edition-specific build step is involved.
 #
 # To enable manually for testing inside the container:
 #   systemctl enable --now hermes-config-sync.service
