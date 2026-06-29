@@ -211,12 +211,29 @@ class AgentLoopOrchestrator:
         is_chat = item.kind is WorkItemKind.CHAT_MESSAGE
         chunk_sink = self._chunk_sink
 
+        # conversation_id (server-side, CWE-862 safe) — needed both for the stream
+        # injection AND for the counting sink's incremental persistence.
+        _conv_id_for_inject = (item.payload.get("conversation_id") or "").strip()
+        _conv_uuid_for_persist = None
+        if is_chat and _conv_id_for_inject and self._conversation_repo is not None:
+            try:
+                from uuid import UUID as _UUID  # noqa: PLC0415
+                _conv_uuid_for_persist = _UUID(_conv_id_for_inject)
+            except (ValueError, AttributeError):
+                _conv_uuid_for_persist = None
+
         # FIX B.2 — wrap the real sink in a counting adapter so we know post-cycle
         # whether the engine emitted incremental deltas (streaming) or nothing.
-        # The counting sink is injected into metadata; the original is used for
-        # emit_status (before the context is built) and for the fallback close().
+        # It ALSO persists the answer incrementally to the mirror (resume mirror-first
+        # on refresh). The original sink is used for emit_status + the fallback close().
         counting_sink: _CountingChunkSink | None = (
-            _CountingChunkSink(chunk_sink) if (is_chat and chunk_sink is not None) else None
+            _CountingChunkSink(
+                chunk_sink,
+                repo=self._conversation_repo,
+                conversation_id=_conv_uuid_for_persist,
+                task_id=item.id,
+            )
+            if (is_chat and chunk_sink is not None) else None
         )
         effective_sink = counting_sink if counting_sink is not None else chunk_sink
 
@@ -228,7 +245,6 @@ class AgentLoopOrchestrator:
             # al engine emitir ChatDelta/ChatStreamEnd D-Bus signals
             # (spec streaming-dbus). Ambos vienen del WorkItem server-side
             # (CWE-862 safe — nunca del payload directo del cliente).
-            _conv_id_for_inject = (item.payload.get("conversation_id") or "").strip()
             ctx = _inject_chunk_sink(
                 ctx, counting_sink, task_id=item.id,
                 conversation_id=_conv_id_for_inject,
@@ -582,11 +598,14 @@ class AgentLoopOrchestrator:
             return
         try:
             from uuid import UUID as _UUID  # noqa: PLC0415
-            self._conversation_repo.append_message(
+            # UPSERT (not append): if the counting sink already wrote a 'streaming'
+            # partial row for this task, this UPDATES it to the final answer +
+            # status='complete' (no duplicate). If streaming was skipped, it inserts.
+            self._conversation_repo.upsert_assistant_message(
                 conversation_id=_UUID(conv_id_str),
-                role="assistant",
-                content=narrative,
                 task_id=item.id,
+                content=narrative,
+                status="complete",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -1133,6 +1152,11 @@ def _item_label(item: "WorkItem") -> str:
         return str(item.id)[:8]
 
 
+# Throttle for incremental assistant persistence: upsert the mirror every N answer
+# deltas (balances "mirror is never stale on refresh" vs DB write frequency).
+_PERSIST_EVERY_N_DELTAS = 12
+
+
 class _CountingChunkSink:
     """Thin wrapper around a ChunkSinkPort that counts DELTA emissions.
 
@@ -1144,17 +1168,56 @@ class _CountingChunkSink:
     All other methods delegate unchanged — no behaviour difference.
     """
 
-    def __init__(self, inner: Any) -> None:
+    def __init__(
+        self,
+        inner: Any,
+        *,
+        repo: Any = None,
+        conversation_id: Any = None,
+        task_id: Any = None,
+    ) -> None:
         self._inner = inner
         self.delta_count: int = 0
+        # Persistencia incremental del asistente (resume mirror-first en refresh):
+        # acumulamos el texto de respuesta (DELTA, no thinking) y lo escribimos al
+        # espejo cada _PERSIST_EVERY_N_DELTAS, fail-soft. Así un refresh repinta el
+        # parcial desde la BD al instante, sin depender del replay volátil.
+        self._repo = repo
+        self._conv_id = conversation_id
+        self._task_id = task_id
+        self._answer = ""
+        self._since_persist = 0
 
     async def emit(self, *, task_id: Any, chunk: Any) -> None:
         from hermes.tasks.control_plane.domain.ports import StreamChunkKind  # noqa: PLC0415
-        if getattr(chunk, "kind", None) in (
-            StreamChunkKind.DELTA, StreamChunkKind.THINKING_DELTA
-        ):
+        kind = getattr(chunk, "kind", None)
+        if kind is StreamChunkKind.DELTA:
+            self.delta_count += 1
+            self._answer += getattr(chunk, "delta", "") or ""
+            self._since_persist += 1
+            if self._since_persist >= _PERSIST_EVERY_N_DELTAS:
+                self._since_persist = 0
+                self._persist_partial("streaming")
+        elif kind is StreamChunkKind.THINKING_DELTA:
             self.delta_count += 1
         await self._inner.emit(task_id=task_id, chunk=chunk)
+
+    def _persist_partial(self, status: str) -> None:
+        """Upsert the accumulated answer to the mirror. FAIL-SOFT — a DB hiccup must
+        NEVER break the live stream / agent loop."""
+        if self._repo is None or self._conv_id is None or self._task_id is None:
+            return
+        if not self._answer:
+            return
+        try:
+            self._repo.upsert_assistant_message(
+                conversation_id=self._conv_id,
+                task_id=self._task_id,
+                content=self._answer,
+                status=status,
+            )
+        except Exception:  # noqa: BLE001 — persistence is best-effort; the stream wins
+            logger.debug("hermes.tasks.loop.incremental_persist_failed", exc_info=True)
 
     async def close(self, *, task_id: Any, outcome: str, error: Any = None) -> None:
         await self._inner.close(task_id=task_id, outcome=outcome, error=error)

@@ -1097,7 +1097,7 @@ def create_app() -> FastAPI:
             "model": d.model,
             "started_at": d.started_at.isoformat(),
             "messages": [
-                {"role": m.role, "content": m.content, "task_id": m.task_id}
+                {"role": m.role, "content": m.content, "task_id": m.task_id, "status": m.status}
                 for m in d.messages
             ],
         }

@@ -112,6 +112,8 @@ export interface ConversationMessage {
   tool_call?: ToolCallDescriptor
   /** task_id of the backend task that produced this assistant turn; null for user messages */
   task_id?: string | null
+  /** 'streaming' = partial (turn in-flight, persisted incrementally) | 'complete' | null */
+  status?: string | null
 }
 
 export interface ConversationDetail {

@@ -579,11 +579,25 @@ export function useChat(): UseChatReturn {
     // Load the conversation history first.
     getConversation(savedConvId)
       .then(detail => {
+        // The in-flight turn's PARTIAL (status='streaming') for the task we are about
+        // to reattach: do NOT render it as a finished bubble — seed it into the live
+        // streaming bubble below (mirror-first: shows instantly = no blank on refresh,
+        // and the SSE replay is de-duped against it by length). A 'complete' row IS
+        // rendered statically (the turn finished).
+        const partialMsg = savedTaskId
+          ? (detail.messages ?? []).find(
+              m => m.role === 'assistant' && m.task_id === savedTaskId && m.status === 'streaming',
+            )
+          : undefined
+        const streamingPartial: string | null = partialMsg ? (partialMsg.content ?? '') : null
         const messages: ChatMessage[] = (detail.messages ?? [])
           .filter(m => m.role === 'user' || m.role === 'assistant')
-          .map(m => {
+          .map((m): ChatMessage | null => {
             if (m.role === 'user') {
               return { type: 'user' as const, id: genUUID(), text: m.content ?? '' }
+            }
+            if (m.task_id && m.task_id === savedTaskId && m.status === 'streaming') {
+              return null
             }
             return {
               type: 'assistant' as const,
@@ -599,6 +613,7 @@ export function useChat(): UseChatReturn {
               isStreaming: false,
             }
           })
+          .filter((m): m is ChatMessage => m !== null)
         dispatch({ type: 'LOAD_MESSAGES', convId: savedConvId, messages })
 
         // If a task stream was in-flight, decide whether to re-attach.
@@ -627,6 +642,15 @@ export function useChat(): UseChatReturn {
           const assistantMsgId = existingBubble ? existingBubble.id : genUUID()
           if (!existingBubble) {
             dispatch({ type: 'ADD_ASSISTANT', id: assistantMsgId, taskId: savedTaskId })
+          }
+          // Mirror-first: seed the live bubble with the persisted partial so it shows
+          // INSTANTLY (no blank on refresh) using the SAME streaming animation. The SSE
+          // replay re-sends the full run from seq 0, so we skip the first
+          // streamingPartial.length chars of replayed answer deltas to avoid doubling.
+          let replaySkip = 0
+          if (streamingPartial) {
+            dispatch({ type: 'DELTA', id: assistantMsgId, chunk: streamingPartial })
+            replaySkip = streamingPartial.length
           }
           dispatch({ type: 'STATUS_STREAMING', text: 'Reconectando…' })
           activeAssistantIdRef.current = assistantMsgId
@@ -658,6 +682,13 @@ export function useChat(): UseChatReturn {
 
           const callbacks: StreamCallbacks = {
             onDelta(chunk) {
+              // De-dup the broker replay against the mirror partial we already seeded:
+              // skip the first replaySkip chars of replayed answer deltas, keep the rest.
+              if (replaySkip > 0) {
+                if (chunk.length <= replaySkip) { replaySkip -= chunk.length; return }
+                chunk = chunk.slice(replaySkip)
+                replaySkip = 0
+              }
               const b = pendingBatchRef.current
               if (b && b.id === assistantMsgId) {
                 b.deltaChunk += chunk

@@ -44,6 +44,11 @@ class ChatMessage:
     role: str
     content: str
     task_id: str | None = None
+    # status del turno del asistente: 'streaming' (parcial, persistido incrementalmente
+    # mientras el LLM responde) | 'complete' (turno terminado) | None (mensajes antiguos
+    # / del usuario). El cliente repinta el parcial al instante en un refresh (mirror-first)
+    # sin esperar al stream, matando el "chat en blanco al refrescar".
+    status: str | None = None
 
 
 _SCHEMA = """
@@ -133,6 +138,10 @@ class SQLiteConversationRepository:
             mcols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
             if "task_id" not in mcols:
                 conn.execute("ALTER TABLE messages ADD COLUMN task_id TEXT")
+            # Migración idempotente: status del turno (streaming|complete) para la
+            # persistencia incremental del asistente (resume mirror-first en refresh).
+            if "status" not in mcols:
+                conn.execute("ALTER TABLE messages ADD COLUMN status TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, isolation_level=None)
@@ -206,6 +215,49 @@ class SQLiteConversationRepository:
             conn.execute(
                 "UPDATE conversations SET last_msg_at = ? "
                 "WHERE conversation_id = ?",
+                (now, str(conversation_id)),
+            )
+
+    def upsert_assistant_message(
+        self,
+        *,
+        conversation_id: UUID,
+        task_id: UUID,
+        content: str,
+        status: str,
+    ) -> None:
+        """Insert-or-update THE assistant row for a task (keyed by conversation+task_id).
+
+        Persistencia incremental: el orquestador llama esto a medida que llegan deltas
+        (status='streaming') y una vez al final (status='complete'). Así el espejo SIEMPRE
+        tiene el parcial → cualquier refresh repinta desde la BD al instante (mirror-first),
+        sin depender del replay volátil del broker ni del handle en sessionStorage. Una
+        sola fila por turno (no duplica). created_at solo se fija al insertar (preserva el
+        orden). Fail-loud aquí; el llamador (sink) lo envuelve en try/except (fail-soft).
+        """
+        with self._connect() as conn:
+            now = _now_iso()
+            row = conn.execute(
+                "SELECT message_id FROM messages "
+                "WHERE conversation_id = ? AND task_id = ? AND role = 'assistant' LIMIT 1",
+                (str(conversation_id), str(task_id)),
+            ).fetchone()
+            if row is not None:
+                conn.execute(
+                    "UPDATE messages SET content = ?, status = ? WHERE message_id = ?",
+                    (content, status, row["message_id"]),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO messages (
+                      message_id, conversation_id, role, content, created_at, task_id, status
+                    ) VALUES (?, ?, 'assistant', ?, ?, ?, ?)
+                    """,
+                    (str(uuid4()), str(conversation_id), content, now, str(task_id), status),
+                )
+            conn.execute(
+                "UPDATE conversations SET last_msg_at = ? WHERE conversation_id = ?",
                 (now, str(conversation_id)),
             )
 
@@ -296,7 +348,8 @@ class SQLiteConversationRepository:
             archived=bool(crow["archived"]),
             messages=[
                 ChatMessage(
-                    role=r["role"], content=r["content"], task_id=r["task_id"]
+                    role=r["role"], content=r["content"], task_id=r["task_id"],
+                    status=(r["status"] if "status" in r.keys() else None),
                 )
                 for r in mrows
             ],
