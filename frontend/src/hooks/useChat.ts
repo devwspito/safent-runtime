@@ -723,11 +723,18 @@ export function useChat(): UseChatReturn {
               // still be running and the mirror will eventually have the answer.
               // Show a neutral "working" status rather than an error bar so the user
               // is not alarmed while the poll continues watching for the final answer.
+              // CRITICAL: do NOT delete SS_TASK_ID here. A transient WS error (idle
+              // close, handshake gap, a 2nd refresh mid-reconnect) is NOT the task
+              // ending — the task is still running server-side. Keeping the handle
+              // lets the NEXT mount/refresh re-attach and the broker replay. The
+              // handle is cleared only on a real terminal done (onDone) or when the
+              // poll adopts the final answer (ADOPT_FINAL). Deleting it here was the
+              // bug that made "2 refreshes kill the chat until it feels like coming
+              // back": once gone, no refresh could ever reconnect.
               flushPending()
               clearFlushTimer()
               dispatch({ type: 'STATUS_STREAMING', text: 'Trabajando…' })
               streamRef.current = null
-              sessionStorage.removeItem(SS_TASK_ID)
               setReconnecting(false)
             },
           }

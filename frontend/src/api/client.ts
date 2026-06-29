@@ -836,87 +836,62 @@ interface StreamHandle {
 }
 
 /**
- * Opens a WebSocket stream for a given task_id.
+ * Opens an SSE (EventSource) stream for a given task_id.
  *
- * Protocol (mirrors vanilla stream.js):
- *   WS  ws[s]://<host>/api/v1/chat/stream/{task_id}
- *   No token in URL — same-origin; token is NOT in the WS URL per vanilla design
- *   (api.js sends Bearer on HTTP; the WS is same-origin and the daemon doesn't
- *    require auth on the streaming socket itself).
+ * Protocol: GET <same-origin>/api/v1/chat/stream/{task_id}, media text/event-stream.
+ * SSE is the LLM-streaming protocol (OpenAI/Anthropic) and gives us NATIVE resume:
+ * the browser auto-reconnects on any drop and re-sends `Last-Event-ID` (= the daemon
+ * per-task `seq` we put in each event's `id:`); the server replays only the missed
+ * frames from the broker log. Resume is the PROTOCOL's job — no bespoke reconnect/
+ * backoff/replay here (that fragility was the recurring "chat dies on refresh" bug).
+ * Same-origin GET, no auth header (loopback + unguessable UUID; GET isn't token-gated;
+ * EventSource cannot set headers anyway).
  *
  * Frame kinds: delta | thinking_delta | tool_call | status | done | error
  */
 export function openTaskStream(
   taskId: string,
   callbacks: StreamCallbacks,
-  opts: { maxRetries?: number } = {},
+  _opts: { maxRetries?: number } = {},
 ): StreamHandle {
-  const { maxRetries = 8 } = opts
-  const wsBase = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`
-  const wsPath = '/api/v1/chat/stream'
-
-  let ws: WebSocket | null = null
-  let retries = 0
+  const path = `/api/v1/chat/stream/${encodeURIComponent(taskId)}`
+  let es: EventSource | null = new EventSource(path)
   let closed = false
-  let retryTimer: ReturnType<typeof setTimeout> | null = null
-
-  // lastSeq survives reconnects for this task handle: the broker replays the
-  // entire run on re-subscribe, so we discard frames whose seq we already saw.
-  // Frames without seq (older backend) always pass through (seq undefined).
+  // Defensive dedup; the server already filters by Last-Event-ID so this rarely fires.
   let lastSeq = -1
 
-  function connect() {
-    if (closed) return
-    const url = `${wsBase}${wsPath}/${encodeURIComponent(taskId)}`
-    ws = new WebSocket(url)
+  function finish() {
+    closed = true
+    if (es) { es.close(); es = null }
+  }
 
-    ws.addEventListener('message', (event) => {
-      retries = 0
-      let frame: StreamFrame
-      try {
-        frame = JSON.parse(event.data as string) as StreamFrame
-      } catch {
-        return
-      }
+  es.onmessage = (event: MessageEvent) => {
+    let frame: StreamFrame
+    try {
+      frame = JSON.parse(event.data as string) as StreamFrame
+    } catch {
+      return
+    }
+    const frameSeq = (frame as Record<string, unknown>).seq
+    if (typeof frameSeq === 'number') {
+      if (frameSeq <= lastSeq) return
+      lastSeq = frameSeq
+    }
+    dispatch(frame)
+  }
 
-      // Dedup by seq: discard frames we already processed (replayed by the broker
-      // after a reconnect). Frames without seq pass through unconditionally.
-      const frameSeq = (frame as Record<string, unknown>).seq
-      if (typeof frameSeq === 'number') {
-        if (frameSeq <= lastSeq) return
-        lastSeq = frameSeq
-      }
-
-      dispatch(frame)
-    })
-
-    ws.addEventListener('error', () => {
-      // onclose will fire next with the code
-    })
-
-    ws.addEventListener('close', (event) => {
-      if (closed) return
-      if (event.code === 1000) {
-        callbacks.onDone()
-        return
-      }
-      if (retries < maxRetries) {
-        retries++
-        callbacks.onStatus('Reconectando con el agente…')
-        const delay = Math.min(400 * 2 ** retries, 10_000)
-        retryTimer = setTimeout(connect, delay)
-      } else {
-        callbacks.onError(
-          'Se perdió la conexión con el agente. La tarea sigue en marcha; vuelve a abrir la conversación para reconectar.',
-        )
-      }
-    })
+  es.onerror = () => {
+    // EventSource reconnects AUTOMATICALLY on a transient drop (it does not give up,
+    // and re-sends Last-Event-ID). Do NOT close or raise a fatal error: the task keeps
+    // running server-side and the server replays on re-attach. A real terminal task
+    // error arrives as a `kind:error` FRAME (handled in dispatch → finish()), not here.
+    if (!closed) callbacks.onStatus('Reconectando con el agente…')
   }
 
   function dispatch(frame: StreamFrame) {
-    // Stay tolerant of payload variants across protocol versions (mirrors vanilla dispatch):
-    // the daemon nests the chunk text in `frame.payload.delta` — without this fallback the
-    // assistant bubble renders empty even though the backend streamed the reply.
+    // Stay tolerant of payload variants across protocol versions: the daemon nests the
+    // chunk text in `frame.payload.delta` — without this fallback the assistant bubble
+    // renders empty even though the backend streamed the reply.
     const f = frame as Record<string, unknown>
     const p = f.payload && typeof f.payload === 'object' ? (f.payload as Record<string, unknown>) : null
     const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
@@ -937,21 +912,19 @@ export function openTaskStream(
         callbacks.onStatus(str(f.message) ?? str(f.status) ?? str(p?.message) ?? '')
         break
       case 'done':
+        finish()  // close the EventSource so it does NOT auto-reconnect after the end
         callbacks.onDone()
         break
       case 'error':
-        callbacks.onError(str(f.message) ?? 'Error desconocido del agente')
+        finish()
+        callbacks.onError(str(f.message) ?? str(f.error) ?? str(p?.error) ?? 'Error desconocido del agente')
         break
     }
   }
 
-  connect()
-
   return {
     close() {
-      closed = true
-      if (retryTimer !== null) clearTimeout(retryTimer)
-      if (ws && ws.readyState < WebSocket.CLOSING) ws.close(1000)
+      finish()
     },
   }
 }
