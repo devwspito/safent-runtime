@@ -21,16 +21,6 @@ interface NavItem {
   icon: React.ReactNode
 }
 
-function DashboardIcon() {
-  return (
-    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="2" y="2" width="5" height="5" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
-      <rect x="9" y="2" width="5" height="5" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
-      <rect x="2" y="9" width="5" height="5" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
-      <rect x="9" y="9" width="5" height="5" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
-    </svg>
-  )
-}
 
 function ChatIcon() {
   return (
@@ -155,7 +145,6 @@ function useNavItems(): NavItem[] {
   const t = useT()
   return [
     { to: '/chat',          label: t('nav.chat'),          icon: <ChatIcon /> },
-    { to: '/tablero',       label: 'Tablero',              icon: <DashboardIcon /> },
     { to: '/programadas',   label: t('nav.programadas'),   icon: <TasksIcon /> },
     { to: '/agentes',       label: t('nav.agentes'),       icon: <AgentsIcon /> },
     { to: '/skills',        label: t('nav.skills'),        icon: <SkillsIcon /> },

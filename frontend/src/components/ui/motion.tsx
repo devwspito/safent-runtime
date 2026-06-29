@@ -297,14 +297,16 @@ interface AnimatedEmptyStateProps {
   title: string
   description?: string
   action?: ReactNode
+  /** Tighter vertical padding for an empty SUB-section (not a full-page empty). */
+  compact?: boolean
 }
 
-export function AnimatedEmptyState({ icon, title, description, action }: AnimatedEmptyStateProps) {
+export function AnimatedEmptyState({ icon, title, description, action, compact }: AnimatedEmptyStateProps) {
   const reduced = useReducedMotion()
 
   return (
     <motion.div
-      className="ds-empty-state"
+      className={compact ? 'ds-empty-state ds-empty-state--compact' : 'ds-empty-state'}
       initial={reduced ? false : { opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ ...SPRING, delay: 0.05 }}

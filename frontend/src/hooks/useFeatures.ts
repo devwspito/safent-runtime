@@ -38,11 +38,9 @@ function buildSet(views: unknown): Set<string> {
 function isAllowed(views: Set<string>, viewId: string, edition: Edition): boolean {
   // Community edition: no restrictions.
   if (edition === 'community') return true
-  // Always-on views: chat (core) and tablero (dashboard, visible to all users).
-  // These are NOT in the native _ALL_VIEWS governable vocabulary (tablero has no
-  // /api/v1 surface); the cloud console mirrors that contract (ALWAYS_ON_VIEWS in
-  // Agents.tsx). Keep this in sync with shell_server/instance/api.py:_ALL_VIEWS.
-  if (viewId === 'chat' || viewId === 'tablero') return true
+  // Always-on view: chat (core). Tablero was removed from the product (owner
+  // decision: not useful). Keep in sync with shell_server/instance/api.py:_ALL_VIEWS.
+  if (viewId === 'chat') return true
   // Empty set signals a failed fetch (fail-open) — allow everything.
   if (views.size === 0) return true
   return views.has(viewId)

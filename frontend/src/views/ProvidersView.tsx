@@ -206,6 +206,7 @@ export default function ProvidersView() {
                 <h2 className={css.sectionLabel}>Configurados</h2>
                 {state.configured.length === 0 ? (
                   <EmptyState
+                    compact
                     icon={<Cpu size={32} />}
                     title="Sin proveedores configurados"
                     description="Añade uno del catálogo para empezar a usar el chat."

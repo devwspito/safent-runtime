@@ -5081,6 +5081,14 @@ details[open] .cv-teach-chevron {
   text-align: center;
 }
 
+/* Compact variant for an empty SUB-section (e.g. Proveedores → Configurados): the
+   full-page padding leaves a huge wasted void when it is just one section among
+   others. Much tighter vertical rhythm. */
+.ds-empty-state--compact {
+  padding: var(--sp-5) var(--sp-4);
+  gap: var(--sp-2);
+}
+
 /* Radial glow circle around the icon */
 .ds-empty-state__icon {
   display: flex;

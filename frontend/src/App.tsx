@@ -21,8 +21,6 @@ const OfficeView = lazy(() => import('./views/OfficeView'))
 // Code-split UsageView: recharts (~50 kB gzipped) not needed on other routes.
 const UsageView = lazy(() => import('./views/UsageView'))
 
-// Code-split DashboardView: shares Recharts with UsageView; not needed on other routes.
-const DashboardView = lazy(() => import('./views/DashboardView'))
 
 /** Shared route-boundary skeleton: stacked lines that mirror a view header. */
 function RouteFallback({ label }: { label: string }) {
@@ -56,10 +54,6 @@ function OfficeFallback() {
 
 function UsageFallback() {
   return <RouteFallback label="Cargando Coste…" />
-}
-
-function DashboardFallback() {
-  return <RouteFallback label="Cargando Tablero…" />
 }
 
 /**
@@ -96,12 +90,7 @@ export default function App() {
           <Route index element={<Navigate to="/chat" replace />} />
           {/* chat is always allowed — no guard needed */}
           <Route path="chat" element={<ChatView />} />
-          {/* tablero is always-on (forced in useFeatures) — no guard needed */}
-          <Route path="tablero" element={
-            <Suspense fallback={<DashboardFallback />}>
-              <DashboardView />
-            </Suspense>
-          } />
+          {/* tablero removed (owner: "no es útil para nada") — /tablero now falls through to index → /chat */}
           <Route path="programadas" element={
             <ViewGuard viewId="programadas"><CalendarView /></ViewGuard>
           } />
@@ -142,6 +131,8 @@ export default function App() {
               </Suspense>
             </ViewGuard>
           } />
+          {/* Unknown paths (incl. the removed /tablero, stale bookmarks) → chat. */}
+          <Route path="*" element={<Navigate to="/chat" replace />} />
         </Route>
       </Routes>
     </BrowserRouter>
