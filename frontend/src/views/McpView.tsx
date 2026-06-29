@@ -72,21 +72,31 @@ function getRunner(argv: string | string[] | undefined): string {
     .pop() ?? ''
 }
 
-// Resolve the FETCHABLE npm coordinate ("npm:@scope/pkg") from an npx argv, so the
-// security scan can download + statically analyse the ACTUAL package. Without this the
-// scan only sees the display name (no registry coordinate) → PackageContentScanner has
-// nothing to fetch → every MCP gets the same constant score. Returns null for a non-npx
-// runner or a local/inline argv (no published package to fetch).
-function npmCoordinateFromArgv(argv: string | string[] | undefined): string | null {
+// Resolve the FETCHABLE registry coordinate ("npm:@scope/pkg" or "pypi:pkg") from a
+// runner argv, so the security scan can download + statically analyse the ACTUAL
+// package. Without this the scan only sees the display name (no registry coordinate)
+// → PackageContentScanner has nothing to fetch → every MCP gets the same constant
+// score. Handles BOTH ecosystems (this was npx-only before, so every uvx/pip MCP fell
+// back to the display name and got the bogus constant score). Returns null only for a
+// truly non-fetchable runner (docker/local/inline) — and the backend treats a null
+// coordinate as "code not verifiable", NOT a clean PASS.
+function fetchableCoordinateFromArgv(argv: string | string[] | undefined): string | null {
   const arr = Array.isArray(argv)
     ? argv
     : String(argv ?? '').split(/\s+/).filter(Boolean)
-  if (!arr.length || getRunner(arr) !== 'npx') return null
+  if (!arr.length) return null
+  const runner = getRunner(arr)
+  // npx → npm ; uvx/uv/pipx/pip → pypi (mirrors the daemon's _NPM_RUNNERS/_PYPI_RUNNERS)
+  const eco = runner === 'npx' ? 'npm'
+    : (runner === 'uvx' || runner === 'uv' || runner === 'pipx' || runner === 'pip') ? 'pypi'
+    : null
+  if (!eco) return null
   for (let i = 1; i < arr.length; i++) {
     const tok = arr[i]!
-    if (tok.startsWith('-')) continue            // skip flags (-y, --yes, ...)
+    if (tok.startsWith('-')) continue            // skip flags (-y, --yes, --from, run, ...)
+    if (tok === 'run' || tok === 'tool') continue // uv run / uv tool run noise
     if (/[/\\]/.test(tok) && !tok.startsWith('@')) return null  // local path, not a pkg
-    return `npm:${tok}`                          // [@scope/]name[@version]
+    return `${eco}:${tok}`                        // [@scope/]name[@version]
   }
   return null
 }
@@ -216,7 +226,7 @@ export default function McpView() {
     // content scanner downloads + analyses the real package and the verdict is REAL
     // (a malicious package -> FAIL, a clean one -> PASS) instead of a constant per-kind
     // score. Falls back to the display identifier if the argv isn't a published package.
-    const scanTarget = npmCoordinateFromArgv(entry.argv) ?? identifier
+    const scanTarget = fetchableCoordinateFromArgv(entry.argv) ?? identifier
 
     try {
       const scan = await scanInstall('mcp', scanTarget)

@@ -348,6 +348,13 @@ RUN systemctl enable \
 # The ARG is re-declared after the FROM so it is in scope for this RUN layer.
 ARG LUMEN_EDITION=community
 RUN mkdir -p /usr/share/hermes && echo "${LUMEN_EDITION}" > /usr/share/hermes/edition
+# Bake the build provenance (git SHA) so anyone can confirm EXACTLY which commit an
+# image was built from — `podman run --rm <img> cat /usr/share/hermes/build` (or the
+# OCI label org.opencontainers.image.revision). CI passes GIT_SHA=${{ github.sha }};
+# local builds default to "dev". This ends the "which version am I running?" guesswork.
+ARG GIT_SHA=dev
+RUN echo "${GIT_SHA}" > /usr/share/hermes/build
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
 # Cloud config-sync: enable it UNCONDITIONALLY (both editions). The unit's
 # ConditionPathExists=/var/lib/hermes/instance/.enterprise keeps it inert in
 # community edition (no pairing marker) and auto-starts it the moment an instance

@@ -36,6 +36,7 @@ jobs:
           push: true
           build-args: |
             FE_CACHEBUST=${{ github.sha }}
+            GIT_SHA=${{ github.sha }}
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.ref_type == 'tag' && github.ref_name || 'edge' }}
