@@ -94,7 +94,7 @@ from hermes.domain.proposal import ToolCallProposal
 from hermes.domain.tool_spec import ToolRisk, ToolSpec
 from hermes.prompts.builder import DefaultPromptBuilder, PromptBuilder, _sanitize_untrusted
 from hermes.prompts.persona import PersonaSpec
-from hermes.runtime.conversation_task_registry import get_conversation_for_task
+from hermes.runtime.conversation_task_registry import resolve_conversation
 from hermes.runtime.cycle_cdp_context import cerebro_cdp_scope, install_thread_local_cdp_override
 from hermes.runtime.model_config import ModelConfig, _replace_context
 from hermes.runtime.nous_tool_risk_map import NousRisk, classify_nous_tool
@@ -1183,13 +1183,20 @@ class GovernedAIAgent:
             )
             return self._blocked(function_name, "broker no configurado — fail-closed")
 
+        conversation_id = resolve_conversation(effective_task_id)
         outcome = _dispatch_via_bridge(
             proposal=proposal,
             broker=self._broker,
             consent_context=self._consent_context,
             engine_loop=self._engine_loop,
-            conversation_id=get_conversation_for_task(effective_task_id),
+            conversation_id=conversation_id,
         )
+        # Same block-and-resume as the native write path: external (Composio/MCP)
+        # writes pending approval in an active chat hold the thread and re-dispatch
+        # on approval, instead of the non-resuming retry queue.
+        from hermes.capabilities.domain.ports import ExecutionStatus  # noqa: PLC0415
+        if outcome.status is ExecutionStatus.PENDING_APPROVAL and conversation_id:
+            return self._await_owner_and_resume(proposal, conversation_id)
         return self._handle_outcome(proposal, outcome)
 
     # ------------------------------------------------------------------
@@ -1421,7 +1428,7 @@ class GovernedAIAgent:
             )
             return self._blocked(function_name, "broker no configurado — fail-closed")
 
-        conversation_id = get_conversation_for_task(effective_task_id)
+        conversation_id = resolve_conversation(effective_task_id)
         outcome = _dispatch_via_bridge(
             proposal=proposal,
             broker=self._broker,
@@ -2716,6 +2723,8 @@ def _run_conversation_with_cdp(
     from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
         set_conversation_for_task,
         clear_conversation_for_task,
+        set_current_cycle_task,
+        clear_current_cycle_task,
     )
 
     set_session_key_for_thread()
@@ -2731,6 +2740,10 @@ def _run_conversation_with_cdp(
     # can register HITL approvals against the thread the owner is looking at
     # (the hook only receives this random task_id, not the conversation_id).
     set_conversation_for_task(cycle_task_id, conversation_id)
+    # Ambient stamp so broker-routed writes that get no task_id (the sequential
+    # write wrapper) still resolve THIS conversation → block-and-resume, not the
+    # non-resuming retry queue.
+    set_current_cycle_task(cycle_task_id)
 
     try:
         if cdp_provider is not None:
@@ -2746,6 +2759,7 @@ def _run_conversation_with_cdp(
     finally:
         clear_session_key_for_thread()
         clear_conversation_for_task(cycle_task_id)
+        clear_current_cycle_task()
         # Reap this cycle's confined-browser session (agent-browser controller
         # daemon + CDP supervisor) so the NEXT cycle attaches to a clean
         # Chromium. No-op when the cycle never touched the browser; only the

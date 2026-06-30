@@ -21,6 +21,16 @@ import threading
 _lock = threading.Lock()
 _conv_by_task: dict[str, str] = {}
 
+# Ambient per-thread current cycle task_id. The cycle and ALL its tool handlers
+# run in the same executor thread, but Nous's sequential WRITE wrapper does not
+# forward task_id to the handler (signature is (args) only) — so a broker-routed
+# write (install_mcp/install_skill/install_app/memory/clarify) cannot resolve the
+# conversation by its own argument and would fall to the non-resuming retry queue
+# ("approve does nothing"). The cycle stamps its task_id here so any write path
+# can recover the conversation. Thread-local + cleared in the cycle's finally so a
+# reused executor thread never leaks a stale binding.
+_current = threading.local()
+
 
 def set_conversation_for_task(task_id: str, conversation_id: str) -> None:
     """Bind a cycle's task_id to its chat conversation_id. No-op if either empty."""
@@ -44,3 +54,30 @@ def clear_conversation_for_task(task_id: str) -> None:
         return
     with _lock:
         _conv_by_task.pop(task_id, None)
+
+
+def set_current_cycle_task(task_id: str) -> None:
+    """Stamp the current cycle's task_id for THIS thread (the cycle's executor thread)."""
+    _current.task_id = task_id or ""
+
+
+def get_current_cycle_task() -> str:
+    """The current cycle's task_id for THIS thread, or "" outside a cycle."""
+    return getattr(_current, "task_id", "")
+
+
+def clear_current_cycle_task() -> None:
+    """Drop the thread's current-cycle stamp (cycle's finally; reused-thread safe)."""
+    _current.task_id = ""
+
+
+def resolve_conversation(effective_task_id: str) -> str:
+    """Conversation for a write proposal: by its own task_id, else the ambient cycle.
+
+    Single resolution point so EVERY HITL write path (hook or broker) anchors to
+    the same conversation the owner is looking at — including the sequential write
+    wrapper that receives no task_id.
+    """
+    return get_conversation_for_task(effective_task_id) or get_conversation_for_task(
+        get_current_cycle_task()
+    )
