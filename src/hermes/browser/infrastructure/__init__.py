@@ -20,23 +20,12 @@ from hermes.browser.infrastructure.agent_browser_cli import (
     AgentBrowserCommandError,
     AgentBrowserNotInstalledError,
 )
-from hermes.browser.infrastructure.agent_browser_driver import (
-    AgentBrowserDriver,
-)
 from hermes.browser.infrastructure.in_memory_selector_registry import (
     InMemorySelectorRegistry,
-)
-from hermes.browser.infrastructure.mcp_session import (
-    McpNotInstalledError,
-    McpServerConnectionError,
-    StdioMcpSession,
 )
 from hermes.browser.infrastructure.playwright_driver import (
     PlaywrightDriver,
     PlaywrightNotInstalledError,
-)
-from hermes.browser.infrastructure.playwright_mcp_driver import (
-    PlaywrightMcpDriver,
 )
 from hermes.browser.infrastructure.signed_selector_registry import (
     SelectorStore,
@@ -56,7 +45,6 @@ __all__ = [
     # agent-browser (optional, experimental)
     "AgentBrowserCli",
     "AgentBrowserCommandError",
-    "AgentBrowserDriver",
     "AgentBrowserNotInstalledError",
     # CDP sandbox driver (OpenShell integration)
     "CdpPlaywrightDriver",
@@ -73,17 +61,13 @@ __all__ = [
     "make_egress_approved_sites_provider",
     # existing drivers
     "InMemorySelectorRegistry",
-    "McpNotInstalledError",
-    "McpServerConnectionError",
     "PlaywrightDriver",
-    "PlaywrightMcpDriver",
     "PlaywrightNotInstalledError",
     "SelectorStore",
     "SelectorTamperedError",
     "SignedSelectorRegistry",
     "StagehandDriver",
     "StagehandNotInstalledError",
-    "StdioMcpSession",
     "StoredSelector",
     "build_signed",
     "sign_selector",

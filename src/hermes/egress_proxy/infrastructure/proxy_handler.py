@@ -67,7 +67,7 @@ def _is_ip_literal(host: str) -> bool:
     return bool(_IP_LITERAL_RE.match(host))
 
 
-async def _resolve_external_ip(host: str) -> str | None:
+async def _resolve_external_ips(host: str) -> "list[str] | None":
     """Resolve *host* and return its IP ONLY if it is a PUBLIC address.
 
     Anti-SSRF (red-team finding 2026-06-19): the proxy runs in the host netns and
@@ -88,9 +88,11 @@ async def _resolve_external_ip(host: str) -> str | None:
         return None
     if not infos:
         return None
+    ips: list[str] = []
     for info in infos:
+        addr = info[4][0]
         try:
-            ip = ipaddress.ip_address(info[4][0])
+            ip = ipaddress.ip_address(addr)
         except ValueError:
             return None
         if (
@@ -98,7 +100,33 @@ async def _resolve_external_ip(host: str) -> str | None:
             or ip.is_reserved or ip.is_multicast or ip.is_unspecified
         ):
             return None
-    return infos[0][4][0]
+        if addr not in ips:
+            ips.append(addr)
+    # Return ALL resolved public addresses (both families) in the OS's RFC 6724 order.
+    # The caller tries each until one connects (RFC 8305 Happy Eyeballs): a family with
+    # no route (IPv6 in an IPv4-only netns, or IPv4 on an IPv6-only host like the Mac)
+    # fails instantly, so the first REACHABLE family wins. Picking ONE family here was
+    # the "browser can't navigate / hallucinates" bug — it dead-ended on single-stack.
+    return ips or None
+
+
+async def _open_upstream(
+    ips: "list[str]", port: int, timeout: float
+) -> "tuple[asyncio.StreamReader, asyncio.StreamWriter]":
+    """RFC 8305 (Happy Eyeballs): connect to the first reachable address.
+
+    Tries each validated IP in turn; an unreachable family (ENETUNREACH) fails almost
+    instantly, so this works on IPv4-only, IPv6-only AND dual-stack without hardcoding
+    a family preference. Raises the last error if none connect."""
+    last_exc: Exception = OSError("no address to connect")
+    for ip in ips:
+        try:
+            return await asyncio.wait_for(
+                asyncio.open_connection(ip, port), timeout=timeout
+            )
+        except (OSError, asyncio.TimeoutError) as exc:
+            last_exc = exc
+    raise last_exc
 
 
 class ProxyConnectionHandler:
@@ -313,8 +341,8 @@ class ProxyConnectionHandler:
         # Open upstream to the VERIFIED SNI host (not the CONNECT host, which may differ).
         # Anti-pivot: refuse if the host resolves to an internal IP (SSRF via the proxy).
         upstream_host = sni_host
-        safe_ip = await _resolve_external_ip(upstream_host)
-        if safe_ip is None:
+        safe_ips = await _resolve_external_ips(upstream_host)
+        if safe_ips is None:
             logger.warning(
                 "hermes.egress_proxy.upstream_internal_blocked",
                 extra={"domain": upstream_host, "session_id": client_ip, "source": "sni"},
@@ -322,9 +350,8 @@ class ProxyConnectionHandler:
             _safe_close(writer)
             return
         try:
-            remote_reader, remote_writer = await asyncio.wait_for(
-                asyncio.open_connection(safe_ip, target.port),
-                timeout=_CONNECT_TIMEOUT_S,
+            remote_reader, remote_writer = await _open_upstream(
+                safe_ips, target.port, _CONNECT_TIMEOUT_S
             )
         except (OSError, asyncio.TimeoutError) as exc:
             logger.warning(
@@ -375,8 +402,8 @@ class ProxyConnectionHandler:
             )
             return
 
-        safe_ip = await _resolve_external_ip(target.host)
-        if safe_ip is None:
+        safe_ips = await _resolve_external_ips(target.host)
+        if safe_ips is None:
             logger.warning(
                 "hermes.egress_proxy.upstream_internal_blocked",
                 extra={"domain": target.host, "session_id": client_ip, "source": "open-logged"},
@@ -385,9 +412,8 @@ class ProxyConnectionHandler:
             await writer.drain()
             return
         try:
-            remote_reader, remote_writer = await asyncio.wait_for(
-                asyncio.open_connection(safe_ip, target.port),
-                timeout=_CONNECT_TIMEOUT_S,
+            remote_reader, remote_writer = await _open_upstream(
+                safe_ips, target.port, _CONNECT_TIMEOUT_S
             )
         except (OSError, asyncio.TimeoutError) as exc:
             logger.warning(
@@ -535,8 +561,8 @@ class ProxyConnectionHandler:
             )
             return
 
-        safe_ip = await _resolve_external_ip(plain_host.host)
-        if safe_ip is None:
+        safe_ips = await _resolve_external_ips(plain_host.host)
+        if safe_ips is None:
             logger.warning(
                 "hermes.egress_proxy.upstream_internal_blocked",
                 extra={"domain": plain_host.host, "session_id": client_ip, "source": "plain-http"},
@@ -545,9 +571,8 @@ class ProxyConnectionHandler:
             await writer.drain()
             return
         try:
-            remote_reader, remote_writer = await asyncio.wait_for(
-                asyncio.open_connection(safe_ip, plain_host.port),
-                timeout=_CONNECT_TIMEOUT_S,
+            remote_reader, remote_writer = await _open_upstream(
+                safe_ips, plain_host.port, _CONNECT_TIMEOUT_S
             )
         except (OSError, asyncio.TimeoutError) as exc:
             logger.warning(

@@ -39,6 +39,7 @@ import os
 import subprocess
 from http import HTTPStatus
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from websockets.asyncio.server import serve
 
@@ -49,12 +50,23 @@ from .cf_access_verifier import (
 )
 from .frame_source_port import FrameSourcePort
 from .input_effector_port import SeatInputEffectorPort
-from .jpeg_source import JpegFrameSource
-from .mutter_mirror import BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, MutterMirrorSession
+
+if TYPE_CHECKING:
+    # Desktop-only deps (gi/GStreamer/mutter). They are used ONLY as type hints,
+    # and `from __future__ import annotations` makes annotations lazy strings, so
+    # importing them under TYPE_CHECKING lets the live-view server import WITHOUT
+    # the GNOME stack — the container teaching path uses the CDP source/input
+    # adapters (CdpScreencastSource / CdpInputAdapter), never mutter.
+    from .jpeg_source import JpegFrameSource
+    from .mutter_mirror import MutterMirrorSession
 
 logger = logging.getLogger("hermes-mirror")
 
 _STATIC = Path(__file__).parent / "static"
+# evdev button codes (linux/input-event-codes.h), inlined so this module needs no
+# mutter/gi import at load time. SeatInputEffectorPort impls (incl. CdpInputAdapter)
+# accept these evdev codes.
+BTN_LEFT, BTN_MIDDLE, BTN_RIGHT = 0x110, 0x112, 0x111
 _BUTTONS = {0: BTN_LEFT, 1: BTN_MIDDLE, 2: BTN_RIGHT}
 _FRAME_INTERVAL = 0.07  # ~14 fps
 

@@ -13,7 +13,6 @@ chromium real. Acepta `scripted_step(...)` para devolver outcomes deterministas.
 """
 
 from hermes.browser.testing.fake_agent_browser_cli import FakeAgentBrowserCli
-from hermes.browser.testing.fake_mcp_session import FakeMcpSession
 from hermes.browser.testing.fakes import (
     FakeBrowserDriver,
     ScriptedStep,
@@ -23,7 +22,6 @@ from hermes.browser.testing.fakes import (
 __all__ = [
     "FakeAgentBrowserCli",
     "FakeBrowserDriver",
-    "FakeMcpSession",
     "ScriptedStep",
     "scripted_step",
 ]
