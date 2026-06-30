@@ -184,8 +184,8 @@ export default function ApprovalCard({
         sileo.success({ title: 'Acción aprobada y ejecutada.' })
       } else {
         sileo.warning({
-          title: 'La solicitud ya había caducado — acción no ejecutada.',
-          description: 'El agente ya había terminado. Vuelve a pedírselo.',
+          title: 'La acción caducó antes de aprobarla — no se ejecutó nada.',
+          description: 'El agente describió el plan pero esperaba tu permiso; la acción NO corrió. Pídeselo de nuevo para ejecutarla.',
         })
         setCardState({ phase: 'expired' })
         onResolved()

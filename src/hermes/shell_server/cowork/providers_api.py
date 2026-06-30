@@ -78,8 +78,10 @@ class AddProviderRequest(BaseModel):
 
 
 class ConfigureNativeProviderRequest(BaseModel):
-    kind: str = Field(min_length=1)
+    provider_id: str = Field(min_length=1, description="Native registry id, e.g. openai-api, gemini")
     api_key: str | None = None
+    model: str | None = None
+    base_url: str | None = None
     set_active: bool = False
 
 
@@ -116,16 +118,39 @@ def create_providers_router() -> APIRouter:
         import json  # noqa: PLC0415
 
         proxy = request.app.state.dbus_proxy
+        # The daemon verb (ConfigureNativeProvider) reads provider_id/api_key/model/
+        # base_url. Sending `kind` here left provider_id empty → "provider desconocido".
         draft = {
-            "kind": body.kind,
+            "provider_id": body.provider_id,
             "set_active": body.set_active,
         }
         if body.api_key:
             draft["api_key"] = body.api_key
+        if body.model:
+            draft["model"] = body.model
+        if body.base_url:
+            draft["base_url"] = body.base_url
         try:
             return await proxy.call_mutator("configure_native_provider", json.dumps(draft))
         except AgentUnavailable as exc:
             _raise_503(exc, "configure_native_provider")
+
+    @router.get("/native/active")
+    async def get_native_active(request: Request) -> dict:
+        """The native provider currently set as the model (config.yaml), {} if none.
+
+        Native-configured providers live in a separate store from the shell-server
+        repo; the UI merges this into its configured list so a native catalogue
+        provider the user just added is actually visible + marked active.
+        """
+        proxy = request.app.state.dbus_proxy
+        try:
+            return await proxy.call_dict("get_native_active")
+        except AgentUnavailable as exc:
+            logger.warning(
+                "hermes.providers.native_active_unavailable", extra={"reason": str(exc)}
+            )
+            return {}
 
     @router.get("/oauth/{session_id}")
     async def get_provider_oauth_status(request: Request, session_id: str) -> dict:

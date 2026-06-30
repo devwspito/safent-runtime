@@ -130,9 +130,16 @@ class SkillSignatureCheck:
 
         row = self._load_row(skill_id)
         if row is None:
-            return [self._critical(
-                f"no signed skill record for '{skill_id}' — skill is unsigned, "
-                "verification cannot proceed",
+            # No local signed record. For a COMMUNITY hub skill being scanned
+            # pre-install this is the EXPECTED, normal state (it has never been
+            # through this install's minter) — NOT evidence of tampering. Emitting
+            # CRITICAL here forced a constant 30 FAIL on every community skill and
+            # masked the real content analysis. Downgrade to MEDIUM so the content
+            # scanner (SkillContentScanner) drives the verdict; the genuine-tamper
+            # branches below (record exists but fails to verify) stay CRITICAL.
+            return [self._medium(
+                f"skill «{skill_id}» sin firma local — esperado en un skill de la "
+                "comunidad antes de instalar; el veredicto se basa en su contenido",
                 f"signature:no_record:{skill_id}",
             )]
 
@@ -228,6 +235,15 @@ class SkillSignatureCheck:
         return Risk(
             category="signature",
             severity=Severity.CRITICAL,
+            message=message,
+            evidence_ref=evidence_ref,
+        )
+
+    @staticmethod
+    def _medium(message: str, evidence_ref: str) -> Risk:
+        return Risk(
+            category="signature",
+            severity=Severity.MEDIUM,
             message=message,
             evidence_ref=evidence_ref,
         )

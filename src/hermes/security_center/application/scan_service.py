@@ -183,7 +183,11 @@ class ScanService:
     # _compose_score, so a weight of 0 must never silently disable them. Letting
     # an operator zero-out "content" would re-open the C2 hole (no analysis ⇒
     # PASS) via policy instead of runner.
-    _ALWAYS_ON_SCANNERS: frozenset[str] = frozenset({"content"})
+    # Content scanners run ALWAYS (not gated by per-scanner policy weight): they are
+    # the "is this actually safe?" check. skill_content was filtered out (weight 0 for
+    # an unknown name) → it never ran → every skill scored PASS without its content
+    # being analyzed (the "scan is theatre" hole, P5). Both must be always-on.
+    _ALWAYS_ON_SCANNERS: frozenset[str] = frozenset({"content", "skill_content"})
 
     async def _run_scanners(
         self, target: InstallTarget, policy: SecurityPolicy

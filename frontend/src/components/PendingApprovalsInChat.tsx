@@ -16,9 +16,9 @@ import ApprovalCard from './ApprovalCard'
 
 const POLL_INTERVAL_MS = 3000
 
-// Backend approval window is 600 s (10 min). Use 11 min as the client-side
+// Backend approval window is 1800 s (30 min). Use 31 min as the client-side
 // cut-off so we never render a card the backend will immediately reject.
-const APPROVAL_MAX_AGE_MS = 11 * 60 * 1000
+const APPROVAL_MAX_AGE_MS = 31 * 60 * 1000
 
 function isApprovalFresh(createdAt: string | null | undefined): boolean {
   if (!createdAt) return true // unknown age — keep for back-compat

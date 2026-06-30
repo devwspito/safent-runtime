@@ -2,7 +2,7 @@ import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { AlertCircle, Cloud, Cpu, Globe, Server } from 'lucide-react'
 import {
-  listProviders, listNativeProviders, addProvider, configureNativeProvider, setActiveProvider,
+  listProviders, listNativeProviders, getNativeActive, addProvider, configureNativeProvider, setActiveProvider,
   testProvider, deleteProvider, startProviderOAuth, getProviderOAuthStatus,
   ApiError,
 } from '../api/client'
@@ -147,11 +147,18 @@ export default function ProvidersView() {
 
   function load() {
     dispatch({ type: 'RELOAD' })
-    Promise.all([listProviders(), listNativeProviders()])
-      .then(([configured, native]) => {
+    Promise.all([listProviders(), listNativeProviders(), getNativeActive()])
+      .then(([configured, native, nativeActive]) => {
+        const cfg = Array.isArray(configured) ? configured : []
+        // Native-configured providers live in a separate store from the repo;
+        // surface the active one in the configured list so a just-added native
+        // catalogue provider is actually visible + marked active.
+        const merged = nativeActive && !cfg.some(p => p.provider_id === nativeActive.provider_id)
+          ? [nativeActive, ...cfg]
+          : cfg
         dispatch({
           type: 'LOADED',
-          configured: Array.isArray(configured) ? configured : [],
+          configured: merged,
           native: Array.isArray(native) ? native : [],
         })
       })
@@ -364,11 +371,11 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
     if (!apiKeyInput.trim()) { onToast('Introduce la clave API', 'warn'); return }
     setAddingKey(true)
     try {
-      // Native catalogue providers go through /providers/native (kind + api_key);
-      // the daemon resolves the default model. Using addProvider() → /providers
-      // 422s (it requires default_model and rejects provider_id).
+      // Native catalogue providers go through /providers/native by their registry
+      // provider_id (the daemon resolves env var + default model). Sending `kind`
+      // here left provider_id empty → "provider desconocido".
       const created = await configureNativeProvider({
-        kind: provider.kind ?? provider.category ?? id,
+        provider_id: provider.provider_id ?? id,
         api_key: apiKeyInput.trim(),
       })
       const realId = created?.provider_id || id

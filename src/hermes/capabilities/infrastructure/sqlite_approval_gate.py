@@ -151,7 +151,7 @@ class SqliteApprovalGate:
                 DELETE FROM pending_approvals
                  WHERE proposal_id = ?
                    AND NOT (status = 'approved' AND consumed_at IS NULL)
-                   AND (status != 'pending' OR created_at <= datetime('now', '-30 minutes'))
+                   AND (status != 'pending' OR created_at <= datetime('now', '-35 minutes'))
                 """,
                 (str(proposal_id),),
             )

@@ -1680,6 +1680,9 @@ class DbusRuntimeServiceWiring:
             from hermes.security_center.infrastructure.package_content_scanner import (  # noqa: PLC0415
                 PackageContentScanner,
             )
+            from hermes.security_center.infrastructure.skill_content_scanner import (  # noqa: PLC0415
+                SkillContentScanner,
+            )
             from hermes.security_center.infrastructure.provenance_scanner import (  # noqa: PLC0415
                 ProvenanceScanner,
             )
@@ -1732,6 +1735,7 @@ class DbusRuntimeServiceWiring:
             # puros/CPU-local.
             scanners=[
                 PackageContentScanner(),
+                SkillContentScanner(),
                 cve_scanner,
                 ProvenanceScanner(),
                 McpToolLinter(),
@@ -1782,15 +1786,16 @@ class DbusRuntimeServiceWiring:
     def _serialize_scan_record(record: "Any") -> str:
         """Serialize a ScanRecord to the JSON string expected by InstallReview QML.
 
-        Maps evidence_ref → evidence to match the QML field name.
+        Emits the domain field names (category, evidence_ref) that the React
+        InstallScanModal reads — renaming to scanner/evidence left the modal blank.
         Includes engine/engine_label/requires_owner_approval for honest provenance.
         """
         risks = [
             {
                 "severity": r.severity.value,
-                "scanner": r.category,
+                "category": r.category,
                 "message": r.message,
-                "evidence": r.evidence_ref,  # QML reads 'evidence', domain has 'evidence_ref'
+                "evidence_ref": r.evidence_ref,
             }
             for r in record.score.risks
         ]
@@ -2371,7 +2376,11 @@ class DbusRuntimeServiceWiring:
                 continue
             seen.add(name)
             out.append({
-                "id": pid,
+                # Canonical identifier is provider_id everywhere (FE + TUI read it,
+                # configure_native_provider/start_provider_oauth take it). Emitting
+                # `id` here was the contract break that left the native catalogue
+                # unusable (FE read provider_id → empty → "provider desconocido").
+                "provider_id": pid,
                 "name": name,
                 "auth_type": getattr(cfg, "auth_type", "api_key"),
                 "base_url": getattr(cfg, "inference_base_url", "") or "",
@@ -6668,10 +6677,14 @@ def _pick_installable_package(packages: list[dict]) -> dict | None:
 
 
 def _normalize_env_vars(raw_vars: list[dict]) -> list[dict]:
+    # Emit key/label — the field names the React MCP form reads (parseEnvSchema).
+    # The registry's raw env var name IS the BYOK key the daemon validates against
+    # the allowlist, so `key` carries it; emitting `name`/`description` left the
+    # form reading v.key=undefined → "clave de env no permitida: 'undefined'".
     return [
         {
-            "name": str(v.get("name") or ""),
-            "description": str(v.get("description") or ""),
+            "key": str(v.get("name") or ""),
+            "label": str(v.get("description") or v.get("name") or ""),
             "required": bool(v.get("isRequired", False)),
             "secret": bool(v.get("isSecret", False)),
         }
@@ -6911,8 +6924,26 @@ def _start_hub_op(
                 do_install(target, category="", force=False,
                            skip_confirm=True, name_override="")
             else:
-                from hermes_cli.skills_hub import do_uninstall  # noqa: PLC0415
-                do_uninstall(target)
+                # P4 fix — uninstall must NOT lie. do_uninstall() called the CLI's
+                # input("Confirm [y/N]") in this TTY-less thread (silent cancel) AND
+                # swallowed uninstall_skill()'s (False, msg) → the op reported "done"
+                # while the skill stayed. Call the primitive directly and FAIL LOUD.
+                from tools.skills_hub import uninstall_skill  # noqa: PLC0415
+                success, msg = uninstall_skill(target)
+                if not success:
+                    # Not in the hub lock → maybe an agent-created NATIVE skill on disk
+                    # ($HERMES_HOME/skills/<name>/), invisible to the lock-based path.
+                    # Remove it directly (validated) so native skills are uninstallable
+                    # too; if genuinely absent, raise → status=error (no false success).
+                    if not _remove_native_skill_dir(target):
+                        raise RuntimeError(f"uninstall failed: {msg}")
+                try:
+                    from agent.prompt_builder import (  # noqa: PLC0415
+                        clear_skills_system_prompt_cache,
+                    )
+                    clear_skills_system_prompt_cache(clear_snapshot=True)
+                except Exception:  # noqa: BLE001 — cache clear is best-effort
+                    pass
             with _HUB_OPS_LOCK:
                 _HUB_OPS[op_id]["status"] = "done"
             logger.info("hermes.dbus.hub_op_done kind=%s target=%s", kind, target)
@@ -7096,6 +7127,37 @@ def _parse_skill_md_frontmatter(skill_md_path: "Any") -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _remove_native_skill_dir(name: str) -> bool:
+    """Remove an agent-created native skill dir ($HERMES_HOME/skills/<name>/).
+
+    Lock-based uninstall_skill() only sees hub-installed skills; agent-created ones
+    live as a bare SKILL.md on disk. Removing them safely: the name must be a single
+    path segment (no traversal), the target a real directory directly under skills/
+    that contains a SKILL.md, and its resolved parent must be skills/ (rejects symlink
+    redirects). Returns True iff a directory was actually removed.
+    """
+    import os as _os  # noqa: PLC0415
+    import shutil as _shutil  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+
+    home = _os.environ.get("HERMES_HOME", "")
+    if not home or not name or "/" in name or "\\" in name or name in (".", ".."):
+        return False
+    skills_root = _Path(home) / "skills"
+    target_dir = skills_root / name
+    try:
+        if (
+            target_dir.is_dir()
+            and (target_dir / "SKILL.md").is_file()
+            and target_dir.resolve().parent == skills_root.resolve()
+        ):
+            _shutil.rmtree(target_dir)
+            return True
+    except OSError:
+        return False
+    return False
+
+
 def _list_native_skills_primary(
     *,
     skills_root: "Any | None" = None,
@@ -7170,7 +7232,26 @@ def _skill_md_to_dto(skill_md_path: "Any") -> "dict | None":
     skill_name = skill_md_path.parent.name
     fm = _parse_skill_md_frontmatter(skill_md_path)
     if not fm:
-        return None
+        # A SKILL.md without parseable YAML frontmatter is still a REAL, loadable
+        # skill on disk (the agent reads it regardless) — it MUST appear in the list,
+        # not be silently dropped. This was the "auto-created/synthesized skill does
+        # not show in Habilidades" bug. Surface it as a minimal native entry.
+        return {
+            "package_id": f"native:{skill_name}",
+            "skill_id": f"native:{skill_name}",
+            "skill_name": skill_name,
+            "version": 1,
+            "state": "native",
+            "surface_kinds": ["skill_manage"],
+            "signed_at": _iso_mtime(skill_md_path),
+            "signature_short": None,
+            "validated_at": None,
+            "promoted_at": None,
+            "signing_method": "none",
+            "toolkit_slug": None,
+            "description": "",
+            "source": "hermes_agent",
+        }
 
     meta: dict = fm.get("metadata") or {}
     signed_at = meta.get("signed_at") or _iso_mtime(skill_md_path)

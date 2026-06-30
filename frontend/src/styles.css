@@ -5081,12 +5081,49 @@ details[open] .cv-teach-chevron {
   text-align: center;
 }
 
-/* Compact variant for an empty SUB-section (e.g. Proveedores → Configurados): the
-   full-page padding leaves a huge wasted void when it is just one section among
-   others. Much tighter vertical rhythm. */
+/* Text block (title + description) — stacked. */
+.ds-empty-state__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  align-items: center;
+}
+
+/* Compact variant for an empty SUB-section (e.g. Proveedores → Configurados,
+   Herramientas → Activas): when it is just one section among others, a full
+   centered block wastes a whole screen and pushes the useful catalogue below the
+   fold. Collapse it to a SINGLE slim ROW: small icon · text left · CTA right. */
 .ds-empty-state--compact {
-  padding: var(--sp-5) var(--sp-4);
-  gap: var(--sp-2);
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  text-align: left;
+}
+.ds-empty-state--compact .ds-empty-state__icon {
+  width: 38px;
+  height: 38px;
+}
+.ds-empty-state--compact .ds-empty-state__icon svg {
+  width: 18px;
+  height: 18px;
+}
+.ds-empty-state--compact .ds-empty-state__text {
+  align-items: flex-start;
+  gap: 1px;
+}
+.ds-empty-state--compact .ds-empty-state__title {
+  max-width: none;
+  line-height: 1.3;
+}
+.ds-empty-state--compact .ds-empty-state__desc {
+  max-width: none;
+  margin-top: 0;
+}
+.ds-empty-state--compact .ds-empty-state__action {
+  margin-top: 0;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 /* Radial glow circle around the icon */

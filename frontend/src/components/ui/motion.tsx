@@ -330,8 +330,10 @@ export function AnimatedEmptyState({ icon, title, description, action, compact }
       >
         {icon}
       </motion.span>
-      <p className="ds-empty-state__title">{title}</p>
-      {description && <p className="ds-empty-state__desc">{description}</p>}
+      <div className="ds-empty-state__text">
+        <p className="ds-empty-state__title">{title}</p>
+        {description && <p className="ds-empty-state__desc">{description}</p>}
+      </div>
       {action && <div className="ds-empty-state__action">{action}</div>}
     </motion.div>
   )

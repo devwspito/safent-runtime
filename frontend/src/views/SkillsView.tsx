@@ -41,6 +41,7 @@ interface PollHandle {
 
 function pollHubOp(opId: string, { onDone, onError }: { onDone?: () => void; onError?: (r: string) => void }): PollHandle {
   let tries = 0
+  let unknownStreak = 0
   let timer: ReturnType<typeof setTimeout> | null = null
   let cancelled = false
 
@@ -52,6 +53,16 @@ function pollHubOp(opId: string, { onDone, onError }: { onDone?: () => void; onE
     const status = String(st?.status ?? '').toLowerCase()
     if (status === 'done' || status === 'completed' || status === 'success') { onDone?.(); return }
     if (status === 'error' || status === 'failed') { onError?.(st?.error ?? st?.message ?? 'error'); return }
+    // 'unknown' = op not found / daemon unavailable. Treat as terminal after a short
+    // streak (tolerate a registration race) instead of polling ~100s to "timeout".
+    if (status === 'unknown') {
+      if (++unknownStreak >= 3) {
+        onError?.('La operación ya no existe (se perdió o el servicio se reinició).')
+        return
+      }
+    } else {
+      unknownStreak = 0
+    }
     if (!cancelled) timer = setTimeout(tick, 2500)
   }
 
@@ -417,6 +428,122 @@ export default function SkillsView() {
       <div className={s.viewBody}>
         <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
 
+          {/* ── Installed skills ─────────────────────────────────────────── */}
+          <StaggerItem>
+            <section className={s.section} aria-label="Habilidades instaladas">
+              <div className={s.sectionHead}>
+                <span className={s.sectionLabel}>{t('skills.installed.label')}</span>
+                {installedCount !== null && installedCount > 0 && (
+                  <span className={s.sectionCount} aria-label={`${installedCount} habilidades`}>
+                    {installedCount}
+                  </span>
+                )}
+              </div>
+
+              {/* Loading skeletons */}
+              {state.status === 'loading' && (
+                <ul className={s.list} aria-busy="true" aria-label="Cargando habilidades">
+                  {[0, 1, 2].map(i => (
+                    <li key={i}>
+                      <SkillRowSkeleton delay={i * 60} />
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {/* Error */}
+              {state.status === 'error' && (
+                <FadeIn>
+                  <div role="alert" className={s.errorInline}>
+                    <span className={s.errorIcon} aria-hidden="true">
+                      <AlertTriangle size={16} />
+                    </span>
+                    <div className={s.errorBody}>
+                      <p className={s.errorTitle}>No se pudieron cargar las habilidades</p>
+                      <p className={s.errorDesc}>{state.message}</p>
+                      <div className={s.errorActions}>
+                        <Button variant="secondary" size="sm" onClick={loadInstalled}>
+                          Reintentar
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                </FadeIn>
+              )}
+
+              {/* Success */}
+              {state.status === 'success' && (
+                state.skills.length === 0
+                  ? (
+                    <FadeIn>
+                      <EmptyState
+                        compact
+                        icon={<Zap size={28} />}
+                        title={t('skills.installed.empty')}
+                        description="Busca en el catálogo e instala la primera en segundos."
+                        action={
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => {
+                              hubInputRef.current?.focus()
+                              hubInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                            }}
+                          >
+                            Explorar el catálogo
+                          </Button>
+                        }
+                      />
+                    </FadeIn>
+                  )
+                  : (
+                    <ul className={s.list} role="list">
+                      <AnimatePresence initial={false}>
+                        {state.skills.map(sk => (
+                          <AnimatedListItem key={sk.package_id ?? sk.skill_id}>
+                            <SkillRow
+                              skill={sk}
+                              loadingDetails={loadingDetailsId === (sk.package_id ?? sk.skill_id ?? '')}
+                              onView={() => handleViewSkillDetails(sk)}
+                              onPromote={async () => {
+                                const pkgId = sk.package_id ?? sk.skill_id ?? ''
+                                try {
+                                  await promoteSkill(pkgId)
+                                  show('El agente puede usar esta habilidad de forma autónoma', 'ok')
+                                  loadInstalled()
+                                } catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
+                              }}
+                              onUninstall={async () => {
+                                const name = sk.skill_name ?? sk.name ?? sk.package_id ?? ''
+                                const ok = await confirm({
+                                  title: `¿Desinstalar "${name}"?`,
+                                  description: 'El agente dejará de tener esta habilidad.',
+                                  confirmLabel: 'Desinstalar',
+                                  variant: 'danger',
+                                })
+                                if (!ok) return
+                                try {
+                                  const op = await uninstallHubSkill(name)
+                                  if (op?.op_id) {
+                                    trackPoll(pollHubOp(op.op_id, {
+                                      onDone: () => { show(`"${name}" desinstalada`, 'ok'); loadInstalled() },
+                                      onError: r => { show(`No se pudo desinstalar: ${r}`, 'error'); loadInstalled() },
+                                    }))
+                                  } else {
+                                    show(`"${name}" desinstalada`, 'ok'); loadInstalled()
+                                  }
+                                } catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
+                              }}
+                            />
+                          </AnimatedListItem>
+                        ))}
+                      </AnimatePresence>
+                    </ul>
+                  )
+              )}
+            </section>
+          </StaggerItem>
+
           {/* ── Hub search ──────────────────────────────────────────────── */}
           <StaggerItem>
             <section className={s.section} aria-label="Catálogo de habilidades">
@@ -520,121 +647,6 @@ export default function SkillsView() {
                   </motion.ul>
                 )}
               </AnimatePresence>
-            </section>
-          </StaggerItem>
-
-          {/* ── Installed skills ─────────────────────────────────────────── */}
-          <StaggerItem>
-            <section className={s.section} aria-label="Habilidades instaladas">
-              <div className={s.sectionHead}>
-                <span className={s.sectionLabel}>{t('skills.installed.label')}</span>
-                {installedCount !== null && installedCount > 0 && (
-                  <span className={s.sectionCount} aria-label={`${installedCount} habilidades`}>
-                    {installedCount}
-                  </span>
-                )}
-              </div>
-
-              {/* Loading skeletons */}
-              {state.status === 'loading' && (
-                <ul className={s.list} aria-busy="true" aria-label="Cargando habilidades">
-                  {[0, 1, 2].map(i => (
-                    <li key={i}>
-                      <SkillRowSkeleton delay={i * 60} />
-                    </li>
-                  ))}
-                </ul>
-              )}
-
-              {/* Error */}
-              {state.status === 'error' && (
-                <FadeIn>
-                  <div role="alert" className={s.errorInline}>
-                    <span className={s.errorIcon} aria-hidden="true">
-                      <AlertTriangle size={16} />
-                    </span>
-                    <div className={s.errorBody}>
-                      <p className={s.errorTitle}>No se pudieron cargar las habilidades</p>
-                      <p className={s.errorDesc}>{state.message}</p>
-                      <div className={s.errorActions}>
-                        <Button variant="secondary" size="sm" onClick={loadInstalled}>
-                          Reintentar
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                </FadeIn>
-              )}
-
-              {/* Success */}
-              {state.status === 'success' && (
-                state.skills.length === 0
-                  ? (
-                    <FadeIn>
-                      <EmptyState
-                        icon={<Zap size={28} />}
-                        title={t('skills.installed.empty')}
-                        description="Busca en el catálogo e instala la primera en segundos."
-                        action={
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => {
-                              hubInputRef.current?.focus()
-                              hubInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-                            }}
-                          >
-                            Explorar el catálogo
-                          </Button>
-                        }
-                      />
-                    </FadeIn>
-                  )
-                  : (
-                    <ul className={s.list} role="list">
-                      <AnimatePresence initial={false}>
-                        {state.skills.map(sk => (
-                          <AnimatedListItem key={sk.package_id ?? sk.skill_id}>
-                            <SkillRow
-                              skill={sk}
-                              loadingDetails={loadingDetailsId === (sk.package_id ?? sk.skill_id ?? '')}
-                              onView={() => handleViewSkillDetails(sk)}
-                              onPromote={async () => {
-                                const pkgId = sk.package_id ?? sk.skill_id ?? ''
-                                try {
-                                  await promoteSkill(pkgId)
-                                  show('El agente puede usar esta habilidad de forma autónoma', 'ok')
-                                  loadInstalled()
-                                } catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
-                              }}
-                              onUninstall={async () => {
-                                const name = sk.skill_name ?? sk.name ?? sk.package_id ?? ''
-                                const ok = await confirm({
-                                  title: `¿Desinstalar "${name}"?`,
-                                  description: 'El agente dejará de tener esta habilidad.',
-                                  confirmLabel: 'Desinstalar',
-                                  variant: 'danger',
-                                })
-                                if (!ok) return
-                                try {
-                                  const op = await uninstallHubSkill(name)
-                                  if (op?.op_id) {
-                                    trackPoll(pollHubOp(op.op_id, {
-                                      onDone: () => { show(`"${name}" desinstalada`, 'ok'); loadInstalled() },
-                                      onError: r => { show(`No se pudo desinstalar: ${r}`, 'error'); loadInstalled() },
-                                    }))
-                                  } else {
-                                    show(`"${name}" desinstalada`, 'ok'); loadInstalled()
-                                  }
-                                } catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
-                              }}
-                            />
-                          </AnimatedListItem>
-                        ))}
-                      </AnimatePresence>
-                    </ul>
-                  )
-              )}
             </section>
           </StaggerItem>
 

@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import AsyncGenerator
 from dataclasses import replace
 from uuid import UUID
@@ -47,6 +47,11 @@ _CLOSE_SENTINEL = object()
 # frames más antiguos). Cubre tareas largas con muchos tool_calls + tokens. La verdad
 # durable del resultado final es el espejo de conversación / audit, no este log.
 _MAX_REPLAY_FRAMES: int = 6000
+
+# Cuántas tareas TERMINADAS se conservan en RAM (su replay/seq) para reconexiones
+# tardías. Más allá, se evicta la más antigua. Sin esto, _replay_log/_terminal_done/
+# _seq crecían por task_id PARA SIEMPRE (fuga de memoria sin techo en la sesión).
+_MAX_TERMINAL_TASKS: int = 256
 
 
 class StreamBroker:
@@ -83,6 +88,24 @@ class StreamBroker:
         # vez de re-añadirlos sobre lo ya pintado (causa raíz de los mensajes duplicados).
         # El replay sigue siendo el run completo; el seq solo evita la doble aplicación.
         self._seq: dict[UUID, int] = defaultdict(int)
+        # Orden de finalización (LRU) para evictar el estado de tareas terminadas y
+        # acotar la memoria (ver _record_terminal / _MAX_TERMINAL_TASKS).
+        self._terminal_order: OrderedDict[UUID, None] = OrderedDict()
+
+    def _record_terminal(self, task_id: UUID) -> None:
+        """Marca la tarea como terminada y evicta el estado de las más antiguas.
+
+        Un suscriptor activo ya tomó su snapshot de replay al subscribe, así que
+        evictar después no afecta a un replay en curso. Acota memoria a (tareas
+        vivas) + (últimas _MAX_TERMINAL_TASKS terminadas)."""
+        self._terminal_order.pop(task_id, None)
+        self._terminal_order[task_id] = None
+        while len(self._terminal_order) > _MAX_TERMINAL_TASKS:
+            old, _ = self._terminal_order.popitem(last=False)
+            self._replay_log.pop(old, None)
+            self._terminal_done.pop(old, None)
+            self._seq.pop(old, None)
+            self._subscribers.pop(old, None)
 
     def _stamp_seq(self, frame: TaskStreamFrame) -> TaskStreamFrame:
         """Copia el frame con un `seq` monótono por task_id en su payload."""
@@ -107,6 +130,7 @@ class StreamBroker:
 
         if kind in ("done", "error"):
             self._terminal_done[frame.task_id] = frame
+            self._record_terminal(frame.task_id)
         else:
             # status, tool_call, thinking_delta, delta → log de replay ORDENADO (acotado).
             log = self._replay_log[frame.task_id]

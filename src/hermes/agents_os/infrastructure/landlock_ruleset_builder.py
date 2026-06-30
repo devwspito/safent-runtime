@@ -291,6 +291,15 @@ _CAPABILITY_PATHS: dict[Capability, tuple[tuple[str, frozenset[AccessRight]], ..
             "/usr/share/ca-certificates",
             frozenset({AccessRight.READ_FILE, AccessRight.READ_DIR}),
         ),
+        # The browser-jail shim reads its seccomp profile (chromium-browser.json)
+        # AFTER applying this Landlock ruleset — load_and_apply("BROWSER") runs
+        # before _install_seccomp() in hermes-browser-launcher. Without READ here
+        # the open() → EACCES (Errno 13), the jail exits 1, CDP never starts and
+        # every browse call fails-closed ("el sistema bloquea el navegador").
+        (
+            "/usr/share/hermes/seccomp",
+            frozenset({AccessRight.READ_FILE, AccessRight.READ_DIR}),
+        ),
         # Runtime pseudo-FS Chromium reads (process self-introspection, entropy,
         # /dev/null). Deny-by-default would otherwise block these and abort the
         # browser at startup. /proc here is READ-only (no write/exec); the

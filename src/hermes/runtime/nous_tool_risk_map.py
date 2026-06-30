@@ -45,8 +45,11 @@ _NOUS_TOOL_RISK: dict[str, NousRisk] = {
     # ----------------------------------------------------------------
     "read_file": NousRisk.READ,
     "search_files": NousRisk.READ,
+    "list_dir": NousRisk.READ,          # lista directorio (no muta)
     "write_file": NousRisk.WRITE,       # escribe en filesystem
     "patch": NousRisk.WRITE,            # escribe en filesystem
+    "create_dir": NousRisk.WRITE,       # crea directorio
+    "delete_file": NousRisk.WRITE,      # borra (destructivo) — antes None → default-deny ciego
 
     # ----------------------------------------------------------------
     # Web tools — búsqueda/extracción = READ; taint de procedencia

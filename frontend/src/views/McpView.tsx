@@ -359,6 +359,7 @@ export default function McpView() {
                 state.servers.length === 0
                   ? (
                     <EmptyState
+                      compact
                       icon={<Wrench size={32} />}
                       title="Sin herramientas conectadas"
                       description="Añade una del catálogo sugerido o busca en el registro para ampliar las capacidades del agente."

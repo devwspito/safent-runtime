@@ -124,6 +124,7 @@ async def _sse_relay(
         return
 
     idle_total = 0.0
+    frames_seen = 0
     try:
         buf = b""
         while True:
@@ -137,6 +138,19 @@ async def _sse_relay(
                         reader.read(65536), timeout=_IDLE_READ_TIMEOUT_S
                     )
                 except asyncio.TimeoutError:
+                    if frames_seen == 0:
+                        # Connected but the task has NO state: no replay, not live —
+                        # e.g. the daemon restarted after the task ended. A live task
+                        # replays its whole log INSTANTLY on subscribe, so zero frames
+                        # by the first idle timeout means the task is gone. Emit a
+                        # terminal frame so EventSource STOPS and does not reconnect
+                        # forever (the post-restart "chat hangs on reopen" bug).
+                        logger.info(
+                            "hermes.cowork.chat_stream.no_state_close",
+                            extra={"task_id": task_id},
+                        )
+                        yield _sse_error_frame(task_id, "stream_no_longer_available")
+                        break
                     idle_total += _IDLE_READ_TIMEOUT_S
                     if idle_total >= _MAX_IDLE_S:
                         logger.info(
@@ -160,6 +174,7 @@ async def _sse_relay(
                 continue
             if opcode in (0x1, 0x2) and payload:
                 text = payload.decode("utf-8", errors="replace")
+                frames_seen += 1  # a real frame ⇒ the task HAS state (live or replayed)
                 seq = _frame_seq(text)
                 if seq is not None and seq <= last_event_id:
                     continue  # already delivered before the reconnect → resume skip

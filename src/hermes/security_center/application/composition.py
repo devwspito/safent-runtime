@@ -31,6 +31,9 @@ def build_default_scan_service():
         from hermes.security_center.infrastructure.package_content_scanner import (
             PackageContentScanner,
         )
+        from hermes.security_center.infrastructure.skill_content_scanner import (
+            SkillContentScanner,
+        )
         from hermes.security_center.infrastructure.provenance_scanner import (
             ProvenanceScanner,
         )
@@ -49,6 +52,7 @@ def build_default_scan_service():
     return ScanService(
         scanners=[
             PackageContentScanner(),
+            SkillContentScanner(),
             HeuristicFallbackScanner(),
             ProvenanceScanner(),
             McpToolLinter(),

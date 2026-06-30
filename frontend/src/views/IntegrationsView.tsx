@@ -269,6 +269,7 @@ export default function IntegrationsView() {
                 composioState.connected.length === 0
                   ? (
                     <EmptyState
+                      compact
                       icon={<Plug size={28} />}
                       title="Sin apps conectadas todavía"
                       description="Conéctate a Gmail, Slack, Notion y más desde el catálogo de abajo."
