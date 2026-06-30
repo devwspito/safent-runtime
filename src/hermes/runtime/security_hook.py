@@ -1203,6 +1203,23 @@ _SELF_JAILBREAK_MSG: str = (
     "mismo manualmente fuera del agente."
 )
 
+# Honest framing for native command/code guard blocks. In Lumen a guarded
+# terminal command or code snippet is HARD-BLOCKED — there is NO command/code
+# approval card (cards exist only for skill_manage/install/cronjob). The native
+# hermes-agent guard message is written for hermes' own HITL ("requires approval")
+# and misleads the model into telling the user "an approval card was shown, approve
+# to proceed" — a lie, since nothing is pending. We prepend this so whichever guard
+# fires, the model reports the block honestly and never invents a pending card.
+_GUARD_HARDBLOCK_MSG: str = (
+    "BLOQUEADO POR SEGURIDAD (inapelable). El sistema bloqueó este comando/código por "
+    "política de seguridad. En este entorno NO existe tarjeta de aprobación para "
+    "comandos peligrosos: NO es aprobable, ni siquiera con autorización del usuario. "
+    "NO lo reintentes, NO lo reformules, NO uses comandos ni herramientas alternativas "
+    "para el mismo efecto, y NO afirmes que se hizo ni que hay una tarjeta pendiente de "
+    "aprobación. Explícale al usuario con HONESTIDAD que está bloqueado por seguridad y "
+    "que, si está seguro, debe hacerlo él mismo manualmente fuera del agente."
+)
+
 
 def make_pre_tool_call_hook(
     *,
@@ -1352,7 +1369,7 @@ def make_pre_tool_call_hook(
                     logger.warning(
                         "hermes.security_hook.pre.command_guard_blocked tool=%s", tool_name
                     )
-                    return _block(msg)
+                    return _block(f"{_GUARD_HARDBLOCK_MSG} Detalle técnico: {msg}")
 
             # Step 5: Code guard for execute_code-type tools.
             code_str = _extract_code_str(tool_name, safe_args)
@@ -1362,7 +1379,7 @@ def make_pre_tool_call_hook(
                     logger.warning(
                         "hermes.security_hook.pre.code_guard_blocked tool=%s", tool_name
                     )
-                    return _block(msg)
+                    return _block(f"{_GUARD_HARDBLOCK_MSG} Detalle técnico: {msg}")
 
             # Step 6: Denylist anti-autopirateo for os_native service ops.
             # The broker already gates these in dispatch(), but the hook fires
