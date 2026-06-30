@@ -50,16 +50,14 @@ import hmac
 import json
 import logging
 import os
-from typing import TYPE_CHECKING
+from uuid import UUID
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from hermes.agents_os.domain.surface_kind import SurfaceKind
 from hermes.browser.infrastructure.cdp_input_adapter import CdpInputAdapter
 from hermes.browser.infrastructure.cdp_screencast_source import CdpScreencastSource
 from hermes.shell_server.mirror.button_codes import BTN_LEFT, BTN_MIDDLE, BTN_RIGHT
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger("hermes.shell_server.cowork.training_live")
 
@@ -86,13 +84,16 @@ def _verify_token(candidate: str, expected: str) -> bool:
     return hmac.compare_digest(candidate, expected)
 
 
-def create_training_live_router() -> APIRouter:
+def create_training_live_router(orchestrator=None) -> APIRouter:
+    """orchestrator: shared TrainingSessionOrchestrator (DI from main) so the
+    operator's demonstrated actions are captured as steps and /sign produces a
+    non-empty skill. None → live-view only (no recording)."""
     router = APIRouter()
 
     @router.websocket("/api/v1/training/{session_id}/live")
     async def training_live(
         websocket: WebSocket,
-        session_id: str,  # noqa: ARG001 — carried for correlation only
+        session_id: str,
     ) -> None:
         # --- Layer 1: token auth (replaces HTTP middleware, which is GET-exempt) ---
         # WebSocket routes get app.state via websocket.app.state (no Request param —
@@ -121,8 +122,11 @@ def create_training_live_router() -> APIRouter:
 
         try:
             pw, ctx, page, screen_src, input_adapter = await _setup_browser_session()
+            sid = _parse_uuid(session_id)
             send_task = asyncio.create_task(_send_frames(websocket, screen_src))
-            recv_task = asyncio.create_task(_recv_input(websocket, input_adapter, page))
+            recv_task = asyncio.create_task(
+                _recv_input(websocket, input_adapter, page, orchestrator, sid)
+            )
 
             # Wait until either task exits (disconnect or error).
             done, pending = await asyncio.wait(
@@ -240,8 +244,11 @@ async def _recv_input(
     ws: WebSocket,
     adapter: CdpInputAdapter,
     page,  # playwright Page
+    orchestrator=None,
+    session_id: "UUID | None" = None,
 ) -> None:
-    """Receive JSON input events from the client and dispatch them."""
+    """Receive JSON input events from the client, dispatch them to the browser,
+    and (if recording) capture them as training steps."""
     while True:
         try:
             raw = await ws.receive_text()
@@ -255,6 +262,7 @@ async def _recv_input(
             continue
 
         _dispatch_event(ev, adapter, page)
+        _record_step(orchestrator, session_id, ev)
 
 
 def _dispatch_event(ev: dict, adapter: CdpInputAdapter, page) -> None:
@@ -268,6 +276,48 @@ def _dispatch_event(ev: dict, adapter: CdpInputAdapter, page) -> None:
         _dispatch_navigate(ev, page)
     else:
         logger.debug("hermes.training_live.recv.unknown_type type=%r", kind)
+
+
+def _record_step(orchestrator, session_id, ev: dict) -> None:
+    """Capture a demonstrated action as a training step so /sign yields a real
+    skill (compile_and_persist reads the orchestrator's steps). Best-effort: if
+    the session is not RECORDING / not found, skip silently. Only meaningful
+    actions are recorded (navigate, click, key) — pointer moves/releases are
+    noise and are dropped."""
+    if orchestrator is None or session_id is None:
+        return
+    kind = ev.get("type")
+    payload: dict | None = None
+    if kind == "navigate":
+        url = str(ev.get("url", "")).strip()
+        if url:
+            payload = {"kind": "navigate", "url": url}
+    elif kind == "mouse" and ev.get("action") == "down":
+        payload = {
+            "kind": "act", "action": "click",
+            "x": ev.get("x"), "y": ev.get("y"), "button": ev.get("button", 0),
+        }
+    elif kind == "key" and ev.get("action") in ("down", "char"):
+        text = ev.get("text")
+        if isinstance(text, str) and text:
+            payload = {"kind": "act", "action": "key", "text": text}
+    if payload is None:
+        return
+    try:
+        orchestrator.capture_step(
+            session_id=session_id,
+            surface_kind=SurfaceKind.BROWSER,
+            action_payload=payload,
+        )
+    except Exception:  # noqa: BLE001 — not recording / not found → skip
+        logger.debug("hermes.training_live.record_step.skipped", exc_info=True)
+
+
+def _parse_uuid(raw: str) -> "UUID | None":
+    try:
+        return UUID(raw)
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 def _dispatch_mouse(ev: dict, adapter: CdpInputAdapter) -> None:
