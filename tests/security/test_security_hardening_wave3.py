@@ -589,20 +589,6 @@ class TestTlsKeyTempfiles:
         assert "mkstemp(" in src
 
 
-# ---------------------------------------------------------------------------
-# Fix-12: --no-sandbox removed from PlaywrightDriver
-# ---------------------------------------------------------------------------
-
-
-class TestPlaywrightNoSandbox:
-    def test_no_sandbox_flag_absent(self) -> None:
-        """Fix-12: PlaywrightDriver.start() does not pass --no-sandbox to Chromium."""
-        import inspect
-
-        from hermes.browser.infrastructure.playwright_driver import PlaywrightDriver
-
-        src = inspect.getsource(PlaywrightDriver.start)
-        assert "--no-sandbox" not in src, (
-            "Fix-12 regression: --no-sandbox still present in PlaywrightDriver.start(). "
-            "This disables the Chromium sandbox — must be removed for production use."
-        )
+# (Fix-12 PlaywrightDriver --no-sandbox test removed: the PlaywrightDriver was a
+# duplicate of hermes-agent's native browser and has been deleted; the jailed Chromium
+# is launched by the browser-launcher with its own seccomp/Landlock, not by Playwright.)
