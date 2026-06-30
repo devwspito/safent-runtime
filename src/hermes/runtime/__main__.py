@@ -767,100 +767,6 @@ def _build_audit_components(db_path: Path):
     return firmer, audit_repo
 
 
-def _build_approved_sites_provider(sandbox_mode: str):
-    """Return an ApprovedSitesProvider for the active sandbox mode.
-
-    openshell mode: provider reads `OpenShellSandboxProvider.approved_hosts` live
-        so the app-layer WRITE gate is always consistent with the kernel egress
-        policy (single source of truth — no env-var duplication needed).
-    local mode: reads HERMES_BROWSER_APPROVED_SITES CSV (static at startup).
-    """
-    if sandbox_mode == "openshell":
-        # The singleton sandbox provider is accessed lazily so that the
-        # composition root does not need to provision a sandbox just to wire the
-        # adapter.  The provider is looked up from the module-level registry if
-        # available; otherwise falls back to a static empty set (fail-closed).
-        try:
-            from hermes.browser.infrastructure.openshell_sandbox_provider import (  # noqa: PLC0415
-                make_egress_approved_sites_provider,
-                OpenShellSandboxProvider,
-            )
-            # Build a singleton provider bound to the standard sandbox name.
-            _sandbox = OpenShellSandboxProvider(
-                sandbox_name=os.environ.get("HERMES_SANDBOX_NAME", "chromium-jail"),
-                cdp_port=int(os.environ.get("HERMES_CDP_PORT", "9222")),
-            )
-            return make_egress_approved_sites_provider(_sandbox)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "hermes.runtime.approved_sites: openshell provider unavailable; "
-                "falling back to HERMES_BROWSER_APPROVED_SITES env var"
-            )
-
-    # Static CSV env var (local mode or openshell fallback).
-    approved_sites_raw = os.environ.get("HERMES_BROWSER_APPROVED_SITES", "").strip()
-    approved_sites_set = frozenset(
-        h.strip() for h in approved_sites_raw.split(",") if h.strip()
-    )
-
-    def _static_provider(_tenant_id: "UUID") -> frozenset[str]:
-        return approved_sites_set
-
-    return _static_provider
-
-
-def _build_browser_surface_adapter(*, browser_guard):
-    """Construye BrowserSurfaceAdapter + BrowserSessionRegistry (fail-soft).
-
-    Registra el adapter bajo SurfaceKind.BROWSER. Si el browser stack no
-    está disponible el adapter se registra igualmente — sus verbos devolverán
-    AgentBrowserNotInstalledError convertido en ReplayOutcome.failed.
-    """
-    try:
-        from hermes.agents_os.infrastructure.browser_surface_adapter import (  # noqa: PLC0415
-            BrowserSurfaceAdapter,
-        )
-        from hermes.browser.application.browser_session_registry import (  # noqa: PLC0415
-            BrowserSessionRegistry,
-        )
-        from hermes.execution.application.execution_context_registry import (  # noqa: PLC0415
-            ExecutionContextRegistry,
-        )
-        from hermes.execution.infrastructure.isolated_execution_context_factory import (  # noqa: PLC0415
-            IsolatedExecutionContextFactory,
-        )
-
-        registry = ExecutionContextRegistry()
-        context_factory = IsolatedExecutionContextFactory(
-            registry=registry, guard=browser_guard
-        )
-        session_registry = BrowserSessionRegistry()
-
-        sandbox_mode = os.environ.get("HERMES_BROWSER_SANDBOX", "").lower()
-        cdp_url = os.environ.get("HERMES_CDP_URL", "http://127.0.0.1:9222")
-
-        approved_sites_provider = _build_approved_sites_provider(sandbox_mode)
-
-        adapter = BrowserSurfaceAdapter(
-            factory=context_factory,
-            registry=session_registry,
-            approved_sites=approved_sites_provider,
-        )
-
-        logger.info(
-            "hermes.runtime.browser_surface_adapter.ready "
-            "sandbox=%s cdp_url=%s",
-            sandbox_mode if sandbox_mode else "local",
-            cdp_url if sandbox_mode == "openshell" else "n/a",
-        )
-        return adapter, session_registry
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "hermes.runtime.browser_surface_adapter.init_failed: %s — "
-            "BROWSER surface not available",
-            exc,
-        )
-        return None, None
 
 
 def _build_composio_surface_adapter(db_path: Path):
@@ -1358,11 +1264,11 @@ async def _run(*, systemd_notify: bool) -> None:
     # fails, the daemon continues without the guard (no browser cap).
     browser_guard = _build_browser_admission_guard()
 
-    # Phase 2b: BrowserSurfaceAdapter — fail-soft; daemon continues without
-    # browser capability if the browser stack is unavailable.
-    browser_adapter, _browser_session_registry = _build_browser_surface_adapter(
-        browser_guard=browser_guard,
-    )
+    # The legacy BrowserSurfaceAdapter (a DUPLICATE browser-as-capability surface)
+    # is removed: the agent browses via hermes-agent's NATIVE browser tools (gated by
+    # NousRisk -> CapabilityBroker), and live teaching uses the CDP screencast live-view.
+    # SurfaceKind.BROWSER stays unregistered — the broker already handles None (1062).
+    browser_adapter = None
 
     firmer, audit_repo = _build_audit_components(db_path)
     logger.info(
