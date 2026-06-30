@@ -91,9 +91,10 @@ def _unregister_pending_event(proposal_id_str: str, slot: dict) -> None:
         if not _pending_events[proposal_id_str]:
             _pending_events.pop(proposal_id_str, None)
 
-# How long the hook waits for the owner before auto-denying (seconds).
+# How long the hook waits for the owner before auto-denying (seconds). 30 min by
+# default — 600 s was too short for a human who steps away from the approval card.
 _NATIVE_DANGER_OWNER_WAIT_S: float = float(
-    __import__("os").environ.get("HERMES_HITL_WAIT_S", "600")
+    __import__("os").environ.get("HERMES_HITL_WAIT_S", "1800")
 )
 
 
@@ -1191,8 +1192,15 @@ def _holistic_command_is_self_jailbreak(command_str: str) -> bool:
 
 
 _SELF_JAILBREAK_MSG: str = (
-    "REJECTED: el agente no puede desactivar el kernel de seguridad del SO "
-    "(anti-autopirateo, inapelable)."
+    "BLOQUEADO POR SEGURIDAD (inapelable). Esta es una operación DESTRUCTIVA "
+    "irreversible o que tocaría el kernel de seguridad del SO. NO es aprobable: "
+    "ni siquiera con autorización del usuario se permite (el usuario también puede "
+    "equivocarse y no hay vuelta atrás). "
+    "NO la reintentes, NO la reformules, NO uses comandos ni herramientas "
+    "alternativas para lograr el mismo efecto, y NO afirmes que la hiciste ni crees "
+    "ficheros marcador. Explícale al usuario con HONESTIDAD: esta acción está "
+    "bloqueada por seguridad y no puedo ejecutarla; si está seguro, debe hacerla él "
+    "mismo manualmente fuera del agente."
 )
 
 
