@@ -149,6 +149,19 @@ class CdpInputAdapter:
             return
         self._fire("Input.dispatchKeyEvent", {"type": "char", "text": char})
 
+    def keyboard_key(self, key: str, pressed: bool) -> None:
+        """Inject a NAMED key (Enter, Backspace, Tab, Escape, Arrow*, Delete, …)
+        via CDP keyDown/keyUp. CDP's ``key`` field uses the same names as the DOM
+        ``KeyboardEvent.key``, so a browser's ``ev.key`` for non-printable keys maps
+        1:1. Printable single chars should use ``keyboard_keysym`` (char insertion).
+        """
+        if not key:
+            return
+        self._fire(
+            "Input.dispatchKeyEvent",
+            {"type": "keyDown" if pressed else "keyUp", "key": key},
+        )
+
     def keyboard_keycode(self, keycode: int, pressed: bool) -> None:  # noqa: ARG002
         """No-op: evdev keycodes have no direct CDP mapping without a layout table.
 

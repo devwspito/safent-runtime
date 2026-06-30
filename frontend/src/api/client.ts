@@ -256,14 +256,23 @@ export function addProvider(payload: Record<string, unknown>): Promise<Provider>
  * the default model for a native kind itself.
  */
 export function configureNativeProvider(payload: {
-  kind: string
+  provider_id: string
   api_key: string
+  model?: string
   set_active?: boolean
 }): Promise<Provider> {
   return request<Provider>('/providers/native', {
     method: 'POST',
     body: JSON.stringify(payload),
   })
+}
+
+/** The native provider currently set as the model (separate store from the repo).
+ *  Returns null when none is configured. Merged into the configured list by the UI. */
+export function getNativeActive(): Promise<Provider | null> {
+  return request<Provider | Record<string, never>>('/providers/native/active')
+    .then(p => (p && (p as Provider).provider_id ? (p as Provider) : null))
+    .catch(() => null)
 }
 
 export function setActiveProvider(providerId: string): Promise<unknown> {
@@ -367,6 +376,14 @@ export function resumeTrainingRecording(sessionId: string): Promise<TrainingStat
 
 export function cancelTrainingRecording(sessionId: string): Promise<TrainingState> {
   return request<TrainingState>(`/training/${encodeURIComponent(sessionId)}/cancel`, { method: 'POST', body: '{}' })
+}
+
+export function getTrainingState(sessionId: string): Promise<TrainingState> {
+  return request<TrainingState>(`/training/${encodeURIComponent(sessionId)}`)
+}
+
+export function signTrainingSession(sessionId: string): Promise<TrainingState> {
+  return request<TrainingState>(`/training/${encodeURIComponent(sessionId)}/sign`, { method: 'POST', body: '{}' })
 }
 
 export function getSkillDetails(packageId: string): Promise<SkillDetails> {

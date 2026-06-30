@@ -133,6 +133,17 @@ function CosteIcon() {
   )
 }
 
+function TeachingIcon() {
+  return (
+    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1" y="2" width="14" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M5 14h6M8 11v3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <circle cx="8" cy="6.5" r="1.5" fill="currentColor" />
+      <path d="M5.5 6.5C5.5 4.85 6.63 4 8 4s2.5.85 2.5 2.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 function PlusIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
@@ -155,6 +166,7 @@ function useNavItems(): NavItem[] {
     { to: '/seguridad',     label: t('nav.seguridad'),     icon: <SecurityIcon /> },
     { to: '/memoria',       label: t('nav.memoria'),       icon: <MemoriaIcon /> },
     { to: '/coste',         label: 'Coste',                icon: <CosteIcon /> },
+    { to: '/ensenar',       label: 'Enseñar',              icon: <TeachingIcon /> },
   ]
 }
 

@@ -14,6 +14,9 @@ import ArchivosView from './views/ArchivosView'
 import { useActiveProvider } from './hooks/useActiveProvider'
 import { useFeatures } from './hooks/useFeatures'
 
+// Code-split TeachingView: the live canvas + WS logic isn't needed on other routes.
+const TeachingView = lazy(() => import('./views/TeachingView'))
+
 // Code-split OfficeView at the route boundary; it imports the canvas engine
 // which is non-trivial (~10 kB gzipped) and not needed on other routes.
 const OfficeView = lazy(() => import('./views/OfficeView'))
@@ -54,6 +57,10 @@ function OfficeFallback() {
 
 function UsageFallback() {
   return <RouteFallback label="Cargando Coste…" />
+}
+
+function TeachingFallback() {
+  return <RouteFallback label="Cargando Modo Enseñanza…" />
 }
 
 /**
@@ -128,6 +135,13 @@ export default function App() {
             <ViewGuard viewId="coste">
               <Suspense fallback={<UsageFallback />}>
                 <UsageView />
+              </Suspense>
+            </ViewGuard>
+          } />
+          <Route path="ensenar" element={
+            <ViewGuard viewId="ensenar">
+              <Suspense fallback={<TeachingFallback />}>
+                <TeachingView />
               </Suspense>
             </ViewGuard>
           } />

@@ -1219,6 +1219,9 @@ def create_app() -> FastAPI:
     from hermes.shell_server.cowork.chat_stream import (  # noqa: PLC0415
         create_chat_stream_router,
     )
+    from hermes.shell_server.cowork.training_live import (  # noqa: PLC0415
+        create_training_live_router,
+    )
     from hermes.shell_server.cowork.workspace_api import (  # noqa: PLC0415
         create_workspace_router,
     )
@@ -1232,6 +1235,7 @@ def create_app() -> FastAPI:
     from hermes.shell_server.egress_api import create_egress_router  # noqa: PLC0415
 
     app.include_router(create_chat_stream_router())
+    app.include_router(create_training_live_router())
     app.include_router(create_workspace_router())
     app.include_router(create_approvals_router())
     app.include_router(create_policies_router())
