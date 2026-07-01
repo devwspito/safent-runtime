@@ -70,6 +70,7 @@ RUN cd /tmp/whlbuild && python3 -m pip wheel . --no-deps -w /tmp/whl \
       cryptography playwright pytesseract selectolax \
       mcp fastapi 'uvicorn[standard]' python-multipart PyJWT websockets httpx croniter \
       rich textual \
+      fastembed \
     # pydantic LAST word (determinism; matches the OS build's pin order)
     && python3 -m pip install --no-cache-dir 'pydantic==2.10.6' 'pydantic-core==2.27.2' \
     && rm -rf /tmp/whlbuild /tmp/whl
@@ -108,9 +109,9 @@ RUN npm install -g --ignore-scripts "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" 
     && echo "chromium -> $CHROME"
 
 # Builder-stage import smoke — fail the BUILD (not runtime) on a missing dep.
-RUN python3 -c "import hermes, fastapi, uvicorn, playwright, dbus_fast, composio, mcp; \
+RUN python3 -c "import hermes, fastapi, uvicorn, playwright, dbus_fast, composio, mcp, fastembed; \
       import hermes.runtime.__main__, hermes.shell_server.main, hermes.egress_proxy.__main__, \
-             hermes.audit_tail_service.__main__; \
+             hermes.audit_tail_service.__main__, hermes.runtime.semantic_tool_index; \
       from run_agent import AIAgent; from hermes_cli.runtime_provider import resolve_runtime_provider; \
       print('IMPORT SMOKE OK')"
 
@@ -277,6 +278,29 @@ RUN mkdir -p "${TRIVY_CACHE_DIR}"; \
     fi; \
     chown -R hermes:hermes "${TRIVY_CACHE_DIR}"; \
     chmod -R u=rwX,go=rX "${TRIVY_CACHE_DIR}"
+
+# ── Semantic tool-retrieval model (fastembed, ONNX, CPU) — baked OFFLINE ───────
+# Intent-based tool retrieval (runtime/semantic_tool_index.py) embeds each connected-
+# integration tool and ranks them by the turn's intent, so a weak model sees a handful
+# of RELEVANT tools instead of hundreds (gmail alone is ~63). The multilingual MiniLM
+# ONNX model is baked to /var/lib/fastembed — OUTSIDE the runtime volume, the SAME
+# rationale as the trivy DB above: a model under /var/lib/hermes/* would be SHADOWED by
+# an existing volume on upgrade → runtime re-download → offline installs break. The
+# hermes-runtime unit sets HERMES_TOOL_EMBED_CACHE=/var/lib/fastembed and adds the path
+# to ReadWritePaths. Owner hermes:hermes (the daemon may write HF lock files on load);
+# world-read (the model is public data); the sandboxed agent has no path to it.
+# FAIL-THE-BUILD if the bake fails so a shipped image always has a working index — the
+# in-code fallback (retrieval disabled → full tool set kept) is a degraded runtime
+# safety net, not a licence to ship an image without the model. Single RUN so the
+# download + chown share one layer (no ~220MB metadata-copy duplication).
+RUN mkdir -p /var/lib/fastembed \
+    && python3 -c "from fastembed import TextEmbedding; \
+m = TextEmbedding(model_name='sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2', cache_dir='/var/lib/fastembed'); \
+v = list(m.embed(['warmup'])); \
+assert v and len(v[0]) == 384, 'unexpected embed dim'; \
+print('INFO: fastembed model baked (dim=%d) at /var/lib/fastembed' % len(v[0]))" \
+    && chown -R hermes:hermes /var/lib/fastembed \
+    && chmod -R u=rwX,go=rX /var/lib/fastembed
 
 # Hardening (V): strip ALL SUID-root bits. The cage uses systemd capabilities
 # (NET_ADMIN/SYS_ADMIN on the root units), NOT SUID — so su/mount/passwd/chfn/

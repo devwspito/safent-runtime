@@ -151,6 +151,11 @@ Environment=UV_CACHE_DIR=/var/lib/hermes/uv-cache
 # Trivy CVE scanner: DB horneada en /var/lib/trivy (en ReadWritePaths abajo). El scanner usa
 # --skip-db-update → lee la DB de aquí, sin red. Escaneo CVE real de cada MCP/skill instalado.
 Environment=TRIVY_CACHE_DIR=/var/lib/trivy
+# Semantic tool retrieval: modelo ONNX horneado en /var/lib/fastembed (en ReadWritePaths
+# abajo, FUERA del volumen como la DB de trivy → no lo sombrea un upgrade). El daemon lo
+# lee al arrancar y puede escribir locks de HF al cargar. Ausente → retrieval se desactiva
+# (fail-soft, set completo de tools). Ver runtime/semantic_tool_index.py.
+Environment=HERMES_TOOL_EMBED_CACHE=/var/lib/fastembed
 # hermes_cli (resolve_runtime_provider + AIAgent) persiste config/.env/auth.json
 # bajo $HERMES_HOME (default ~/.hermes). Con ProtectHome=yes el HOME está
 # enmascarado → PermissionError al resolver/llamar al modelo (rompe TestProvider
@@ -231,7 +236,7 @@ RestrictNamespaces=yes
 LockPersonality=yes
 PrivateDevices=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/hermes /run/hermes /var/lib/trivy
+ReadWritePaths=/var/lib/hermes /run/hermes /var/lib/trivy /var/lib/fastembed
 # El agente NO debe poder ni siquiera ESCRIBIR una petición al gate de acceso
 # remoto (defensa en profundidad: aunque el gate ya exige la contraseña del
 # dispositivo, le quitamos al agente la posibilidad de intentar/brute-forcear).

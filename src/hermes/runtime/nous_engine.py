@@ -2111,6 +2111,16 @@ class NousReasoningEngine:
         else:
             self._chunk_sink_emitter = None
 
+        # Intent-based tool retrieval: stamp THIS turn's message so _tools_source
+        # (resolved just below, in THIS event-loop thread) can rank connected-
+        # integration tools by intent and surface only the top-K. Must be set here,
+        # not in the run_in_executor cycle body — that runs in a different thread the
+        # ContextVar would not reach, and after specs are already resolved.
+        from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+            set_current_message as _set_current_message,
+        )
+        _set_current_message(user_message or "")
+
         external_specs = await self._resolve_external_specs(active_agent_id)
         external_catalog = _ExternalToolCatalog(external_specs)
 

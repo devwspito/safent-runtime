@@ -16,6 +16,7 @@ and the hook fires within it; keys are unique per cycle so there is no contentio
 
 from __future__ import annotations
 
+import contextvars
 import threading
 
 _lock = threading.Lock()
@@ -69,6 +70,33 @@ def get_current_cycle_task() -> str:
 def clear_current_cycle_task() -> None:
     """Drop the thread's current-cycle stamp (cycle's finally; reused-thread safe)."""
     _current.task_id = ""
+
+
+# Ambient current-turn user message for intent-based semantic tool retrieval.
+# A ContextVar (NOT thread-local): the async cycle (run_cycle) resolves external
+# tools in the EVENT-LOOP thread via `await _tools_source()`, but the rest of the
+# cycle body runs in a run_in_executor thread. A thread-local set in one is invisible
+# to the other. ContextVars propagate down the `await` chain within the SAME asyncio
+# task (so _tools_source sees it) and are isolated across concurrent cycles (each
+# run_cycle is its own task) — exactly the scope this needs.
+_current_message: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "hermes_current_message", default=""
+)
+
+
+def set_current_message(message: str) -> None:
+    """Stamp the current turn's user message (intent-based tool retrieval)."""
+    _current_message.set(message or "")
+
+
+def get_current_message() -> str:
+    """The current turn's user message for THIS cycle/task, or "" outside a cycle."""
+    return _current_message.get()
+
+
+def clear_current_message() -> None:
+    """Reset the current-turn message stamp (cycle end)."""
+    _current_message.set("")
 
 
 def resolve_conversation(effective_task_id: str) -> str:

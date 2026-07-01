@@ -34,6 +34,20 @@ _CONSENT_DB_PATH = Path(
 _HEALTH_INTERVAL_S = float(os.environ.get("HERMES_HEALTH_INTERVAL_S", "30"))
 _LEASE_SECONDS = int(os.environ.get("HERMES_LEASE_SECONDS", "60"))
 
+# Semantic tool retrieval: present only the top-K integration tools relevant to the
+# turn's intent (see _tools_source). Process-global index, lazily loaded.
+_TOOL_RETRIEVAL_TOPK = int(os.environ.get("HERMES_TOOL_RETRIEVAL_TOPK", "12"))
+_TOOL_INDEX_SINGLETON = None
+
+
+def _tool_index():
+    global _TOOL_INDEX_SINGLETON
+    if _TOOL_INDEX_SINGLETON is None:
+        from hermes.runtime.semantic_tool_index import SemanticToolIndex  # noqa: PLC0415
+
+        _TOOL_INDEX_SINGLETON = SemanticToolIndex()
+    return _TOOL_INDEX_SINGLETON
+
 
 def _sd_notify(message: str) -> None:
     """Envía notificación al socket de systemd si NOTIFY_SOCKET está configurado."""
@@ -1479,11 +1493,36 @@ async def _run(*, systemd_notify: bool) -> None:
             get_dynamic_tool_registry().publish(dynamic_entries)
         except Exception as _dyn_exc:  # noqa: BLE001
             logger.debug("hermes.runtime.dynamic_registry_publish_failed: %s", _dyn_exc)
+        # Intent-based tool retrieval: a connected integration can expose hundreds of
+        # tools (gmail alone ~63). Presenting them all bloats context and trips
+        # progressive disclosure, so the model never finds the right one. Instead,
+        # embed the turn's user message and keep only the top-K most relevant
+        # integration (composio + mcp) tools — the agent sees a handful of RELEVANT
+        # tools directly. Fail-soft: no message / embedder unavailable → full set.
+        integration = list(composio) + list(mcp_specs)
+        try:
+            from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+                get_current_message,
+            )
+            _msg = get_current_message()
+            picked = _tool_index().retrieve(_msg, integration, k=_TOOL_RETRIEVAL_TOPK) if _msg else None
+            if picked is not None and len(picked) < len(integration):
+                logger.info(
+                    "hermes.runtime.tools_source.retrieved %d/%d integration tools by intent",
+                    len(picked), len(integration),
+                )
+                logger.debug(
+                    "hermes.runtime.tools_source.retrieved names=%s",
+                    [getattr(s, "name", "?") for s in picked],
+                )
+                integration = picked
+        except Exception as _ret_exc:  # noqa: BLE001
+            logger.debug("hermes.runtime.tool_retrieval_skipped: %s", _ret_exc)
         # spec 014 inc. 3: capability_specs are static (built once, always
         # present).  Included BEFORE composio + mcp so they appear first in
         # the LLM schema and are not filtered by _resolve_external_specs
         # (their names are NOT in the Nous native catalog).
-        return (native_tool_specs or ()) + (capability_specs or ()) + composio + mcp_specs
+        return (native_tool_specs or ()) + (capability_specs or ()) + tuple(integration)
 
     # B4: construir repos de filtrado runtime ANTES del engine.
     # Misma shell-state.db (db_path). Fail-soft: sin repos, el engine corre en modo
