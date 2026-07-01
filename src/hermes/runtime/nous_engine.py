@@ -3375,6 +3375,51 @@ def _wire_inline_branch_gates(agent: "GovernedAIAgent") -> None:
     """
     _patch_memory_tool(agent)
     _patch_clarify_tool(agent)
+    _patch_skill_manage_tool(agent)
+
+
+def _patch_skill_manage_tool(agent: "GovernedAIAgent") -> None:
+    """Auto-wrap plain skill content into a valid SKILL.md before the native handler.
+
+    ROOT of the skill_manage failures: the native tool requires ``content`` to be a
+    full SKILL.md (``---`` frontmatter with name/description/version), but the LLM
+    almost always sends just the body ("saluda al usuario") → "SKILL.md must start
+    with YAML frontmatter" → it retries blindly (the retry-spam). We reuse the
+    existing _ensure_frontmatter_fields helper to wrap plain content, so a skill is
+    created on the FIRST try. Fail-soft: import errors leave the native tool as-is.
+    """
+    try:
+        import tools.skill_manager_tool as _sm_mod  # noqa: PLC0415
+        from hermes.shell_server.skills.skill_synthesis import (  # noqa: PLC0415
+            _ensure_frontmatter_fields,
+        )
+    except ImportError:
+        logger.debug(
+            "hermes.nous_engine._patch_skill_manage_tool: unavailable — skip"
+        )
+        return
+
+    _original_skill_manage = _sm_mod.skill_manage
+
+    def _wrapped_skill_manage(action=None, name=None, content=None, **kwargs):
+        # Only content-bearing actions (create/edit) carry a SKILL.md body. If the
+        # model sent a bare body (no frontmatter), wrap it so the native parser accepts it.
+        if (
+            isinstance(content, str)
+            and content.strip()
+            and not content.lstrip().startswith("---")
+        ):
+            try:
+                content = _ensure_frontmatter_fields(content, name or "", "")
+                logger.info(
+                    "hermes.nous_engine.skill_manage.frontmatter_wrapped name=%s", name
+                )
+            except Exception:  # noqa: BLE001 — never block the call on wrapping
+                logger.debug("skill_manage frontmatter wrap failed", exc_info=True)
+        return _original_skill_manage(action=action, name=name, content=content, **kwargs)
+
+    _sm_mod.skill_manage = _wrapped_skill_manage
+    logger.debug("hermes.nous_engine._patch_skill_manage_tool: content auto-frontmatter on")
 
 
 def _patch_memory_tool(agent: "GovernedAIAgent") -> None:
