@@ -56,6 +56,14 @@ class StdioMcpClient:
         self._pump_tasks: list[Any] = []
         self._launcher_files: tuple[Any, Any] | None = None
         self._closed = False
+        # Session ownership: the MCP ClientSession (and, on the direct path, the
+        # stdio_client context) enter anyio cancel scopes bound to the TASK that
+        # enters them. If teardown runs in a different task (disconnect handler),
+        # anyio raises "Attempted to exit cancel scope in a different task". So a
+        # single long-lived owner task enters AND exits the session; close() just
+        # signals it. See _session_owner.
+        self._owner_task: Any = None
+        self._close_evt: Any = None
 
     async def initialize(self) -> None:
         """Launch the subprocess and perform MCP handshake.
@@ -86,10 +94,6 @@ class StdioMcpClient:
 
     async def _initialize_via_launcher(self, argv: list[str]) -> None:
         """Launcher path: spawn via hermes-mcp-launcher, wire fds to ClientSession."""
-        import asyncio as _asyncio  # noqa: PLC0415
-
-        ClientSession = _import_mcp_session()
-
         from hermes.security.mcp_launcher_client import (  # noqa: PLC0415
             McpLauncherClient,
             McpLauncherError,
@@ -124,11 +128,9 @@ class StdioMcpClient:
 
         try:
             read_stream, write_stream = self._wire_launcher_streams(read_fd, write_fd)
-            self._client_session = ClientSession(read_stream, write_stream)
-            await self._client_session.__aenter__()
-            # asyncio.timeout (same-task cancel scope) — see comment in direct path.
-            async with _asyncio.timeout(self._timeout_sec):
-                await self._client_session.initialize()
+            # Enter/exit the ClientSession inside ONE owner task (same-task cancel
+            # scope). Blocks until the handshake completes or raises.
+            await self._start_session_owner(streams=(read_stream, write_stream))
         except McpConnectionError:
             raise
         except Exception as exc:
@@ -218,7 +220,7 @@ class StdioMcpClient:
 
     async def _initialize_direct(self, argv: list[str]) -> None:
         """Direct path: original stdio_client() spawn (used in CI/tests)."""
-        ClientSession, stdio_client = _import_mcp()
+        _ClientSession, stdio_client = _import_mcp()
         try:
             from mcp.client.stdio import (  # noqa: PLC0415
                 StdioServerParameters,
@@ -250,29 +252,80 @@ class StdioMcpClient:
             if byok:
                 env.update(byok)
             params = StdioServerParameters(command=argv[0], args=argv[1:], env=env)
-            self._stdio_context = stdio_client(params)
-            read_stream, write_stream = await self._stdio_context.__aenter__()
-            self._client_session = ClientSession(read_stream, write_stream)
-            await self._client_session.__aenter__()
-            # timeout_sec se aplica con asyncio.timeout() (CM, MISMA task), NO con
-            # asyncio.wait_for: wait_for ejecuta la corrutina en una task nueva, y
-            # como stdio_client/ClientSession usan task-groups+cancel-scopes de
-            # anyio entrados en ESTA task, el cruce de tasks lanzaba
-            # "Attempted to exit cancel scope in a different task than it was
-            # entered in" → "Connection closed" en TODOS los MCP. asyncio.timeout
-            # cancela dentro de la misma task y preserva el scope.
-            # (npx/uvx descargan el paquete entero en el primer arranque sin caché,
-            # por eso el presupuesto debe ser amplio — 120s/300s desde el factory.)
-            import asyncio as _asyncio  # noqa: PLC0415
-
-            async with _asyncio.timeout(self._timeout_sec):
-                await self._client_session.initialize()
+            # Own BOTH the stdio_client context AND the ClientSession in ONE task,
+            # so their anyio cancel scopes are entered and exited in the same task
+            # (see _session_owner). Blocks until the handshake completes or raises.
+            await self._start_session_owner(stdio_ctx=stdio_client(params))
         except McpConnectionError:
             raise
         except Exception as exc:
             raise McpConnectionError(
                 f"StdioMcpClient: failed to connect via {argv!r}: {exc}"
             ) from exc
+
+    async def _start_session_owner(
+        self, *, streams: tuple[Any, Any] | None = None, stdio_ctx: Any = None
+    ) -> None:
+        """Spawn the owner task that holds the MCP session for its whole life.
+
+        Blocks until the session is initialized (returns) or the handshake fails
+        (raises the original exception). The owner task then idles until close()
+        signals it, at which point it exits the session IN ITS OWN TASK — so the
+        anyio cancel scope is always exited in the task that entered it.
+        """
+        import asyncio as _asyncio  # noqa: PLC0415
+
+        self._close_evt = _asyncio.Event()
+        ready: Any = _asyncio.get_event_loop().create_future()
+        self._owner_task = _asyncio.ensure_future(
+            self._session_owner(ready, streams=streams, stdio_ctx=stdio_ctx)
+        )
+        await ready  # propagates the connect error, if any
+
+    async def _session_owner(
+        self, ready: Any, *, streams: tuple[Any, Any] | None = None, stdio_ctx: Any = None
+    ) -> None:
+        """Enter → initialize → serve → exit the MCP session, all in THIS task."""
+        import asyncio as _asyncio  # noqa: PLC0415
+
+        try:
+            if stdio_ctx is not None:
+                async with stdio_ctx as (read_stream, write_stream):
+                    await self._serve_session(read_stream, write_stream, ready)
+            else:
+                assert streams is not None
+                await self._serve_session(streams[0], streams[1], ready)
+        except _asyncio.CancelledError:
+            # close() cancelled us as a fallback; the async-with teardown above
+            # already ran the session __aexit__ in this task. Nothing to log.
+            pass
+        except Exception as exc:  # noqa: BLE001
+            if not ready.done():
+                ready.set_exception(exc)
+            else:
+                # Teardown-time hiccup AFTER a healthy session — cosmetic; DEBUG only.
+                logger.debug("hermes.mcp.stdio_client.session_owner_exit: %s", exc)
+        finally:
+            self._client_session = None
+
+    async def _serve_session(self, read_stream: Any, write_stream: Any, ready: Any) -> None:
+        """Enter the ClientSession, initialize, publish it, and idle until close."""
+        import asyncio as _asyncio  # noqa: PLC0415
+
+        ClientSession = _import_mcp_session()
+        async with ClientSession(read_stream, write_stream) as session:
+            try:
+                async with _asyncio.timeout(self._timeout_sec):
+                    await session.initialize()
+            except BaseException as exc:  # noqa: BLE001 — surface to the connect caller
+                if not ready.done():
+                    ready.set_exception(exc)
+                raise  # exit the async-with → __aexit__ runs in THIS task
+            self._client_session = session
+            if not ready.done():
+                ready.set_result(True)
+            # Hold the session open until close() asks us to tear it down.
+            await self._close_evt.wait()
 
     async def list_tools(self) -> list[dict[str, Any]]:
         """Return raw tool descriptors from the MCP server.
@@ -314,20 +367,35 @@ class StdioMcpClient:
     async def close(self) -> None:
         """Tear down gracefully. Idempotent.
 
-        On the launcher path: closing the ClientSession causes the MCP child to
-        receive EOF on its stdin and exit naturally. The launcher reaps it via
-        SIGCHLD/waitpid. We then close our fd copies to free kernel resources.
+        The MCP session (ClientSession, and on the direct path the stdio_client
+        context) is owned by _session_owner. We SIGNAL that task to exit — so the
+        anyio cancel scopes are exited in the SAME task that entered them (no
+        "exit cancel scope in a different task" warning) — then reap our launcher
+        transport (pump tasks + fd copies). Closing the session makes the MCP
+        child receive EOF on stdin and exit; the launcher reaps it via SIGCHLD.
         """
+        import asyncio as _asyncio  # noqa: PLC0415
+
         if self._closed:
             return
         self._closed = True
-        # ── Launcher path: orden de teardown determinista ──────────────────────
-        # 1) Cancelar las tareas pump (dejan de empujar a los memory-streams).
-        # 2) Cerrar write_fd PRIMERO = stdin del MCP → EOF → el hijo sale solo (el
-        #    launcher lo reapea por SIGCHLD). 3) Cerrar read_fd = stdout del MCP →
-        #    desbloquea el read() del reader que pueda seguir bloqueado en su hilo
-        #    (devuelve EOF/EBADF y la tarea acaba). Hacerlo ANTES del cierre del
-        #    ClientSession evita que su task-group se quede esperando al transporte.
+        # 1) Ask the owner task to exit the session in ITS OWN task, then join it.
+        if self._close_evt is not None:
+            self._close_evt.set()
+        if self._owner_task is not None:
+            try:
+                await _asyncio.wait_for(self._owner_task, timeout=15.0)
+            except _asyncio.TimeoutError:
+                self._owner_task.cancel()
+                try:
+                    await self._owner_task
+                except (Exception, _asyncio.CancelledError):  # noqa: BLE001
+                    pass
+            except (Exception, _asyncio.CancelledError):  # noqa: BLE001
+                pass
+            self._owner_task = None
+        # 2) Reap the launcher transport (no-op on the direct path). Cancel the
+        #    pump tasks and close our fd copies to free kernel resources.
         for _task in self._pump_tasks:
             try:
                 _task.cancel()
@@ -343,17 +411,8 @@ class StdioMcpClient:
                     pass
         self._launcher_read_fd = None
         self._launcher_write_fd = None
-        # Ahora cerrar la sesión MCP y, en el camino directo, el stdio_context.
-        if self._client_session is not None:
-            try:
-                await self._client_session.__aexit__(None, None, None)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("hermes.mcp.stdio_client.session_close_error: %s", exc)
-        if self._stdio_context is not None:
-            try:
-                await self._stdio_context.__aexit__(None, None, None)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("hermes.mcp.stdio_client.stdio_context_close_error: %s", exc)
+        self._client_session = None
+        self._stdio_context = None
 
 
 # ---------------------------------------------------------------------------
