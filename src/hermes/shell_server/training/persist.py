@@ -209,6 +209,7 @@ def compile_and_persist(
     signed_at: str,
     voice_captions: list[str] | None = None,
     transcription_failed_ack: bool = False,
+    generalized_body: str | None = None,
 ) -> bool:
     """Compile the in-memory session into a SkillPackage and persist it.
 
@@ -294,6 +295,7 @@ def compile_and_persist(
             skill_name=skill_name,
             signed_at=signed_at,
             signing_method=signing_method,
+            generalized_body=generalized_body,
         )
     except Exception:
         logger.exception("compile_and_persist: SKILL.md write failed session=%s", session_id)
@@ -319,7 +321,16 @@ def _format_steps_procedure(pkg: "Any") -> "tuple[str, int]":
     """
     bundle = getattr(pkg, "steps_by_surface_kind", None) or {}
     steps = [st for sk_steps in bundle.values() for st in sk_steps]
-    steps.sort(key=lambda s: getattr(s, "sequence_index", 0))
+    return format_steps_lines(steps)
+
+
+def format_steps_lines(steps: "list[Any]") -> "tuple[str, int]":
+    """Format a flat list of TrainingSteps into a numbered, human-readable trace.
+
+    Shared by the SKILL.md writer and the LLM generalizer (which feeds this trace to
+    the model). Clicks use the captured element descriptor when present.
+    """
+    steps = sorted(steps, key=lambda s: getattr(s, "sequence_index", 0))
     if not steps:
         return "Replay the recorded session steps.", 0
     lines: list[str] = []
@@ -329,12 +340,39 @@ def _format_steps_procedure(pkg: "Any") -> "tuple[str, int]":
         if ap.get("kind") == "navigate" or ap.get("url"):
             lines.append(f"{i}. Navigate to {ap.get('url', '')}")
         elif action == "click":
-            lines.append(f"{i}. Click at ({ap.get('x')}, {ap.get('y')})")
+            desc = _describe_element(ap.get("element"))
+            if desc:
+                lines.append(f"{i}. Click {desc}")
+            else:
+                lines.append(f"{i}. Click at ({ap.get('x')}, {ap.get('y')})")
         elif action == "key":
             lines.append(f"{i}. Type: {ap.get('text', '')}")
         else:
             lines.append(f"{i}. {action or ap.get('kind') or 'action'}: {ap}")
     return "\n".join(lines), len(steps)
+
+
+def _describe_element(el: "Any") -> str:
+    """Human label for a captured click target ('the button "Search"'), or '' if none.
+
+    Turns the semantic descriptor (tag/role/text captured via elementFromPoint) into a
+    readable, layout-independent instruction so the skill survives coordinate changes.
+    """
+    if not isinstance(el, dict) or not el:
+        return ""
+    tag = el.get("tag")
+    label = {
+        "a": "link", "button": "button", "input": "input field",
+        "textarea": "text area", "select": "dropdown", "img": "image",
+    }.get(tag) or el.get("role") or tag or "element"
+    text = (el.get("text") or "").strip()
+    if text:
+        return f'the {label} “{text}”'
+    if el.get("name"):
+        return f"the {label} named '{el['name']}'"
+    if el.get("id"):
+        return f"the {label} #{el['id']}"
+    return f"the {label}"
 
 
 def _persist_as_skill_md(
@@ -343,6 +381,7 @@ def _persist_as_skill_md(
     skill_name: str,
     signed_at: str,
     signing_method: str,
+    generalized_body: str | None = None,
 ) -> None:
     """Write a SKILL.md for a voice-trained skill into the Neus skills dir.
 
@@ -391,12 +430,22 @@ def _persist_as_skill_md(
     }
     frontmatter = _yaml.dump(fm_dict, default_flow_style=False, allow_unicode=True).rstrip()
     procedure, n_steps = _format_steps_procedure(pkg)
-    body = (
-        "## When\nUse this skill when the trained scenario is triggered.\n\n"
-        f"## Procedure\n{procedure}\n\n"
-        f"## Notes\nOrigin: teaching session `{pkg.skill_id}` "
-        f"| {n_steps} step(s) | surfaces: {', '.join(surface_kinds) or 'none'}\n"
-    )
+    if generalized_body and generalized_body.strip():
+        # LLM-generalized skill (semantic, reusable) as the main body; keep the exact
+        # demonstrated actions appended for traceability/exact replay.
+        body = (
+            f"{generalized_body.strip()}\n\n"
+            f"## Demonstrated actions (verbatim)\n{procedure}\n\n"
+            f"## Notes\nOrigin: teaching session `{pkg.skill_id}` "
+            f"| {n_steps} step(s) generalized | surfaces: {', '.join(surface_kinds) or 'none'}\n"
+        )
+    else:
+        body = (
+            "## When\nUse this skill when the trained scenario is triggered.\n\n"
+            f"## Procedure\n{procedure}\n\n"
+            f"## Notes\nOrigin: teaching session `{pkg.skill_id}` "
+            f"| {n_steps} step(s) | surfaces: {', '.join(surface_kinds) or 'none'}\n"
+        )
     content = f"---\n{frontmatter}\n---\n\n{body}"
     skill_dir = _neus_skills_root() / skill_name
     _write_skill_md_atomic(skill_dir, content)

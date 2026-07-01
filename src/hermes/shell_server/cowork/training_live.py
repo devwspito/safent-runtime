@@ -277,6 +277,15 @@ async def _recv_input(
             continue
 
         _dispatch_event(ev, adapter, page)
+        # Semantic capture: resolve a click's coordinate to the actual element so the
+        # recorded step is "click the Search button", not "click at (640,300)".
+        if ev.get("type") == "mouse" and ev.get("action") == "down":
+            try:
+                el = await adapter.resolve_element_at(ev.get("x", 0), ev.get("y", 0))
+                if el:
+                    ev["element"] = el
+            except Exception:  # noqa: BLE001 — fall back to coordinates
+                pass
         _record_step(orchestrator, session_id, ev)
 
 
@@ -312,6 +321,9 @@ def _record_step(orchestrator, session_id, ev: dict) -> None:
             "kind": "act", "action": "click",
             "x": ev.get("x"), "y": ev.get("y"), "button": ev.get("button", 0),
         }
+        el = ev.get("element")
+        if isinstance(el, dict) and el:
+            payload["element"] = el  # semantic descriptor (tag/role/text) if resolved
     elif kind == "key" and ev.get("action") in ("down", "char"):
         text = ev.get("text")
         if isinstance(text, str) and text:

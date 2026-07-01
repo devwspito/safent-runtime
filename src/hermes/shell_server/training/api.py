@@ -424,8 +424,31 @@ def create_training_router(
             if row is None:
                 raise HTTPException(409, "session not in review state")
             skill_name = row["skill_name"]
+            skill_description = (row["description"] or "").strip()
 
         now = _now_iso()
+
+        # Generalize the demonstrated (now semantic) steps into a reusable skill body
+        # via the LLM — best-effort. On no-provider / any error, generalized_body stays
+        # None and compile_and_persist falls back to the verbatim semantic steps.
+        generalized_body: str | None = None
+        try:
+            sess_obj = orchestrator.get_session(session_id=session_id)
+            from hermes.shell_server.training.persist import format_steps_lines  # noqa: PLC0415
+            trace, n_steps = format_steps_lines(list(getattr(sess_obj, "steps", []) or []))
+            if n_steps:
+                from hermes.shell_server.skills.skill_synthesis import (  # noqa: PLC0415
+                    generalize_steps_to_body,
+                )
+                generalized_body = await generalize_steps_to_body(
+                    name=skill_name,
+                    description=skill_description,
+                    steps_trace=trace,
+                    db_path=db_path,
+                )
+        except Exception:  # noqa: BLE001 — LLM optional; fall back to verbatim steps
+            logger.info("training.sign generalize skipped session=%s", session_id, exc_info=True)
+            generalized_body = None
 
         # Recoge la voz capturada por el coordinator (si lo hay) para que el
         # gate de voz vea la transcripción. compile_and_persist FIRMA (aplicando
@@ -446,6 +469,7 @@ def create_training_router(
                 skill_name=skill_name,
                 signed_at=now,
                 voice_captions=voice_captions,
+                generalized_body=generalized_body,
             )
         except VoiceCaptureRequired as exc:
             # Mic activo, sin voz y sin opt-out: NO firmamos una skill muda.

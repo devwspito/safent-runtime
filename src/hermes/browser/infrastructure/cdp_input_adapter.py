@@ -48,6 +48,7 @@ Ownership:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -192,6 +193,34 @@ class CdpInputAdapter:
         await self._session.send(
             "Input.dispatchMouseEvent", {"type": "mouseReleased", **common}
         )
+
+    async def resolve_element_at(self, x: float, y: float) -> dict | None:
+        """Return a semantic descriptor of the element at viewport (x, y), or None.
+
+        Teaching capture records clicks as raw coordinates ('click at (640,300)') —
+        brittle and not reusable. Resolving the actual element (via the page's own
+        elementFromPoint over the SAME CDP session) lets the skill say 'click the
+        Search button', which survives layout changes. Best-effort: any CDP/JS error
+        returns None and the caller falls back to coordinates.
+        """
+        js = (
+            "(function(){var el=document.elementFromPoint(" + str(int(x)) + "," + str(int(y)) + ");"
+            "if(!el)return null;"
+            "var t=(el.innerText||el.value||el.getAttribute('aria-label')||"
+            "el.getAttribute('placeholder')||el.getAttribute('title')||el.name||'').trim().slice(0,80);"
+            "return JSON.stringify({tag:el.tagName.toLowerCase(),"
+            "role:el.getAttribute('role'),text:t,"
+            "id:el.id||null,name:el.getAttribute('name')||null});})()"
+        )
+        try:
+            res = await self._session.send(
+                "Runtime.evaluate", {"expression": js, "returnByValue": True}
+            )
+            val = (res.get("result") or {}).get("value")
+            return json.loads(val) if val else None
+        except Exception:  # noqa: BLE001 — never block capture on resolution
+            logger.debug("hermes.cdp_input_adapter.resolve_element_at failed", exc_info=True)
+            return None
 
     async def async_type_text(self, text: str) -> None:
         """Type a string using CDP char events (one per character)."""

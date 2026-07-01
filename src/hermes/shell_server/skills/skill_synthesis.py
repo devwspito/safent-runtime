@@ -173,6 +173,42 @@ async def synthesize_skill_md(
     return content
 
 
+async def generalize_steps_to_body(
+    *,
+    name: str,
+    description: str,
+    steps_trace: str,
+    db_path: Path,
+    timeout: float = 90.0,
+) -> str:
+    """Turn a LIVE demonstration (captured steps) into a generalizable SKILL.md body.
+
+    The live-capture path records exact low-level actions (navigate URLs, click at
+    coordinates, typed literals) — faithful but brittle and not reusable. Here we feed
+    those demonstrated steps to the LLM and ask it to GENERALIZE them into semantic,
+    parametrized steps (no raw coordinates, {placeholders} for variable values), i.e.
+    the same quality as the description-only synthesis path but grounded in what the
+    user actually did. Returns just the markdown BODY (## sections), no frontmatter —
+    the caller (compile_and_persist) keeps the signed frontmatter and appends the raw
+    demonstrated actions for traceability. Raises NoActiveProvider / httpx errors.
+    """
+    enriched = (
+        f"{description or name}\n\n"
+        "Acciones que el usuario DEMOSTRÓ EN VIVO (esta es la fuente de verdad; "
+        "generalízalas: NADA de coordenadas literales como 'click at (640,300)', "
+        "describe el elemento por su rol/propósito; parametriza los valores variables "
+        "con {placeholders}):\n" + steps_trace
+    )
+    full_md = await synthesize_skill_md(
+        name=name, description=enriched, db_path=db_path, timeout=timeout
+    )
+    # Keep only the body (drop the LLM's frontmatter — compile_and_persist owns the
+    # signed frontmatter). Split on the closing '---' of the frontmatter block.
+    parts = full_md.split("---", 2)
+    body = parts[2].strip() if len(parts) >= 3 else full_md.strip()
+    return body
+
+
 async def synthesize_and_persist(
     *,
     db_path: Path,
