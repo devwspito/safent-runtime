@@ -186,6 +186,21 @@ async def _setup_browser_session():
     # Best-effort: ensure the jailed browser is running before connecting.
     await _try_ensure_browser_running()
 
+    # Egress: the jailed browser's IP is DEFAULT_DENY at the proxy until a policy
+    # is pushed (the agent does this on session open). Teaching is a human-supervised
+    # LIVE session, so push "open-logged" (teaching_mode) — otherwise every navigate
+    # dies with net::ERR_CONNECTION_CLOSED and the operator cannot demonstrate.
+    try:
+        from hermes.security.browser_jail import push_egress_policy  # noqa: PLC0415
+
+        push_egress_policy(
+            session_name="teaching-live",
+            domains_whitelist=(),
+            teaching_mode=True,
+        )
+    except Exception:  # noqa: BLE001 — no proxy socket in dev/CI → navigate direct
+        logger.debug("hermes.training_live.egress_policy.skipped", exc_info=True)
+
     pw = await async_playwright().start()
     browser = await pw.chromium.connect_over_cdp(_cdp_url())
 
@@ -309,8 +324,14 @@ def _record_step(orchestrator, session_id, ev: dict) -> None:
             surface_kind=SurfaceKind.BROWSER,
             action_payload=payload,
         )
-    except Exception:  # noqa: BLE001 — not recording / not found → skip
-        logger.debug("hermes.training_live.record_step.skipped", exc_info=True)
+        logger.info(
+            "hermes.training_live.record_step.ok kind=%s session=%s", kind, session_id
+        )
+    except Exception:  # noqa: BLE001 — surface the reason (silent skip hid a real bug)
+        logger.warning(
+            "hermes.training_live.record_step.FAILED kind=%s session=%s payload=%r",
+            kind, session_id, payload, exc_info=True,
+        )
 
 
 def _parse_uuid(raw: str) -> "UUID | None":

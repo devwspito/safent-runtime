@@ -81,3 +81,32 @@ def resolve_conversation(effective_task_id: str) -> str:
     return get_conversation_for_task(effective_task_id) or get_conversation_for_task(
         get_current_cycle_task()
     )
+
+
+# Per-cycle circuit breaker for the WRITE-PROPOSAL path. Nous's tool_loop_guardrails
+# do not see broker-routed gated tools (install_mcp/skill_manage go through
+# block-and-resume, bypassing the standard tool loop), so a tool that keeps failing
+# there re-proposes forever — each retry a fresh HITL card ("retry-spam"). Count
+# failures per (thread-cycle, tool) and hard-stop after N so the agent stops and
+# reports honestly instead of thrashing. Thread-local + reset per cycle.
+_failcounts = threading.local()
+
+
+def bump_write_tool_failure(tool_name: str) -> int:
+    """Record a failed write-tool call this cycle; return the new count."""
+    counts = getattr(_failcounts, "counts", None)
+    if counts is None:
+        counts = {}
+        _failcounts.counts = counts
+    counts[tool_name] = counts.get(tool_name, 0) + 1
+    return counts[tool_name]
+
+
+def write_tool_failure_count(tool_name: str) -> int:
+    """Failed write-tool calls of `tool_name` this cycle (0 outside a cycle)."""
+    return getattr(_failcounts, "counts", {}).get(tool_name, 0) if getattr(_failcounts, "counts", None) else 0
+
+
+def reset_write_tool_failures() -> None:
+    """Clear the per-cycle write-tool failure counters (cycle start/finally)."""
+    _failcounts.counts = {}

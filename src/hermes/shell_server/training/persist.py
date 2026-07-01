@@ -308,6 +308,35 @@ def compile_and_persist(
     return True
 
 
+def _format_steps_procedure(pkg: "Any") -> "tuple[str, int]":
+    """Serialize the compiled steps into a human/agent-readable procedure.
+
+    The compiled SkillPackage carries the demonstrated actions in
+    ``steps_by_surface_kind`` (navigate/click/type). Earlier this was dropped and
+    the SKILL.md said only "Replay the recorded session steps" — an empty skill.
+    Now each step becomes a numbered instruction the agent can actually follow.
+    Returns (markdown_procedure, step_count).
+    """
+    bundle = getattr(pkg, "steps_by_surface_kind", None) or {}
+    steps = [st for sk_steps in bundle.values() for st in sk_steps]
+    steps.sort(key=lambda s: getattr(s, "sequence_index", 0))
+    if not steps:
+        return "Replay the recorded session steps.", 0
+    lines: list[str] = []
+    for i, st in enumerate(steps, 1):
+        ap = getattr(st, "action_payload", {}) or {}
+        action = ap.get("action")
+        if ap.get("kind") == "navigate" or ap.get("url"):
+            lines.append(f"{i}. Navigate to {ap.get('url', '')}")
+        elif action == "click":
+            lines.append(f"{i}. Click at ({ap.get('x')}, {ap.get('y')})")
+        elif action == "key":
+            lines.append(f"{i}. Type: {ap.get('text', '')}")
+        else:
+            lines.append(f"{i}. {action or ap.get('kind') or 'action'}: {ap}")
+    return "\n".join(lines), len(steps)
+
+
 def _persist_as_skill_md(
     *,
     pkg: "Any",
@@ -356,16 +385,17 @@ def _persist_as_skill_md(
     }
     fm_dict: dict = {
         "name": skill_name,
-        "description": f"Recorded skill (voice-trained session {pkg.skill_id})",
+        "description": f"Recorded skill (taught session {pkg.skill_id})",
         "version": str(pkg.version),
         "metadata": governance_meta,
     }
     frontmatter = _yaml.dump(fm_dict, default_flow_style=False, allow_unicode=True).rstrip()
+    procedure, n_steps = _format_steps_procedure(pkg)
     body = (
         "## When\nUse this skill when the trained scenario is triggered.\n\n"
-        "## Procedure\nReplay the recorded session steps.\n\n"
-        f"## Notes\nOrigin: voice-training session `{pkg.skill_id}` "
-        f"| surfaces: {', '.join(surface_kinds) or 'none'}\n"
+        f"## Procedure\n{procedure}\n\n"
+        f"## Notes\nOrigin: teaching session `{pkg.skill_id}` "
+        f"| {n_steps} step(s) | surfaces: {', '.join(surface_kinds) or 'none'}\n"
     )
     content = f"---\n{frontmatter}\n---\n\n{body}"
     skill_dir = _neus_skills_root() / skill_name

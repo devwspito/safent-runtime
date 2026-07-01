@@ -94,7 +94,44 @@ from hermes.domain.proposal import ToolCallProposal
 from hermes.domain.tool_spec import ToolRisk, ToolSpec
 from hermes.prompts.builder import DefaultPromptBuilder, PromptBuilder, _sanitize_untrusted
 from hermes.prompts.persona import PersonaSpec
-from hermes.runtime.conversation_task_registry import resolve_conversation
+from hermes.runtime.conversation_task_registry import (
+    bump_write_tool_failure,
+    resolve_conversation,
+    write_tool_failure_count,
+)
+
+# Circuit breaker for broker-routed gated tools (install_mcp/skill_manage/...): after
+# this many failures of the SAME tool in one cycle, refuse to re-propose it (each
+# retry would otherwise mint a fresh HITL card). Stops the "retry-spam" and lets the
+# turn end so the chat message finalizes instead of streaming forever.
+_MAX_WRITE_TOOL_FAILURES = 5
+
+
+def _write_result_is_failure(result: str) -> bool:
+    """True if a write-tool result string signals failure (rejected / error / not-ok)."""
+    if not result:
+        return False
+    low = result[:600].lower()
+    return (
+        '"error"' in low
+        or '"success": false' in low
+        or '"success":false' in low
+        or "blocked:" in low
+        or result.startswith("Error")
+    )
+
+
+def _write_circuit_broken_msg(tool_name: str, count: int) -> str:
+    return json.dumps(
+        {
+            "error": (
+                f"BLOQUEADO: '{tool_name}' ya falló {count} veces en este turno. "
+                "NO lo reintentes (ni con los mismos ni con otros argumentos): "
+                "explícale al usuario con honestidad qué falla y qué necesitas, o propón otra vía."
+            )
+        },
+        ensure_ascii=False,
+    )
 from hermes.runtime.cycle_cdp_context import cerebro_cdp_scope, install_thread_local_cdp_override
 from hermes.runtime.model_config import ModelConfig, _replace_context
 from hermes.runtime.nous_tool_risk_map import NousRisk, classify_nous_tool
@@ -1168,6 +1205,17 @@ class GovernedAIAgent:
         ComposioCapabilityRegistry / McpCapabilityRegistry puedan resolverla.
         GARANTÍA: el handler nativo de Nous NUNCA se invoca.
         """
+        # Circuit breaker (same as the native path): stop re-proposing a tool that
+        # keeps failing this turn — otherwise a failing Composio/MCP action re-cards
+        # forever (the connect_integration 502 retry-spam).
+        _fc = write_tool_failure_count(function_name)
+        if _fc >= _MAX_WRITE_TOOL_FAILURES:
+            logger.warning(
+                "hermes.nous_engine.external_write_circuit_broken tool=%s failures=%d",
+                function_name, _fc,
+            )
+            return _write_circuit_broken_msg(function_name, _fc)
+
         proposal = _build_external_proposal(
             function_name=function_name,
             function_args=function_args,
@@ -1196,8 +1244,12 @@ class GovernedAIAgent:
         # on approval, instead of the non-resuming retry queue.
         from hermes.capabilities.domain.ports import ExecutionStatus  # noqa: PLC0415
         if outcome.status is ExecutionStatus.PENDING_APPROVAL and conversation_id:
-            return self._await_owner_and_resume(proposal, conversation_id)
-        return self._handle_outcome(proposal, outcome)
+            result = self._await_owner_and_resume(proposal, conversation_id)
+        else:
+            result = self._handle_outcome(proposal, outcome)
+        if _write_result_is_failure(result):
+            bump_write_tool_failure(function_name)
+        return result
 
     # ------------------------------------------------------------------
     # READ path (native Nous tools)
@@ -1413,6 +1465,17 @@ class GovernedAIAgent:
 
         GARANTÍA: el handler nativo de Nous NO se invoca en ningún caso.
         """
+        # Circuit breaker: this tool already failed too many times this turn → refuse
+        # to re-propose it (each retry mints a fresh HITL card). Stops the retry-spam
+        # and lets the turn end so the chat message finalizes.
+        _fc = write_tool_failure_count(function_name)
+        if _fc >= _MAX_WRITE_TOOL_FAILURES:
+            logger.warning(
+                "hermes.nous_engine.write_circuit_broken tool=%s failures=%d",
+                function_name, _fc,
+            )
+            return _write_circuit_broken_msg(function_name, _fc)
+
         proposal = _build_proposal(
             function_name=function_name,
             function_args=function_args,
@@ -1444,9 +1507,12 @@ class GovernedAIAgent:
         # scheduled (sin conversation_id) se mantiene el modelo de cola no-bloqueante.
         from hermes.capabilities.domain.ports import ExecutionStatus  # noqa: PLC0415
         if outcome.status is ExecutionStatus.PENDING_APPROVAL and conversation_id:
-            return self._await_owner_and_resume(proposal, conversation_id)
-
-        return self._handle_outcome(proposal, outcome)
+            result = self._await_owner_and_resume(proposal, conversation_id)
+        else:
+            result = self._handle_outcome(proposal, outcome)
+        if _write_result_is_failure(result):
+            bump_write_tool_failure(function_name)
+        return result
 
     def _await_owner_and_resume(
         self, proposal: ToolCallProposal, conversation_id: str
@@ -2725,6 +2791,7 @@ def _run_conversation_with_cdp(
         clear_conversation_for_task,
         set_current_cycle_task,
         clear_current_cycle_task,
+        reset_write_tool_failures,
     )
 
     set_session_key_for_thread()
@@ -2744,6 +2811,7 @@ def _run_conversation_with_cdp(
     # write wrapper) still resolve THIS conversation → block-and-resume, not the
     # non-resuming retry queue.
     set_current_cycle_task(cycle_task_id)
+    reset_write_tool_failures()  # fresh circuit-breaker counters per cycle
 
     try:
         if cdp_provider is not None:
