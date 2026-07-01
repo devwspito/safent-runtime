@@ -782,25 +782,11 @@ def _build_composio_surface_adapter(db_path: Path):
     sin acceso a las tools de Composio).
     """
     try:
-        from hermes.runtime.composio_config_source import load_composio_credential  # noqa: PLC0415
-        from hermes.capabilities.infrastructure.composio_surface_adapter import (  # noqa: PLC0415
+        # Import-check only (fail-soft if the module is unavailable). The actual
+        # credential is resolved per-call by the lazy adapter below.
+        from hermes.capabilities.infrastructure.composio_surface_adapter import (  # noqa: PLC0415,F401
             ComposioSurfaceAdapter,
         )
-
-        credential = load_composio_credential(db_path)
-        if credential is None:
-            logger.debug(
-                "hermes.runtime.composio_surface_adapter.no_credential — "
-                "KC-4 adapter not instantiated (no Composio credentials)"
-            )
-            return None
-
-        adapter = ComposioSurfaceAdapter(
-            api_key=credential.api_key,
-            entity_id=credential.entity_id,
-        )
-        logger.info("hermes.runtime.composio_surface_adapter.ready entity_id=%s", credential.entity_id)
-        return adapter
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "hermes.runtime.composio_surface_adapter.init_failed: %s — "
@@ -808,6 +794,62 @@ def _build_composio_surface_adapter(db_path: Path):
             exc,
         )
         return None
+
+    # LAZY adapter: resolve the Composio credential on EACH call instead of once at
+    # boot. Without this, a key set in the UI after the daemon started never takes
+    # effect (the adapter was built None at boot) — every Composio tool call fails
+    # "composio_adapter no configurado" until a restart. The lazy wrapper picks up a
+    # newly-set key on the next call, and still fail-closes (same REJECTED_BY_POLICY)
+    # when no key is present.
+    return _LazyComposioSurfaceAdapter(db_path)
+
+
+class _LazyComposioSurfaceAdapter:
+    """composio_adapter that re-resolves the credential per call (see builder)."""
+
+    def __init__(self, db_path: "Path") -> None:
+        self._db_path = db_path
+        self._cache: tuple[str, Any] | None = None  # (api_key, ComposioSurfaceAdapter)
+
+    def _resolve(self):
+        from hermes.runtime.composio_config_source import load_composio_credential  # noqa: PLC0415
+        from hermes.capabilities.infrastructure.composio_surface_adapter import (  # noqa: PLC0415
+            ComposioSurfaceAdapter,
+        )
+        cred = load_composio_credential(self._db_path)
+        if cred is None:
+            self._cache = None
+            return None
+        if self._cache is None or self._cache[0] != cred.api_key:
+            self._cache = (
+                cred.api_key,
+                ComposioSurfaceAdapter(api_key=cred.api_key, entity_id=cred.entity_id),
+            )
+            logger.info(
+                "hermes.runtime.composio_surface_adapter.ready entity_id=%s (lazy)",
+                cred.entity_id,
+            )
+        return self._cache[1]
+
+    async def replay(self, action):
+        adapter = self._resolve()
+        if adapter is None:
+            from hermes.agents_os.domain.ports.surface_adapter_port import (  # noqa: PLC0415
+                ReplayOutcome,
+                ReplayStatus,
+            )
+            return ReplayOutcome(
+                action_id=action.action_id,
+                status=ReplayStatus.REJECTED_BY_POLICY,
+                error="composio_adapter no configurado — fail-closed (KC-4)",
+            )
+        return await adapter.replay(action)
+
+    async def capture(self, *args, **kwargs):
+        adapter = self._resolve()
+        if adapter is None:
+            raise RuntimeError("composio_adapter no configurado — fail-closed (KC-4)")
+        return await adapter.capture(*args, **kwargs)
 
 
 def _build_skill_store_adapter(db_path: Path):
