@@ -431,9 +431,18 @@ def _tokenize_pii(text: str) -> str:
     Llamado ANTES de construir el WorkItem — los placeholders viajan en payload.
     El broker rehidrata lo más tarde posible si el engine devuelve placeholders.
     """
-    from hermes.tokenizer.pii import DefaultPIITokenizer  # noqa: PLC0415
+    from hermes.tokenizer.pii import (  # noqa: PLC0415
+        DefaultPIITokenizer,
+        actionable_pii_exclusions,
+    )
 
-    result = DefaultPIITokenizer().tokenize(text)
+    # Do NOT tokenize actionable identifiers (recipient email/phone) the user gave
+    # the agent to act on: this call DISCARDS the mapping, so a tokenized email
+    # would be UNRECOVERABLE downstream and the agent would message the wrong
+    # target. Financial/ID PII stays tokenized. See actionable_pii_exclusions().
+    result = DefaultPIITokenizer(
+        exclude_patterns=actionable_pii_exclusions()
+    ).tokenize(text)
     if result.replaced > 0:
         logger.info(
             "hermes.cp.pii_tokenized",

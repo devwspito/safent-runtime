@@ -24,9 +24,24 @@ Diseno:
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+
+def actionable_pii_exclusions() -> frozenset[str]:
+    """Default pattern names NOT to tokenize — ACTIONABLE identifiers the user
+    hands the agent to act on (recipient email / phone). Tokenizing them fights
+    the agent's ability to use them (a weak model may not carry the placeholder
+    into tool args and would message the wrong target). Financial/ID PII stays
+    tokenized. Override via HERMES_PII_UNTOKENIZED (comma-separated names).
+    """
+    return frozenset(
+        p.strip().upper()
+        for p in os.environ.get("HERMES_PII_UNTOKENIZED", "EMAIL,TEL").split(",")
+        if p.strip()
+    )
 
 
 class UnknownPlaceholderError(ValueError):
@@ -102,18 +117,31 @@ class DefaultPIITokenizer:
         *,
         extra_patterns: tuple[tuple[str, re.Pattern[str]], ...] = (),
         default_patterns_enabled: bool = True,
+        exclude_patterns: frozenset[str] = frozenset(),
     ) -> None:
+        """PII tokenizer.
+
+        exclude_patterns: names of default patterns to SKIP. Use for ACTIONABLE
+        identifiers the user explicitly hands the agent to act on (e.g.
+        {"EMAIL", "TEL"}): tokenizing a recipient the user provided fights the
+        agent's ability to use it — a weak model may not carry the placeholder
+        faithfully into tool args and would message the wrong target. Financial/ID
+        PII (NIE/NIF/CIF/IBAN) stays tokenized by default (protective; rehydrated
+        at the external-dispatch boundary if the agent uses it in a tool arg).
+        """
         patterns: list[_Pattern] = []
         if default_patterns_enabled:
             patterns.extend(
-                [
+                p
+                for p in (
                     _Pattern("NIE", self._NIE_RE),
                     _Pattern("NIF", self._NIF_RE),
                     _Pattern("CIF", self._CIF_RE),
                     _Pattern("IBAN", self._IBAN_RE),
                     _Pattern("EMAIL", self._EMAIL_RE),
                     _Pattern("TEL", self._PHONE_ES_RE),
-                ]
+                )
+                if p.name not in exclude_patterns
             )
         for name, regex in extra_patterns:
             patterns.append(_Pattern(name, regex))

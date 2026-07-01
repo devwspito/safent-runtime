@@ -378,9 +378,14 @@ class TriggerGate:
 
 def _tokenize_pii(text: str) -> str:
     """CTRL-P2-12/NFR-006: tokeniza PII antes de persistir. Reutiliza P0."""
-    from hermes.tokenizer.pii import DefaultPIITokenizer  # noqa: PLC0415
+    from hermes.tokenizer.pii import (  # noqa: PLC0415
+        DefaultPIITokenizer,
+        actionable_pii_exclusions,
+    )
 
-    result = DefaultPIITokenizer().tokenize(text)
+    result = DefaultPIITokenizer(
+        exclude_patterns=actionable_pii_exclusions()
+    ).tokenize(text)
     if result.replaced > 0:
         logger.info("hermes.triggers.gate.pii_tokenized", extra={"replaced": result.replaced})
     return result.sanitized if isinstance(result.sanitized, str) else text

@@ -15,9 +15,15 @@ Binding para READ de Composio:
   - Taint garantizado por el adapter dispatcher (tag "composio" en ToolSpec).
 
 Binding para WRITE de Composio:
-  - NUNCA devuelve binding — el broker hace fail-closed (REJECTED_BY_POLICY).
-  - WRITE tools de Composio van al HITL flow desde la CapturingToolHost (handler=None).
-  - Si por alguna razón llegaran aquí como proposal, fail-closed es correcto.
+  - risk=HIGH, auto_executable=False, executor="composio".
+  - El broker EXIGE HITL (tarjeta de aprobación + TOTP) y solo ejecuta vía
+    ComposioSurfaceAdapter tras la aprobación del dueño. NUNCA auto-ejecuta.
+  - Antes devolvía None → "no registrado" → el agente no podía enviar/crear/borrar
+    en NINGUNA integración ni con aprobación (el HITL flow por CapturingToolHost solo
+    aplica al engine litellm; el engine nous despacha WRITE externas por el broker).
+    HIGH+no-auto mantiene el modelo soberano: nada se ejecuta hasta que el dueño
+    aprueba; un WRITE derivado de contenido no confiable ya se eleva a HIGH por taint
+    en _compute_effective_risk.
 
 Nota: el nombre del tool en el CapturingToolHost es el slug lowercased
 (e.g. "gmail_get_email"). La classificación necesita el slug uppercased.
@@ -102,18 +108,25 @@ class ComposioCapabilityRegistry:
         if not _looks_like_composio_slug(tool_name):
             return None
 
-        if not _is_composio_read_slug(tool_name):
-            # WRITE Composio proposal — el broker hace fail-closed.
-            # Esto no debería ocurrir: WRITE specs tienen handler=None y van
-            # al path WRITE_PROPOSAL sin pasar por el broker como READ.
-            return None
+        if _is_composio_read_slug(tool_name):
+            # READ: auto-ejecutable, LOW (el broker aplica el gate READ + taint).
+            return CapabilityBinding(
+                tool_name=tool_name,
+                surface_kind=SurfaceKind.API_CALL,
+                required_capability=None,  # READ de Composio: sin consent per-capability
+                risk=RiskLevel.LOW,
+                auto_executable=True,
+                executor="composio",
+            )
 
+        # WRITE: HIGH + NO auto-ejecutable → el broker EXIGE HITL (tarjeta + TOTP) y
+        # solo ejecuta vía ComposioSurfaceAdapter tras la aprobación del dueño.
         return CapabilityBinding(
             tool_name=tool_name,
             surface_kind=SurfaceKind.API_CALL,
-            required_capability=None,  # READ de Composio: no requiere consent per-capability
-            risk=RiskLevel.LOW,
-            auto_executable=True,
+            required_capability=None,
+            risk=RiskLevel.HIGH,
+            auto_executable=False,
             executor="composio",
         )
 

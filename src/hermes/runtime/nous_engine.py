@@ -969,10 +969,18 @@ class GovernedAIAgent:
         external_catalog: _ExternalToolCatalog | None = None,
         tool_call_emitter: "Callable[[str, dict[str, Any]], None] | None" = None,
         active_agent_id: str = "",
+        pii_mapping: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
         AIAgent = _import_ai_agent()
         self._inner = AIAgent(*args, **kwargs)
+        # Per-cycle PII placeholder→value map. The LLM sees tokenized context
+        # ([[EMAIL_1]] etc.), so its tool-call ARGS carry placeholders. External
+        # (composio/mcp) calls must be REHYDRATED to real values before they leave
+        # for the third-party API — else e.g. gmail_send_email receives
+        # "[[EMAIL_1]]" and 400s. Rehydration happens as late as possible, at the
+        # external-dispatch boundary in this agent (native tools are untouched).
+        self._pii_mapping: dict[str, str] = pii_mapping or {}
         self._inner._invoke_tool = self._invoke_tool
 
         self._broker = broker
@@ -1165,6 +1173,10 @@ class GovernedAIAgent:
 
         from hermes.capabilities.domain.ports import ExecutionStatus  # noqa: PLC0415
 
+        # Rehydrate PII placeholders before the READ leaves for the external API
+        # (e.g. a search arg containing an email the LLM saw tokenized).
+        function_args = _rehydrate_external_args(function_args, self._pii_mapping)
+
         try:
             future = asyncio.run_coroutine_threadsafe(
                 spec.handler(function_args),
@@ -1224,6 +1236,10 @@ class GovernedAIAgent:
                 function_name, _fc,
             )
             return _write_circuit_broken_msg(function_name, _fc)
+
+        # Rehydrate PII placeholders in the args before the WRITE leaves for the
+        # external API (composio/mcp) — the LLM emitted them tokenized.
+        function_args = _rehydrate_external_args(function_args, self._pii_mapping)
 
         proposal = _build_external_proposal(
             function_name=function_name,
@@ -1761,7 +1777,16 @@ class NousReasoningEngine:
     ) -> None:
         self._persona = persona
         self._prompt_builder = prompt_builder or DefaultPromptBuilder()
-        self._tokenizer = tokenizer or DefaultPIITokenizer()
+        # Do NOT tokenize ACTIONABLE identifiers the user hands the agent (email,
+        # phone): the model must use them verbatim in tool args (send/message), and
+        # a weak model won't reliably carry a [[EMAIL_1]] placeholder through — it
+        # would message the wrong target. Financial/ID PII (NIF/IBAN/…) stays
+        # tokenized (and is rehydrated at the external-dispatch boundary if used).
+        # Overridable via HERMES_PII_UNTOKENIZED (comma-separated pattern names).
+        from hermes.tokenizer.pii import actionable_pii_exclusions  # noqa: PLC0415
+        self._tokenizer = tokenizer or DefaultPIITokenizer(
+            exclude_patterns=actionable_pii_exclusions()
+        )
         self._model_config = model_config
         # Per-cycle resolution of the ACTIVE Hermes provider (providers table +
         # SecretsVault), set in onboarding/Settings. Without this the Nous engine
@@ -2137,6 +2162,7 @@ class NousReasoningEngine:
             model_config, system_prompt, loop, tenant_id, external_catalog,
             consent_context=per_cycle_consent,
             active_agent_id=str(active_agent_id) if active_agent_id else "",
+            pii_mapping=mapping,
         )
         _register_external_specs_in_nous(external_specs, agent)
         # COLD-CYCLE FIX: agent_init captured agent.tools + agent.valid_tool_names
@@ -2573,6 +2599,7 @@ class NousReasoningEngine:
         *,
         consent_context: "ConsentContext | None" = None,
         active_agent_id: str = "",
+        pii_mapping: dict[str, str] | None = None,
     ) -> GovernedAIAgent:
         """Construye GovernedAIAgent headless con broker, gate y catálogo externo.
 
@@ -2659,6 +2686,7 @@ class NousReasoningEngine:
             external_catalog=external_catalog,
             tool_call_emitter=self._chunk_sink_emitter,
             active_agent_id=active_agent_id,
+            pii_mapping=pii_mapping,
             **_extra_knobs,
         )
         return agent
@@ -3056,6 +3084,39 @@ def _is_external_content_tool(tool_name: str) -> bool:
 # ---------------------------------------------------------------------------
 # Memory bridge helpers
 # ---------------------------------------------------------------------------
+
+
+_REHYDRATE_TOKENIZER = DefaultPIITokenizer()
+
+
+def _rehydrate_external_args(
+    args: dict[str, Any], mapping: dict[str, str]
+) -> dict[str, Any]:
+    """Replace PII placeholders in an external tool's args with real values.
+
+    The LLM sees tokenized context, so its emitted args (e.g. a recipient email)
+    carry ``[[EMAIL_1]]`` placeholders. Before an external (composio/mcp) call
+    leaves for the third-party API, restore real values from the per-cycle map.
+    Walks dict/list/str recursively; unknown placeholders are left as-is (never
+    raise into the dispatch — the adapter/API will reject a bad value honestly).
+    Native tools are NOT rehydrated (their handlers run in-process under the cage).
+    """
+    if not mapping:
+        return args
+
+    def _r(v: Any) -> Any:
+        if isinstance(v, str):
+            try:
+                return _REHYDRATE_TOKENIZER.rehydrate(v, mapping)
+            except UnknownPlaceholderError:
+                return v
+        if isinstance(v, dict):
+            return {k: _r(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [_r(x) for x in v]
+        return v
+
+    return _r(args)
 
 
 def _build_external_proposal(
