@@ -44,21 +44,6 @@ tools:
   tool_search:
     enabled: auto
 
-# ---------------------------------------------------------------------------
-# Tool-loop guardrails (circuit breaker). A tool that keeps failing with the
-# SAME arguments is HARD-STOPPED, not retried forever. Without this the agent
-# spams identical failing calls — and for gated tools each retry mints a fresh
-# HITL card ("retry-spam"). Warnings stay on; hard_stop_after caps the loop so
-# the agent reports the failure honestly instead of thrashing.
-# ---------------------------------------------------------------------------
-tool_loop_guardrails:
-  warnings_enabled: true
-  hard_stop_enabled: true
-  hard_stop_after:
-    exact_failure: 3
-    same_tool_failure: 5
-    idempotent_no_progress: 6
-
 skills:
   # Escáner nativo de skills creadas por el agente (patrones peligrosos / exfil /
   # injection). NO-overridable. Es el "Centro de Seguridad" de skills, nativo.
