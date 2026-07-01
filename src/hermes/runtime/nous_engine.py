@@ -2130,6 +2130,16 @@ class NousReasoningEngine:
             active_agent_id=str(active_agent_id) if active_agent_id else "",
         )
         _register_external_specs_in_nous(external_specs, agent)
+        # COLD-CYCLE FIX: agent_init captured agent.tools + agent.valid_tool_names
+        # from the Nous registry BEFORE the line above registered this cycle's
+        # externals (Composio/MCP). The Nous registry is process-global, so a warm
+        # daemon happens to see them (registered by a PRIOR cycle) — but the FIRST
+        # request after every daemon boot builds the agent against an empty external
+        # set and the model NEVER receives the tools ("no las veo"), until the next
+        # cycle warms the registry. Sync the just-registered specs into THIS agent so
+        # the tools reach the model on the same cycle they were resolved. Idempotent:
+        # warm cycles already have them and skip.
+        _sync_agent_tools_with_external(agent, external_specs)
 
         # FIX "Hermes se presenta cada mensaje": el orchestrator inyecta el
         # historial de la conversación en metadata; lo pasamos a run_conversation
@@ -3648,6 +3658,109 @@ def _register_external_specs_in_nous(
 
     for spec in specs:
         _make_external_sequential_wrapper(agent, spec, nous_registry)
+
+
+def _sync_agent_tools_with_external(
+    agent: "GovernedAIAgent",
+    specs: tuple[ToolSpec, ...],
+) -> None:
+    """Make THIS cycle's agent expose the just-registered external ToolSpecs.
+
+    ``agent_init`` builds ``agent.tools`` (the schema array sent to the LLM) and
+    ``agent.valid_tool_names`` (the call-time allow-list) ONCE, from the Nous
+    registry, DURING agent construction — which happens before
+    ``_register_external_specs_in_nous`` runs. The registry is process-global, so a
+    warm daemon sees externals registered by an earlier cycle, but the FIRST cycle
+    after boot builds against an empty external set: the model never receives the
+    Composio/MCP tools and the agent would reject a call to them as an unknown name.
+
+    Append any spec not already present (by name) as a plain function schema and
+    extend the allow-list. Idempotent: warm cycles where ``agent.tools`` already
+    carries these names add nothing. Appending directly (rather than re-running the
+    full tool assembly) preserves memory/LCM tools injected after init, and keeps the
+    intent-retrieved top-K VISIBLE (not re-deferred behind tool_search) — which is the
+    whole point of the semantic retrieval that produced this short list.
+    """
+    if not specs:
+        return
+    # GovernedAIAgent wraps the real AIAgent by composition — tools/valid_tool_names
+    # live on the inner agent (agent_init sets them there during construction).
+    inner = getattr(agent, "_inner", agent)
+    try:
+        from tools.registry import registry as _nous_registry  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        _nous_registry = None
+
+    def _is_accumulated_external(name: str) -> bool:
+        """True if `name` is a Composio/MCP tool from the process-global registry.
+
+        The registry is shared across cycles and NEVER pruned, so it accumulates the
+        union of every intent's retrieved tools. Such names must be re-presented ONLY
+        when they belong to THIS cycle's retrieved set — otherwise the intent-based
+        narrowing erodes over a session (the model drifts back to seeing hundreds).
+        Native/core/capability tools are NOT accumulated externals and are kept as-is.
+        """
+        if not name or _nous_registry is None:
+            return False
+        try:
+            entry = _nous_registry.get_entry(name)
+        except Exception:  # noqa: BLE001
+            return False
+        toolset = getattr(entry, "toolset", "") if entry else ""
+        return toolset == "composio" or toolset.startswith("mcp-")
+
+    try:
+        current = getattr(inner, "tools", None)
+        source = current if isinstance(current, list) else []
+        current_names = {s.name for s in specs}
+        # 1) Drop stale accumulated externals not selected this cycle (keeps narrowing).
+        kept: list = []
+        pruned = 0
+        for t in source:
+            nm = (t.get("function") or {}).get("name") if isinstance(t, dict) else None
+            if nm and nm not in current_names and _is_accumulated_external(nm):
+                pruned += 1
+                continue
+            kept.append(t)
+        # 2) Append this cycle's retrieved externals that agent_init didn't capture
+        #    (cold start: registry was empty when the agent was built).
+        present = {
+            (t.get("function") or {}).get("name")
+            for t in kept
+            if isinstance(t, dict)
+        }
+        added = 0
+        for spec in specs:
+            if spec.name in present:
+                continue
+            kept.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": spec.name,
+                        "description": spec.description,
+                        "parameters": spec.parameters_schema
+                        or {"type": "object", "properties": {}},
+                    },
+                }
+            )
+            present.add(spec.name)
+            added += 1
+        inner.tools = kept
+        # Keep the call-time allow-list exactly in sync with what the model can see.
+        inner.valid_tool_names = {
+            (t.get("function") or {}).get("name")
+            for t in kept
+            if isinstance(t, dict) and (t.get("function") or {}).get("name")
+        }
+        if added or pruned:
+            logger.info(
+                "hermes.nous_engine.synced_external_tools added=%d pruned=%d total=%d "
+                "(cold-start visibility + per-turn narrowing)",
+                added, pruned, len(kept),
+            )
+    except Exception as exc:  # noqa: BLE001 — never break the cycle over tool sync
+        logger.warning("hermes.nous_engine.sync_external_tools_failed: %s", exc)
 
 
 def _make_external_sequential_wrapper(
