@@ -1189,7 +1189,16 @@ class GovernedAIAgent:
         logger.debug(
             "hermes.nous_engine.external_read_executed: tool=%s", function_name
         )
-        return json.dumps(result, ensure_ascii=False, default=str)
+        # Cap the serialized result to a token-safe size BEFORE it enters the model
+        # context. External reads (composio/mcp) can return arbitrarily large,
+        # token-dense JSON (gmail_fetch_emails ≈ 85 KB) that overflows a small-context
+        # model on the very next call — which then "cannot compress further" and the
+        # task retries in a loop with no reply. Same choke-point cap as the concurrent
+        # CapturingToolHost path (single source of truth).
+        from hermes.runtime.tool_host import _cap_external_result  # noqa: PLC0415
+        return _cap_external_result(
+            json.dumps(result, ensure_ascii=False, default=str), function_name
+        )
 
     def _dispatch_external_write(
         self,

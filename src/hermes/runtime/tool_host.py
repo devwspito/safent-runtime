@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -145,9 +146,12 @@ class CapturingToolHost:
                 result, is_untrusted = await self._execute_read(spec, args)
                 if is_untrusted:
                     round_untrusted = True
+                _content = _safe_json(result)
+                if _EXTERNAL_READ_TAGS & set(spec.tags):
+                    _content = _cap_external_result(_content, tool_name)
                 results.append(
                     ToolResultMessage(
-                        tool_call_id=call_id, name=tool_name, content=_safe_json(result)
+                        tool_call_id=call_id, name=tool_name, content=_content
                     )
                 )
             else:
@@ -268,6 +272,41 @@ def _safe_json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         return json.dumps({"_serialize_error": True})
+
+
+# Token-safe cap for EXTERNAL read results (composio / mcp / browser). These
+# tools return arbitrarily large, token-DENSE JSON (e.g. gmail_fetch_emails can
+# be ~85 KB ≈ >65 K tokens on a 65 K-context model). Admitted verbatim, the next
+# model call 400s ("prompt exceeds context") and CANNOT be compressed — the single
+# tool message already blows the window — so the task fails and RETRIES in a loop
+# with no reply. We cap the SERIALIZED result here: the one choke point before it
+# enters the message context. Dense JSON tokenizes at ~1.5 chars/token (not the
+# 4:1 prose ratio), so we size pessimistically for the smallest supported window.
+# Overridable so larger-context deployments can raise it.
+_EXTERNAL_READ_MAX_CHARS: int = int(os.environ.get("HERMES_EXTERNAL_READ_MAX_CHARS", "24000"))
+_EXTERNAL_READ_TAGS: frozenset[str] = frozenset({"composio", "mcp", "browser"})
+
+
+def _cap_external_result(payload: str, tool_name: str) -> str:
+    """Cap a serialized EXTERNAL read result to a token-safe size.
+
+    Truncation is on the SERIALIZED string (never on the object) so any result
+    shape is handled uniformly. A machine- and LLM-legible marker is appended so
+    the model KNOWS it was reduced and can re-query with a smaller page/filter.
+    """
+    if len(payload) <= _EXTERNAL_READ_MAX_CHARS:
+        return payload
+    marker = (
+        f'\n\n[TRUNCATED: "{tool_name}" returned {len(payload)} chars; kept the '
+        f"first {_EXTERNAL_READ_MAX_CHARS} to fit the model context. Re-query with "
+        "a smaller page size / tighter filter (e.g. max_results, ids, a query) "
+        "for the rest.]"
+    )
+    logger.warning(
+        "hermes.tool_host.external_result_capped tool=%s original_chars=%d cap=%d",
+        tool_name, len(payload), _EXTERNAL_READ_MAX_CHARS,
+    )
+    return payload[:_EXTERNAL_READ_MAX_CHARS] + marker
 
 
 def _is_untrusted_read(spec: ToolSpec, args: dict[str, Any]) -> bool:
