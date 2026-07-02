@@ -463,12 +463,12 @@ def _build_browser_argv(session_name: str) -> list[str]:
         # boundary; allow any CDP origin so the attach completes.
         "--remote-allow-origins=*",
         f"--proxy-server={_EGRESS_PROXY_URL}",
-        # Render at 2x device pixels at the COMPOSITOR level. Measured truth: the
-        # CDP screencast IGNORES per-context/per-session deviceScaleFactor (frame =
-        # layout viewport), so the ONLY way to get a sharp (2x) screencast is this
-        # launch flag. With it, a CSS-sized viewport renders at 2x → the teaching /
-        # live views are crisp on Retina/fullscreen. Safe for the agent's
-        # automation (it uses DOM selectors, not frame pixels).
+        # Render at 2x device pixels at the COMPOSITOR level. Measured truth: the CDP
+        # screencast IGNORES per-context/per-session deviceScaleFactor (frame = layout
+        # viewport), so the ONLY lever that makes the screencast sharp is this launch
+        # flag (measured: viewport 1280 → frame 2560). Safe: the agent automates by DOM
+        # selectors (not frame pixels); teaching maps normalized fractions → CSS
+        # viewport; watch is read-only.
         "--force-device-scale-factor=2",
         "--disable-features=Translate,SidePanel,Autofill,PasswordManager",
         "--password-store=basic",
