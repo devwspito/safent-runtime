@@ -10,6 +10,12 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // noVNC (@novnc/novnc) uses top-level await → needs es2022+. All target
+    // browsers (modern Chrome/Safari/Firefox) support it.
+    target: 'es2022',
+  },
+  optimizeDeps: {
+    esbuildOptions: { target: 'es2022' },
   },
   server: {
     proxy: {

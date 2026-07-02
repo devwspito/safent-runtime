@@ -993,3 +993,17 @@ export function openTaskStream(
     },
   }
 }
+
+// ── Teaching over the noVNC browser (UI-driven, En vivo → Enseñar) ────────────
+export async function startTeaching(
+  skillName: string,
+): Promise<{ session_id: string; skill_name: string }> {
+  return request('/teach/start', {
+    method: 'POST',
+    body: JSON.stringify({ skill_name: skillName }),
+  })
+}
+
+export async function signTeaching(sessionId: string): Promise<{ ok: boolean }> {
+  return request(`/teach/${sessionId}/save`, { method: 'POST', body: JSON.stringify({}) })
+}

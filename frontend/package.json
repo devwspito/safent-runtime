@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@novnc/novnc": "^1.7.0",
     "dompurify": "^3.4.11",
     "lucide-react": "^1.21.0",
     "marked": "^18.0.5",

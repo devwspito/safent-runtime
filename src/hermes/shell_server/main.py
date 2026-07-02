@@ -1279,6 +1279,16 @@ def create_app() -> FastAPI:
         create_vnc_proxy_router,
     )
     app.include_router(create_vnc_proxy_router())
+    # UI-driven teaching over the noVNC browser: POST /teach/start + /save record the
+    # demonstration via a CDP observer and compile the SKILL.md (same orchestrator).
+    from hermes.shell_server.cowork.teach_vnc import (  # noqa: PLC0415
+        create_teach_vnc_router,
+    )
+    app.include_router(
+        create_teach_vnc_router(
+            orchestrator=_get_training_orchestrator(_DB_PATH), db_path=_DB_PATH
+        )
+    )
     app.include_router(create_workspace_router())
     app.include_router(create_approvals_router())
     app.include_router(create_policies_router())
