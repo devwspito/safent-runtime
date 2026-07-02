@@ -77,6 +77,7 @@ _CDP_PORT = 9333
 _CDP_BIND_ADDR = "10.200.0.2"          # netns veth IP; reachable only from 10.200.0.1
 _EGRESS_PROXY_URL = "http://10.200.0.1:3128"  # forced egress through the audited proxy
 _VNC_PORT = 5900                        # x11vnc (RFB) on the veth IP; daemon-only (nft 5900)
+_CLIP_PORT = 7519                       # hermes-clipboard-server (xclip) on the veth IP; daemon-only (nft 7519)
 # Xvfb screen = 1600×900 DIP workspace × 2 (force-device-scale-factor=2) → HiDPI-sharp
 # live view. x11vnc streams these real display pixels (region updates, fluid).
 _DISPLAY_RES = "3200x1800"
@@ -591,6 +592,9 @@ def _launch(session_name: str, domains_whitelist: list[str]) -> None:
         # reachable only by the daemon (nft 5900) and proxied to the web UI.
         f"--setenv=HERMES_BROWSER_DISPLAY={_DISPLAY_RES}",
         f"--setenv=HERMES_VNC_RELAY={_CDP_BIND_ADDR}:{_VNC_PORT}",
+        # hermes-clipboard-server (xclip) so the web UI can copy/paste with the jailed
+        # browser (UTF-8). Bound to the veth IP, daemon-only (nft 7519), proxied same-origin.
+        f"--setenv=HERMES_CLIP_RELAY={_CDP_BIND_ADDR}:{_CLIP_PORT}",
         "--",
         _JAIL_SCRIPT,
         *browser_argv,

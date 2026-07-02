@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { X, Zap, Search as SearchIcon, ChevronRight, Package, AlertTriangle } from 'lucide-react'
+import { X, Zap, Search as SearchIcon, Plus, Package, AlertTriangle } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import {
   listSkills, searchSkillsHub, listHubSkills, installSkill, getHubOpStatus,
@@ -14,13 +14,12 @@ import InstallScanModal from '../components/InstallScanModal'
 import SkillDetailsModal from '../components/SkillDetailsModal'
 import type { MfaFactors } from '../components/MfaModal'
 import { PageHeader } from '../components/ui/PageHeader'
-import { TeachPanel } from '../components/TeachPanel'
+import { TeachModal } from '../components/TeachModal'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
 import {
   AnimatePresence,
   AnimatedListItem,
-  AnimatedExpanderContent,
   FadeIn,
   Stagger,
   StaggerItem,
@@ -354,6 +353,12 @@ export default function SkillsView() {
     <>
       {ConfirmDialogNode}
 
+      <TeachModal
+        open={teachOpen}
+        onClose={() => setTeachOpen(false)}
+        onSaved={() => { setTeachOpen(false); loadInstalled() }}
+      />
+
       {pendingSkillInstall && (
         <InstallScanModal
           scan={pendingSkillInstall.scan}
@@ -587,14 +592,23 @@ export default function SkillsView() {
             </section>
           </StaggerItem>
 
-          {/* ── Teach a skill (in the real noVNC browser) ────────────────── */}
+          {/* ── Teach a skill (full-screen noVNC browser modal) ──────────── */}
           <StaggerItem>
             <section className={s.section} aria-label="Enseñar una habilidad">
-              <TeachSkillExpander
-                open={teachOpen}
-                onToggle={() => setTeachOpen((v) => !v)}
-                onSaved={loadInstalled}
-              />
+              <div className={s.sectionHead}>
+                <span className={s.sectionLabel}>Enseñar</span>
+              </div>
+              <div className={s.teachCard}>
+                <p className={s.teachIntro}>
+                  Enséñale a Lumen a operar en el navegador demostrando la tarea. Se abre un
+                  navegador real (nítido) a pantalla completa que conduces tú; tus pasos se
+                  convierten en una habilidad reutilizable.
+                </p>
+                <Button variant="primary" size="sm" onClick={() => setTeachOpen(true)}>
+                  <Plus size={14} aria-hidden="true" />
+                  Enseñar una habilidad
+                </Button>
+              </div>
             </section>
           </StaggerItem>
 
@@ -806,46 +820,3 @@ function HubResultRow({ item, installedNames, onInstall }: HubResultRowProps) {
   )
 }
 
-// ── Teach skill expander ──────────────────────────────────────────────────────
-
-interface TeachSkillExpanderProps {
-  open: boolean
-  onToggle: () => void
-  onSaved: () => void
-}
-
-function TeachSkillExpander({ open, onToggle, onSaved }: TeachSkillExpanderProps) {
-  const reduced = useReducedMotion()
-  return (
-    <div>
-      <button
-        type="button"
-        className={s.teachExpander}
-        onClick={onToggle}
-        aria-expanded={open}
-        aria-controls="teach-skill-body"
-      >
-        <motion.span
-          className={s.teachChevron}
-          aria-hidden="true"
-          animate={reduced ? undefined : { rotate: open ? 90 : 0 }}
-          transition={{ type: 'tween', ease: [0.4, 0, 0.2, 1], duration: 0.18 }}
-          style={{ display: 'inline-flex', flexShrink: 0 }}
-        >
-          <ChevronRight size={13} />
-        </motion.span>
-        Enseñar una habilidad
-      </button>
-
-      <AnimatedExpanderContent open={open}>
-        <div id="teach-skill-body" className={s.teachCard}>
-          <p className={s.teachIntro}>
-            Enséñale a Lumen a operar en el navegador demostrando la tarea. Conduces un
-            navegador real (nítido) aquí abajo y tus pasos se convierten en una habilidad.
-          </p>
-          <TeachPanel onSaved={onSaved} />
-        </div>
-      </AnimatedExpanderContent>
-    </div>
-  )
-}

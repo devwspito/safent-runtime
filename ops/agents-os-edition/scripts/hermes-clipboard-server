@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""hermes-clipboard-server — expose the jailed browser's X CLIPBOARD over HTTP so the
+web UI can sync copy/paste, the OS-era way (adapted with xclip as the selection owner).
+
+Why this and not x11vnc's clipboard: x11vnc 0.9.16, as an X selection owner, does NOT
+answer the TARGETS request Chromium sends before pasting → paste HANGS; and it never
+emits ServerCutText → copy-out is dead. xclip IS a proper selection owner (answers
+TARGETS, serves UTF8_STRING), so Chromium pastes correctly — including accents, €, emoji
+and CJK. Verified end-to-end.
+
+Model (mirrors ops/agents-os-edition/novnc/clipboard-overlay.js from the OS edition):
+  POST /clipboard {"text": "..."}  → set the X CLIPBOARD (xclip becomes owner)
+  GET  /clipboard                  → read the X CLIPBOARD (xclip -o)
+The web UI intercepts Cmd/Ctrl+V, POSTs the local clipboard here, then injects a REAL
+Ctrl+V over noVNC RFB so the focused app pastes from the now-set clipboard. It also
+polls GET to mirror in-jail copies back to the user's local clipboard.
+
+Runs INSIDE the browser jail (netns + DISPLAY=:99), bound to the veth IP from
+HERMES_CLIP_RELAY="addr:port" (only 10.200.0.1, the daemon, may reach it — nftables).
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_DISPLAY = os.environ.get("DISPLAY", ":99")
+_ENV = {**os.environ, "DISPLAY": _DISPLAY}
+_MAX = 100_000  # cap payload; a huge paste shouldn't be able to hammer xclip
+_SEL = ["-selection", "clipboard"]
+
+
+def _clipboard_get() -> str:
+    try:
+        r = subprocess.run(
+            ["xclip", *_SEL, "-o"], env=_ENV, capture_output=True, timeout=5
+        )
+        return r.stdout.decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _clipboard_set(text: str) -> None:
+    # xclip reads stdin, acquires the selection, then forks to the background to serve
+    # it (foreground process exits) — so this returns promptly.
+    try:
+        p = subprocess.Popen(["xclip", *_SEL], env=_ENV, stdin=subprocess.PIPE)
+        assert p.stdin is not None
+        p.stdin.write(text.encode("utf-8"))
+        p.stdin.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+class _Handler(BaseHTTPRequestHandler):
+    def _reply(self, code: int, body: bytes = b"") -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path.rstrip("/") != "/clipboard":
+            return self._reply(404)
+        self._reply(200, json.dumps({"text": _clipboard_get()}).encode("utf-8"))
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path.rstrip("/") != "/clipboard":
+            return self._reply(404)
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(min(n, _MAX + 4096)) if n > 0 else b"{}"
+            text = str((json.loads(raw or b"{}") or {}).get("text", ""))[:_MAX]
+        except Exception:  # noqa: BLE001
+            return self._reply(400, b'{"ok":false}')
+        _clipboard_set(text)
+        self._reply(200, b'{"ok":true}')
+
+    def log_message(self, *_args) -> None:  # silence access log
+        return
+
+
+def main() -> None:
+    relay = os.environ.get("HERMES_CLIP_RELAY", "10.200.0.2:7519")
+    host, _, port_s = relay.partition(":")
+    port = int(port_s or "7519")
+    ThreadingHTTPServer((host or "10.200.0.2", port), _Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

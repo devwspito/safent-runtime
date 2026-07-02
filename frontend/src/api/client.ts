@@ -1008,11 +1008,13 @@ export async function signTeaching(sessionId: string): Promise<{ ok: boolean }> 
   return request(`/teach/${sessionId}/save`, { method: 'POST', body: JSON.stringify({}) })
 }
 
-// ── UTF-8 clipboard bridge for the noVNC view (CDP, bypasses x11vnc) ───────────
-export async function clipboardPasteToBrowser(text: string): Promise<{ ok: boolean; inserted: number }> {
-  return request('/clipboard/paste', { method: 'POST', body: JSON.stringify({ text }) })
+// ── Clipboard bridge for the noVNC view (proxies the jail's xclip server) ──────
+// Read the jailed browser's X CLIPBOARD (poll → mirror into the local clipboard).
+export async function getBrowserClipboard(): Promise<{ ok: boolean; text: string }> {
+  return request('/clipboard', { method: 'GET' })
 }
 
-export async function clipboardCopyFromBrowser(): Promise<{ ok: boolean; text: string }> {
-  return request('/clipboard/copy', { method: 'POST', body: JSON.stringify({}) })
+// Set the jailed browser's X CLIPBOARD (then the UI injects a real Ctrl+V over RFB).
+export async function setBrowserClipboard(text: string): Promise<{ ok: boolean }> {
+  return request('/clipboard', { method: 'POST', body: JSON.stringify({ text }) })
 }

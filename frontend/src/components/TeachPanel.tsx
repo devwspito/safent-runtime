@@ -12,7 +12,7 @@ import { Button } from './ui/Button'
 import { VncFrame } from './VncView'
 import { startTeaching, signTeaching, ApiError } from '../api/client'
 
-export function TeachPanel({ onSaved }: { onSaved?: () => void }) {
+export function TeachPanel({ onSaved, fullscreen }: { onSaved?: () => void; fullscreen?: boolean }) {
   const [skill, setSkill] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -48,7 +48,10 @@ export function TeachPanel({ onSaved }: { onSaved?: () => void }) {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+    <div style={{
+      display: 'flex', flexDirection: 'column', gap: 'var(--space-4)',
+      ...(fullscreen ? { flex: 1, minHeight: 0 } : {}),
+    }}>
       <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
         <input
           type="text"
@@ -80,7 +83,7 @@ export function TeachPanel({ onSaved }: { onSaved?: () => void }) {
           ? 'Navega y haz la tarea en el navegador de abajo, como lo harías normalmente. Cuando termines, pulsa «Guardar habilidad».'
           : 'Ponle nombre y pulsa «Empezar a enseñar». Se abre un navegador real (nítido) que puedes conducir; tus pasos se convierten en una habilidad reutilizable.'}
       </p>
-      <VncFrame />
+      <VncFrame fill={fullscreen} />
     </div>
   )
 }

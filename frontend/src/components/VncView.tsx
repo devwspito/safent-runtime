@@ -7,41 +7,46 @@
  * blurry CDP screencast / slow captureScreenshot. viewOnly=true for Actividad
  * (watch the agent), false for Enseñar (drive it to demonstrate a skill).
  *
- * Clipboard (interactive only): UTF-8 copy/paste with an external source works via a
- * CDP bridge (clipboardPasteToBrowser / clipboardCopyFromBrowser), NOT x11vnc — its
+ * Clipboard (interactive only) — the OS-edition model, adapted with xclip. x11vnc's own
  * clipboard is broken for a jailed Chromium (it never answers the TARGETS request
- * Chromium sends before pasting, so paste hangs; and it never emits ServerCutText, so
- * copy-out is dead). We intercept Ctrl/Cmd+V and +C here BEFORE noVNC forwards them to
- * RFB, and drive the jailed browser over CDP instead: paste = Input.insertText (UTF-8
- * native), copy = read window.getSelection(). Cmd→Ctrl handled by the combo checks.
+ * Chromium sends before pasting → paste hangs; and it never emits ServerCutText → copy
+ * is dead). So we bypass it:
+ *   PASTE  (outside → jail): intercept Cmd/Ctrl+V in capture, read the local clipboard,
+ *     POST it to the jail's clipboard server (xclip becomes the X CLIPBOARD owner and
+ *     answers TARGETS), THEN inject a REAL Ctrl+V over RFB (rfb.sendKey) so the focused
+ *     app pastes it. Order matters: the clipboard must be set before the paste fires.
+ *   COPY   (jail → outside): Ctrl+C is NOT intercepted — it reaches the app normally and
+ *     copies to the X CLIPBOARD; a 1.5s poll (+ on focus) reads it back via the bridge
+ *     and writes it to the local clipboard. UTF-8 (accents/€/emoji/CJK) works throughout.
  */
 import { useEffect, useRef, useState } from 'react'
 import RFB from '@novnc/novnc'
 import { token } from '../lib/token'
-import { clipboardPasteToBrowser, clipboardCopyFromBrowser } from '../api/client'
+import { getBrowserClipboard, setBrowserClipboard } from '../api/client'
 
 type Status = 'connecting' | 'connected' | 'disconnected'
+
+// X11 keysyms for the clean, real Ctrl+V injection over RFB.
+const XK_Control_L = 0xffe3
+const XK_Shift_L = 0xffe1
+const XK_v = 0x0076
 
 function isPasteCombo(e: KeyboardEvent): boolean {
   const v = e.key === 'v' || e.key === 'V' || e.keyCode === 86
   return v && (e.ctrlKey || e.metaKey) && !e.altKey
 }
 
-function isCopyCombo(e: KeyboardEvent): boolean {
-  const c = e.key === 'c' || e.key === 'C' || e.keyCode === 67
-  return c && (e.ctrlKey || e.metaKey) && !e.altKey
-}
-
-/** Framed 16:9 container around a VncView — used by Enseñar (interactive), Actividad
- *  and the chat inline live panel. */
-export function VncFrame({ viewOnly }: { viewOnly?: boolean }) {
+/** Framed container around a VncView — used by Actividad and the chat inline live panel
+ *  (16:9), and the full-screen teaching modal (fill = grow to fill the flex parent). */
+export function VncFrame({ viewOnly, fill }: { viewOnly?: boolean; fill?: boolean }) {
   return (
     <div
       style={{
         position: 'relative',
         width: '100%',
-        aspectRatio: '16 / 9',
-        maxHeight: 'min(74vh, 900px)',
+        ...(fill
+          ? { flex: 1, minHeight: 0 }
+          : { aspectRatio: '16 / 9', maxHeight: 'min(74vh, 900px)' }),
         background: '#000',
         border: '1px solid var(--color-border-subtle)',
         borderRadius: 'var(--radius-md)',
@@ -70,36 +75,69 @@ export function VncView({
     const url = `${proto}//${location.host}/api/v1/vnc?token=${encodeURIComponent(token() || '')}`
     let rfb: RFB | null = null
     let retry: ReturnType<typeof setTimeout> | null = null
+    let poll: ReturnType<typeof setInterval> | null = null
 
     const canRead = !!(navigator.clipboard && navigator.clipboard.readText)
+    let lastPushed: string | null = null // last text we set on the jail clipboard
+    let lastSeenFromJail: string | null = null // last text we pulled from the jail
 
-    // Outside → jail: read the local clipboard, insert it into the jailed browser over
-    // CDP (UTF-8). Intercept BEFORE noVNC forwards the keystroke to RFB so the real
-    // Ctrl+V never reaches x11vnc (whose paste would hang).
+    // Inject a clean, REAL Ctrl+V (or Ctrl+Shift+V) to the jailed app over RFB.
+    const injectPaste = (withShift: boolean) => {
+      if (!rfb) return
+      rfb.sendKey(XK_Control_L, 'ControlLeft', true)
+      if (withShift) rfb.sendKey(XK_Shift_L, 'ShiftLeft', true)
+      rfb.sendKey(XK_v, 'KeyV', true)
+      rfb.sendKey(XK_v, 'KeyV', false)
+      if (withShift) rfb.sendKey(XK_Shift_L, 'ShiftLeft', false)
+      rfb.sendKey(XK_Control_L, 'ControlLeft', false)
+    }
+
+    // Outside → jail: set the jail clipboard from the local one, THEN inject Ctrl+V so
+    // the focused app pastes it. Intercept in capture, before noVNC forwards the key.
     const onKeyDownCapture = (e: KeyboardEvent) => {
-      if (viewOnly) return
-      if (isPasteCombo(e)) {
-        if (!canRead) return
-        e.preventDefault()
-        e.stopImmediatePropagation()
-        navigator.clipboard
-          .readText()
-          .then((text) => { if (text) return clipboardPasteToBrowser(text) })
-          .catch(() => { /* no permission/empty → nothing to paste */ })
-        return
-      }
-      if (isCopyCombo(e)) {
-        // Jail → outside: read the jailed browser's current selection over CDP and
-        // put it on the local clipboard. The remote selection was made with the mouse.
-        e.preventDefault()
-        e.stopImmediatePropagation()
-        clipboardCopyFromBrowser()
-          .then((r) => {
-            const t = r?.text
-            if (t) return navigator.clipboard?.writeText(t)
+      if (viewOnly || !rfb || !isPasteCombo(e) || !canRead) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      const withShift = e.shiftKey
+      navigator.clipboard
+        .readText()
+        .then((text) => {
+          if (text != null && text !== lastPushed) {
+            lastPushed = text
+            return setBrowserClipboard(text)
+          }
+        })
+        .catch(() => { /* no permission/empty → paste whatever the jail already has */ })
+        .then(() => injectPaste(withShift))
+    }
+
+    // Jail → outside: mirror the jail clipboard into the local one (dedup vs our push).
+    const pullFromJail = () => {
+      getBrowserClipboard()
+        .then((r) => {
+          const t = r?.text
+          if (!t || t === lastSeenFromJail || t === lastPushed) return
+          lastSeenFromJail = t
+          navigator.clipboard?.writeText(t).catch(() => {
+            setTimeout(() => navigator.clipboard?.writeText(t).catch(() => {}), 0)
           })
-          .catch(() => { /* transient — ignore */ })
+        })
+        .catch(() => { /* transient */ })
+    }
+
+    // On focus: presync the local clipboard to the jail so any later paste is correct.
+    const onFocus = () => {
+      if (canRead && document.hasFocus()) {
+        navigator.clipboard.readText()
+          .then((text) => {
+            if (text != null && text !== lastPushed) {
+              lastPushed = text
+              return setBrowserClipboard(text)
+            }
+          })
+          .catch(() => { /* no permission yet */ })
       }
+      pullFromJail()
     }
 
     const connect = () => {
@@ -122,11 +160,19 @@ export function VncView({
     }
     connect()
 
-    if (!viewOnly) el.addEventListener('keydown', onKeyDownCapture, true)
+    if (!viewOnly) {
+      el.addEventListener('keydown', onKeyDownCapture, true)
+      window.addEventListener('focus', onFocus)
+      poll = setInterval(pullFromJail, 1500)
+    }
 
     return () => {
       if (retry) clearTimeout(retry)
-      if (!viewOnly) el.removeEventListener('keydown', onKeyDownCapture, true)
+      if (poll) clearInterval(poll)
+      if (!viewOnly) {
+        el.removeEventListener('keydown', onKeyDownCapture, true)
+        window.removeEventListener('focus', onFocus)
+      }
       try { rfb?.disconnect() } catch { /* noop */ }
     }
   }, [viewOnly])

@@ -61,6 +61,11 @@ table inet hermes_browser_local {
         # shell-server proxies it to the web UI behind the webui bearer token.
         ip saddr 10.200.0.1 tcp dport 5900 accept comment "daemon→VNC live-view (jailed browser display)"
 
+        # Daemon → hermes-clipboard-server (xclip) on 7519 — clipboard sync for the web UI.
+        # Same trust model as CDP/VNC: only the veth host-side peer connects; proxied by
+        # the shell-server behind the webui bearer token.
+        ip saddr 10.200.0.1 tcp dport 7519 accept comment "daemon→clipboard bridge (jailed browser)"
+
         log prefix "hbr NS IN DROP: " level warn drop
     }
 

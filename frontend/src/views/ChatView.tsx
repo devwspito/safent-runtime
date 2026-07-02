@@ -564,9 +564,9 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
 
-  // "+" context menu: two-level (root → skills/live submenu). Non-exclusive.
+  // "+" context menu: two-level (root → skills submenu). Non-exclusive.
   const [menuOpen, setMenuOpen] = useState(false)
-  const [menuView, setMenuView] = useState<'root' | 'skills' | 'live'>('root')
+  const [menuView, setMenuView] = useState<'root' | 'skills'>('root')
   const [skills, setSkills] = useState<Skill[]>([])
   const [skillsLoaded, setSkillsLoaded] = useState(false)
   const [selectedSkills, setSelectedSkills] = useState<Skill[]>([])
@@ -585,9 +585,9 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
     setMenuOpen((o) => !o)
   }
 
-  // Load skills lazily — only when the user actually opens the Skills/Live submenu.
-  async function enterSkillsView(view: 'skills' | 'live') {
-    setMenuView(view)
+  // Load skills lazily — only when the user actually opens the Skills submenu.
+  async function enterSkillsView() {
+    setMenuView('skills')
     if (!skillsLoaded) {
       try {
         const list = await listSkills()
@@ -831,40 +831,32 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                 <button type="button" className={styles.plusItem} role="menuitem" onClick={() => void pickFolder()}>
                   <FolderOpen size={14} aria-hidden="true" /> Seleccionar carpeta…
                 </button>
-                <button type="button" className={styles.plusItem} role="menuitem" onClick={() => void enterSkillsView('skills')}>
+                <button type="button" className={styles.plusItem} role="menuitem" onClick={() => void enterSkillsView()}>
                   <Zap size={14} aria-hidden="true" />
                   <span style={{ flex: 1, textAlign: 'left' }}>Habilidades</span>
-                  <span aria-hidden="true">›</span>
-                </button>
-                <button type="button" className={styles.plusItem} role="menuitem" onClick={() => void enterSkillsView('live')}>
-                  <Zap size={14} aria-hidden="true" />
-                  <span style={{ flex: 1, textAlign: 'left' }}>Live</span>
                   <span aria-hidden="true">›</span>
                 </button>
               </>
             )}
 
-            {(menuView === 'skills' || menuView === 'live') && (
+            {menuView === 'skills' && (
               <>
                 <button type="button" className={styles.plusItem} role="menuitem"
                   onClick={() => setMenuView('root')}>
                   <span aria-hidden="true">‹</span>
-                  <span style={{ flex: 1, textAlign: 'left' }}>
-                    {menuView === 'live' ? 'Live' : 'Habilidades'}
-                  </span>
+                  <span style={{ flex: 1, textAlign: 'left' }}>Habilidades</span>
                 </button>
                 {(() => {
-                  const list = skills.filter((s) => (menuView === 'live' ? isLive(s) : !isLive(s)))
                   if (!skillsLoaded) return <div className={styles.plusEmpty}>Cargando…</div>
-                  if (list.length === 0) return <div className={styles.plusEmpty}>Ninguna</div>
-                  return list.map((sk) => {
+                  if (skills.length === 0) return <div className={styles.plusEmpty}>Ninguna</div>
+                  return skills.map((sk) => {
                     const on = selectedSkills.some((s) => skillKey(s) === skillKey(sk))
                     return (
                       <button key={skillKey(sk)} type="button" className={styles.plusItem} role="menuitemcheckbox"
                         aria-checked={on} onClick={() => toggleSkill(sk)}>
                         <Zap size={14} aria-hidden="true" />
                         <span style={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skillLabel(sk)}</span>
-                        {menuView === 'live' && <span className={styles.plusLiveTag}>live</span>}
+                        {isLive(sk) && <span className={styles.plusLiveTag}>live</span>}
                         {on && <Check size={13} aria-hidden="true" />}
                       </button>
                     )
