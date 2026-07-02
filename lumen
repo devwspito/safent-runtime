@@ -194,6 +194,14 @@ cmd_update() {
   "$RT" pull "$(_image)"
   echo "[*] Recreating the container with the new image..."
   _run   # -v lumen-data keeps your config (keystore, MFA, providers)
+  # Reclaim disk WITHOUT losing anything you care about. After the pull+recreate the
+  # PREVIOUS image is untagged (the :latest tag moved) and unused (container was
+  # recreated) → a DANGLING image. Pruning dangling images frees ~7 GB per old
+  # version. It NEVER touches the lumen-data volume (your keystore/MFA/providers/
+  # config) nor the current image — an update keeps everything, it just stops
+  # hoarding old image layers each time (which was filling the disk).
+  echo "[*] Reclaiming space from previous versions (your data is untouched)..."
+  "$RT" image prune -f >/dev/null 2>&1 || true
   _open_and_print
 }
 
