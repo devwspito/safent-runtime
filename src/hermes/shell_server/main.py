@@ -1273,6 +1273,12 @@ def create_app() -> FastAPI:
         create_watch_live_router,
     )
     app.include_router(create_watch_live_router())
+    # VNC-over-WebSocket bridge → x11vnc on the jailed browser's Xvfb display. The
+    # UI's noVNC connects here for a sharp+fluid live view (En vivo → Enseñar/Actividad).
+    from hermes.shell_server.cowork.vnc_proxy import (  # noqa: PLC0415
+        create_vnc_proxy_router,
+    )
+    app.include_router(create_vnc_proxy_router())
     app.include_router(create_workspace_router())
     app.include_router(create_approvals_router())
     app.include_router(create_policies_router())
