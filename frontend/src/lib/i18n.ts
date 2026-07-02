@@ -211,9 +211,10 @@ const translations = {
     'agents.subtitle.ready':      'Tu equipo de {count} agente',
     'agents.subtitle.ready_pl':   'Tu equipo de {count} agentes',
     'agents.subtitle.loading':    'Tu equipo de IA',
-    'agents.subtitle.suffix':     ' — tarjetas o piso en vivo',
+    'agents.subtitle.suffix':     '',
     'agents.tab.cards':           'Tarjetas',
     'agents.tab.live':            'En vivo',
+    'agents.tab.premium':         'Premium',
     'agents.tab.aria':            'Vista de la oficina',
     'agents.create.btn':          '+ Crear agente',
     'agents.create.aria':         'Crear nuevo agente',
@@ -223,6 +224,12 @@ const translations = {
     'agents.map.loading':         'Cargando mapa…',
     'agents.empty.text':          'Aún no tienes agentes.',
     'agents.empty.cta':           'Crear tu primer agente',
+    'agents.error.title':         'No se pudo cargar el equipo',
+    'agents.error.retry':         'Reintentar',
+
+    // Agents / Office view — Premium floor
+    'agents.premium.today_action':    '{count} acción hoy',
+    'agents.premium.today_action_pl': '{count} acciones hoy',
 
     // Agents / Office view — fullscreen
     'agents.fullscreen':          'Pantalla completa',
@@ -504,9 +511,10 @@ const translations = {
     'agents.subtitle.ready':      'Your team of {count} agent',
     'agents.subtitle.ready_pl':   'Your team of {count} agents',
     'agents.subtitle.loading':    'Your AI team',
-    'agents.subtitle.suffix':     ' — cards or live floor',
+    'agents.subtitle.suffix':     '',
     'agents.tab.cards':           'Cards',
     'agents.tab.live':            'Live',
+    'agents.tab.premium':         'Premium',
     'agents.tab.aria':            'Office view',
     'agents.create.btn':          '+ New agent',
     'agents.create.aria':         'Create new agent',
@@ -516,6 +524,12 @@ const translations = {
     'agents.map.loading':         'Loading map…',
     'agents.empty.text':          'You have no agents yet.',
     'agents.empty.cta':           'Create your first agent',
+    'agents.error.title':         'We could not load your team',
+    'agents.error.retry':         'Retry',
+
+    // Agents / Office view — Premium floor
+    'agents.premium.today_action':    '{count} action today',
+    'agents.premium.today_action_pl': '{count} actions today',
 
     // Agents / Office view — fullscreen
     'agents.fullscreen':          'Full screen',

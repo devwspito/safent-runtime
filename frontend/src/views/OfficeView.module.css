@@ -11,29 +11,6 @@
   overflow: hidden;
 }
 
-/* ── Header toolbar row ──────────────────────────────────────────────────── */
-
-.headerRow {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-4);
-  flex-wrap: wrap;
-}
-
-.headerLeft {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.headerActions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-}
-
 /* ── Roster toggle row ───────────────────────────────────────────────────── */
 
 .rosterToggleRow {
@@ -668,20 +645,6 @@
   text-align: center;
   padding: var(--space-4) 0 var(--space-2);
   letter-spacing: 0.04em;
-}
-
-/* ── Custom-agents empty section ─────────────────────────────────────────── */
-
-.mineEmpty {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.mineEmptyText {
-  font-size: var(--text-sm);
-  color: var(--color-text-dim);
-  padding: 0;
 }
 
 /* ── Agent drawer ────────────────────────────────────────────────────────── */

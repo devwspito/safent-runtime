@@ -1008,14 +1008,17 @@ function LiveBrowserPanel() {
         aria-expanded={open}
         style={{
           display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)',
-          padding: '5px 12px', borderRadius: 'var(--radius-full, 999px)',
+          padding: '5px 12px', borderRadius: 'var(--radius-full)',
           border: '1px solid var(--color-border-subtle)', background: 'var(--color-bg-subtle)',
           color: 'var(--color-text)', fontSize: 'var(--text-sm)', cursor: 'pointer',
         }}
       >
         <span
           aria-hidden="true"
-          style={{ width: 8, height: 8, borderRadius: '50%', background: '#e5484d', boxShadow: '0 0 0 3px rgba(229,72,77,0.2)' }}
+          style={{
+            width: 8, height: 8, borderRadius: '50%', background: 'var(--color-danger)',
+            boxShadow: '0 0 0 3px color-mix(in srgb, var(--color-danger) 22%, transparent)',
+          }}
         />
         <span>Ver en vivo</span>
         <ChevronDown
@@ -1036,7 +1039,7 @@ function LiveBrowserPanel() {
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               width: 28, height: 28, borderRadius: 'var(--radius-md)',
               border: '1px solid var(--color-border-subtle)',
-              background: 'rgba(0,0,0,0.55)', color: '#fff', cursor: 'pointer',
+              background: 'rgba(0,0,0,0.55)', color: 'var(--slate-12)', cursor: 'pointer',
             }}
           >
             <Maximize2 size={14} aria-hidden="true" />

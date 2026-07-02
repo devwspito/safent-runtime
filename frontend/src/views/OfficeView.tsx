@@ -8,10 +8,14 @@ import type { AgentRoster, RosterAgent, RosterDepartment, RuntimeStatus, CreateA
 import type { LumenAgent, LumenRuntimeStatus } from './office-live/engine/office-state'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import { useT } from '../lib/i18n'
+import { activeAgentIds, departmentDisplayLabel, groupDepartmentsByKind } from '../lib/agentRoster'
 import type { ChatOutletContext } from '../components/Layout'
-import { AnimatedDrawer, AnimatedPageHeaderText, AnimatePresence, motion, useReducedMotion, SPRING, Stagger, StaggerItem } from '../components/ui/motion'
+import { AnimatedDrawer, AnimatePresence, motion, useReducedMotion, SPRING, Stagger, StaggerItem } from '../components/ui/motion'
 import { Badge, StatusDot } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
+import { PageHeader } from '../components/ui/PageHeader'
+import { EmptyState } from '../components/ui/EmptyState'
+import { PremiumFloorView } from './PremiumFloorView'
 
 import styles from './OfficeView.module.css'
 
@@ -45,7 +49,20 @@ function rosterAgentToLumenAgent(a: RosterAgent, dept: RosterDepartment): LumenA
 
 // ── View-level state ──────────────────────────────────────────────────────────
 
-type Tab = 'tarjetas' | 'live'
+type Tab = 'tarjetas' | 'live' | 'premium'
+
+const AGENTS_VIEW_STORAGE_KEY = 'lumen_agents_view'
+const VALID_TABS: readonly Tab[] = ['tarjetas', 'live', 'premium']
+
+function readStoredTab(): Tab {
+  try {
+    const raw = localStorage.getItem(AGENTS_VIEW_STORAGE_KEY)
+    if (raw && (VALID_TABS as readonly string[]).includes(raw)) return raw as Tab
+  } catch {
+    // localStorage unavailable (private mode, etc.) — fall back to default.
+  }
+  return 'live'
+}
 
 type DataState =
   | { status: 'loading' }
@@ -67,15 +84,6 @@ function dataReducer(state: DataState, action: DataAction): DataState {
       if (state.status !== 'ready') return state
       return { ...state, runtimeStatus: action.runtimeStatus, agentStats: action.agentStats }
   }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function activeAgentIds(runtimeStatus: RuntimeStatus): Set<string> {
-  const ids = new Set<string>()
-  if (runtimeStatus.active_agent_id) ids.add(runtimeStatus.active_agent_id)
-  for (const a of runtimeStatus.activity ?? []) ids.add(a.agent_id)
-  return ids
 }
 
 // ── Loading skeleton ──────────────────────────────────────────────────────────
@@ -466,9 +474,7 @@ function AgentDrawer({ agent, departments, isWorking, open, onClose, onClone, on
     }
   }
 
-  const deptLabel = agent.department
-    ? agent.department.replace(/^custom:/i, '')
-    : ''
+  const deptLabel = departmentDisplayLabel(agent)
 
   return (
     <>
@@ -614,9 +620,7 @@ function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
   const reduced = useReducedMotion()
   const initials = agent.name.charAt(0).toUpperCase()
   const isFactory = agent.source === 'ruflo'
-  const deptLabel = agent.department
-    ? agent.department.replace(/^custom:/i, '')
-    : ''
+  const deptLabel = departmentDisplayLabel(agent)
 
   const cardClasses = [
     styles.agentCard,
@@ -769,11 +773,7 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
   const [showCreateModal, setShowCreateModal] = useState(false)
 
   const activeIds = activeAgentIds(runtimeStatus)
-
-  const cerebroDepts = roster.departments.filter((d) => d.kind === 'cerebro')
-  const factoryDepts = roster.departments.filter((d) => d.kind === 'factory')
-  const customDepts = roster.departments.filter((d) => d.kind === 'custom')
-  const hasCustomDepts = customDepts.length > 0
+  const { cerebroDepts, customDepts, factoryDepts, hasCustomDepts } = groupDepartmentsByKind(roster.departments)
 
   function handleAgentSaved(_agent: RosterAgent) {
     setShowCreateModal(false)
@@ -808,17 +808,21 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
         {!hasCustomDepts && (
           <section aria-labelledby="section-mis-agentes" className={styles.section}>
             <h2 id="section-mis-agentes" className={styles.sectionTitle}>{t('agents.dept.mine.title')}</h2>
-            <div className={styles.mineEmpty}>
-              <p className={styles.mineEmptyText}>{t('agents.dept.mine.empty')}</p>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowCreateModal(true)}
-              >
-                + {t('agents.card.create.label')}
-              </Button>
-            </div>
+            <EmptyState
+              compact
+              icon={<Users size={20} aria-hidden="true" />}
+              title={t('agents.dept.mine.empty')}
+              action={
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowCreateModal(true)}
+                >
+                  + {t('agents.card.create.label')}
+                </Button>
+              }
+            />
           </section>
         )}
 
@@ -867,7 +871,7 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
 
 export default function OfficeView() {
   const t = useT()
-  const [tab, setTab] = useState<Tab>('live')
+  const [tab, setTabState] = useState<Tab>(readStoredTab)
   const [state, dispatch] = useReducer(dataReducer, { status: 'loading' })
   const [showCreateFromHeader, setShowCreateFromHeader] = useState(false)
   const [selectedAgent, setSelectedAgent] = useState<RosterAgent | null>(null)
@@ -877,6 +881,15 @@ export default function OfficeView() {
   // ── Default roster toggle ────────────────────────────────────────────────
   const [defaultRosterEnabled, setDefaultRosterEnabled] = useState(true)
   const [rosterTogglePending, setRosterTogglePending] = useState(false)
+
+  const setTab = useCallback((next: Tab) => {
+    setTabState(next)
+    try {
+      localStorage.setItem(AGENTS_VIEW_STORAGE_KEY, next)
+    } catch {
+      // localStorage unavailable — the choice just won't persist across reloads.
+    }
+  }, [])
 
   // ── Initial load + programmatic refetch ──────────────────────────────────
   const load = useCallback(async () => {
@@ -995,17 +1008,11 @@ export default function OfficeView() {
 
   return (
     <div className={styles.officeView}>
-      {/* ── Header ── */}
-      <header className="view-header office-view-header">
-        <div className={styles.headerRow}>
-          <div className={styles.headerLeft}>
-            <AnimatedPageHeaderText
-              title={t('view.agentes')}
-              subtitle={state.status !== 'loading' ? subtitle : undefined}
-            />
-          </div>
-
-          <div className={styles.headerActions}>
+      <PageHeader
+        title={t('view.agentes')}
+        subtitle={state.status !== 'loading' ? subtitle : undefined}
+        actions={
+          <>
             {/* Default roster toggle */}
             <div
               className={styles.rosterToggleRow}
@@ -1054,10 +1061,18 @@ export default function OfficeView() {
               >
                 {t('agents.tab.live')}
               </button>
+              <button
+                type="button"
+                className={`${styles.segBtn}${tab === 'premium' ? ` ${styles.segBtnActive}` : ''}`}
+                onClick={() => setTab('premium')}
+                aria-pressed={tab === 'premium'}
+              >
+                {t('agents.tab.premium')}
+              </button>
             </div>
-          </div>
-        </div>
-      </header>
+          </>
+        }
+      />
 
       {/* ── Body ── */}
       <div className={styles.body}>
@@ -1070,7 +1085,7 @@ export default function OfficeView() {
             <span className={styles.errorIcon} aria-hidden="true">
               <AlertTriangle size={18} />
             </span>
-            <p className={styles.errorTitle}>No se pudo cargar el equipo</p>
+            <p className={styles.errorTitle}>{t('agents.error.title')}</p>
             <p className={styles.errorMessage}>{state.message}</p>
             <Button
               type="button"
@@ -1079,7 +1094,7 @@ export default function OfficeView() {
               onClick={() => void load()}
             >
               <RefreshCw size={13} aria-hidden="true" style={{ marginRight: 6 }} />
-              Reintentar
+              {t('agents.error.retry')}
             </Button>
           </div>
         )}
@@ -1087,12 +1102,10 @@ export default function OfficeView() {
         {/* Empty — no agents */}
         {state.status === 'ready' && totalAgentCount === 0 && (
           <div className={styles.emptyState}>
-            <div className="ds-empty-state">
-              <span className="ds-empty-state__icon" aria-hidden="true">
-                <Users size={28} />
-              </span>
-              <p className="ds-empty-state__title">{t('agents.empty.text')}</p>
-              <div className="ds-empty-state__action">
+            <EmptyState
+              icon={<Users size={28} aria-hidden="true" />}
+              title={t('agents.empty.text')}
+              action={
                 <Button
                   type="button"
                   variant="primary"
@@ -1100,8 +1113,8 @@ export default function OfficeView() {
                 >
                   {t('agents.empty.cta')}
                 </Button>
-              </div>
-            </div>
+              }
+            />
           </div>
         )}
 
@@ -1229,6 +1242,26 @@ export default function OfficeView() {
                       </Suspense>
                     </div>
                   </div>
+                </motion.div>
+              )}
+
+              {tab === 'premium' && (
+                <motion.div
+                  key="premium"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.14 }}
+                  style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+                >
+                  <PremiumFloorView
+                    roster={state.roster}
+                    runtimeStatus={state.runtimeStatus}
+                    agentStats={state.agentStats}
+                    hasRuflo={state.hasRuflo}
+                    onAgentClick={setSelectedAgent}
+                    onCreateClick={() => setShowCreateFromHeader(true)}
+                  />
                 </motion.div>
               )}
             </AnimatePresence>
