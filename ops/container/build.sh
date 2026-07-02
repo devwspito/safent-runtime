@@ -62,6 +62,7 @@ echo "[*] Building → ${IMAGE_VERSIONED} (+ :latest)"
   --build-arg LUMEN_EDITION=community \
   --build-arg LUMEN_VERSION="${VERSION}" \
   --build-arg FE_CACHEBUST="${FE_CACHEBUST}" \
+  --build-arg APP_CACHEBUST="${FE_CACHEBUST}" \
   --build-arg GIT_SHA="${GIT_SHA}" \
   -f ops/container/Containerfile \
   -t "${IMAGE_VERSIONED}" \

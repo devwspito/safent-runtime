@@ -61,6 +61,12 @@ RUN python3 -m pip install --no-cache-dir \
 # SELF-CONTAINED — the host's python is never used (an old macOS system python 3.9/pip
 # can't mis-name it as UNKNOWN-0.0.0). Then install --no-deps + ALL real deps EXPLICITLY
 # (core + the browser/shell/tui/mcp extras). No extras-syntax, one package per need.
+# APP_CACHEBUST: pass a unique value (build.sh sends $(date +%s)) to force the wheel
+# (COPY src) AND everything after — including the ops/ launcher COPY — to rebuild.
+# Without this, podman has served STALE `COPY src` / `COPY ops` layers even when the
+# content changed, baking old backend code / launcher into a "fresh" image.
+ARG APP_CACHEBUST=0
+RUN echo "app-cachebust ${APP_CACHEBUST}" > /tmp/.app_cachebust
 COPY pyproject.toml README.md /tmp/whlbuild/
 COPY src /tmp/whlbuild/src
 RUN cd /tmp/whlbuild && python3 -m pip wheel . --no-deps -w /tmp/whl \
