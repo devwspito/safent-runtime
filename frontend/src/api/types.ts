@@ -164,6 +164,8 @@ export interface Skill {
   state?: string
   version?: string
   surface_kinds?: string | string[]
+  /** "teaching_live" for skills minted via the live teaching flow. */
+  teaching_origin?: string
 }
 
 export interface HubSkillResult {

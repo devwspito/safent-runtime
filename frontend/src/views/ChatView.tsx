@@ -18,10 +18,18 @@ import {
   type ChangeEvent,
 } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
-import { GitBranch, Loader2, CheckCircle2, AlertTriangle, FileText, X } from 'lucide-react'
+import { GitBranch, Loader2, CheckCircle2, AlertTriangle, FileText, X, Plus, Paperclip, FolderOpen, Zap, Check } from 'lucide-react'
 import type { ChatMessage, ToolStep } from '../hooks/useChat'
-import { listProviders, uploadWorkspaceFile, getRuntimeStatus, ApiError } from '../api/client'
-import type { Provider } from '../api/types'
+import { listProviders, uploadWorkspaceFile, getRuntimeStatus, listSkills, ApiError } from '../api/client'
+import type { Provider, Skill } from '../api/types'
+import {
+  uploadDirectoryToBridge,
+  syncBridgeToHost,
+  pickHostDirectory,
+  supportsFolderPicker,
+  type BridgeSelection,
+} from '../lib/folderBridge'
+import { sileo } from 'sileo'
 import type { ChatOutletContext } from '../components/Layout'
 import ContextPanel from '../components/ContextPanel'
 import PendingApprovalsInChat from '../components/PendingApprovalsInChat'
@@ -555,6 +563,87 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
 
+  // "+" context menu: attach files / bridge a host folder / add skills (non-exclusive).
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [skills, setSkills] = useState<Skill[]>([])
+  const [skillsLoaded, setSkillsLoaded] = useState(false)
+  const [selectedSkills, setSelectedSkills] = useState<Skill[]>([])
+  const [bridge, setBridge] = useState<BridgeSelection | null>(null)
+  const [bridgeBusy, setBridgeBusy] = useState(false)
+  const [bridgeSyncing, setBridgeSyncing] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  const skillKey = (sk: Skill) => sk.skill_id ?? sk.package_id ?? sk.skill_name ?? sk.name ?? ''
+  const skillLabel = (sk: Skill) => sk.skill_name ?? sk.name ?? sk.slug ?? skillKey(sk)
+  const isLive = (sk: Skill) => sk.teaching_origin === 'teaching_live'
+
+  async function openMenu() {
+    setMenuOpen((o) => !o)
+    if (!skillsLoaded) {
+      try {
+        const list = await listSkills()
+        setSkills(Array.isArray(list) ? list : [])
+      } catch { /* fail-soft: empty picker */ }
+      setSkillsLoaded(true)
+    }
+  }
+
+  function toggleSkill(sk: Skill) {
+    const k = skillKey(sk)
+    setSelectedSkills((prev) =>
+      prev.some((s) => skillKey(s) === k) ? prev.filter((s) => skillKey(s) !== k) : [...prev, sk],
+    )
+  }
+
+  async function pickFolder() {
+    if (!supportsFolderPicker()) {
+      sileo.error({ title: 'Seleccionar carpeta necesita Chrome o Edge.' })
+      return
+    }
+    setMenuOpen(false)
+    let handle: FileSystemDirectoryHandle | null
+    try {
+      handle = await pickHostDirectory()
+    } catch (e) {
+      sileo.error({ title: e instanceof Error ? e.message : 'No se pudo abrir el selector' })
+      return
+    }
+    if (!handle) return
+    setBridgeBusy(true)
+    try {
+      const sel = await uploadDirectoryToBridge(handle)
+      setBridge(sel)
+      sileo.success({ title: `Carpeta "${sel.name}" lista (${sel.fileCount} ficheros)` })
+    } catch (e) {
+      sileo.error({ title: e instanceof Error ? e.message : 'No se pudo cargar la carpeta' })
+    } finally {
+      setBridgeBusy(false)
+    }
+  }
+
+  async function syncBridge() {
+    if (!bridge) return
+    setBridgeSyncing(true)
+    try {
+      const n = await syncBridgeToHost(bridge)
+      sileo.success({ title: `Guardado en tu carpeta (${n} ficheros)` })
+    } catch (e) {
+      sileo.error({ title: e instanceof Error ? e.message : 'No se pudo guardar en tu carpeta' })
+    } finally {
+      setBridgeSyncing(false)
+    }
+  }
+
+  // Close the menu on outside click.
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDoc = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [menuOpen])
+
   // Auto-grow textarea
   useLayoutEffect(() => {
     const el = textareaRef.current
@@ -625,26 +714,45 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
       .filter((a) => a.uploadedPath !== null)
       .map((a) => a.uploadedPath as string)
 
-    let text = value
+    // Compose context refs (same channel as attachments: appended as text the
+    // agent reads). Non-exclusive: skills + folder + attachments can all be present.
+    const refs: string[] = []
+    if (selectedSkills.length > 0) {
+      refs.push(`Usa estas habilidades: ${selectedSkills.map(skillLabel).join(', ')}.`)
+    }
+    if (bridge) {
+      refs.push(
+        `Trabaja en la carpeta ${bridge.workspacePath} (es la carpeta "${bridge.name}" del usuario, puedes leer y modificar sus ficheros).`,
+      )
+    }
     if (uploadedPaths.length > 0) {
-      const refs = uploadedPaths.map((p) => `[Adjunto: ${p}]`).join('\n')
-      text = text.trim() ? `${text}\n\n${refs}` : refs
+      refs.push(uploadedPaths.map((p) => `[Adjunto: ${p}]`).join('\n'))
+    }
+
+    let text = value
+    if (refs.length > 0) {
+      const block = refs.join('\n')
+      text = text.trim() ? `${text}\n\n${block}` : block
     }
 
     if (text.trim()) {
       onSend(text)
       setAttachments([])
+      setSelectedSkills([])
+      // Keep `bridge` so the user can still "Guardar en mi carpeta" after the
+      // agent finishes; they remove it explicitly with the chip's ✕.
     }
   }
 
   const anyUploading = attachments.some((a) => a.uploading)
-  const canSend =
-    !disabled && !anyUploading && (value.trim() !== '' || attachments.some((a) => a.uploadedPath))
+  const hasContext =
+    attachments.some((a) => a.uploadedPath) || selectedSkills.length > 0 || bridge !== null
+  const canSend = !disabled && !anyUploading && !bridgeBusy && (value.trim() !== '' || hasContext)
 
   return (
     <div className={styles.composerWrap}>
-      {attachments.length > 0 && (
-        <div className={styles.attachmentsRow} aria-label="Archivos adjuntos">
+      {(attachments.length > 0 || selectedSkills.length > 0 || bridge || bridgeBusy) && (
+        <div className={styles.attachmentsRow} aria-label="Contexto del mensaje">
           {attachments.map((att) => (
             <AttachmentChip
               key={att.id}
@@ -654,6 +762,49 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
               onRemove={() => removeAttachment(att.id)}
             />
           ))}
+          {selectedSkills.map((sk) => (
+            <span key={skillKey(sk)} className={styles.attachChip}>
+              <Zap size={12} aria-hidden="true" />
+              {skillLabel(sk)}{isLive(sk) ? ' · live' : ''}
+              <button
+                type="button"
+                onClick={() => toggleSkill(sk)}
+                aria-label={`Quitar ${skillLabel(sk)}`}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', display: 'inline-flex' }}
+              >
+                <X size={11} aria-hidden="true" />
+              </button>
+            </span>
+          ))}
+          {bridgeBusy && (
+            <span className={styles.attachChip}>
+              <Loader2 size={12} className="spin" aria-hidden="true" /> Cargando carpeta…
+            </span>
+          )}
+          {bridge && (
+            <span className={styles.attachChip} title={bridge.workspacePath}>
+              <FolderOpen size={12} aria-hidden="true" />
+              {bridge.name} ({bridge.fileCount})
+              <button
+                type="button"
+                onClick={() => void syncBridge()}
+                disabled={bridgeSyncing}
+                aria-label="Guardar cambios en mi carpeta"
+                title="Guardar los cambios del agente de vuelta en tu carpeta"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', display: 'inline-flex' }}
+              >
+                {bridgeSyncing ? <Loader2 size={11} className="spin" /> : <Check size={11} />}
+              </button>
+              <button
+                type="button"
+                onClick={() => setBridge(null)}
+                aria-label="Quitar carpeta"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', display: 'inline-flex' }}
+              >
+                <X size={11} aria-hidden="true" />
+              </button>
+            </span>
+          )}
         </div>
       )}
 
@@ -680,16 +831,67 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
             onChange={handleFileSelect}
             tabIndex={-1}
           />
-          <button
-            type="button"
-            className={styles.attachBtn}
-            onClick={() => fileInputRef.current?.click()}
-            disabled={disabled}
-            aria-label="Adjuntar archivo (imágenes, PDF, documentos)"
-            title="Adjuntar archivo"
-          >
-            <AttachIcon />
-          </button>
+          <div ref={menuRef} style={{ position: 'relative', display: 'inline-flex' }}>
+            <button
+              type="button"
+              className={styles.attachBtn}
+              onClick={() => void openMenu()}
+              disabled={disabled}
+              aria-label="Añadir contexto (archivos, carpeta, habilidades)"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              title="Añadir contexto"
+            >
+              <Plus size={16} />
+            </button>
+
+            {menuOpen && (
+              <div className={styles.plusMenu} role="menu" aria-label="Añadir al mensaje">
+                <button type="button" className={styles.plusItem} role="menuitem"
+                  onClick={() => { setMenuOpen(false); fileInputRef.current?.click() }}>
+                  <Paperclip size={14} aria-hidden="true" /> Adjuntar archivos
+                </button>
+                <button type="button" className={styles.plusItem} role="menuitem" onClick={() => void pickFolder()}>
+                  <FolderOpen size={14} aria-hidden="true" /> Seleccionar carpeta…
+                </button>
+
+                <div className={styles.plusSectionLabel}>Habilidades</div>
+                {!skillsLoaded && <div className={styles.plusEmpty}>Cargando…</div>}
+                {skillsLoaded && skills.filter((s) => !isLive(s)).length === 0 && (
+                  <div className={styles.plusEmpty}>Ninguna</div>
+                )}
+                {skills.filter((s) => !isLive(s)).map((sk) => {
+                  const on = selectedSkills.some((s) => skillKey(s) === skillKey(sk))
+                  return (
+                    <button key={skillKey(sk)} type="button" className={styles.plusItem} role="menuitemcheckbox"
+                      aria-checked={on} onClick={() => toggleSkill(sk)}>
+                      <Zap size={14} aria-hidden="true" />
+                      <span style={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skillLabel(sk)}</span>
+                      {on && <Check size={13} aria-hidden="true" />}
+                    </button>
+                  )
+                })}
+
+                {skillsLoaded && skills.some((s) => isLive(s)) && (
+                  <>
+                    <div className={styles.plusSectionLabel}>Live</div>
+                    {skills.filter(isLive).map((sk) => {
+                      const on = selectedSkills.some((s) => skillKey(s) === skillKey(sk))
+                      return (
+                        <button key={skillKey(sk)} type="button" className={styles.plusItem} role="menuitemcheckbox"
+                          aria-checked={on} onClick={() => toggleSkill(sk)}>
+                          <Zap size={14} aria-hidden="true" />
+                          <span style={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skillLabel(sk)}</span>
+                          <span className={styles.plusLiveTag}>live</span>
+                          {on && <Check size={13} aria-hidden="true" />}
+                        </button>
+                      )
+                    })}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
 
           <ModelPicker />
 
@@ -732,20 +934,6 @@ function ChevronIcon() {
         d="M4 3l4 3-4 3"
         stroke="currentColor"
         strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
-}
-
-function AttachIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path
-        d="M13.5 7.5l-6 6a4 4 0 01-5.657-5.657l6-6a2.5 2.5 0 013.535 3.535L5.5 11.25a1 1 0 01-1.414-1.414L10 4"
-        stroke="currentColor"
-        strokeWidth="1.4"
         strokeLinecap="round"
         strokeLinejoin="round"
       />

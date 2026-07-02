@@ -296,6 +296,7 @@ def compile_and_persist(
             signed_at=signed_at,
             signing_method=signing_method,
             generalized_body=generalized_body,
+            teaching_origin="teaching_live",
         )
     except Exception:
         logger.exception("compile_and_persist: SKILL.md write failed session=%s", session_id)
@@ -382,6 +383,7 @@ def _persist_as_skill_md(
     signed_at: str,
     signing_method: str,
     generalized_body: str | None = None,
+    teaching_origin: str = "teaching_live",
 ) -> None:
     """Write a SKILL.md for a voice-trained skill into the Neus skills dir.
 
@@ -401,6 +403,9 @@ def _persist_as_skill_md(
         "package_id": str(pkg.package_id),
         "skill_id": str(pkg.skill_id),
         "state": pkg.state.value,
+        # Origin: skills minted through the live teaching flow carry this so the UI
+        # can show a "live" tag and the chat "+" picker can list them separately.
+        "teaching_origin": teaching_origin,
         "signing_method": signing_method,
         "signature_hex": pkg.signature_hex or "",
         "signed_at": signed_at,

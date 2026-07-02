@@ -29,7 +29,7 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 logger = logging.getLogger("hermes.shell_server.cowork.workspace_api")
@@ -91,6 +91,28 @@ def _safe_entry_path(workspace: Path, rel_path: str) -> Path | None:
     except ValueError:
         return None
     if not candidate.exists():
+        return None
+    return candidate
+
+
+def _safe_rel_upload_path(workspace: Path, rel_path: str) -> Path | None:
+    """Resolve a relative path (with subdirs) for a NEW upload, strictly inside
+    `workspace`. Unlike _safe_entry_path this does NOT require the path to exist
+    (we are about to create it). Rejects traversal / absolute / symlink escapes.
+    Used by the folder-bridge upload to preserve directory structure under
+    `workspace/bridge/<name>/...`.
+    """
+    clean = rel_path.strip().lstrip("/")
+    if not clean or ".." in clean.split("/"):
+        return None
+    root = _resolve_root(workspace)
+    candidate = (root / clean).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    # Must not resolve to the root itself and must have a filename component.
+    if candidate == root or not candidate.name or candidate.name in {".", ".."}:
         return None
     return candidate
 
@@ -259,7 +281,10 @@ def create_workspace_router() -> APIRouter:
         return FileResponse(path=str(candidate), filename=candidate.name)
 
     @router.post("/api/v1/workspace/files", status_code=201)
-    async def upload_workspace_file(file: UploadFile) -> dict:
+    async def upload_workspace_file(
+        file: UploadFile,
+        rel_path: str | None = Form(default=None),
+    ) -> dict:
         """Upload a file into the workspace directory.
 
         The file is saved into the same directory that GET /workspace/files
@@ -282,13 +307,23 @@ def create_workspace_router() -> APIRouter:
         """
         workspace = _workspace_dir()
 
-        raw_name = file.filename or ""
-        dest = _safe_upload_path(workspace, raw_name)
-        if dest is None:
-            raise HTTPException(
-                status_code=422,
-                detail="invalid filename: must be a non-empty name without path separators",
-            )
+        # Folder-bridge upload: rel_path preserves the picked folder's structure
+        # under workspace/bridge/<name>/... . Otherwise a flat single-file upload.
+        if rel_path:
+            dest = _safe_rel_upload_path(workspace, rel_path)
+            if dest is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="invalid rel_path: must stay inside the workspace (no '..'/absolute)",
+                )
+        else:
+            raw_name = file.filename or ""
+            dest = _safe_upload_path(workspace, raw_name)
+            if dest is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="invalid filename: must be a non-empty name without path separators",
+                )
 
         # Stream the upload, enforcing the size cap. We read one byte beyond
         # the cap so that over-size files are detected without buffering them
@@ -311,7 +346,12 @@ def create_workspace_router() -> APIRouter:
             raise HTTPException(status_code=422, detail="empty file not allowed")
 
         workspace.mkdir(parents=True, exist_ok=True)
-        dest = _deduplicate(dest)
+        if rel_path:
+            # Preserve structure; overwrite in place (a bridge re-upload should
+            # update the same file, not spawn "name (1)" copies).
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            dest = _deduplicate(dest)
 
         dest.write_bytes(b"".join(chunks))
 

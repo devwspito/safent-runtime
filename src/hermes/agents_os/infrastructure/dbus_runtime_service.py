@@ -7400,6 +7400,7 @@ def _skill_md_to_dto(skill_md_path: "Any") -> "dict | None":
         "toolkit_slug": None,
         "description": fm.get("description") or "",
         "source": source,
+        "teaching_origin": meta.get("teaching_origin") or None,
     }
 
 

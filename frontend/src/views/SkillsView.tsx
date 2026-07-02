@@ -748,7 +748,18 @@ function SkillRow({ skill, loadingDetails, onView, onPromote, onUninstall }: Ski
       </span>
 
       <div className={s.skillInfo}>
-        <div className={s.skillName}>{name}</div>
+        <div className={s.skillName}>
+          {name}
+          {skill.teaching_origin === 'teaching_live' && (
+            <span
+              className={`${s.stateBadge} ${s['stateBadge--accent']}`}
+              style={{ marginLeft: 'var(--space-2)' }}
+              title="Habilidad enseñada en vivo"
+            >
+              live
+            </span>
+          )}
+        </div>
         {sub && <div className={s.skillMeta}>{sub}</div>}
       </div>
 

@@ -107,6 +107,9 @@ class SkillPackageDTO(BaseModel):
     validated_at: str | None = None
     promoted_at: str | None = None
     signing_method: str = "v1"
+    # Origin of the skill; "teaching_live" for skills minted via the live teaching
+    # flow (surfaces as a "live" tag in the UI).
+    teaching_origin: str | None = None
 
 
 class CreateComposioSkillRequest(BaseModel):
@@ -210,6 +213,7 @@ def _dict_to_skill_dto(d: dict) -> SkillPackageDTO:
         validated_at=d.get("validated_at"),
         promoted_at=d.get("promoted_at"),
         signing_method=d.get("signing_method") or "none",
+        teaching_origin=d.get("teaching_origin"),
     )
 
 
