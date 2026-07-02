@@ -74,16 +74,20 @@ _FRAME_INTERVAL_S: float = 0.07
 # Evdev: BTN_LEFT=0x110(272), BTN_MIDDLE=0x112(274), BTN_RIGHT=0x111(273).
 _BTN_MAP: dict[int, int] = {0: BTN_LEFT, 1: BTN_MIDDLE, 2: BTN_RIGHT}
 
-# ADAPTIVE RESOLUTION. Measured truth (2026-07-02): the CDP screencast IGNORES
-# deviceScaleFactor over connect_over_cdp — the frame resolution EQUALS the page
-# VIEWPORT (DSF=2 vp1600x900 → frame 1600x900, blurry when upscaled). So we render
-# at DSF=1 and set the viewport to the CLIENT's physical canvas size (CSS px ×
-# devicePixelRatio), which it reports via {"type":"resize"}. set_viewport_size is
-# honoured live → the frame follows (verified 1280x720 → 2880x1620). Clicks use
-# NORMALIZED fractions mapped against the CURRENT viewport, so any size is exact.
+# ADAPTIVE RESOLUTION. GROUND-TRUTH MEASURED (2026-07-02, real jailed path): the CDP
+# screencast frame resolution EQUALS the page LAYOUT VIEWPORT and IGNORES the device-
+# scale-factor at EVERY level — per-context, per-session Emulation, AND the compositor
+# --force-device-scale-factor launch flag (flag confirmed in the running chromium's
+# cmdline → frame STILL 1×viewport). So the ONLY lever for a sharp frame is a LARGER
+# VIEWPORT: the client reports its PHYSICAL canvas size (CSS px × devicePixelRatio)
+# via {"type":"resize"}; we set_viewport_size(physical) → frame = physical → the
+# client paints it into its CSS×dpr backing store 1:1 = crisp on Retina (measured
+# 2400x1400/3200x1800/3840x2160 all MATCH). Trade-off: layout is a physical-px-sized
+# window (content a touch smaller) — the price of sharpness given the DSF is ignored.
+# Clicks use NORMALIZED fractions mapped against the CURRENT viewport → any size exact.
 _TEACH_VIEWPORT_W: int = 1600   # initial, until the client reports its real size
 _TEACH_VIEWPORT_H: int = 900
-_TEACH_MAX_W: int = 4096        # generous screencast cap; viewport (≤ this) drives it
+_TEACH_MAX_W: int = 4096        # generous screencast cap; physical viewport (≤ this) drives it
 _TEACH_MAX_H: int = 2160
 
 
@@ -222,13 +226,12 @@ async def _setup_browser_session():
     pw = await async_playwright().start()
     browser = await pw.chromium.connect_over_cdp(_cdp_url())
 
-    # Isolated context: no shared cookies/storage with the agent. NO
-    # device_scale_factor override here — the jailed Chromium is launched with
-    # --force-device-scale-factor=2 (compositor-level 2x; the ONLY thing the CDP
-    # screencast honours), so the page inherits dpr=2 and renders a CSS-sized
-    # viewport at 2x = crisp. The client reports its CSS canvas size via
-    # {"type":"resize"} and we set_viewport_size(CSS) → layout is normal (no zoom)
-    # AND the frame comes at CSS×2 (sharp). Screencast cap is generous.
+    # Isolated context: no shared cookies/storage with the agent. device_scale_factor
+    # is pointless here (the screencast ignores it — see the ADAPTIVE RESOLUTION note
+    # at module top); sharpness comes from the client sending its PHYSICAL canvas size
+    # via {"type":"resize"} → set_viewport_size(physical) → frame = physical = the
+    # client's CSS×dpr backing store → 1:1 crisp. This initial viewport is a
+    # placeholder until the first resize arrives. Screencast cap is generous.
     ctx = await browser.new_context(
         viewport={"width": _TEACH_VIEWPORT_W, "height": _TEACH_VIEWPORT_H},
     )

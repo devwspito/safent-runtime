@@ -33,13 +33,14 @@
   font-weight: var(--weight-semibold);
   color: var(--color-text);
   line-height: var(--leading-dense);
+  margin: 0 0 var(--space-1) 0;
 }
 
 .setupDesc {
   font-size: var(--text-sm);
   color: var(--color-text-muted);
   line-height: var(--leading-normal);
-  margin-top: calc(-1 * var(--space-2));
+  margin: 0;
 }
 
 /* ── URL bar row ────────────────────────────────────────────────────────── */

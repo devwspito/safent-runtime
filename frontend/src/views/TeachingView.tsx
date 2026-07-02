@@ -316,17 +316,21 @@ function useLiveCanvas(
     send({ type: 'key', action: 'up', keysym: null, text: ev.key })
   }, [send])
 
-  // Report the canvas' CSS size to the server as the remote browser VIEWPORT
-  // (layout size). The jailed Chromium is launched with --force-device-scale-factor=2,
-  // so it renders that CSS viewport at 2× device px → the screencast frame is sharp
-  // AND the page layout is normal (a CSS-sized window), no zoom/scroll. Sending the
-  // physical size (CSS×dpr) instead would lay the page out for a huge window (the
-  // v0.7.4 bug). The canvas backing store stays CSS×dpr so the 2× frame paints 1:1.
+  // Report the canvas' PHYSICAL size (CSS × devicePixelRatio) to the server as the
+  // remote browser VIEWPORT. GROUND-TRUTH MEASURED: the CDP screencast captures at
+  // the page's LAYOUT VIEWPORT resolution and IGNORES deviceScaleFactor at every
+  // level (per-context, Emulation, AND --force-device-scale-factor), so frame =
+  // viewport ALWAYS. To fill the canvas BACKING STORE (which is CSS×dpr) at 1:1 —
+  // i.e. sharp on Retina — the viewport must therefore equal that physical size, so
+  // the frame comes back at CSS×dpr = backing = crisp. Trade-off: the page lays out
+  // for a larger (physical-px) window, so content reads a touch smaller — but sharp,
+  // which is the requirement. (v0.7.4 also sent physical but was blurry only because
+  // the screencast was capped at 1280×720; the cap is now 4096×2160.)
   const sendViewport = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    const w = canvas.clientWidth
-    const h = canvas.clientHeight
+    const w = canvas.width   // backing store = CSS × dpr (physical px)
+    const h = canvas.height
     if (w < 1 || h < 1) return
     send({ type: 'resize', width: w, height: h })
   // eslint-disable-next-line react-hooks/exhaustive-deps

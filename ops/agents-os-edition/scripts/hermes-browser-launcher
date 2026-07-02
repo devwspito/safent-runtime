@@ -463,13 +463,14 @@ def _build_browser_argv(session_name: str) -> list[str]:
         # boundary; allow any CDP origin so the attach completes.
         "--remote-allow-origins=*",
         f"--proxy-server={_EGRESS_PROXY_URL}",
-        # Render at 2x device pixels at the COMPOSITOR level. Measured truth: the CDP
-        # screencast IGNORES per-context/per-session deviceScaleFactor (frame = layout
-        # viewport), so the ONLY lever that makes the screencast sharp is this launch
-        # flag (measured: viewport 1280 → frame 2560). Safe: the agent automates by DOM
-        # selectors (not frame pixels); teaching maps normalized fractions → CSS
-        # viewport; watch is read-only.
-        "--force-device-scale-factor=2",
+        # NOTE: do NOT add --force-device-scale-factor here to sharpen the teaching
+        # screencast. GROUND-TRUTH MEASURED (2026-07-02, real jailed path): Page.
+        # startScreencast over connect_over_cdp captures at the page LAYOUT VIEWPORT
+        # resolution and IGNORES deviceScaleFactor at EVERY level — per-context,
+        # per-session Emulation, AND the compositor --force-device-scale-factor flag
+        # (flag present in cmdline → frame STILL 1×viewport). The only lever for a
+        # sharp frame is a LARGER VIEWPORT: the teaching client reports its PHYSICAL
+        # canvas size (CSS×dpr) via {"type":"resize"} → frame = that → paints 1:1.
         "--disable-features=Translate,SidePanel,Autofill,PasswordManager",
         "--password-store=basic",
         "--use-mock-keychain",
