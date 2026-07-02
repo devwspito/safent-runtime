@@ -321,6 +321,16 @@ _CAPABILITY_PATHS: dict[Capability, tuple[tuple[str, frozenset[AccessRight]], ..
             "/dev/random",
             frozenset({AccessRight.READ_FILE}),
         ),
+        # X11 display socket: when the browser runs HEADFUL on the jail's Xvfb
+        # (HERMES_BROWSER_DISPLAY set → live-view via x11vnc, sharp+fluid), Chromium
+        # connects to the X server via the AF_UNIX socket /tmp/.X11-unix/X99. Grant
+        # READ on that dir so the landlocked browser can reach the display. The
+        # socket lives in the scope's PrivateTmp — invisible outside this unit — and
+        # Xvfb/x11vnc share the same namespace. Harmless when headless (unused).
+        (
+            "/tmp/.X11-unix",
+            frozenset({AccessRight.READ_FILE, AccessRight.READ_DIR}),
+        ),
         # /dev/shm: Chromium IPC shared memory. The launcher passes
         # --disable-dev-shm-usage so this is a fallback, but grant the writable
         # shm segment so a non-fallback build still renders.

@@ -74,8 +74,11 @@ _LOG_TAG = "hermes-browser-launcher"
 # the per-session user-data dir. (security review HIGH-1, 2026-06-15.)
 _CHROMIUM_BIN = "/usr/bin/chromium-browser"
 _CDP_PORT = 9333
-_CDP_BIND_ADDR = "10.200.0.2"          # netns veth IP; CDP reachable only from 10.200.0.1
-_EGRESS_PROXY_URL = "http://10.200.0.1:3128"  # forced egress through the audited proxy
+_CDP_BIND_ADDR = "10.200.0.2"          # netns veth
+_VNC_PORT = 5900                        # x11vnc (RFB) on the veth IP; daemon-only (nft 5900)
+# Xvfb screen = 1600×900 DIP workspace × 2 (force-device-scale-factor=2) → HiDPI-sharp
+# live view. x11vnc streams these real display pixels (region updates, fluid).
+_DISPLAY_RES = "3200x1800"
 
 # ── Landlock self-apply exec shim (security review HIGH: FS jail was a no-op) ──
 # THE BUG: hermes-browser-jail ran `python3 -m hermes.security.landlock_loader
@@ -426,24 +429,28 @@ def _build_browser_argv(session_name: str) -> list[str]:
         "-c",
         _LANDLOCK_SHIM_SRC,
         _CHROMIUM_BIN,
-        "--headless=new",
+        # HEADFUL on the jail's Xvfb display (DISPLAY=:99 exported by the jail
+        # script when HERMES_BROWSER_DISPLAY is set). Industry-standard live-view
+        # (Kasm/neko): x11vnc streams the REAL display pixels — sharp and fluid —
+        # instead of the CDP screencast (which ignores deviceScaleFactor → blurry)
+        # or captureScreenshot polling (sharp but ~10 fps). If Xvfb fails, the
+        # jail script leaves DISPLAY unset and Chromium falls back to headless.
         # Chromium's OWN multi-process sandbox needs user-namespace / privileged
         # syscalls that this confined service blocks (SystemCallFilter ~@privileged,
         # CapabilityBoundingSet= empty) → it aborts with SIGTRAP. The OS provides a
         # STRONGER boundary here (netns + egress proxy + Landlock FS + seccomp +
-        # non-root User=hermes), so we disable Chromium's internal sandbox. Mirrors
-        # the base's headless AGENT_BROWSER_ARGS (--no-sandbox,--disable-dev-shm-usage).
+        # non-root User=hermes), so we disable Chromium's internal sandbox.
         "--no-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
         # The GPU process is spawned via a namespaced zygote fork that the scope's
         # seccomp (~@privileged) blocks → "GPU process isn't usable. Goodbye"
         # (status 6/ABRT). Run GPU in the main process (no separate zygote fork)
-        # and disable the GPU sandbox + SwiftShader fallback. Standard headless-
-        # in-restricted-seccomp combo.
+        # and disable the GPU sandbox. NOTE: --disable-software-rasterizer is
+        # deliberately NOT set — headful painting to the X display NEEDS the
+        # software rasterizer once the GPU is disabled.
         "--in-process-gpu",
         "--disable-gpu-sandbox",
-        "--disable-software-rasterizer",
         # The zygote pre-forks renderer/utility processes via a namespaced clone
         # that the scope seccomp (~@privileged) blocks → "Zygote could not fork"
         # → pages never render → Page.enable hangs. --no-zygote makes Chromium
@@ -463,14 +470,13 @@ def _build_browser_argv(session_name: str) -> list[str]:
         # boundary; allow any CDP origin so the attach completes.
         "--remote-allow-origins=*",
         f"--proxy-server={_EGRESS_PROXY_URL}",
-        # NOTE: do NOT add --force-device-scale-factor here to sharpen the teaching
-        # screencast. GROUND-TRUTH MEASURED (2026-07-02, real jailed path): Page.
-        # startScreencast over connect_over_cdp captures at the page LAYOUT VIEWPORT
-        # resolution and IGNORES deviceScaleFactor at EVERY level — per-context,
-        # per-session Emulation, AND the compositor --force-device-scale-factor flag
-        # (flag present in cmdline → frame STILL 1×viewport). The only lever for a
-        # sharp frame is a LARGER VIEWPORT: the teaching client reports its PHYSICAL
-        # canvas size (CSS×dpr) via {"type":"resize"} → frame = that → paints 1:1.
+        # HiDPI on the real display: with a live X display the compositor honours
+        # the launch-time scale factor, so the browser UI+content render at 2× on
+        # the {_DISPLAY_RES} Xvfb screen (= a {_DISPLAY_RES} Retina panel showing a
+        # 1600×900 DIP workspace). x11vnc then transmits those pixels 1:1.
+        "--force-device-scale-factor=2",
+        "--window-position=0,0",
+        "--window-size=1600,900",
         "--disable-features=Translate,SidePanel,Autofill,PasswordManager",
         "--password-store=basic",
         "--use-mock-keychain",
@@ -576,9 +582,14 @@ def _launch(session_name: str, domains_whitelist: list[str]) -> None:
         f"--setenv=TMPDIR={rw_path}",
         f"--setenv=HERMES_BROWSER_SESSION={session_name}",
         f"--setenv=HERMES_JAIL_SESSION={session_name}",
-        # Chromium (--headless=new) binds CDP to 127.0.0.1 only; the jail starts a
-        # socat relay so the daemon reaches it on the veth IP (see hermes-browser-jail).
+        # Chromium binds CDP to 127.0.0.1 only; the jail starts a socat relay so the
+        # daemon reaches it on the veth IP (see hermes-browser-jail).
         f"--setenv=HERMES_CDP_RELAY={_CDP_BIND_ADDR}:{_CDP_PORT}",
+        # Headful on a real Xvfb display + x11vnc live-view (sharp+fluid). The jail
+        # script starts Xvfb :99 at this resolution and x11vnc bound to the veth IP,
+        # reachable only by the daemon (nft 5900) and proxied to the web UI.
+        f"--setenv=HERMES_BROWSER_DISPLAY={_DISPLAY_RES}",
+        f"--setenv=HERMES_VNC_RELAY={_CDP_BIND_ADDR}:{_VNC_PORT}",
         "--",
         _JAIL_SCRIPT,
         *browser_argv,

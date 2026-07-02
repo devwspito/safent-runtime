@@ -56,6 +56,11 @@ table inet hermes_browser_local {
         # CDP responses are covered by the output chain's ct established,related rule.
         ip saddr 10.200.0.1 tcp dport 9333 accept comment "daemon→CDP control (jailed browser)"
 
+        # Daemon → x11vnc (RFB) serving the jailed browser's Xvfb display on 5900.
+        # Same trust model as CDP: only the veth host-side peer can connect; the
+        # shell-server proxies it to the web UI behind the webui bearer token.
+        ip saddr 10.200.0.1 tcp dport 5900 accept comment "daemon→VNC live-view (jailed browser display)"
+
         log prefix "hbr NS IN DROP: " level warn drop
     }
 

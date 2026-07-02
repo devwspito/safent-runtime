@@ -128,6 +128,42 @@ if [[ -n "${HERMES_CDP_RELAY:-}" ]]; then
     fi
 fi
 
+# ── 2c. Display real (Xvfb) + VNC (opcional) ─────────────────────────────────
+# HERMES_BROWSER_DISPLAY="WxH" → el navegador corre HEADFUL sobre un display Xvfb
+# y x11vnc lo sirve en HERMES_VNC_RELAY (addr:port, la IP del veth — solo el
+# daemon 10.200.0.1 llega; regla nft 5900). Solución estándar de la industria
+# (Kasm/neko) para ver un navegador confinado NÍTIDO y FLUIDO: píxeles reales del
+# display, actualizaciones por regiones (no full-frame), input nativo del protocolo.
+# Xvfb y x11vnc quedan en el cgroup del servicio → mueren con el navegador.
+if [[ -n "${HERMES_BROWSER_DISPLAY:-}" ]]; then
+    display_res="${HERMES_BROWSER_DISPLAY}"
+    if command -v Xvfb >/dev/null 2>&1; then
+        log "display: Xvfb :99 ${display_res}x24"
+        Xvfb :99 -screen 0 "${display_res}x24" -nolisten tcp &
+        # Wait for the X socket (Xvfb is fast; bounded wait, fail-soft to headless).
+        for _i in $(seq 1 50); do
+            [[ -e /tmp/.X11-unix/X99 ]] && break
+            sleep 0.1
+        done
+        if [[ -e /tmp/.X11-unix/X99 ]]; then
+            export DISPLAY=:99
+            if [[ -n "${HERMES_VNC_RELAY:-}" ]] && command -v x11vnc >/dev/null 2>&1; then
+                vnc_addr="${HERMES_VNC_RELAY%%:*}"
+                vnc_port="${HERMES_VNC_RELAY##*:}"
+                log "vnc: x11vnc :99 → ${vnc_addr}:${vnc_port}"
+                x11vnc -display :99 -listen "${vnc_addr}" -rfbport "${vnc_port}" \
+                       -nopw -forever -shared -quiet >/dev/null 2>&1 &
+            else
+                log_warn "vnc: HERMES_VNC_RELAY vacío o x11vnc ausente — display sin VNC"
+            fi
+        else
+            log_warn "display: Xvfb no levantó /tmp/.X11-unix/X99 — el navegador seguirá headless"
+        fi
+    else
+        log_warn "display: Xvfb no disponible — el navegador seguirá headless"
+    fi
+fi
+
 # ── Stale single-instance lock cleanup (self-heal) ───────────────────────────
 # A crashed Chromium — or a profile dir reused across container recreations —
 # leaves SingletonLock/Socket/Cookie pointing at a dead PID/host. Chromium then

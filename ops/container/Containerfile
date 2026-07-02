@@ -207,7 +207,11 @@ RUN chmod 0755 /usr/libexec/hermes/openshell && \
 
 # socat: the browser-jail CDP relay (daemon ⇄ jailed Chromium) needs it. Without it
 # the daemon can't reach the browser's CDP port. (Late layer = cheap rebuild.)
-RUN apt-get update && apt-get install -y --no-install-recommends socat \
+# x11vnc: the jailed browser runs HEADFUL on an Xvfb display (industry-standard
+# Kasm/neko live-view — sharp + fluid, unlike the CDP screencast). x11vnc streams
+# that real display; the shell-server proxies it to the web UI. (Xvfb ships with
+# the Playwright base image.)
+RUN apt-get update && apt-get install -y --no-install-recommends socat x11vnc \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Trivy CVE scanner (Security Center CVE slot probes /usr/bin/trivy exactly).
