@@ -307,7 +307,7 @@ const UserMessage = memo(function UserMessage({ text, failed, enterDelay = 0 }: 
 // its own body" — it can take the user to any section with a one-click button.
 const APP_VIEW_ROUTES: ReadonlySet<string> = new Set([
   '/chat', '/programadas', '/agentes', '/skills', '/integraciones', '/mcp',
-  '/archivos', '/proveedores', '/seguridad', '/memoria', '/coste', '/ensenar',
+  '/archivos', '/proveedores', '/seguridad', '/memoria', '/coste', '/en-vivo', '/ensenar',
 ])
 
 interface AssistantMessageProps {

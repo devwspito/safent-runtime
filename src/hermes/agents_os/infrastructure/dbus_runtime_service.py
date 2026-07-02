@@ -406,6 +406,39 @@ class DbusRuntimeServiceWiring:
             extra={"by_uid": sender_uid, "reason": reason},
         )
 
+    async def cancel_task(
+        self,
+        *,
+        task_id: str,
+        sender_uid: int,
+        operator_token: str | None = None,
+    ) -> dict:
+        """Solicita cancelar UNA tarea en ejecución por su task_id (cooperativa).
+
+        Marca el task_id en el registry de cancelación (proceso-local); el
+        stream-callback del ciclo lo consulta por-token y desenrolla run_conversation
+        → el orchestrator marca la tarea CANCELLED (terminal, sin retry) y cierra el
+        stream. authZ: operador (sender_uid del bus, CWE-862).
+        """
+        self._authorize_and_resolve(
+            sender_uid, operation="cancel_task", operator_token=operator_token
+        )
+        from uuid import UUID as _UUID  # noqa: PLC0415
+        from hermes.tasks.domain.task_cancel_registry import (  # noqa: PLC0415
+            get_cancel_registry,
+        )
+
+        try:
+            tid = _UUID(str(task_id))
+        except (ValueError, TypeError):
+            return {"ok": False, "error": f"task_id inválido: {task_id!r}"}
+        get_cancel_registry().request_cancel(tid, reason="Detenida por el operador")
+        logger.info(
+            "hermes.dbus.task_cancel_requested",
+            extra={"task_id": str(tid), "by_uid": sender_uid},
+        )
+        return {"ok": True, "requested": True}
+
     async def request_resume(
         self,
         *,

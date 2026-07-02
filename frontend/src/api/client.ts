@@ -478,6 +478,14 @@ export function listRecentTasks(limit = 20): Promise<RecentTasksResponse> {
   )
 }
 
+/**
+ * Stop a running task (cooperative cancel). Terminal, no retry.
+ * POST /tasks/{task_id}/cancel
+ */
+export function cancelTask(taskId: string): Promise<{ ok: boolean; requested?: boolean }> {
+  return request(`/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST', body: '{}' })
+}
+
 export function createTask(payload: CreateTaskPayload): Promise<ConfiguredTask> {
   return request<ConfiguredTask>('/tasks/scheduled', { method: 'POST', body: JSON.stringify(payload) })
 }

@@ -378,6 +378,33 @@ class SqliteWorkQueue:
                 "o claim_token incorrecto"
             )
 
+    async def mark_cancelled(
+        self, item_id: UUID, *, claim_token: UUID, reason: str
+    ) -> None:
+        """CANCELLED terminal (operador detuvo la tarea, sin retry)."""
+        now_iso = _iso(datetime.now(tz=UTC))
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE agent_tasks
+                SET status           = 'cancelled',
+                    claim_token      = NULL,
+                    claimed_at       = NULL,
+                    lease_expires_at = NULL,
+                    last_error       = ?,
+                    updated_at       = ?
+                WHERE task_id = ?
+                  AND status = 'in_progress'
+                  AND claim_token = ?
+                """,
+                (reason, now_iso, str(item_id), str(claim_token)),
+            )
+        if cursor.rowcount == 0:
+            raise ClaimTokenMismatch(
+                f"mark_cancelled: item {item_id} no encontrado "
+                "o claim_token incorrecto"
+            )
+
     async def reconcile_stale(self) -> int:
         """Re-encola IN_PROGRESS con lease vencido (FR-007/SC-003)."""
         now_iso = _iso(datetime.now(tz=UTC))
@@ -405,7 +432,7 @@ class SqliteWorkQueue:
                 """
                 SELECT task_id FROM agent_tasks
                 WHERE dedup_key = ?
-                  AND status NOT IN ('completed','failed','rejected')
+                  AND status NOT IN ('completed','failed','rejected','cancelled')
                 LIMIT 1
                 """,
                 (dedup_key,),

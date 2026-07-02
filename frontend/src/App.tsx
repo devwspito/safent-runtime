@@ -14,8 +14,9 @@ import ArchivosView from './views/ArchivosView'
 import { useActiveProvider } from './hooks/useActiveProvider'
 import { useFeatures } from './hooks/useFeatures'
 
-// Code-split TeachingView: the live canvas + WS logic isn't needed on other routes.
-const TeachingView = lazy(() => import('./views/TeachingView'))
+// "En vivo" section (tabs: Actividad + Enseñar). Code-split: the live canvas + WS
+// logic isn't needed on other routes.
+const EnVivoView = lazy(() => import('./views/EnVivoView'))
 
 // Code-split OfficeView at the route boundary; it imports the canvas engine
 // which is non-trivial (~10 kB gzipped) and not needed on other routes.
@@ -138,13 +139,17 @@ export default function App() {
               </Suspense>
             </ViewGuard>
           } />
-          <Route path="ensenar" element={
+          {/* "En vivo" = unified section (Actividad + Enseñar). Replaces the old
+              standalone "Enseñar" nav item. */}
+          <Route path="en-vivo" element={
             <ViewGuard viewId="ensenar">
               <Suspense fallback={<TeachingFallback />}>
-                <TeachingView />
+                <EnVivoView />
               </Suspense>
             </ViewGuard>
           } />
+          {/* Back-compat: /ensenar (deep-links, agent app-map) → /en-vivo. */}
+          <Route path="ensenar" element={<Navigate to="/en-vivo" replace />} />
           {/* Unknown paths (incl. the removed /tablero, stale bookmarks) → chat. */}
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Route>

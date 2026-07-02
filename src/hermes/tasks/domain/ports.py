@@ -53,6 +53,9 @@ class TaskStatus(StrEnum):
     FAILED = "failed"
     PENDING_APPROVAL = "pending_approval"
     REJECTED = "rejected"
+    # IN_PROGRESS -> CANCELLED: operator stopped the task (terminal, NO retry —
+    # unlike FAILED which may re-enqueue with backoff).
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +189,12 @@ class WorkQueuePort(Protocol):
         self, item_id: UUID, *, claim_token: UUID, reason: str
     ) -> None:
         """Transición terminal REJECTED (consent/política, fail-closed)."""
+        ...
+
+    async def mark_cancelled(
+        self, item_id: UUID, *, claim_token: UUID, reason: str
+    ) -> None:
+        """Transición terminal CANCELLED (operador detuvo la tarea, sin retry)."""
         ...
 
     async def reconcile_stale(self) -> int:

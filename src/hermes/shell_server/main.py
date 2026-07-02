@@ -1060,6 +1060,31 @@ def create_app() -> FastAPI:
             )
             return {"available": False, "tasks": []}
 
+    @app.post("/api/v1/tasks/{task_id}/cancel")
+    async def cancel_task(task_id: str) -> dict[str, Any]:
+        """Detiene UNA tarea en ejecución (operador). Cooperativa: marca el task_id
+        y el ciclo se desenrolla en el siguiente token → CANCELLED terminal.
+
+        503 si el daemon no está disponible.
+        """
+        try:
+            result = await app.state.dbus_proxy.call_dict("cancel_task", task_id)
+        except AgentUnavailable as exc:
+            logger.warning(
+                "hermes.shell_server.tasks.cancel.unavailable",
+                extra={"task_id": task_id, "reason": str(exc)},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "agent_unavailable", "message": "El agente no está disponible."},
+            ) from exc
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "cancel_failed", "message": result.get("error", "unknown")},
+            )
+        return result
+
     # ------------------------------------------------------------------
     # Chat: mirror read-only del historial + POST encola vía control-plane
     # T048: POST /api/v1/chat → ControlPlanePort.enqueue (sin fallback).

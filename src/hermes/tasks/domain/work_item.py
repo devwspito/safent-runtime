@@ -147,6 +147,31 @@ def mark_rejected(
     )
 
 
+def mark_cancelled(
+    item: WorkItem,
+    *,
+    claim_token: UUID,
+    reason: str,
+) -> WorkItem:
+    """IN_PROGRESS -> CANCELLED (operador detuvo la tarea, terminal, SIN retry).
+
+    A diferencia de mark_failed (que puede reencolar con backoff), una cancelación
+    del operador es definitiva: no se reintenta.
+
+    Raises:
+        IllegalTransition: si estado no es IN_PROGRESS o claim_token no coincide.
+    """
+    _assert_in_progress_with_token(item, claim_token, "mark_cancelled")
+    return _replace(
+        item,
+        status=TaskStatus.CANCELLED,
+        claim_token=None,
+        claimed_at=None,
+        lease_expires_at=None,
+        payload={**item.payload, "_cancel_reason": reason},
+    )
+
+
 def to_pending_after_approval(item: WorkItem) -> WorkItem:
     """PENDING_APPROVAL -> PENDING (tras aprobación humana, re-dispatch inmediato).
 

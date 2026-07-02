@@ -30,6 +30,10 @@ from hermes.capabilities.domain.ports import (
 from hermes.tasks.application.decision_context_builder import build_decision_context
 from hermes.tasks.application.worker_wake_signal import MonoWorkerWakeSignal
 from hermes.tasks.domain.ports import AgentStatePort, WorkItem, WorkItemKind, WorkQueuePort
+from hermes.tasks.domain.task_cancel_registry import (
+    OperationCancelled,
+    get_cancel_registry,
+)
 
 logger = logging.getLogger("hermes.tasks.loop")
 
@@ -301,9 +305,26 @@ class AgentLoopOrchestrator:
         # El taint por lectura externa se aplica POST-ciclo (ver abajo).
         pre_cycle_consent = _taint_consent_if_chat(base_consent, is_chat)
 
+        # Cancel requested while queued / just before dispatch: don't start the
+        # cycle at all — mark terminal and close the stream cleanly.
+        if get_cancel_registry().is_cancelled(item.id):
+            await self._handle_cancelled(
+                item, get_cancel_registry().reason(item.id), effective_sink, is_chat
+            )
+            return
+
         _cycle_start = time.monotonic()
         try:
             output = await self._engine.run_cycle(ctx)
+        except OperationCancelled as exc:
+            # Operator stopped the task mid-cycle (stream callback raised). Terminal,
+            # NO retry (unlike a normal failure).
+            reason = str(exc).strip() or "Detenida por el operador"
+            logger.info(
+                "hermes.tasks.loop.cancelled task=%s reason=%s", str(item.id), reason
+            )
+            await self._handle_cancelled(item, reason, effective_sink, is_chat)
+            return
         except Exception as exc:
             _latency_ms = int((time.monotonic() - _cycle_start) * 1000)
             # exc_info + traceback explícito en el MENSAJE: el handler stderr→journald
@@ -654,6 +675,42 @@ class AgentLoopOrchestrator:
         )
         await self._emit_failed(item, reason)
         self._emit_notification_failed(item, reason)
+
+    async def _handle_cancelled(
+        self, item: WorkItem, reason: str, effective_sink: Any, is_chat: bool
+    ) -> None:
+        """Operator stopped this task: close the stream, persist a note, mark the
+        task CANCELLED (terminal, no retry), and clear the cancel flag."""
+        if is_chat and effective_sink is not None:
+            try:
+                await effective_sink.close(
+                    task_id=item.id, outcome="cancelled", error=reason
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("hermes.tasks.loop.cancel.stream_close_failed: %s", exc)
+        if is_chat and self._conversation_repo is not None:
+            conv_id_str = item.payload.get("conversation_id") or ""
+            if conv_id_str:
+                try:
+                    from uuid import UUID as _UUID  # noqa: PLC0415
+                    self._conversation_repo.append_message(
+                        conversation_id=_UUID(conv_id_str),
+                        role="assistant",
+                        content=f"⏹ Tarea detenida por el operador. {reason}".strip(),
+                        task_id=item.id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("hermes.tasks.loop.cancel.persist_failed: %s", exc)
+        try:
+            await self._queue.mark_cancelled(
+                item.id,
+                claim_token=item.claim_token,  # type: ignore[arg-type]
+                reason=reason,
+            )
+        except Exception as exc:  # noqa: BLE001 — task may have already terminated
+            logger.warning("hermes.tasks.loop.cancel.mark_failed: %s", exc)
+        finally:
+            get_cancel_registry().clear(item.id)
 
     async def _do_mark_completed(
         self, item: WorkItem, audit_entry_id: Any, head_hash: str | None = None

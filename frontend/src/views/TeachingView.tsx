@@ -341,7 +341,9 @@ function useLiveCanvas(
 
 // ── TeachingView ──────────────────────────────────────────────────────────────
 
-export default function TeachingView() {
+export default function TeachingView(
+  { embedded = false, onVerifyStarted }: { embedded?: boolean; onVerifyStarted?: () => void } = {},
+) {
   const [vs, dispatch] = useReducer(reducer, { phase: 'setup' })
 
   const [skillName, setSkillName] = useState('')
@@ -538,10 +540,13 @@ export default function TeachingView() {
       })
       closeWs()
       setHasFrame(false)
-      setVerifying(name)
       dispatch({ type: 'SIGN_OK' })
       setSkillName('')
       setStartUrl('https://')
+      // Embedded under "En vivo": switch to the Actividad tab (its live watch shows
+      // the agent executing). Standalone: show the inline live view.
+      if (onVerifyStarted) onVerifyStarted()
+      else setVerifying(name)
     } catch (e) {
       toastErr(e instanceof ApiError ? e.message : 'No se pudo lanzar la verificación')
     } finally {
@@ -587,10 +592,12 @@ export default function TeachingView() {
 
   return (
     <>
-      <PageHeader
-        title="Modo Enseñanza"
-        subtitle="Demuestra una tarea en el navegador aislado. Lumen observa e interpreta los pasos para crear una habilidad reutilizable."
-      />
+      {!embedded && (
+        <PageHeader
+          title="Modo Enseñanza"
+          subtitle="Demuestra una tarea en el navegador aislado. Lumen observa e interpreta los pasos para crear una habilidad reutilizable."
+        />
+      )}
 
       <div className={s.viewBody}>
 

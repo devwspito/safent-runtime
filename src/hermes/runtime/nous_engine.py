@@ -94,6 +94,10 @@ from hermes.domain.proposal import ToolCallProposal
 from hermes.domain.tool_spec import ToolRisk, ToolSpec
 from hermes.prompts.builder import DefaultPromptBuilder, PromptBuilder, _sanitize_untrusted
 from hermes.prompts.persona import PersonaSpec
+from hermes.tasks.domain.task_cancel_registry import (
+    OperationCancelled,
+    get_cancel_registry,
+)
 from hermes.runtime.conversation_task_registry import (
     bump_write_tool_failure,
     resolve_conversation,
@@ -703,7 +707,17 @@ def _build_stream_callback(
                 conversation_id, seq,
             )
 
+    _cancel_registry = get_cancel_registry()
+
     def _callback(*args: Any, **kwargs: Any) -> None:
+        # Cooperative cancellation: the operator's CancelTask marks this task_id;
+        # raising here unwinds run_conversation (this is the executor thread) so the
+        # orchestrator marks the task CANCELLED. Checked per token → cancellation
+        # takes effect within one streamed token of the request (a gap during a long
+        # tool call resolves at the next token the model streams).
+        if _cancel_registry.is_cancelled(task_id):
+            raise OperationCancelled(_cancel_registry.reason(task_id))
+
         # Support both positional and keyword forms Nous may use.
         delta: str = ""
         kind: str = "delta"
@@ -2073,7 +2087,8 @@ class NousReasoningEngine:
             "- Memoria (/memoria): lo que recuerdas entre conversaciones; el usuario "
             "puede ver, EDITAR y borrar cada entrada ahí.\n"
             "- Coste (/coste): consumo y coste.\n"
-            "- Enseñar (/ensenar): grabar una demostración en vivo para crear una skill.\n"
+            "- En vivo (/en-vivo): ver a tus agentes trabajar en directo, DETENER una "
+            "tarea si algo va mal, y enseñar nuevas habilidades (pestaña Enseñar).\n"
             "Para LLEVAR al usuario a una sección, incluye un enlace markdown a su ruta, "
             "p.ej. [Abrir Archivos](/archivos) o [Ver tu memoria](/memoria): la app lo "
             "convierte en un botón que navega ahí de un clic. Hazlo siempre que orientes. "

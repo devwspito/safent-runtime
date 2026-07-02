@@ -238,6 +238,16 @@ class Runtime1ServiceInterface(ServiceInterface):
         return True
 
     @method()
+    async def CancelTask(self, task_id: "s") -> "s":  # noqa: N802,F821,UP037
+        """Cancela UNA tarea en ejecución por task_id (cooperativa, terminal sin retry).
+
+        Devuelve JSON {ok, requested} / {ok:false, error}. by = UID del bus.
+        """
+        sender_uid = await self._resolve_current_sender_uid()
+        result = await self._wiring.cancel_task(task_id=task_id, sender_uid=sender_uid)
+        return json.dumps(result)
+
+    @method()
     async def Approve(self, proposal_id: "s", totp: "s") -> "s":  # noqa: N802,F821,UP037
         """HITL approve. approved_by = UID del bus. NO dispara run_cycle.
 

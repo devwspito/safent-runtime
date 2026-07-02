@@ -166,7 +166,7 @@ function useNavItems(): NavItem[] {
     { to: '/seguridad',     label: t('nav.seguridad'),     icon: <SecurityIcon /> },
     { to: '/memoria',       label: t('nav.memoria'),       icon: <MemoriaIcon /> },
     { to: '/coste',         label: 'Coste',                icon: <CosteIcon /> },
-    { to: '/ensenar',       label: 'Enseñar',              icon: <TeachingIcon /> },
+    { to: '/en-vivo',       label: 'En vivo',              icon: <TeachingIcon /> },
   ]
 }
 
