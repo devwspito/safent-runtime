@@ -217,7 +217,10 @@ RUN chmod 0755 /usr/libexec/hermes/openshell && \
 # Kasm/neko live-view — sharp + fluid, unlike the CDP screencast). x11vnc streams
 # that real display; the shell-server proxies it to the web UI. (Xvfb ships with
 # the Playwright base image.)
-RUN apt-get update && apt-get install -y --no-install-recommends socat x11vnc \
+# autocutsel: owns the X CLIPBOARD/PRIMARY selections and syncs them with CUTBUFFER0.
+# Required for noVNC copy/paste — x11vnc's own selection owner does NOT answer the
+# TARGETS request Chromium sends before pasting (paste hangs). autocutsel does.
+RUN apt-get update && apt-get install -y --no-install-recommends socat x11vnc autocutsel \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Trivy CVE scanner (Security Center CVE slot probes /usr/bin/trivy exactly).

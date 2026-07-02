@@ -147,12 +147,33 @@ if [[ -n "${HERMES_BROWSER_DISPLAY:-}" ]]; then
         done
         if [[ -e /tmp/.X11-unix/X99 ]]; then
             export DISPLAY=:99
+            # Clipboard bridge: autocutsel OWNS the X CLIPBOARD/PRIMARY selections and
+            # keeps them in sync with CUTBUFFER0. This is required because x11vnc's own
+            # selection-owner implementation does NOT answer the TARGETS request that
+            # Chromium always sends before pasting (verified: Chromium paste hangs). With
+            # autocutsel owning the selections (it answers TARGETS) and x11vnc restricted
+            # to CUTBUFFER0 only (-noprimary -noclipboard -nosetprimary -nosetclipboard),
+            # the round-trip is: RFB CutText → CUTBUFFER0 → autocutsel → CLIPBOARD (Chromium
+            # pastes) and Chromium copy → CLIPBOARD → autocutsel → CUTBUFFER0 → ServerCutText.
+            if command -v autocutsel >/dev/null 2>&1; then
+                autocutsel -selection CLIPBOARD -fork 2>/dev/null || true
+                autocutsel -selection PRIMARY -fork 2>/dev/null || true
+                log "clipboard: autocutsel bridging CLIPBOARD/PRIMARY ↔ CUTBUFFER0"
+            else
+                log_warn "clipboard: autocutsel ausente — copiar/pegar noVNC degradado"
+            fi
             if [[ -n "${HERMES_VNC_RELAY:-}" ]] && command -v x11vnc >/dev/null 2>&1; then
                 vnc_addr="${HERMES_VNC_RELAY%%:*}"
                 vnc_port="${HERMES_VNC_RELAY##*:}"
                 log "vnc: x11vnc :99 → ${vnc_addr}:${vnc_port}"
+                # -nosetprimary -nosetclipboard → x11vnc does NOT own/set the X selections on
+                # an incoming RFB CutText (that ownership, without a TARGETS answer, is what
+                # made Chromium paste hang). autocutsel owns them instead (and answers TARGETS)
+                # via CUTBUFFER0, which x11vnc DOES set. Selection *polling* stays ON so the
+                # browser→client (copy-out) direction can still emit ServerCutText.
                 x11vnc -display :99 -listen "${vnc_addr}" -rfbport "${vnc_port}" \
-                       -nopw -forever -shared -quiet >/dev/null 2>&1 &
+                       -nopw -forever -shared -quiet \
+                       -nosetprimary -nosetclipboard >/dev/null 2>&1 &
             else
                 log_warn "vnc: HERMES_VNC_RELAY vacío o x11vnc ausente — display sin VNC"
             fi

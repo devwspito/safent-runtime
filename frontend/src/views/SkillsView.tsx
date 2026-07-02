@@ -5,9 +5,6 @@ import { useT } from '../lib/i18n'
 import {
   listSkills, searchSkillsHub, listHubSkills, installSkill, getHubOpStatus,
   uninstallHubSkill, promoteSkill,
-  createTrainingSession, startTrainingRecording, stopTrainingRecording,
-  synthesizeSkill, abandonTrainingSession,
-  pauseTrainingRecording, resumeTrainingRecording, cancelTrainingRecording,
   getSkillDetails, scanInstall, recordSecurityDecision,
   ApiError,
 } from '../api/client'
@@ -17,6 +14,7 @@ import InstallScanModal from '../components/InstallScanModal'
 import SkillDetailsModal from '../components/SkillDetailsModal'
 import type { MfaFactors } from '../components/MfaModal'
 import { PageHeader } from '../components/ui/PageHeader'
+import { TeachPanel } from '../components/TeachPanel'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
 import {
@@ -29,7 +27,6 @@ import {
   motion,
   useReducedMotion,
   SPRING,
-  TWEEN_FAST,
 } from '../components/ui/motion'
 import s from './SkillsView.module.css'
 
@@ -104,7 +101,6 @@ function installedReducer(_s: InstalledState, a: InstalledAction): InstalledStat
   }
 }
 
-type TeachPhase = 'idle' | 'form' | 'recording' | 'paused' | 'synth'
 
 function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok') {
   if (kind === 'ok') sileo.success({ title: message })
@@ -126,11 +122,6 @@ export default function SkillsView() {
   const [hubQuery, setHubQuery] = useState('')
   const [hubSearching, setHubSearching] = useState(false)
   const hubInputRef = useRef<HTMLInputElement>(null)
-  const [teachPhase, setTeachPhase] = useState<TeachPhase>('idle')
-  const teachSessionRef = useRef<string | null>(null)
-  const teachNameRef = useRef<HTMLInputElement>(null)
-  const teachDescRef = useRef<HTMLTextAreaElement>(null)
-  const teachNameValueRef = useRef('')
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
   const [pendingSkillInstall, setPendingSkillInstall] = useState<PendingSkillInstall | null>(null)
   const [skillDetails, setSkillDetails] = useState<SkillDetails | null>(null)
@@ -304,83 +295,6 @@ export default function SkillsView() {
     }
   }
 
-  async function handleTeachStart() {
-    const name = teachNameRef.current?.value.trim() ?? ''
-    const description = teachDescRef.current?.value.trim() ?? ''
-    if (!name) { show('Ponle un nombre a la habilidad', 'warn'); return }
-    teachNameValueRef.current = name
-    try {
-      const sess = await createTrainingSession({ skill_name: name, description, surface_kind: 'browser' })
-      teachSessionRef.current = sess.session_id
-      await startTrainingRecording(sess.session_id)
-      setTeachPhase('recording')
-    } catch (e) {
-      show(`No se pudo crear la habilidad: ${e instanceof Error ? e.message : 'error'}`, 'error')
-      if (teachSessionRef.current) {
-        abandonTrainingSession(teachSessionRef.current)
-        teachSessionRef.current = null
-      }
-    }
-  }
-
-  async function handleTeachPause() {
-    const sid = teachSessionRef.current
-    if (!sid) return
-    try {
-      await pauseTrainingRecording(sid)
-      setTeachPhase('paused')
-    } catch (e) {
-      show(`No se pudo pausar: ${e instanceof Error ? e.message : 'error'}`, 'error')
-    }
-  }
-
-  async function handleTeachResume() {
-    const sid = teachSessionRef.current
-    if (!sid) return
-    try {
-      await resumeTrainingRecording(sid)
-      setTeachPhase('recording')
-    } catch (e) {
-      show(`No se pudo reanudar: ${e instanceof Error ? e.message : 'error'}`, 'error')
-    }
-  }
-
-  async function handleTeachStop() {
-    const sid = teachSessionRef.current
-    if (!sid) { setTeachPhase('idle'); return }
-    const name = teachNameValueRef.current
-    setTeachPhase('synth')
-    try {
-      await stopTrainingRecording(sid)
-      await synthesizeSkill(sid)
-      show(`Habilidad "${name}" creada`, 'ok')
-      setTeachPhase('idle')
-      loadInstalled()
-    } catch (e) {
-      const status = e instanceof ApiError ? e.status : 0
-      const msg = status === 409
-        ? 'Conecta un modelo en Proveedores para crear habilidades.'
-        : `No se pudo crear la habilidad: ${e instanceof Error ? e.message : 'error'}`
-      show(msg, status === 409 ? 'warn' : 'error')
-      setTeachPhase('idle')
-    } finally {
-      teachSessionRef.current = null
-    }
-  }
-
-  async function handleTeachCancel() {
-    const sid = teachSessionRef.current
-    if (sid) {
-      try {
-        await cancelTrainingRecording(sid)
-      } catch {
-        abandonTrainingSession(sid)
-      }
-      teachSessionRef.current = null
-    }
-    setTeachPhase('idle')
-  }
-
   async function handleViewSkillDetails(skill: Skill) {
     const pkgId = skill.package_id ?? skill.skill_id ?? ''
     if (!pkgId) return
@@ -396,6 +310,45 @@ export default function SkillsView() {
   }
 
   const installedCount = state.status === 'success' ? state.skills.length : null
+
+  const renderSkill = (sk: Skill) => (
+    <AnimatedListItem key={sk.package_id ?? sk.skill_id}>
+      <SkillRow
+        skill={sk}
+        loadingDetails={loadingDetailsId === (sk.package_id ?? sk.skill_id ?? '')}
+        onView={() => handleViewSkillDetails(sk)}
+        onPromote={async () => {
+          const pkgId = sk.package_id ?? sk.skill_id ?? ''
+          try {
+            await promoteSkill(pkgId)
+            show('El agente puede usar esta habilidad de forma autónoma', 'ok')
+            loadInstalled()
+          } catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
+        }}
+        onUninstall={async () => {
+          const name = sk.skill_name ?? sk.name ?? sk.package_id ?? ''
+          const ok = await confirm({
+            title: `¿Desinstalar "${name}"?`,
+            description: 'El agente dejará de tener esta habilidad.',
+            confirmLabel: 'Desinstalar',
+            variant: 'danger',
+          })
+          if (!ok) return
+          try {
+            const op = await uninstallHubSkill(name)
+            if (op?.op_id) {
+              trackPoll(pollHubOp(op.op_id, {
+                onDone: () => { show(`"${name}" desinstalada`, 'ok'); loadInstalled() },
+                onError: r => { show(`No se pudo desinstalar: ${r}`, 'error'); loadInstalled() },
+              }))
+            } else {
+              show(`"${name}" desinstalada`, 'ok'); loadInstalled()
+            }
+          } catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
+        }}
+      />
+    </AnimatedListItem>
+  )
 
   return (
     <>
@@ -496,50 +449,34 @@ export default function SkillsView() {
                       />
                     </FadeIn>
                   )
-                  : (
-                    <ul className={s.list} role="list">
-                      <AnimatePresence initial={false}>
-                        {state.skills.map(sk => (
-                          <AnimatedListItem key={sk.package_id ?? sk.skill_id}>
-                            <SkillRow
-                              skill={sk}
-                              loadingDetails={loadingDetailsId === (sk.package_id ?? sk.skill_id ?? '')}
-                              onView={() => handleViewSkillDetails(sk)}
-                              onPromote={async () => {
-                                const pkgId = sk.package_id ?? sk.skill_id ?? ''
-                                try {
-                                  await promoteSkill(pkgId)
-                                  show('El agente puede usar esta habilidad de forma autónoma', 'ok')
-                                  loadInstalled()
-                                } catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
-                              }}
-                              onUninstall={async () => {
-                                const name = sk.skill_name ?? sk.name ?? sk.package_id ?? ''
-                                const ok = await confirm({
-                                  title: `¿Desinstalar "${name}"?`,
-                                  description: 'El agente dejará de tener esta habilidad.',
-                                  confirmLabel: 'Desinstalar',
-                                  variant: 'danger',
-                                })
-                                if (!ok) return
-                                try {
-                                  const op = await uninstallHubSkill(name)
-                                  if (op?.op_id) {
-                                    trackPoll(pollHubOp(op.op_id, {
-                                      onDone: () => { show(`"${name}" desinstalada`, 'ok'); loadInstalled() },
-                                      onError: r => { show(`No se pudo desinstalar: ${r}`, 'error'); loadInstalled() },
-                                    }))
-                                  } else {
-                                    show(`"${name}" desinstalada`, 'ok'); loadInstalled()
-                                  }
-                                } catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
-                              }}
-                            />
-                          </AnimatedListItem>
-                        ))}
-                      </AnimatePresence>
-                    </ul>
-                  )
+                  : (() => {
+                    // Split installed skills: the ones demonstrated live (teaching_origin
+                    // === 'teaching_live') get their own section above the rest.
+                    const live = state.skills.filter(sk => sk.teaching_origin === 'teaching_live')
+                    const rest = state.skills.filter(sk => sk.teaching_origin !== 'teaching_live')
+                    return (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+                        {live.length > 0 && (
+                          <div>
+                            <p className={s.subsectionLabel}>Enseñadas en vivo</p>
+                            <ul className={s.list} role="list">
+                              <AnimatePresence initial={false}>
+                                {live.map(renderSkill)}
+                              </AnimatePresence>
+                            </ul>
+                          </div>
+                        )}
+                        <div>
+                          {live.length > 0 && <p className={s.subsectionLabel}>Habilidades</p>}
+                          <ul className={s.list} role="list">
+                            <AnimatePresence initial={false}>
+                              {rest.map(renderSkill)}
+                            </AnimatePresence>
+                          </ul>
+                        </div>
+                      </div>
+                    )
+                  })()
               )}
             </section>
           </StaggerItem>
@@ -650,24 +587,13 @@ export default function SkillsView() {
             </section>
           </StaggerItem>
 
-          {/* ── Teach a skill ────────────────────────────────────────────── */}
+          {/* ── Teach a skill (in the real noVNC browser) ────────────────── */}
           <StaggerItem>
             <section className={s.section} aria-label="Enseñar una habilidad">
               <TeachSkillExpander
-                teachPhase={teachPhase}
                 open={teachOpen}
-                onToggle={() => {
-                  if (!teachOpen) setTeachOpen(true)
-                  else if (teachPhase === 'idle') setTeachOpen(false)
-                }}
-                teachNameRef={teachNameRef}
-                teachDescRef={teachDescRef}
-                onStart={handleTeachStart}
-                onPause={handleTeachPause}
-                onResume={handleTeachResume}
-                onStop={handleTeachStop}
-                onCancel={handleTeachCancel}
-                onSetPhase={setTeachPhase}
+                onToggle={() => setTeachOpen((v) => !v)}
+                onSaved={loadInstalled}
               />
             </section>
           </StaggerItem>
@@ -883,27 +809,13 @@ function HubResultRow({ item, installedNames, onInstall }: HubResultRowProps) {
 // ── Teach skill expander ──────────────────────────────────────────────────────
 
 interface TeachSkillExpanderProps {
-  teachPhase: TeachPhase
   open: boolean
   onToggle: () => void
-  teachNameRef: React.RefObject<HTMLInputElement> | React.RefObject<HTMLInputElement | null>
-  teachDescRef: React.RefObject<HTMLTextAreaElement> | React.RefObject<HTMLTextAreaElement | null>
-  onStart: () => void
-  onPause: () => void
-  onResume: () => void
-  onStop: () => void
-  onCancel: () => void
-  onSetPhase: (p: TeachPhase) => void
+  onSaved: () => void
 }
 
-function TeachSkillExpander({
-  teachPhase, open, onToggle,
-  teachNameRef, teachDescRef,
-  onStart, onPause, onResume, onStop, onCancel, onSetPhase,
-}: TeachSkillExpanderProps) {
-  const t = useT()
+function TeachSkillExpander({ open, onToggle, onSaved }: TeachSkillExpanderProps) {
   const reduced = useReducedMotion()
-
   return (
     <div>
       <button
@@ -922,126 +834,16 @@ function TeachSkillExpander({
         >
           <ChevronRight size={13} />
         </motion.span>
-        {t('skills.teach.header')}
+        Enseñar una habilidad
       </button>
 
       <AnimatedExpanderContent open={open}>
         <div id="teach-skill-body" className={s.teachCard}>
           <p className={s.teachIntro}>
-            Enséñale a Lumen a operar en el navegador grabando una demostración. Aprende a usar plataformas y a operar por ti.
+            Enséñale a Lumen a operar en el navegador demostrando la tarea. Conduces un
+            navegador real (nítido) aquí abajo y tus pasos se convierten en una habilidad.
           </p>
-          <p className={s.teachHint}>
-            La demostración ocurre en un navegador aislado dentro de Lumen y no interrumpe otras tareas.
-          </p>
-
-          <AnimatePresence mode="wait" initial={false}>
-            {teachPhase === 'idle' && (
-              <motion.div
-                key="idle"
-                initial={reduced ? false : { opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={reduced ? undefined : { opacity: 0, y: -4 }}
-                transition={TWEEN_FAST}
-              >
-                <button
-                  type="button"
-                  className="cv-btn cv-btn--secondary cv-btn--sm"
-                  onClick={() => onSetPhase('form')}
-                >
-                  + Nueva habilidad
-                </button>
-              </motion.div>
-            )}
-
-            {teachPhase === 'form' && (
-              <motion.div
-                key="form"
-                className={s.teachFormStack}
-                initial={reduced ? false : { opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={reduced ? undefined : { opacity: 0, y: -4 }}
-                transition={TWEEN_FAST}
-              >
-                <label className="sr-only" htmlFor="teach-name">Nombre de la habilidad</label>
-                <input
-                  id="teach-name"
-                  ref={teachNameRef as React.RefObject<HTMLInputElement>}
-                  className={s.teachInput}
-                  type="text"
-                  placeholder='Nombre (p. ej. "Publicar en LinkedIn")'
-                  autoComplete="off"
-                />
-                <label className="sr-only" htmlFor="teach-desc">Descripción de la habilidad</label>
-                <textarea
-                  id="teach-desc"
-                  ref={teachDescRef as React.RefObject<HTMLTextAreaElement>}
-                  className={s.teachTextarea}
-                  rows={3}
-                  placeholder="Describe qué hace y los pasos — el agente aprende la habilidad de aquí"
-                />
-                <div className={s.teachActions}>
-                  <Button variant="primary" size="sm" onClick={onStart}>Empezar grabación</Button>
-                  <Button variant="ghost" size="sm" onClick={onCancel}>Cancelar</Button>
-                </div>
-              </motion.div>
-            )}
-
-            {teachPhase === 'recording' && (
-              <motion.div
-                key="recording"
-                className={s.teachFormStack}
-                initial={reduced ? false : { opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={reduced ? undefined : { opacity: 0, y: -4 }}
-                transition={TWEEN_FAST}
-              >
-                <p className={s.recordingLabel} role="status" aria-live="polite">
-                  <span className={s.recordingDot} aria-hidden="true" />
-                  Grabando la demostración…
-                </p>
-                <div className={s.teachActions}>
-                  <Button variant="secondary" size="sm" onClick={onPause}>Pausar</Button>
-                  <Button variant="primary" size="sm" onClick={onStop}>{t('skills.teach.stop')}</Button>
-                  <Button variant="danger" size="sm" onClick={onCancel}>Cancelar</Button>
-                </div>
-              </motion.div>
-            )}
-
-            {teachPhase === 'paused' && (
-              <motion.div
-                key="paused"
-                className={s.teachFormStack}
-                initial={reduced ? false : { opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={reduced ? undefined : { opacity: 0, y: -4 }}
-                transition={TWEEN_FAST}
-              >
-                <p className={s.statusLabel} role="status" aria-live="polite">
-                  Grabación en pausa.
-                </p>
-                <div className={s.teachActions}>
-                  <Button variant="primary" size="sm" onClick={onResume}>Reanudar</Button>
-                  <Button variant="secondary" size="sm" onClick={onStop}>{t('skills.teach.stop_paused')}</Button>
-                  <Button variant="danger" size="sm" onClick={onCancel}>Cancelar</Button>
-                </div>
-              </motion.div>
-            )}
-
-            {teachPhase === 'synth' && (
-              <motion.p
-                key="synth"
-                className={s.statusLabel}
-                aria-live="polite"
-                aria-busy="true"
-                initial={reduced ? false : { opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={reduced ? undefined : { opacity: 0 }}
-                transition={{ duration: 0.15 }}
-              >
-                {t('skills.teach.synth')}
-              </motion.p>
-            )}
-          </AnimatePresence>
+          <TeachPanel onSaved={onSaved} />
         </div>
       </AnimatedExpanderContent>
     </div>

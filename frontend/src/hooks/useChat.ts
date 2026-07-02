@@ -318,6 +318,8 @@ interface UseChatReturn {
   status: ChatStatus
   /** True while re-attaching to a stream that was in-flight before a page refresh. */
   reconnecting: boolean
+  /** Sticky: the in-flight turn's task is using the browser → chat can show live view. */
+  liveBrowserActive: boolean
   sendMessage(text: string): Promise<void>
   startNew(): void
   /** Start a new conversation pre-bound to a specific agent. */
@@ -341,6 +343,12 @@ export function useChat(): UseChatReturn {
   const restoredRef = useRef(false)
   // "reconectando…" status while re-attaching a stream after refresh
   const [reconnecting, setReconnecting] = useState(false)
+
+  // Sticky: true once the in-flight turn's task touches the browser (a browser_*
+  // tool), so the chat can offer an inline "Ver en vivo" panel of the jailed
+  // browser. Set from both the WS tool_call frames and the runtime-status poll
+  // (belt-and-suspenders); reset when the turn ends (done / adopt-final / stop).
+  const [liveBrowserActive, setLiveBrowserActive] = useState(false)
 
   // ── Coalesce / throttle buffer ────────────────────────────────────────────────
   // Instead of dispatching on every WS frame we accumulate here and flush at most
@@ -458,6 +466,7 @@ export function useChat(): UseChatReturn {
               : undefined
 
             if (entry?.tool) {
+              if (entry.tool.startsWith('browser')) setLiveBrowserActive(true)
               const humanized = toolLabel(entry.tool)
               if (humanized) {
                 dispatch({ type: 'STATUS_STREAMING', text: `Trabajando… (${humanized.toLowerCase()})` })
@@ -501,6 +510,7 @@ export function useChat(): UseChatReturn {
             currentTaskIdRef.current = null
             sessionStorage.removeItem(SS_TASK_ID)
             setReconnecting(false)
+            setLiveBrowserActive(false)
             clearPoll()
           }
         })
@@ -527,6 +537,7 @@ export function useChat(): UseChatReturn {
     currentTaskIdRef.current = null
     sessionStorage.removeItem(SS_TASK_ID)
     setReconnecting(false)
+    setLiveBrowserActive(false)
   }, [clearPoll, flushPending, clearFlushTimer])
 
   const startNew = useCallback(() => {
@@ -713,6 +724,7 @@ export function useChat(): UseChatReturn {
               const name = (d.tool as string | undefined) ?? (d.tool_name as string | undefined) ?? 'herramienta'
               const label = (d.label as string | undefined) ?? String(name).replace(/_/g, ' ')
               const target = String((d.target as string | undefined) ?? '').slice(0, 80)
+              if (String(name).startsWith('browser')) setLiveBrowserActive(true)
               const step: ToolStep = { name, label, target }
               // Flush any accumulated text before the tool step so the segment boundary
               // is clean (matches vanilla segmentStart behaviour — activityText resets on TOOL_CALL).
@@ -748,6 +760,7 @@ export function useChat(): UseChatReturn {
               currentTaskIdRef.current = null
               sessionStorage.removeItem(SS_TASK_ID)
               setReconnecting(false)
+              setLiveBrowserActive(false)
             },
             onError(_msg) {
               // On WS error after re-attach, keep the poll running — the task may
@@ -967,6 +980,7 @@ export function useChat(): UseChatReturn {
     messages: state.messages,
     status: state.status,
     reconnecting,
+    liveBrowserActive,
     sendMessage,
     startNew,
     startNewWithAgent,

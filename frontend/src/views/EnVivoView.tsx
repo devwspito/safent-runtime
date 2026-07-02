@@ -1,53 +1,37 @@
 /**
- * EnVivoView — unified "En vivo" section: two tabs, both showing the jailed browser
- * SHARP + FLUID via noVNC (headful Chromium on Xvfb + x11vnc, industry-standard —
- * no more blurry CDP screencast).
- *   · Actividad: view-only live watch of the agent's browser + running tasks (Detener).
- *   · Enseñar:   drive the real browser to demonstrate a skill; steps are recorded.
+ * EnVivoView — "En vivo": watch the agents' browser work in real time (sharp, via
+ * noVNC) and stop a task if something goes wrong. Teaching now lives in Habilidades.
+ * The live browser frame only shows when a running task is actually USING the browser
+ * (live_activity tool starts with "browser"), not for every running task.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { Square } from 'lucide-react'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
-import { VncView } from '../components/VncView'
-import {
-  listRecentTasks,
-  cancelTask,
-  ApiError,
-  startTeaching,
-  signTeaching,
-} from '../api/client'
+import { VncFrame } from '../components/VncView'
+import { listRecentTasks, cancelTask, getRuntimeStatus, ApiError } from '../api/client'
 import type { RecentTask } from '../api/types'
-
-type Tab = 'actividad' | 'ensenar'
-
-function VncFrame({ viewOnly }: { viewOnly?: boolean }) {
-  return (
-    <div
-      style={{
-        position: 'relative',
-        width: '100%',
-        aspectRatio: '16 / 9',
-        maxHeight: 'min(74vh, 900px)',
-        background: '#000',
-        border: '1px solid var(--color-border-subtle)',
-        borderRadius: 'var(--radius-md)',
-        overflow: 'hidden',
-      }}
-    >
-      <VncView viewOnly={viewOnly} />
-    </div>
-  )
-}
 
 function ActividadPanel() {
   const [tasks, setTasks] = useState<RecentTask[]>([])
   const [cancelling, setCancelling] = useState<string | null>(null)
+  // Sticky: once a running task touches the browser, keep the live frame visible
+  // (live_activity only reports the LATEST tool, so it flickers off between calls).
+  const browserSeen = useRef(false)
+  const [showLive, setShowLive] = useState(false)
 
   const refresh = useCallback(async () => {
-    const r = await listRecentTasks(40)
-    setTasks((r.tasks ?? []).filter((t) => t.status === 'in_progress'))
+    const [r, status] = await Promise.all([
+      listRecentTasks(40),
+      getRuntimeStatus().catch(() => null),
+    ])
+    const running = (r.tasks ?? []).filter((t) => t.status === 'in_progress')
+    setTasks(running)
+    const browserNow = !!status?.activity?.some((a) => (a.tool ?? '').startsWith('browser'))
+    if (browserNow) browserSeen.current = true
+    if (running.length === 0) browserSeen.current = false // reset when idle
+    setShowLive(running.length > 0 && browserSeen.current)
   }, [])
 
   useEffect(() => {
@@ -69,11 +53,9 @@ function ActividadPanel() {
     }
   }
 
-  const hasRunning = tasks.length > 0
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
-      {hasRunning ? (
+      {showLive ? (
         <VncFrame viewOnly />
       ) : (
         <div style={{
@@ -84,8 +66,9 @@ function ActividadPanel() {
           color: 'var(--color-text-muted)',
           fontSize: 'var(--text-sm)',
         }}>
-          No hay ninguna tarea en ejecución ahora mismo. Cuando un agente empiece a
-          trabajar, verás aquí su navegador en directo (nítido) y podrás detenerlo.
+          {tasks.length > 0
+            ? 'Hay tareas en ejecución, pero ninguna está usando el navegador ahora mismo. Cuando un agente navegue, verás aquí su navegador en directo (nítido).'
+            : 'No hay ninguna tarea en ejecución. Cuando un agente empiece a navegar, verás aquí su navegador en directo y podrás detenerlo.'}
         </div>
       )}
 
@@ -145,103 +128,15 @@ function ActividadPanel() {
   )
 }
 
-function EnsenarPanel() {
-  const [skill, setSkill] = useState('')
-  const [sessionId, setSessionId] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  async function handleStart() {
-    if (!skill.trim()) { sileo.error({ title: 'Ponle un nombre a la habilidad' }); return }
-    setBusy(true)
-    try {
-      const r = await startTeaching(skill.trim())
-      setSessionId(r.session_id)
-      sileo.success({ title: 'Grabando. Demuestra la tarea en el navegador de abajo.' })
-    } catch (e) {
-      sileo.error({ title: e instanceof ApiError ? e.message : 'No se pudo iniciar' })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleSave() {
-    if (!sessionId) return
-    setBusy(true)
-    try {
-      await signTeaching(sessionId)
-      sileo.success({ title: '¡Habilidad guardada! Ábrela en Habilidades.' })
-      setSessionId(null)
-      setSkill('')
-    } catch (e) {
-      sileo.error({ title: e instanceof ApiError ? e.message : 'No se pudo guardar' })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-      <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
-        <input
-          type="text"
-          value={skill}
-          onChange={(e) => setSkill(e.target.value)}
-          disabled={!!sessionId}
-          placeholder='Nombre de la habilidad (p. ej. "Reservar plaza")'
-          style={{
-            flex: 1, minWidth: 240,
-            padding: 'var(--space-2) var(--space-3)',
-            border: '1px solid var(--color-border-subtle)',
-            borderRadius: 'var(--radius-md)',
-            background: 'var(--color-bg-subtle)', color: 'var(--color-text)',
-            fontSize: 'var(--text-sm)',
-          }}
-        />
-        {sessionId ? (
-          <Button variant="primary" size="sm" loading={busy} onClick={() => void handleSave()}>
-            Guardar habilidad
-          </Button>
-        ) : (
-          <Button variant="primary" size="sm" loading={busy} onClick={() => void handleStart()}>
-            Empezar a enseñar
-          </Button>
-        )}
-      </div>
-      <p style={{ color: 'var(--color-text-dim)', fontSize: 'var(--text-sm)', margin: 0 }}>
-        {sessionId
-          ? 'Navega y haz la tarea en el navegador de abajo, como lo harías normalmente. Cuando termines, pulsa «Guardar habilidad».'
-          : 'Ponle nombre y pulsa «Empezar a enseñar». Se abre un navegador real (nítido) que puedes conducir; tus pasos se convierten en una habilidad reutilizable.'}
-      </p>
-      <VncFrame />
-    </div>
-  )
-}
-
 export default function EnVivoView() {
-  const [tab, setTab] = useState<Tab>('actividad')
-
   return (
     <>
       <PageHeader
         title="En vivo"
-        subtitle="Observa a tus agentes trabajar en tiempo real, detén una tarea si algo va mal, o enséñales una nueva habilidad."
+        subtitle="Observa a tus agentes trabajar en tiempo real y detén una tarea si algo va mal. Para enseñar una habilidad nueva, ve a Habilidades."
       />
       <div className="view-body">
-        <div
-          role="tablist"
-          aria-label="Secciones en vivo"
-          style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-5)' }}
-        >
-          <Button variant={tab === 'actividad' ? 'primary' : 'ghost'} size="sm" onClick={() => setTab('actividad')}>
-            Actividad
-          </Button>
-          <Button variant={tab === 'ensenar' ? 'primary' : 'ghost'} size="sm" onClick={() => setTab('ensenar')}>
-            Enseñar
-          </Button>
-        </div>
-
-        {tab === 'actividad' && <ActividadPanel />}
-        {tab === 'ensenar' && <EnsenarPanel />}
+        <ActividadPanel />
       </div>
     </>
   )

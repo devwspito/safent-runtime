@@ -18,7 +18,8 @@ import {
   type ChangeEvent,
 } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
-import { GitBranch, Loader2, CheckCircle2, AlertTriangle, FileText, X, Plus, Paperclip, FolderOpen, Zap, Check } from 'lucide-react'
+import { GitBranch, Loader2, CheckCircle2, AlertTriangle, FileText, X, Plus, Paperclip, FolderOpen, Zap, Check, Maximize2, ChevronDown } from 'lucide-react'
+import { VncFrame } from '../components/VncView'
 import type { ChatMessage, ToolStep } from '../hooks/useChat'
 import { listProviders, uploadWorkspaceFile, getRuntimeStatus, listSkills, ApiError } from '../api/client'
 import type { Provider, Skill } from '../api/types'
@@ -990,9 +991,74 @@ function SpinnerIcon() {
 
 // ── ChatView ───────────────────────────────────────────────────────────────
 
+/**
+ * LiveBrowserPanel — inline "Ver en vivo" for the chat. Shown while the in-flight
+ * turn's task is using the browser (liveBrowserActive). Collapsed by default: a red
+ * "Ver en vivo" chip that expands a view-only VNC frame of the jailed browser, with a
+ * fullscreen toggle. Same VNC system as Enseñar / En vivo (sharp + fluid).
+ */
+function LiveBrowserPanel() {
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  const toggleFullscreen = () => {
+    const el = wrapRef.current
+    if (!el) return
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {})
+    else void el.requestFullscreen?.().catch(() => {})
+  }
+
+  return (
+    <div style={{ padding: '0 var(--space-4) var(--space-2)' }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)',
+          padding: '5px 12px', borderRadius: 'var(--radius-full, 999px)',
+          border: '1px solid var(--color-border-subtle)', background: 'var(--color-bg-subtle)',
+          color: 'var(--color-text)', fontSize: 'var(--text-sm)', cursor: 'pointer',
+        }}
+      >
+        <span
+          aria-hidden="true"
+          style={{ width: 8, height: 8, borderRadius: '50%', background: '#e5484d', boxShadow: '0 0 0 3px rgba(229,72,77,0.2)' }}
+        />
+        <span>Ver en vivo</span>
+        <ChevronDown
+          size={14}
+          aria-hidden="true"
+          style={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}
+        />
+      </button>
+      {open && (
+        <div ref={wrapRef} style={{ position: 'relative', marginTop: 'var(--space-2)' }}>
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            aria-label="Pantalla completa"
+            title="Pantalla completa"
+            style={{
+              position: 'absolute', top: 8, right: 8, zIndex: 2,
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              width: 28, height: 28, borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--color-border-subtle)',
+              background: 'rgba(0,0,0,0.55)', color: '#fff', cursor: 'pointer',
+            }}
+          >
+            <Maximize2 size={14} aria-hidden="true" />
+          </button>
+          <VncFrame viewOnly />
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function ChatView() {
   const t = useT()
-  const { convId, agentName, messages, status, sendMessage, stopStream, approvalRefreshTick } =
+  const { convId, agentName, messages, status, sendMessage, stopStream, approvalRefreshTick, liveBrowserActive } =
     useOutletContext<ChatOutletContext>()
   const [composerText, setComposerText] = useState('')
   const [panelOpen, setPanelOpen] = useState(true)
@@ -1141,6 +1207,8 @@ export default function ChatView() {
               refreshTick={approvalRefreshTick}
             />
           </div>
+
+          {liveBrowserActive && <LiveBrowserPanel />}
 
           {showNoModel || noProvider ? (
             <NoModelBanner />

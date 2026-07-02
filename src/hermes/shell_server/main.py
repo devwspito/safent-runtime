@@ -1289,6 +1289,13 @@ def create_app() -> FastAPI:
             orchestrator=_get_training_orchestrator(_DB_PATH), db_path=_DB_PATH
         )
     )
+    # UTF-8 copy/paste bridge for the noVNC view (CDP-based, bypasses x11vnc's broken
+    # clipboard): POST /clipboard/paste inserts text into the jailed browser, /copy
+    # reads its current selection. The frontend intercepts Ctrl/Cmd+V and +C.
+    from hermes.shell_server.cowork.clipboard_bridge import (  # noqa: PLC0415
+        create_clipboard_bridge_router,
+    )
+    app.include_router(create_clipboard_bridge_router())
     app.include_router(create_workspace_router())
     app.include_router(create_approvals_router())
     app.include_router(create_policies_router())

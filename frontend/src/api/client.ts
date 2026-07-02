@@ -1007,3 +1007,12 @@ export async function startTeaching(
 export async function signTeaching(sessionId: string): Promise<{ ok: boolean }> {
   return request(`/teach/${sessionId}/save`, { method: 'POST', body: JSON.stringify({}) })
 }
+
+// ── UTF-8 clipboard bridge for the noVNC view (CDP, bypasses x11vnc) ───────────
+export async function clipboardPasteToBrowser(text: string): Promise<{ ok: boolean; inserted: number }> {
+  return request('/clipboard/paste', { method: 'POST', body: JSON.stringify({ text }) })
+}
+
+export async function clipboardCopyFromBrowser(): Promise<{ ok: boolean; text: string }> {
+  return request('/clipboard/copy', { method: 'POST', body: JSON.stringify({}) })
+}
