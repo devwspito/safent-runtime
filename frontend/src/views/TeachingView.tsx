@@ -316,13 +316,19 @@ function useLiveCanvas(
     send({ type: 'key', action: 'up', keysym: null, text: ev.key })
   }, [send])
 
-  // Report the canvas' PHYSICAL size to the server so it renders the remote page
-  // at exactly that resolution (crisp at any window size / fullscreen). The screen
-  // real size = CSS × devicePixelRatio; that's also the canvas backing store.
+  // Report the canvas' CSS size to the server as the remote browser VIEWPORT
+  // (layout size). The jailed Chromium is launched with --force-device-scale-factor=2,
+  // so it renders that CSS viewport at 2× device px → the screencast frame is sharp
+  // AND the page layout is normal (a CSS-sized window), no zoom/scroll. Sending the
+  // physical size (CSS×dpr) instead would lay the page out for a huge window (the
+  // v0.7.4 bug). The canvas backing store stays CSS×dpr so the 2× frame paints 1:1.
   const sendViewport = useCallback(() => {
     const canvas = canvasRef.current
-    if (!canvas || canvas.width < 1 || canvas.height < 1) return
-    send({ type: 'resize', width: canvas.width, height: canvas.height })
+    if (!canvas) return
+    const w = canvas.clientWidth
+    const h = canvas.clientHeight
+    if (w < 1 || h < 1) return
+    send({ type: 'resize', width: w, height: h })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [send])
 

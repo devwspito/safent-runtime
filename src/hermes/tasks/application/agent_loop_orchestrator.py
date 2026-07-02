@@ -343,9 +343,9 @@ class AgentLoopOrchestrator:
             _detail = str(exc).strip().replace("\n", " ")
             error_reason = f"{type(exc).__name__}: {_detail}" if _detail else type(exc).__name__
             error_reason = error_reason[:400]
-            if is_chat and effective_sink is not None:
-                await effective_sink.close(
-                    task_id=item.id, outcome="failed", error=error_reason
+            if is_chat:
+                await self._safe_close_stream(
+                    effective_sink, item, "failed", error=error_reason
                 )
             # El fallo del motor debe SER VISIBLE en la UI: ChatBar sondea
             # get_conversation, así que sin un mensaje persistido el usuario ve
@@ -413,9 +413,9 @@ class AgentLoopOrchestrator:
                 if is_chat
                 else "no_actions"
             )
-            if is_chat and effective_sink is not None:
-                await effective_sink.close(
-                    task_id=item.id, outcome="failed", error=no_actions_error
+            if is_chat:
+                await self._safe_close_stream(
+                    effective_sink, item, "failed", error=no_actions_error
                 )
             await self._do_mark_failed(item, "no_actions")
             return
@@ -444,13 +444,13 @@ class AgentLoopOrchestrator:
         )
         if dispatch_result is None:
             # Dispatch ya llamó mark_failed/mark_pending_approval/mark_rejected.
-            if is_chat and effective_sink is not None:
-                await effective_sink.close(task_id=item.id, outcome="failed")
+            if is_chat:
+                await self._safe_close_stream(effective_sink, item, "failed")
             return
 
         audit_entry_id, head_hash = dispatch_result
-        if is_chat and effective_sink is not None:
-            await effective_sink.close(task_id=item.id, outcome="completed")
+        if is_chat:
+            await self._safe_close_stream(effective_sink, item, "completed")
         await self._do_mark_completed(item, audit_entry_id, head_hash)
 
     async def _dispatch_proposals(
@@ -595,8 +595,10 @@ class AgentLoopOrchestrator:
                 # emitimos la narrativa completa de una vez (comportamiento previo).
                 delta_chunk = TaskStreamChunk(kind=StreamChunkKind.DELTA, delta=narrative)
                 await chunk_sink.emit(task_id=item.id, chunk=delta_chunk)
-            # Siempre cerramos el stream: el cliente espera el frame DONE.
-            await chunk_sink.close(task_id=item.id, outcome="completed")
+            # Siempre cerramos el stream: el cliente espera el frame DONE. Wrapped:
+            # a broker close() failure must not skip _emit_chat_replied/mark_completed
+            # (the narrative is already persisted above → the mirror poll adopts it).
+            await self._safe_close_stream(chunk_sink, item, "completed")
 
         audit_entry_id, head_hash = await self._emit_chat_replied(item, narrative)
         await self._do_mark_completed(item, audit_entry_id, head_hash)
@@ -666,6 +668,22 @@ class AgentLoopOrchestrator:
     # ------------------------------------------------------------------
     # Private: state transitions with observability
     # ------------------------------------------------------------------
+
+    async def _safe_close_stream(
+        self, sink: Any, item: WorkItem, outcome: str, error: str | None = None
+    ) -> None:
+        """Emit the terminal stream frame, never letting a broker/close() error
+        propagate. A close() failure must NOT skip mark_* nor crash the worker; the
+        client's 2s mirror poll adopts the persisted answer regardless."""
+        if sink is None:
+            return
+        try:
+            await sink.close(task_id=item.id, outcome=outcome, error=error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "hermes.tasks.loop.stream.close_failed task=%s outcome=%s: %s",
+                str(item.id), outcome, exc,
+            )
 
     async def _do_mark_failed(self, item: WorkItem, reason: str) -> None:
         await self._queue.mark_failed(

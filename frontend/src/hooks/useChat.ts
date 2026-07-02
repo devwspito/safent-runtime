@@ -911,14 +911,19 @@ export function useChat(): UseChatReturn {
         currentTaskIdRef.current = null
         sessionStorage.removeItem(SS_TASK_ID)
       },
-      onError(msg) {
-        // Keep the poll running on WS error — the task may still be running and
-        // the mirror poll will surface the final answer when it appears.
+      onError(_msg) {
+        // A terminal error frame (or transient teardown) arrived. Do NOT dispatch
+        // STATUS_ERROR and do NOT delete SS_TASK_ID: STATUS_ERROR flips the bubble's
+        // isStreaming=false, which makes the poll's ADOPT_FINAL a no-op (its guard
+        // only seals a STILL-streaming bubble) → the persisted answer/refusal is
+        // NEVER rendered = the "first attempt shows nothing, second works" bug.
+        // Keep the bubble streaming and let the 2s mirror poll adopt the final
+        // answer (success narrative, refusal, or the backend's "⚠ …" error turn).
+        // Matches the re-attach onError (the proven-good path).
         flushPending()
         clearFlushTimer()
-        dispatch({ type: 'STATUS_ERROR', message: msg })
+        dispatch({ type: 'STATUS_STREAMING', text: 'Trabajando…' })
         streamRef.current = null
-        sessionStorage.removeItem(SS_TASK_ID)
       },
     }
 

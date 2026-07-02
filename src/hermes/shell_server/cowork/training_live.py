@@ -222,14 +222,15 @@ async def _setup_browser_session():
     pw = await async_playwright().start()
     browser = await pw.chromium.connect_over_cdp(_cdp_url())
 
-    # Isolated context: no shared cookies/storage with the agent. DSF=1 (the
-    # screencast ignores DSF); the initial viewport is a placeholder — the client
-    # reports its real physical canvas size via {"type":"resize"} and we
-    # set_viewport_size to match so the frame is 1:1 with the display (crisp at any
-    # size / fullscreen). The screencast cap is generous; the viewport drives it.
+    # Isolated context: no shared cookies/storage with the agent. NO
+    # device_scale_factor override here — the jailed Chromium is launched with
+    # --force-device-scale-factor=2 (compositor-level 2x; the ONLY thing the CDP
+    # screencast honours), so the page inherits dpr=2 and renders a CSS-sized
+    # viewport at 2x = crisp. The client reports its CSS canvas size via
+    # {"type":"resize"} and we set_viewport_size(CSS) → layout is normal (no zoom)
+    # AND the frame comes at CSS×2 (sharp). Screencast cap is generous.
     ctx = await browser.new_context(
         viewport={"width": _TEACH_VIEWPORT_W, "height": _TEACH_VIEWPORT_H},
-        device_scale_factor=1,
     )
     page = await ctx.new_page()
 
