@@ -563,8 +563,9 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
 
-  // "+" context menu: attach files / bridge a host folder / add skills (non-exclusive).
+  // "+" context menu: two-level (root → skills/live submenu). Non-exclusive.
   const [menuOpen, setMenuOpen] = useState(false)
+  const [menuView, setMenuView] = useState<'root' | 'skills' | 'live'>('root')
   const [skills, setSkills] = useState<Skill[]>([])
   const [skillsLoaded, setSkillsLoaded] = useState(false)
   const [selectedSkills, setSelectedSkills] = useState<Skill[]>([])
@@ -572,13 +573,20 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
   const [bridgeBusy, setBridgeBusy] = useState(false)
   const [bridgeSyncing, setBridgeSyncing] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
+  const plusBtnRef = useRef<HTMLButtonElement>(null)
 
   const skillKey = (sk: Skill) => sk.skill_id ?? sk.package_id ?? sk.skill_name ?? sk.name ?? ''
   const skillLabel = (sk: Skill) => sk.skill_name ?? sk.name ?? sk.slug ?? skillKey(sk)
   const isLive = (sk: Skill) => sk.teaching_origin === 'teaching_live'
 
-  async function openMenu() {
+  function openMenu() {
+    setMenuView('root')
     setMenuOpen((o) => !o)
+  }
+
+  // Load skills lazily — only when the user actually opens the Skills/Live submenu.
+  async function enterSkillsView(view: 'skills' | 'live') {
+    setMenuView(view)
     if (!skillsLoaded) {
       try {
         const list = await listSkills()
@@ -634,11 +642,13 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
     }
   }
 
-  // Close the menu on outside click.
+  // Close the menu on outside click (ignore clicks on the popover or the "+" button).
   useEffect(() => {
     if (!menuOpen) return
     const onDoc = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false)
+      const tgt = e.target as Node
+      if (menuRef.current?.contains(tgt) || plusBtnRef.current?.contains(tgt)) return
+      setMenuOpen(false)
     }
     document.addEventListener('mousedown', onDoc)
     return () => document.removeEventListener('mousedown', onDoc)
@@ -809,6 +819,60 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
       )}
 
       <div className={styles.composerBox}>
+        {menuOpen && (
+          <div ref={menuRef} className={styles.plusMenu} role="menu" aria-label="Añadir al mensaje">
+            {menuView === 'root' && (
+              <>
+                <button type="button" className={styles.plusItem} role="menuitem"
+                  onClick={() => { setMenuOpen(false); fileInputRef.current?.click() }}>
+                  <Paperclip size={14} aria-hidden="true" /> Adjuntar archivos
+                </button>
+                <button type="button" className={styles.plusItem} role="menuitem" onClick={() => void pickFolder()}>
+                  <FolderOpen size={14} aria-hidden="true" /> Seleccionar carpeta…
+                </button>
+                <button type="button" className={styles.plusItem} role="menuitem" onClick={() => void enterSkillsView('skills')}>
+                  <Zap size={14} aria-hidden="true" />
+                  <span style={{ flex: 1, textAlign: 'left' }}>Habilidades</span>
+                  <span aria-hidden="true">›</span>
+                </button>
+                <button type="button" className={styles.plusItem} role="menuitem" onClick={() => void enterSkillsView('live')}>
+                  <Zap size={14} aria-hidden="true" />
+                  <span style={{ flex: 1, textAlign: 'left' }}>Live</span>
+                  <span aria-hidden="true">›</span>
+                </button>
+              </>
+            )}
+
+            {(menuView === 'skills' || menuView === 'live') && (
+              <>
+                <button type="button" className={styles.plusItem} role="menuitem"
+                  onClick={() => setMenuView('root')}>
+                  <span aria-hidden="true">‹</span>
+                  <span style={{ flex: 1, textAlign: 'left' }}>
+                    {menuView === 'live' ? 'Live' : 'Habilidades'}
+                  </span>
+                </button>
+                {(() => {
+                  const list = skills.filter((s) => (menuView === 'live' ? isLive(s) : !isLive(s)))
+                  if (!skillsLoaded) return <div className={styles.plusEmpty}>Cargando…</div>
+                  if (list.length === 0) return <div className={styles.plusEmpty}>Ninguna</div>
+                  return list.map((sk) => {
+                    const on = selectedSkills.some((s) => skillKey(s) === skillKey(sk))
+                    return (
+                      <button key={skillKey(sk)} type="button" className={styles.plusItem} role="menuitemcheckbox"
+                        aria-checked={on} onClick={() => toggleSkill(sk)}>
+                        <Zap size={14} aria-hidden="true" />
+                        <span style={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skillLabel(sk)}</span>
+                        {menuView === 'live' && <span className={styles.plusLiveTag}>live</span>}
+                        {on && <Check size={13} aria-hidden="true" />}
+                      </button>
+                    )
+                  })
+                })()}
+              </>
+            )}
+          </div>
+        )}
         <textarea
           ref={textareaRef}
           className={styles.composerTextarea}
@@ -831,67 +895,19 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
             onChange={handleFileSelect}
             tabIndex={-1}
           />
-          <div ref={menuRef} style={{ position: 'relative', display: 'inline-flex' }}>
-            <button
-              type="button"
-              className={styles.attachBtn}
-              onClick={() => void openMenu()}
-              disabled={disabled}
-              aria-label="Añadir contexto (archivos, carpeta, habilidades)"
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
-              title="Añadir contexto"
-            >
-              <Plus size={16} />
-            </button>
-
-            {menuOpen && (
-              <div className={styles.plusMenu} role="menu" aria-label="Añadir al mensaje">
-                <button type="button" className={styles.plusItem} role="menuitem"
-                  onClick={() => { setMenuOpen(false); fileInputRef.current?.click() }}>
-                  <Paperclip size={14} aria-hidden="true" /> Adjuntar archivos
-                </button>
-                <button type="button" className={styles.plusItem} role="menuitem" onClick={() => void pickFolder()}>
-                  <FolderOpen size={14} aria-hidden="true" /> Seleccionar carpeta…
-                </button>
-
-                <div className={styles.plusSectionLabel}>Habilidades</div>
-                {!skillsLoaded && <div className={styles.plusEmpty}>Cargando…</div>}
-                {skillsLoaded && skills.filter((s) => !isLive(s)).length === 0 && (
-                  <div className={styles.plusEmpty}>Ninguna</div>
-                )}
-                {skills.filter((s) => !isLive(s)).map((sk) => {
-                  const on = selectedSkills.some((s) => skillKey(s) === skillKey(sk))
-                  return (
-                    <button key={skillKey(sk)} type="button" className={styles.plusItem} role="menuitemcheckbox"
-                      aria-checked={on} onClick={() => toggleSkill(sk)}>
-                      <Zap size={14} aria-hidden="true" />
-                      <span style={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skillLabel(sk)}</span>
-                      {on && <Check size={13} aria-hidden="true" />}
-                    </button>
-                  )
-                })}
-
-                {skillsLoaded && skills.some((s) => isLive(s)) && (
-                  <>
-                    <div className={styles.plusSectionLabel}>Live</div>
-                    {skills.filter(isLive).map((sk) => {
-                      const on = selectedSkills.some((s) => skillKey(s) === skillKey(sk))
-                      return (
-                        <button key={skillKey(sk)} type="button" className={styles.plusItem} role="menuitemcheckbox"
-                          aria-checked={on} onClick={() => toggleSkill(sk)}>
-                          <Zap size={14} aria-hidden="true" />
-                          <span style={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skillLabel(sk)}</span>
-                          <span className={styles.plusLiveTag}>live</span>
-                          {on && <Check size={13} aria-hidden="true" />}
-                        </button>
-                      )
-                    })}
-                  </>
-                )}
-              </div>
-            )}
-          </div>
+          <button
+            ref={plusBtnRef}
+            type="button"
+            className={styles.attachBtn}
+            onClick={openMenu}
+            disabled={disabled}
+            aria-label="Añadir contexto (archivos, carpeta, habilidades)"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            title="Añadir contexto"
+          >
+            <Plus size={16} />
+          </button>
 
           <ModelPicker />
 

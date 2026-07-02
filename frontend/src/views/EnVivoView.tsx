@@ -43,9 +43,27 @@ function ActividadPanel() {
     }
   }
 
+  const hasRunning = tasks.length > 0
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
-      <AgentLiveWatch label="Actividad del agente en vivo" />
+      {/* Only show the live browser while a task is actually running — otherwise the
+          screencast would show a stale page from a finished task. */}
+      {hasRunning ? (
+        <AgentLiveWatch label="Actividad del agente en vivo" />
+      ) : (
+        <div style={{
+          border: '1px dashed var(--color-border-subtle)',
+          borderRadius: 'var(--radius-md)',
+          padding: 'var(--space-8) var(--space-4)',
+          textAlign: 'center',
+          color: 'var(--color-text-muted)',
+          fontSize: 'var(--text-sm)',
+        }}>
+          No hay ninguna tarea en ejecución ahora mismo. Cuando un agente empiece a
+          trabajar, verás aquí su navegador en directo y podrás detenerlo.
+        </div>
+      )}
 
       <section>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}>

@@ -74,14 +74,17 @@ _FRAME_INTERVAL_S: float = 0.07
 # Evdev: BTN_LEFT=0x110(272), BTN_MIDDLE=0x112(274), BTN_RIGHT=0x111(273).
 _BTN_MAP: dict[int, int] = {0: BTN_LEFT, 1: BTN_MIDDLE, 2: BTN_RIGHT}
 
-# Teaching browser LOGICAL viewport (CSS px). Rendered at deviceScaleFactor=2 so
-# the screencast SOURCE is 2x (crisp on Retina / fullscreen). CDP input
-# coordinates are in CSS px (DSF-independent), so the client sends NORMALIZED
-# fractions (0..1 of the frame) and we multiply by these — the mapping is exact
-# and independent of the frame's pixel resolution or the client's DPR.
-_TEACH_VIEWPORT_W: int = 1600
+# ADAPTIVE RESOLUTION. Measured truth (2026-07-02): the CDP screencast IGNORES
+# deviceScaleFactor over connect_over_cdp — the frame resolution EQUALS the page
+# VIEWPORT (DSF=2 vp1600x900 → frame 1600x900, blurry when upscaled). So we render
+# at DSF=1 and set the viewport to the CLIENT's physical canvas size (CSS px ×
+# devicePixelRatio), which it reports via {"type":"resize"}. set_viewport_size is
+# honoured live → the frame follows (verified 1280x720 → 2880x1620). Clicks use
+# NORMALIZED fractions mapped against the CURRENT viewport, so any size is exact.
+_TEACH_VIEWPORT_W: int = 1600   # initial, until the client reports its real size
 _TEACH_VIEWPORT_H: int = 900
-_TEACH_DEVICE_SCALE: int = 2
+_TEACH_MAX_W: int = 4096        # generous screencast cap; viewport (≤ this) drives it
+_TEACH_MAX_H: int = 2160
 
 
 def _cdp_url() -> str:
@@ -134,9 +137,13 @@ def create_training_live_router(orchestrator=None) -> APIRouter:
         try:
             pw, ctx, page, screen_src, input_adapter = await _setup_browser_session()
             sid = _parse_uuid(session_id)
+            # Mutable per-connection viewport (CSS px). Updated by the client's
+            # {"type":"resize"} to its physical canvas size; used BOTH to
+            # set_viewport_size (crisp frame) AND to map normalized clicks → CSS px.
+            viewport = {"w": _TEACH_VIEWPORT_W, "h": _TEACH_VIEWPORT_H}
             send_task = asyncio.create_task(_send_frames(websocket, screen_src))
             recv_task = asyncio.create_task(
-                _recv_input(websocket, input_adapter, page, orchestrator, sid)
+                _recv_input(websocket, input_adapter, page, orchestrator, sid, viewport)
             )
 
             # Wait until either task exits (disconnect or error).
@@ -215,24 +222,21 @@ async def _setup_browser_session():
     pw = await async_playwright().start()
     browser = await pw.chromium.connect_over_cdp(_cdp_url())
 
-    # Isolated context: no shared cookies/storage with the agent.
-    # Logical viewport 1600x900 at deviceScaleFactor=2 → the screencast SOURCE is
-    # 3200x1800 device px, so it stays crisp on a Retina display and in fullscreen
-    # (a 1x source was upscaled into an illegible blur). Click coordinates are sent
-    # NORMALIZED (fraction of the frame) and converted server-side to CSS px, so the
-    # 2x source does not break input mapping.
+    # Isolated context: no shared cookies/storage with the agent. DSF=1 (the
+    # screencast ignores DSF); the initial viewport is a placeholder — the client
+    # reports its real physical canvas size via {"type":"resize"} and we
+    # set_viewport_size to match so the frame is 1:1 with the display (crisp at any
+    # size / fullscreen). The screencast cap is generous; the viewport drives it.
     ctx = await browser.new_context(
         viewport={"width": _TEACH_VIEWPORT_W, "height": _TEACH_VIEWPORT_H},
-        device_scale_factor=_TEACH_DEVICE_SCALE,
+        device_scale_factor=1,
     )
     page = await ctx.new_page()
 
-    # maxWidth/maxHeight must be >= device pixels (viewport x DSF) or CDP downscales
-    # the frame back to a blur. Match the 2x source exactly.
     screen_src = CdpScreencastSource(
         page=page,
-        max_width=_TEACH_VIEWPORT_W * _TEACH_DEVICE_SCALE,
-        max_height=_TEACH_VIEWPORT_H * _TEACH_DEVICE_SCALE,
+        max_width=_TEACH_MAX_W,
+        max_height=_TEACH_MAX_H,
     )
     await screen_src.start()
 
@@ -286,9 +290,11 @@ async def _recv_input(
     page,  # playwright Page
     orchestrator=None,
     session_id: "UUID | None" = None,
+    viewport: dict | None = None,
 ) -> None:
     """Receive JSON input events from the client, dispatch them to the browser,
     and (if recording) capture them as training steps."""
+    vp = viewport if viewport is not None else {"w": _TEACH_VIEWPORT_W, "h": _TEACH_VIEWPORT_H}
     while True:
         try:
             raw = await ws.receive_text()
@@ -301,7 +307,11 @@ async def _recv_input(
             logger.debug("hermes.training_live.recv.bad_json raw=%r", raw)
             continue
 
-        _normalize_mouse_coords(ev)
+        if ev.get("type") == "resize":
+            _dispatch_resize(ev, page, vp)
+            continue
+
+        _normalize_mouse_coords(ev, vp)
         _dispatch_event(ev, adapter, page)
         # Semantic capture: resolve a click's coordinate to the actual element so the
         # recorded step is "click the Search button", not "click at (640,300)".
@@ -315,12 +325,12 @@ async def _recv_input(
         _record_step(orchestrator, session_id, ev)
 
 
-def _normalize_mouse_coords(ev: dict) -> None:
+def _normalize_mouse_coords(ev: dict, viewport: dict) -> None:
     """Convert NORMALIZED client coords (xf/yf ∈ [0,1] of the frame) into CSS px
-    of the teaching viewport, in place, so all downstream code (dispatch, element
-    resolution, step capture) keeps reading ev['x']/ev['y'] as CSS px. The client
-    sends fractions so it never needs to know the source resolution or DSF; the
-    server owns the viewport truth. Legacy pixel events (x/y only) pass through.
+    of the CURRENT teaching viewport, in place, so all downstream code (dispatch,
+    element resolution, step capture) keeps reading ev['x']/ev['y'] as CSS px. The
+    client sends fractions so it never needs to know the source resolution/DSF; the
+    server owns the (dynamic) viewport truth. Legacy pixel events pass through.
     """
     if ev.get("type") != "mouse":
         return
@@ -332,8 +342,31 @@ def _normalize_mouse_coords(ev: dict) -> None:
         fy = min(1.0, max(0.0, float(yf)))
     except (TypeError, ValueError):
         return
-    ev["x"] = round(fx * _TEACH_VIEWPORT_W)
-    ev["y"] = round(fy * _TEACH_VIEWPORT_H)
+    ev["x"] = round(fx * viewport["w"])
+    ev["y"] = round(fy * viewport["h"])
+
+
+def _dispatch_resize(ev: dict, page, viewport: dict) -> None:
+    """Client reported its physical canvas size → resize the teaching page so the
+    screencast frame is 1:1 with the display (crisp at any size / fullscreen).
+    Updates the shared viewport dict (used to map normalized clicks) and schedules
+    page.set_viewport_size (async, fire-and-forget). Clamped to sane bounds.
+    """
+    try:
+        w = int(ev.get("width", 0))
+        h = int(ev.get("height", 0))
+    except (TypeError, ValueError):
+        return
+    w = max(320, min(w, _TEACH_MAX_W))
+    h = max(240, min(h, _TEACH_MAX_H))
+    if w == viewport["w"] and h == viewport["h"]:
+        return
+    viewport["w"], viewport["h"] = w, h
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    asyncio.ensure_future(page.set_viewport_size({"width": w, "height": h}), loop=loop)
 
 
 def _dispatch_event(ev: dict, adapter: CdpInputAdapter, page) -> None:

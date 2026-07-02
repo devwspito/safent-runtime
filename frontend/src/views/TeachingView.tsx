@@ -316,27 +316,38 @@ function useLiveCanvas(
     send({ type: 'key', action: 'up', keysym: null, text: ev.key })
   }, [send])
 
-  // Keep the canvas BACKING STORE in sync with its CSS display size × the
-  // device pixel ratio. On a Retina display devicePixelRatio is 2, so a backing
-  // store sized to CSS px alone is drawn at half resolution and the browser
-  // upscales it → blurry. Sizing the buffer to rect × dpr makes the frame render
-  // at native physical resolution (crisp). The CSS size is unchanged (the canvas
-  // still fills its box); only the drawing buffer grows.
+  // Report the canvas' PHYSICAL size to the server so it renders the remote page
+  // at exactly that resolution (crisp at any window size / fullscreen). The screen
+  // real size = CSS × devicePixelRatio; that's also the canvas backing store.
+  const sendViewport = useCallback(() => {
+    const canvas = canvasRef.current
+    if (!canvas || canvas.width < 1 || canvas.height < 1) return
+    send({ type: 'resize', width: canvas.width, height: canvas.height })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [send])
+
+  // Keep the canvas BACKING STORE at native physical resolution (CSS × dpr) so it
+  // isn't upscaled, AND tell the server that size so the SOURCE matches (the CDP
+  // screencast resolution follows the page viewport, which the server sets from
+  // this). Debounced so a drag-resize doesn't spam viewport changes.
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
+    let t: ReturnType<typeof setTimeout> | null = null
     const ro = new ResizeObserver((entries) => {
       const rect = entries[0]?.contentRect
       if (!rect) return
       const dpr = window.devicePixelRatio || 1
       canvas.width  = Math.round(rect.width * dpr)
       canvas.height = Math.round(rect.height * dpr)
+      if (t) clearTimeout(t)
+      t = setTimeout(sendViewport, 180)
     })
     ro.observe(canvas)
-    return () => ro.disconnect()
-  }, [canvasRef])
+    return () => { ro.disconnect(); if (t) clearTimeout(t) }
+  }, [canvasRef, sendViewport])
 
-  return { renderFrame, onMouseDown, onMouseUp, onMouseMove, onKeyDown, onKeyUp }
+  return { renderFrame, onMouseDown, onMouseUp, onMouseMove, onKeyDown, onKeyUp, sendViewport }
 }
 
 // ── TeachingView ──────────────────────────────────────────────────────────────
@@ -393,19 +404,22 @@ export default function TeachingView(
 
   const { send, close: closeWs } = useTrainingWs(activeSessionId, { onFrame, onOpen, onClose })
 
-  const { renderFrame, onMouseDown, onMouseUp, onMouseMove, onKeyDown, onKeyUp } =
+  const { renderFrame, onMouseDown, onMouseUp, onMouseMove, onKeyDown, onKeyUp, sendViewport } =
     useLiveCanvas(canvasRef, send)
 
-  // Send the pending navigation once the WS is open
+  // Send the pending navigation + the initial viewport once the WS is open.
   const wsReady = vs.phase === 'live' && vs.wsReady
   useEffect(() => {
     if (!wsReady) return
+    // Report our physical canvas size so the server renders the page at that exact
+    // resolution (the fix for the blurry teaching browser).
+    sendViewport()
     const navUrl = pendingNavRef.current
     if (navUrl) {
       send({ type: 'navigate', url: navUrl })
       pendingNavRef.current = null
     }
-  }, [wsReady, send])
+  }, [wsReady, send, sendViewport])
 
   // Poll session state while a session is active (every 3 s)
   useEffect(() => {
