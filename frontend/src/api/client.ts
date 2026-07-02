@@ -809,6 +809,21 @@ export function getMemoryEntry(entryId: string): Promise<MemoryEntryDetail> {
   return request<MemoryEntryDetail>(`/memory/${encodeURIComponent(entryId)}`)
 }
 
+/**
+ * Edit the content of a single memory entry.
+ * PUT /memory/{entry_id}  body { content }
+ * Rejects (400) if the new content trips the PII/injection guard.
+ */
+export function updateMemoryEntry(
+  entryId: string,
+  content: string,
+): Promise<{ ok: boolean; updated?: boolean }> {
+  return request(`/memory/${encodeURIComponent(entryId)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ content }),
+  })
+}
+
 // ── Instance / Edition ────────────────────────────────────────────────────────
 
 export interface InstanceFeatures {

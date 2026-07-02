@@ -332,6 +332,44 @@
   font-style: italic;
 }
 
+/* Editable content area — full content, editable in place */
+.editArea {
+  flex: 1;
+  width: 100%;
+  min-height: 160px;
+  max-height: 400px;
+  resize: vertical;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.015) 0%, rgba(255, 255, 255, 0) 100%),
+    var(--color-bg);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  font-size: var(--text-base);
+  font-family: inherit;
+  color: var(--color-text);
+  line-height: var(--leading-normal);
+  white-space: pre-wrap;
+  word-break: break-word;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.editArea:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-subtle, rgba(80, 130, 255, 0.15));
+}
+
+.editHint {
+  font-size: var(--text-sm);
+  color: var(--color-text-dim);
+  margin-top: calc(-1 * var(--space-1));
+}
+
+.drawerFooterSpacer {
+  flex: 1;
+}
+
 /* Loading skeleton inside drawer */
 .drawerLoadingWrap {
   display: flex;

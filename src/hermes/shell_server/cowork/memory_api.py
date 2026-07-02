@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Body, HTTPException, Query, Request
 
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
@@ -98,6 +98,45 @@ def create_memory_router() -> APIRouter:
             raise HTTPException(
                 status_code=404,
                 detail={"code": "not_found", "message": "memory entry not found"},
+            )
+        return result
+
+    @router.put("/{entry_id}")
+    async def update_memory_entry(
+        request: Request,
+        entry_id: str,
+        content: str = Body(..., embed=True, min_length=1),
+    ) -> dict:
+        """Edit the content of one memory entry by its id '{target}:{index}'.
+
+        Body: {"content": "<new text>"}.
+        Returns {ok:true, updated:bool} on success.
+        400 when the content is empty, the entry is missing, or the new content
+        is rejected by the PII/injection guard (fail-closed).
+        503 when the daemon is unavailable.
+        """
+        proxy = request.app.state.dbus_proxy
+        try:
+            result = await proxy.call_dict("update_memory_entry", entry_id, content)
+        except AgentUnavailable as exc:
+            logger.warning(
+                "hermes.memory.update_unavailable",
+                extra={"entry_id": entry_id, "reason": str(exc)},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "agent_unavailable",
+                    "message": "El agente no está disponible.",
+                },
+            ) from exc
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": result.get("code", "update_failed"),
+                    "message": result.get("error", "unknown"),
+                },
             )
         return result
 

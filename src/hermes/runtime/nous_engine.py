@@ -297,6 +297,78 @@ _RUNTIME_PROVIDER_CACHE: dict[int, tuple[float, tuple]] = {}  # key → (expires
 _RUNTIME_PROVIDER_TTL_S: float = 30.0
 
 
+def _resolve_local_tz():
+    """Resolve the timezone the agent should reason in.
+
+    Order: HERMES_TZ → TZ (both IANA names, e.g. 'Europe/Madrid') → the process'
+    system local zone → UTC. Fail-soft: any bad name falls through. This is the
+    single knob for "what wall-clock does Lumen live in" — set by run-lumen.sh from
+    the host and passed to the daemon unit via PassEnvironment.
+    """
+    from datetime import timezone as _tz  # noqa: PLC0415
+
+    for env_name in ("HERMES_TZ", "TZ"):
+        name = (os.environ.get(env_name) or "").strip()
+        if not name:
+            continue
+        try:
+            from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+            return ZoneInfo(name)
+        except Exception:  # noqa: BLE001 — unknown zone / no tzdata → try next
+            continue
+    try:
+        # System local zone (honours /etc/localtime). astimezone() with no arg
+        # attaches the local zone; .tzinfo is then a fixed-offset tzinfo.
+        from datetime import datetime as _dt  # noqa: PLC0415
+
+        local = _dt.now().astimezone().tzinfo
+        return local or _tz.utc
+    except Exception:  # noqa: BLE001
+        return _tz.utc
+
+
+# Spanish month/day names — strftime %B/%A are locale-dependent (C locale = English);
+# we render names explicitly so the agent always reads a coherent es-ES date.
+_ES_MONTHS = (
+    "enero", "febrero", "marzo", "abril", "mayo", "junio",
+    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+)
+_ES_DAYS = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+
+
+def _current_time_context() -> str:
+    """Authoritative LOCAL date/time block injected fresh every cycle.
+
+    The reasoning engine may inject its own UTC-labelled date; this overrides that
+    confusion so the agent talks and schedules in the user's real wall-clock. Never
+    cached (volatile) and never crashes the cycle (fail-soft → empty string).
+    """
+    try:
+        from datetime import datetime as _dt  # noqa: PLC0415
+
+        now = _dt.now(_resolve_local_tz())
+        off = now.strftime("%z")  # e.g. +0200
+        off_fmt = f"{off[:3]}:{off[3:]}" if len(off) == 5 else (off or "+00:00")
+        tzname = now.tzname() or "local"
+        stamp = now.strftime("%Y-%m-%d %H:%M")
+        pretty = (
+            f"{_ES_DAYS[now.weekday()]} {now.day} de {_ES_MONTHS[now.month - 1]} "
+            f"de {now.year}, {now.strftime('%H:%M')}"
+        )
+        return (
+            "CONTEXTO TEMPORAL (fuente autoritativa de la hora — úsala tal cual, "
+            "NUNCA inventes la hora ni uses UTC al hablar con el usuario):\n"
+            f"- Ahora mismo: {pretty} ({stamp}, {tzname}, UTC{off_fmt}). "
+            "Es la hora local del equipo donde vives.\n"
+            "- Calcula SIEMPRE en esta hora local: 'dentro de N minutos' = esta hora "
+            "+ N; 'a las 9' = las 09:00 de HOY (o mañana si ya pasó). El planificador "
+            "guarda internamente en UTC; tú razonas y respondes en hora local."
+        )
+    except Exception:  # noqa: BLE001 — time context is best-effort, never fatal
+        return ""
+
+
 def _cached_chat_system_prompt(engine_id: int, persona: Any) -> str:
     """Return _chat_system_prompt(persona) from cache keyed by (engine_id, id(persona)).
 
@@ -1980,6 +2052,37 @@ class NousReasoningEngine:
             "NUEVO desde el catálogo; NUNCA uses `search_mcp` para usar ruflo u otra "
             "integración ya conectada (ahí no aparecerán). Si el usuario te pide operar "
             "ruflo/un swarm/una app conectada, ve directo a `tool_search` con su nombre.",
+            # Body-awareness: the agent lives INSIDE this app and must know its own
+            # UI so it GUIDES the user to the right section instead of handing out
+            # raw shell commands (a `rm` in a chat is user-hostile). Each section has
+            # a deep-link the frontend turns into a one-click button when the agent
+            # writes it as a markdown link to the route (react-router basename=/app).
+            "Vives DENTRO de una app con estas secciones (menú lateral izquierdo). "
+            "Conoces tu propio cuerpo: guía al usuario a la sección correcta en vez de "
+            "darle comandos de terminal.\n"
+            "- Chat (/chat): esta conversación.\n"
+            "- Programadas (/programadas): tareas y recordatorios programados.\n"
+            "- Agentes (/agentes): tus agentes/roles y su actividad en vivo.\n"
+            "- Habilidades (/skills): las skills que sabes ejecutar.\n"
+            "- Integraciones (/integraciones): apps conectadas (Gmail, Google Ads…).\n"
+            "- Herramientas (/mcp): servidores MCP conectados.\n"
+            "- Archivos (/archivos): la carpeta de trabajo; el usuario VE, ABRE, "
+            "DESCARGA y BORRA aquí los ficheros que generas.\n"
+            "- Modelo de IA (/proveedores): el proveedor/modelo LLM configurado.\n"
+            "- Seguridad (/seguridad): permisos y análisis de seguridad.\n"
+            "- Memoria (/memoria): lo que recuerdas entre conversaciones; el usuario "
+            "puede ver, EDITAR y borrar cada entrada ahí.\n"
+            "- Coste (/coste): consumo y coste.\n"
+            "- Enseñar (/ensenar): grabar una demostración en vivo para crear una skill.\n"
+            "Para LLEVAR al usuario a una sección, incluye un enlace markdown a su ruta, "
+            "p.ej. [Abrir Archivos](/archivos) o [Ver tu memoria](/memoria): la app lo "
+            "convierte en un botón que navega ahí de un clic. Hazlo siempre que orientes. "
+            "Cuando el usuario quiera GESTIONAR sus ficheros (verlos, borrarlos, "
+            "descargarlos), llévale a [Archivos](/archivos) —ahí los borra con clic "
+            "derecho→Eliminar— en vez de darle un comando `rm`. Y si TÚ puedes hacer la "
+            "acción con una herramienta (borrar un fichero, etc.), invócala: el sistema "
+            "pedirá la aprobación del dueño si hace falta; no te limites a mandar al "
+            "usuario a hacerlo a mano.",
         ]
         golden = getattr(persona, "golden_rules", ()) or ()
         if golden:
@@ -2073,6 +2176,13 @@ class NousReasoningEngine:
                 user_message = _chat_text
                 # FIX D — cache system prompt keyed by (engine_id, persona_id).
                 system_prompt = _cached_chat_system_prompt(id(self), cycle_persona)
+
+        # Time awareness: append the authoritative LOCAL wall-clock per cycle so the
+        # agent reasons and schedules in the user's real time, not the container's
+        # UTC. Volatile → appended AFTER the cached prompt (never baked into cache).
+        _time_ctx = _current_time_context()
+        if _time_ctx:
+            system_prompt = f"{system_prompt}\n\n{_time_ctx}"
 
         loop = asyncio.get_event_loop()
         tenant_id = self._tenant_id or context.tenant_id

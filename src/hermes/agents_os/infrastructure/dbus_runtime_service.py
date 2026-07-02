@@ -4180,6 +4180,78 @@ class DbusRuntimeServiceWiring:
             return {"ok": True, "deleted": True}
         return {"ok": False, "error": result.get("error", "unknown")}
 
+    def update_memory_entry(
+        self, *, entry_id: str, content: str, sender_uid: int
+    ) -> dict:
+        """Edita el contenido de una entrada de memoria por su id '{target}:{index}'.
+
+        Reemplaza el texto de la entrada in situ (el índice se conserva). El nuevo
+        contenido pasa por el MISMO guard PII/inyección que las escrituras del
+        agente (fail-closed): si contiene un patrón de amenaza se rechaza sin
+        escribir — un operador no debe poder inyectar instrucciones en la memoria
+        que luego el agente leería como contexto de confianza.
+        authZ: operador (sender_uid del bus, CWE-862).
+        PII: el contenido NUNCA se loguea, sólo target e índice (metadatos).
+        """
+        self._authorize(sender_uid, operation="update_memory_entry")
+
+        if not entry_id or ":" not in entry_id:
+            return {"ok": False, "error": f"id inválido: {entry_id!r}"}
+        parts = entry_id.rsplit(":", 1)
+        if len(parts) != 2:
+            return {"ok": False, "error": f"id inválido: {entry_id!r}"}
+        target, index_str = parts[0], parts[1]
+
+        try:
+            entry_index = int(index_str)
+        except ValueError:
+            return {"ok": False, "error": f"índice no numérico en id: {entry_id!r}"}
+
+        new_content = (content or "").strip()
+        if not new_content:
+            return {"ok": False, "error": "El contenido no puede estar vacío."}
+
+        try:
+            from hermes.memory.infrastructure.tenant_memory_store import (  # noqa: PLC0415
+                PiiRejectedError,
+                TenantMemoryStore,
+            )
+            from hermes.memory.infrastructure.nous_memory_bridge import (  # noqa: PLC0415
+                _DEFAULT_MEMORY_ROOT,
+            )
+            from hermes.runtime.__main__ import _resolve_tenant_id  # noqa: PLC0415
+            tenant_id = _resolve_tenant_id()
+            store = TenantMemoryStore(root=_DEFAULT_MEMORY_ROOT, tenant_id=tenant_id)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"memory store unavailable: {exc}"}
+
+        try:
+            entries = store.read(target)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"cannot read target {target!r}: {exc}"}
+
+        if entry_index >= len(entries):
+            return {"ok": False, "error": "entry not found"}
+
+        old_text = entries[entry_index]
+        if old_text.strip() == new_content:
+            return {"ok": True, "updated": False, "reason": "sin cambios"}
+
+        try:
+            result = store.replace(target, old_text, new_content, agent_id="operator")
+        except PiiRejectedError as exc:
+            return {"ok": False, "error": str(exc), "code": "pii_rejected"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"update failed: {exc}"}
+
+        if result.get("success"):
+            logger.info(
+                "hermes.dbus.memory_entry_updated target=%s index=%d by_uid=%d",
+                target, entry_index, sender_uid,
+            )
+            return {"ok": True, "updated": True}
+        return {"ok": False, "error": result.get("error", "unknown")}
+
     # ------------------------------------------------------------------
     # Notifications — task/chat completion bell
     # Written by daemon (orchestrator post-cycle hooks), read via D-Bus.

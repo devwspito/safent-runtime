@@ -68,6 +68,24 @@ _PRINTABLE_LOW: int = 0x0020
 _PRINTABLE_HIGH: int = 0x007E
 _UNICODE_KEYSYM_BASE: int = 0x01000000
 
+# DOM KeyboardEvent.key → (windowsVirtualKeyCode, DOM code). Chrome only executes
+# the built-in editing command for these keys when the legacy VK code is present.
+_NAMED_KEY_META: dict[str, tuple[int, str]] = {
+    "Enter": (13, "Enter"),
+    "Backspace": (8, "Backspace"),
+    "Tab": (9, "Tab"),
+    "Escape": (27, "Escape"),
+    "Delete": (46, "Delete"),
+    "ArrowLeft": (37, "ArrowLeft"),
+    "ArrowUp": (38, "ArrowUp"),
+    "ArrowRight": (39, "ArrowRight"),
+    "ArrowDown": (40, "ArrowDown"),
+    "Home": (36, "Home"),
+    "End": (35, "End"),
+    "PageUp": (33, "PageUp"),
+    "PageDown": (34, "PageDown"),
+}
+
 
 class CdpInputAdapter:
     """Inject input events into a jailed Chromium page via CDP.
@@ -81,6 +99,14 @@ class CdpInputAdapter:
 
     def __init__(self, *, session: "CDPSession") -> None:
         self._session = session
+        # CDP is STATELESS per event: a mousePressed/mouseReleased dispatches at
+        # the x,y IN THAT EVENT — it does NOT reuse the position of a prior
+        # mouseMoved. We remember the last pointer position (set synchronously by
+        # pointer_motion) so the press/release lands where the operator clicked
+        # instead of the (0,0) top-left corner. Without this the click never hits
+        # the target element → the field never focuses → typing goes nowhere.
+        self._last_x: float = 0.0
+        self._last_y: float = 0.0
 
     # ------------------------------------------------------------------
     # SeatInputEffectorPort — synchronous facade
@@ -88,6 +114,8 @@ class CdpInputAdapter:
 
     def pointer_motion(self, x: float, y: float) -> None:
         """Move pointer to absolute (x, y) in page viewport coordinates."""
+        self._last_x = float(x)
+        self._last_y = float(y)
         self._fire(
             "Input.dispatchMouseEvent",
             {"type": "mouseMoved", "x": x, "y": y},
@@ -98,6 +126,12 @@ class CdpInputAdapter:
 
         The BTN_* evdev codes (272=left, 273=right, 274=middle) are mapped to
         CDP button names. Unmapped codes default to 'left'.
+
+        The press/release is dispatched at the LAST pointer position recorded by
+        pointer_motion — CDP does not carry position across events, so sending
+        (0,0) here would click the top-left corner (the historical "clicks do
+        nothing / can't type" bug). clickCount stays 1 on release too so Chrome
+        synthesises the DOM 'click' (press and release must agree).
         """
         # evdev → CDP button name: BTN_LEFT=272 → 0, RIGHT=273 → 2, MIDDLE=274 → 1
         evdev_to_idx = {272: 0, 273: 2, 274: 1}
@@ -108,10 +142,10 @@ class CdpInputAdapter:
             "Input.dispatchMouseEvent",
             {
                 "type": event_type,
-                "x": 0.0,  # position updated by last pointer_motion
-                "y": 0.0,
+                "x": self._last_x,
+                "y": self._last_y,
                 "button": btn_name,
-                "clickCount": 1 if pressed else 0,
+                "clickCount": 1,
             },
         )
 
@@ -155,13 +189,27 @@ class CdpInputAdapter:
         via CDP keyDown/keyUp. CDP's ``key`` field uses the same names as the DOM
         ``KeyboardEvent.key``, so a browser's ``ev.key`` for non-printable keys maps
         1:1. Printable single chars should use ``keyboard_keysym`` (char insertion).
+
+        For editing keys Chrome only runs the built-in command (delete a char,
+        submit a form, move the caret) when the event also carries the legacy
+        ``windowsVirtualKeyCode``/``code``. A bare ``key`` fires a JS keydown but
+        does NOT edit the field — so Backspace/Enter/arrows appeared dead. We
+        attach the VK/code for the keys we know; unknown named keys still send
+        the bare ``key`` (best-effort).
         """
         if not key:
             return
-        self._fire(
-            "Input.dispatchKeyEvent",
-            {"type": "keyDown" if pressed else "keyUp", "key": key},
-        )
+        params: dict[str, Any] = {
+            "type": "keyDown" if pressed else "keyUp",
+            "key": key,
+        }
+        meta = _NAMED_KEY_META.get(key)
+        if meta is not None:
+            vk, code = meta
+            params["windowsVirtualKeyCode"] = vk
+            params["nativeVirtualKeyCode"] = vk
+            params["code"] = code
+        self._fire("Input.dispatchKeyEvent", params)
 
     def keyboard_keycode(self, keycode: int, pressed: bool) -> None:  # noqa: ARG002
         """No-op: evdev keycodes have no direct CDP mapping without a layout table.

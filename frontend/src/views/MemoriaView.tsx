@@ -9,8 +9,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { Brain, CalendarClock, ChevronRight, Search, Trash2 } from 'lucide-react'
-import { listMemory, searchMemory, forgetMemoryItem, getMemoryEntry, ApiError } from '../api/client'
+import { Brain, CalendarClock, ChevronRight, Save, Search, Trash2 } from 'lucide-react'
+import { listMemory, searchMemory, forgetMemoryItem, getMemoryEntry, updateMemoryEntry, ApiError } from '../api/client'
 import type { MemoryItem, MemoryEntryDetail } from '../api/types'
 import { Drawer } from '../components/ui/Drawer'
 import { EmptyState } from '../components/ui/EmptyState'
@@ -152,6 +152,8 @@ export default function MemoriaView() {
   const [searchInput, setSearchInput] = useState('')
   const [drawer, setDrawer] = useState<DrawerState>({ open: false })
   const [deleting, setDeleting] = useState(false)
+  const [editValue, setEditValue] = useState('')
+  const [saving, setSaving] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async (query = '') => {
@@ -180,6 +182,7 @@ export default function MemoriaView() {
 
   async function openDrawer(item: MemoryItem) {
     setDrawer({ open: true, item, detail: null, loading: true })
+    setEditValue(memoryContent(item))
     const id = entryId(item)
     if (!id) {
       setDrawer({ open: true, item, detail: null, loading: false })
@@ -188,6 +191,8 @@ export default function MemoriaView() {
     try {
       const detail = await getMemoryEntry(id)
       setDrawer(prev => prev.open ? { ...prev, detail, loading: false } : prev)
+      // Load the FULL content into the editor (list rows are truncated).
+      setEditValue(detail.content ?? memoryContent(item))
     } catch {
       setDrawer(prev => prev.open ? { ...prev, detail: null, loading: false } : prev)
     }
@@ -195,6 +200,30 @@ export default function MemoriaView() {
 
   function closeDrawer() {
     setDrawer({ open: false })
+    setEditValue('')
+  }
+
+  async function handleSave() {
+    if (!drawer.open) return
+    const item = drawer.item
+    const id = entryId(item)
+    if (!id) { sileo.error({ title: 'No se puede editar esta entrada.' }); return }
+    const next = editValue.trim()
+    if (!next) { sileo.warning({ title: 'El contenido no puede estar vacío.' }); return }
+    setSaving(true)
+    try {
+      await updateMemoryEntry(id, next)
+      sileo.success({ title: 'Entrada actualizada' })
+      // Reflect the saved value in the open drawer without a refetch.
+      setDrawer(prev => prev.open
+        ? { ...prev, detail: prev.detail ? { ...prev.detail, content: next } : prev.detail }
+        : prev)
+      void load(searchInput.trim())
+    } catch (e) {
+      sileo.error({ title: e instanceof ApiError ? e.message : 'No se pudo guardar' })
+    } finally {
+      setSaving(false)
+    }
   }
 
   async function handleDelete() {
@@ -353,10 +382,28 @@ export default function MemoriaView() {
           drawer.open ? (
             <div className={styles.drawerFooter}>
               <Button
+                variant="primary"
+                size="sm"
+                onClick={handleSave}
+                loading={saving}
+                disabled={
+                  drawer.loading ||
+                  deleting ||
+                  !editValue.trim() ||
+                  editValue.trim() === (drawer.detail?.content ?? memoryContent(drawer.item)).trim()
+                }
+                aria-label="Guardar cambios en esta entrada de memoria"
+              >
+                <Save size={13} aria-hidden="true" />
+                Guardar cambios
+              </Button>
+              <div className={styles.drawerFooterSpacer} />
+              <Button
                 variant="danger"
                 size="sm"
                 onClick={handleDelete}
                 loading={deleting}
+                disabled={saving}
                 aria-label="Eliminar esta entrada de memoria"
               >
                 <Trash2 size={13} aria-hidden="true" />
@@ -387,7 +434,7 @@ export default function MemoriaView() {
               </div>
             )}
 
-            {/* Content body */}
+            {/* Content body — editable */}
             {drawer.loading ? (
               <div className={styles.drawerLoadingWrap}>
                 <Spinner size={14} label="Cargando contenido completo…" />
@@ -397,12 +444,19 @@ export default function MemoriaView() {
               </div>
             ) : (
               <FadeIn>
-                <div className={styles.drawerBody}>
-                  {(drawer.detail?.content ?? memoryContent(drawer.item))
-                    ? (drawer.detail?.content ?? memoryContent(drawer.item))
-                    : <span className={styles.drawerBodyEmpty}>(sin contenido)</span>
-                  }
-                </div>
+                <label className="sr-only" htmlFor="memory-edit">Contenido de la entrada</label>
+                <textarea
+                  id="memory-edit"
+                  className={styles.editArea}
+                  value={editValue}
+                  onChange={e => setEditValue(e.target.value)}
+                  spellCheck={false}
+                  aria-label="Editar el contenido de esta entrada de memoria"
+                  placeholder="Contenido de la entrada…"
+                />
+                <p className={styles.editHint}>
+                  Edita el texto y pulsa <strong>Guardar cambios</strong>. Lumen usará esto como contexto en futuras conversaciones.
+                </p>
               </FadeIn>
             )}
 

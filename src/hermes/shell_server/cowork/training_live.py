@@ -205,7 +205,14 @@ async def _setup_browser_session():
     browser = await pw.chromium.connect_over_cdp(_cdp_url())
 
     # Isolated context: no shared cookies/storage with the agent.
-    ctx = await browser.new_context()
+    # Viewport 1600x900 at deviceScaleFactor=1: gives the screencast a crisp
+    # 1600-wide source (the frame is upscaled far less on a large/Retina display)
+    # while keeping device pixels == CSS pixels so the operator's click
+    # coordinates map 1:1 to the CDP Input viewport (no DSF correction needed).
+    ctx = await browser.new_context(
+        viewport={"width": 1600, "height": 900},
+        device_scale_factor=1,
+    )
     page = await ctx.new_page()
 
     screen_src = CdpScreencastSource(page=page)

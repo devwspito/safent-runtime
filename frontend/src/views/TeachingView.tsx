@@ -245,8 +245,8 @@ function useLiveCanvas(
     const img = new Image()
 
     img.onload = () => {
-      const srcW = img.naturalWidth  || 1280
-      const srcH = img.naturalHeight || 720
+      const srcW = img.naturalWidth  || 1600
+      const srcH = img.naturalHeight || 900
       const dstW = canvas.width
       const dstH = canvas.height
       const scale = Math.min(dstW / srcW, dstH / srcH)
@@ -266,10 +266,17 @@ function useLiveCanvas(
   }, [canvasRef])
 
   function canvasToRemote(ev: React.MouseEvent<HTMLCanvasElement>): { x: number; y: number } {
+    const canvas = canvasRef.current
     const { scaleX, scaleY, offX, offY } = layoutRef.current
+    // offsetX/Y are in CSS px, but the letterbox layout (offX/offY/scale) is
+    // computed in the canvas BACKING-STORE space (device px = CSS × dpr). Convert
+    // the pointer position to backing-store px using the canvas' own ratio so the
+    // click maps to the correct remote-browser coordinate regardless of dpr.
+    const ratioX = canvas && canvas.clientWidth ? canvas.width / canvas.clientWidth : 1
+    const ratioY = canvas && canvas.clientHeight ? canvas.height / canvas.clientHeight : 1
     return {
-      x: Math.round((ev.nativeEvent.offsetX - offX) / scaleX),
-      y: Math.round((ev.nativeEvent.offsetY - offY) / scaleY),
+      x: Math.round((ev.nativeEvent.offsetX * ratioX - offX) / scaleX),
+      y: Math.round((ev.nativeEvent.offsetY * ratioY - offY) / scaleY),
     }
   }
 
@@ -304,15 +311,21 @@ function useLiveCanvas(
     send({ type: 'key', action: 'up', keysym: null, text: ev.key })
   }, [send])
 
-  // Keep canvas.width / height in sync with CSS display size via ResizeObserver
+  // Keep the canvas BACKING STORE in sync with its CSS display size × the
+  // device pixel ratio. On a Retina display devicePixelRatio is 2, so a backing
+  // store sized to CSS px alone is drawn at half resolution and the browser
+  // upscales it → blurry. Sizing the buffer to rect × dpr makes the frame render
+  // at native physical resolution (crisp). The CSS size is unchanged (the canvas
+  // still fills its box); only the drawing buffer grows.
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
     const ro = new ResizeObserver((entries) => {
       const rect = entries[0]?.contentRect
       if (!rect) return
-      canvas.width  = Math.round(rect.width)
-      canvas.height = Math.round(rect.height)
+      const dpr = window.devicePixelRatio || 1
+      canvas.width  = Math.round(rect.width * dpr)
+      canvas.height = Math.round(rect.height * dpr)
     })
     ro.observe(canvas)
     return () => ro.disconnect()

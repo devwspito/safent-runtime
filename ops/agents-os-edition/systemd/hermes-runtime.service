@@ -41,6 +41,11 @@ Type=notify
 NotifyAccess=main
 User=hermes
 Group=hermes
+# Timezone: systemd units do NOT inherit the container's `-e` env by default.
+# PassEnvironment imports these from PID1 (systemd), which DID inherit them from
+# `docker run -e ...`. This lets run-lumen.sh forward the host timezone so the
+# agent reasons/schedules in the user's real wall-clock instead of UTC.
+PassEnvironment=HERMES_TZ TZ
 # In group hermes-egress so the daemon's browser flow may PUSH egress policy to the
 # proxy control socket (group hermes-egress 0660). The agent's sandboxed terminal/
 # browser run as hermes-sandbox (NOT hermes-egress) → cannot push → cannot widen their

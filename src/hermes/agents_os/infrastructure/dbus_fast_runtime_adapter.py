@@ -1407,6 +1407,25 @@ class Runtime1ServiceInterface(ServiceInterface):
         except PermissionError as exc:
             raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
 
+    @method()
+    async def UpdateMemoryEntry(self, entry_id: "s", content: "s") -> "s":  # noqa: N802,F821,UP037
+        """Edita el contenido de una entrada de memoria por su id '{target}:{index}'.
+
+        Devuelve JSON {ok:true, updated:bool} en éxito, {ok:false, error, code?}
+        si el contenido está vacío, no existe la entrada o el guard PII/inyección
+        lo rechaza (mismo guard fail-closed que las escrituras del agente).
+        authZ: operador (sender_uid del bus, CWE-862).
+        PII: el contenido NUNCA cruza el bus completo en logs ni se persiste aquí.
+        """
+        try:
+            sender_uid = await self._resolve_current_sender_uid()
+            result = self._wiring.update_memory_entry(
+                entry_id=entry_id, content=content, sender_uid=sender_uid
+            )
+            return json.dumps(result)
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
+
     # ------------------------------------------------------------------
     # Notifications — task/chat completion bell (read via D-Bus by shell-server)
     # Read verbs: no authZ (same policy as list_memory / list_providers).

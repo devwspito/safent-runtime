@@ -38,9 +38,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_QUALITY: int = 60
-_DEFAULT_MAX_WIDTH: int = 1280
-_DEFAULT_MAX_HEIGHT: int = 720
+# JPEG quality and cap. Raised from 60/1280x720: on a large / Retina display the
+# old low-res, low-quality frame was upscaled into an illegible blur. 82 quality
+# at 1600x900 (matched to the teaching context viewport, deviceScaleFactor=1 so
+# the frame's device pixels == the CSS viewport → operator click coordinates stay
+# 1:1) is crisp without an unreasonable bandwidth cost on localhost.
+_DEFAULT_QUALITY: int = 82
+_DEFAULT_MAX_WIDTH: int = 1600
+_DEFAULT_MAX_HEIGHT: int = 900
 
 _SCREENCAST_PARAMS: dict[str, Any] = {
     "format": "jpeg",

@@ -22,6 +22,24 @@ SECCOMP="${LUMEN_SECCOMP:-$HERE/seccomp/lumen.json}"
 
 "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || true
 
+# Timezone: the container must reason/schedule in the SAME wall-clock as the host
+# that runs it — otherwise it defaults to UTC and the agent tells you the wrong
+# time (e.g. "it's 11 PM" when your clock says 1 AM). Resolve the host IANA zone:
+#   1. an explicit LUMEN_TZ / TZ wins (override for remote/headless installs),
+#   2. else read the /etc/localtime symlink (works on macOS and Linux),
+#   3. else fall back to UTC.
+host_tz() {
+  if [ -n "${LUMEN_TZ:-}" ]; then printf '%s' "$LUMEN_TZ"; return; fi
+  if [ -n "${TZ:-}" ]; then printf '%s' "$TZ"; return; fi
+  local link
+  link="$(readlink /etc/localtime 2>/dev/null || true)"
+  case "$link" in
+    */zoneinfo/*) printf '%s' "${link##*/zoneinfo/}" ;;
+    *) printf 'UTC' ;;
+  esac
+}
+LUMEN_TZ_VALUE="$(host_tz)"
+
 # WHY each flag (see SECURITY.md):
 #   -p 127.0.0.1:...    publish on host LOOPBACK only — the control plane never
 #                       faces the LAN. (The HTTP edge also requires a Bearer token.)
@@ -56,6 +74,7 @@ SECCOMP="${LUMEN_SECCOMP:-$HERE/seccomp/lumen.json}"
 # a container-level no-new-privileges breaks dbus/login setuid and the boot fails.
 exec "$RUNTIME" run -d --name "$NAME" --systemd=always \
   -p "127.0.0.1:${HOST_PORT}:7517" \
+  -e "TZ=${LUMEN_TZ_VALUE}" -e "HERMES_TZ=${LUMEN_TZ_VALUE}" \
   --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
   --security-opt "seccomp=${SECCOMP}" \
   --security-opt unmask=/sys/kernel/security \

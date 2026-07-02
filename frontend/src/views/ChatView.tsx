@@ -300,6 +300,16 @@ const UserMessage = memo(function UserMessage({ text, failed, enterDelay = 0 }: 
   )
 })
 
+// The SPA's own view routes (react-router basename=/app). When the agent guides
+// the user with a markdown link to one of these (e.g. [Abrir Archivos](/archivos)),
+// we intercept the click and navigate IN-APP instead of doing a full-page reload
+// that would 404 (the app is mounted under /app). This is how the agent "operates
+// its own body" — it can take the user to any section with a one-click button.
+const APP_VIEW_ROUTES: ReadonlySet<string> = new Set([
+  '/chat', '/programadas', '/agentes', '/skills', '/integraciones', '/mcp',
+  '/archivos', '/proveedores', '/seguridad', '/memoria', '/coste', '/ensenar',
+])
+
 interface AssistantMessageProps {
   message: Extract<ChatMessage, { type: 'assistant' }>
   enterDelay?: number
@@ -310,6 +320,22 @@ const AssistantMessage = memo(function AssistantMessage({
   enterDelay = 0,
 }: AssistantMessageProps) {
   const { thinkingText, thinkingDone, toolSteps, activityText, renderedHtml, isStreaming } = message
+  const navigate = useNavigate()
+
+  // Intercept clicks on internal view links inside the agent's rendered markdown
+  // and route them through react-router (respects the /app basename); external
+  // links (target=_blank) are left untouched.
+  const handleProseClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const anchor = (e.target as HTMLElement).closest('a')
+    if (!anchor) return
+    const href = anchor.getAttribute('href') ?? ''
+    if (!href.startsWith('/')) return
+    const path = href.split('?')[0].split('#')[0]
+    if (APP_VIEW_ROUTES.has(path)) {
+      e.preventDefault()
+      navigate(path)
+    }
+  }, [navigate])
 
   const hasDelegationInFlight =
     isStreaming &&
@@ -338,6 +364,7 @@ const AssistantMessage = memo(function AssistantMessage({
         {!isStreaming && renderedHtml && (
           <div
             className={styles.agentProse}
+            onClick={handleProseClick}
             /* Safe: renderedHtml is produced by DOMPurify.sanitize — see lib/markdown.ts */
             dangerouslySetInnerHTML={{ __html: renderedHtml }}
           />
