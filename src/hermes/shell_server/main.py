@@ -1268,6 +1268,16 @@ def create_app() -> FastAPI:
     app.include_router(
         create_training_live_router(orchestrator=_get_training_orchestrator(_DB_PATH))
     )
+    # Native teaching: record a demonstration in the USER's own Chrome (observe via
+    # CDP, no screencast) — same orchestrator so POST …/sign compiles the SKILL.md.
+    from hermes.shell_server.cowork.native_teach import (  # noqa: PLC0415
+        create_native_teach_router,
+    )
+    app.include_router(
+        create_native_teach_router(
+            orchestrator=_get_training_orchestrator(_DB_PATH), db_path=_DB_PATH
+        )
+    )
     # Read-only live-watch of the agent's internal browser (Verificar).
     from hermes.shell_server.cowork.watch_live import (  # noqa: PLC0415
         create_watch_live_router,

@@ -45,7 +45,8 @@ echo "[*] Version (from VERSION file): ${VERSION}"
 
 # 1) Sync the single version into the wheel + runtime (idempotent).
 sed -i -E "s/^version = \".*\"/version = \"${VERSION}\"/" pyproject.toml
-sed -i -E "s/^__version__ = \".*\"/__version__ = \"${VERSION}\"  # single source of truth: repo-root VERSION file (synced by ops\/container\/build.sh)/" src/hermes/__init__.py
+# Match the WHOLE line so an existing trailing comment is replaced, not duplicated.
+sed -i -E "s|^__version__ = .*|__version__ = \"${VERSION}\"  # single source of truth: repo-root VERSION (synced by build.sh)|" src/hermes/__init__.py
 echo "[ok] synced pyproject.toml + src/hermes/__init__.py → ${VERSION}"
 
 # 2) Build a SINGLE fresh wheel (wipe dist/ so the Containerfile glob is unambiguous).
