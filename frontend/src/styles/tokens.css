@@ -19,6 +19,7 @@
   --color-bg:            var(--slate-1);
   --color-surface:       var(--slate-2);
   --color-surface-raise: var(--slate-3);
+  --color-bg-subtle:     var(--slate-3);
   --color-surface-hover: rgba(255, 255, 255, 0.04);
   --color-surface-press: rgba(255, 255, 255, 0.06);
   --color-border-subtle: var(--slate-6);
@@ -91,6 +92,7 @@
   --radius-md:   6px;
   --radius-lg:   8px;
   --radius-pill: 9999px;
+  --radius-full: 9999px; /* alias of --radius-pill */
 
   /* ── Depth — borders + luminance delta; shadows ONLY on overlays/drawers ─── */
   --shadow-overlay: 0 8px 32px rgba(0, 0, 0, 0.56), 0 2px 8px rgba(0, 0, 0, 0.32);

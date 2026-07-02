@@ -32,6 +32,31 @@
   margin: 0 0 var(--space-2);
 }
 
+/* "Live" badge — a skill that drives the browser (watchable live when run/verified). */
+.liveBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: var(--space-2);
+  padding: 1px 8px 1px 7px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.02em;
+  color: var(--color-danger);
+  background: var(--color-danger-surface);
+  border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
+  vertical-align: middle;
+}
+
+.liveDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-danger) 22%, transparent);
+}
+
 .sectionCount {
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);

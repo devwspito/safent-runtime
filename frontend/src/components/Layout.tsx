@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { Settings } from 'lucide-react'
 import { listConversations, listPendingApprovals } from '../api/client'
 import { useChat } from '../hooks/useChat'
 import { useFeatures } from '../hooks/useFeatures'
@@ -133,17 +134,6 @@ function CosteIcon() {
   )
 }
 
-function TeachingIcon() {
-  return (
-    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="1" y="2" width="14" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M5 14h6M8 11v3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-      <circle cx="8" cy="6.5" r="1.5" fill="currentColor" />
-      <path d="M5.5 6.5C5.5 4.85 6.63 4 8 4s2.5.85 2.5 2.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-    </svg>
-  )
-}
-
 function PlusIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
@@ -152,21 +142,33 @@ function PlusIcon() {
   )
 }
 
-function useNavItems(): NavItem[] {
+/** Sidebar núcleo: the only 3 views shown as top-level nav. Everything else lives behind Ajustes. */
+function useCoreNavItems(): NavItem[] {
   const t = useT()
   return [
-    { to: '/chat',          label: t('nav.chat'),          icon: <ChatIcon /> },
+    { to: '/chat',    label: t('nav.chat'),    icon: <ChatIcon /> },
+    { to: '/agentes', label: t('nav.agentes'), icon: <AgentsIcon /> },
+    { to: '/skills',  label: t('nav.skills'),  icon: <SkillsIcon /> },
+  ]
+}
+
+/**
+ * The 8 config sections shown as tabs inside the Ajustes page, in display order.
+ * Exported so AjustesView can reuse the same {to, label} pairs instead of
+ * duplicating the nav.* label lookups. "En vivo" is the Ajustes page's 9th tab
+ * but isn't a sidebar nav item, so it's added separately in AjustesView.
+ */
+export function useSettingsNavItems(): NavItem[] {
+  const t = useT()
+  return [
     { to: '/programadas',   label: t('nav.programadas'),   icon: <TasksIcon /> },
-    { to: '/agentes',       label: t('nav.agentes'),       icon: <AgentsIcon /> },
-    { to: '/skills',        label: t('nav.skills'),        icon: <SkillsIcon /> },
+    { to: '/proveedores',   label: t('nav.proveedores'),   icon: <ProvidersIcon /> },
     { to: '/integraciones', label: t('nav.integraciones'), icon: <IntegrationsIcon /> },
     { to: '/mcp',           label: t('nav.mcp'),           icon: <McpIcon /> },
     { to: '/archivos',      label: t('nav.archivos'),      icon: <ArchivosIcon /> },
-    { to: '/proveedores',   label: t('nav.proveedores'),   icon: <ProvidersIcon /> },
     { to: '/seguridad',     label: t('nav.seguridad'),     icon: <SecurityIcon /> },
     { to: '/memoria',       label: t('nav.memoria'),       icon: <MemoriaIcon /> },
-    { to: '/coste',         label: 'Coste',                icon: <CosteIcon /> },
-    { to: '/en-vivo',       label: 'En vivo',              icon: <TeachingIcon /> },
+    { to: '/coste',         label: t('nav.coste'),         icon: <CosteIcon /> },
   ]
 }
 
@@ -332,7 +334,7 @@ function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps)
 
 export default function Layout({ activeProviderReload }: LayoutProps) {
   const navigate = useNavigate()
-  const allNavItems = useNavItems()
+  const coreNavItems = useCoreNavItems()
   const t = useT()
   const { locale, setLocale } = useLocale()
   const { isLoading: featuresLoading, allowed } = useFeatures()
@@ -341,7 +343,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
   // 'chat' is always forced visible even if the backend omits it (defensive).
   const navItems = featuresLoading
     ? [] // render skeleton instead — see below
-    : allNavItems.filter(({ to }) => {
+    : coreNavItems.filter(({ to }) => {
         const viewId = to.replace(/^\//, '')
         return allowed(viewId)
       })
@@ -431,7 +433,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
             {featuresLoading ? (
               // Mirror the real nav: fixed count = no layout shift on load.
               <ul role="list" aria-busy="true" aria-label="Cargando navegación">
-                {Array.from({ length: 5 }, (_, i) => (
+                {Array.from({ length: 3 }, (_, i) => (
                   <li key={i}>
                     <div
                       className="skeleton skeleton--block"
@@ -460,21 +462,44 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
                     >
                       {icon}
                       {label}
-                      {to === '/seguridad' && pendingCount > 0 && (
-                        <span
-                          className="badge-count"
-                          role="status"
-                          aria-label={`${pendingCount} aprobaciones pendientes`}
-                        >
-                          {pendingCount}
-                        </span>
-                      )}
                     </NavLink>
                   </li>
                 ))}
               </ul>
             )}
           </div>
+        </div>
+
+        {/* Ajustes — every other section (programadas, modelo de IA, integraciones,
+            herramientas, archivos, seguridad, memoria, coste, en vivo) lives behind
+            this single entry as tabs. The pending-approvals badge lives here too,
+            since Seguridad is now one tab among the rest. */}
+        <div
+          className="sidebar-nav"
+          style={{ borderTop: '1px solid var(--color-border-subtle)', paddingTop: 'var(--space-2)' }}
+        >
+          <ul role="list">
+            <li>
+              <NavLink
+                to="/ajustes"
+                className={({ isActive }) =>
+                  ['nav-link', isActive ? 'active' : ''].filter(Boolean).join(' ')
+                }
+              >
+                <Settings className="nav-icon" aria-hidden="true" />
+                {t('nav.ajustes')}
+                {pendingCount > 0 && (
+                  <span
+                    className="badge-count"
+                    role="status"
+                    aria-label={t('nav.ajustes.pending_aria').replace('{count}', String(pendingCount))}
+                  >
+                    {pendingCount}
+                  </span>
+                )}
+              </NavLink>
+            </li>
+          </ul>
         </div>
 
         {/* Language selector + user chip */}

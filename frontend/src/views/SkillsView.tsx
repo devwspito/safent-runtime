@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useNavigate, useOutletContext } from 'react-router-dom'
 import { sileo } from 'sileo'
-import { X, Zap, Search as SearchIcon, Plus, Package, AlertTriangle } from 'lucide-react'
+import { X, Zap, Search as SearchIcon, Plus, Play, Package, AlertTriangle } from 'lucide-react'
 import { useT } from '../lib/i18n'
+import type { ChatOutletContext } from '../components/Layout'
 import {
   listSkills, searchSkillsHub, listHubSkills, installSkill, getHubOpStatus,
   uninstallHubSkill, promoteSkill,
@@ -115,6 +117,8 @@ interface PendingSkillInstall {
 
 export default function SkillsView() {
   const t = useT()
+  const navigate = useNavigate()
+  const { startNew, sendMessage } = useOutletContext<ChatOutletContext>()
   const [state, dispatch] = useReducer(installedReducer, { status: 'loading' })
   const [installedHubNames, setInstalledHubNames] = useState<Set<string>>(new Set())
   const [hubResults, setHubResults] = useState<HubSkillResult[]>([])
@@ -310,12 +314,22 @@ export default function SkillsView() {
 
   const installedCount = state.status === 'success' ? state.skills.length : null
 
+  // Verify a skill = run it in a fresh chat. If the agent uses the browser, the chat's
+  // "Ver en vivo" panel appears automatically (useChat liveBrowserActive). No backend.
+  function handleVerify(sk: Skill) {
+    const name = sk.skill_name ?? sk.name ?? sk.slug ?? ''
+    startNew()
+    navigate('/chat')
+    void sendMessage(t('skills.verify.msg').replace('{name}', name))
+  }
+
   const renderSkill = (sk: Skill) => (
     <AnimatedListItem key={sk.package_id ?? sk.skill_id}>
       <SkillRow
         skill={sk}
         loadingDetails={loadingDetailsId === (sk.package_id ?? sk.skill_id ?? '')}
         onView={() => handleViewSkillDetails(sk)}
+        onVerify={() => handleVerify(sk)}
         onPromote={async () => {
           const pkgId = sk.package_id ?? sk.skill_id ?? ''
           try {
@@ -379,8 +393,14 @@ export default function SkillsView() {
       )}
 
       <PageHeader
-        title="Habilidades"
-        subtitle="Amplía las capacidades del agente. Busca, instala o enséñale desde una demostración."
+        title={t('view.skills')}
+        subtitle={t('skills.subtitle')}
+        actions={
+          <Button variant="primary" size="sm" onClick={() => setTeachOpen(true)}>
+            <Plus size={14} aria-hidden="true" />
+            {t('skills.teach.open')}
+          </Button>
+        }
       />
 
       <div className={s.viewBody}>
@@ -463,7 +483,7 @@ export default function SkillsView() {
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
                         {live.length > 0 && (
                           <div>
-                            <p className={s.subsectionLabel}>Enseñadas en vivo</p>
+                            <p className={s.subsectionLabel}>{t('skills.section.live')}</p>
                             <ul className={s.list} role="list">
                               <AnimatePresence initial={false}>
                                 {live.map(renderSkill)}
@@ -472,7 +492,7 @@ export default function SkillsView() {
                           </div>
                         )}
                         <div>
-                          {live.length > 0 && <p className={s.subsectionLabel}>Habilidades</p>}
+                          {live.length > 0 && <p className={s.subsectionLabel}>{t('skills.section.rest')}</p>}
                           <ul className={s.list} role="list">
                             <AnimatePresence initial={false}>
                               {rest.map(renderSkill)}
@@ -488,9 +508,9 @@ export default function SkillsView() {
 
           {/* ── Hub search ──────────────────────────────────────────────── */}
           <StaggerItem>
-            <section className={s.section} aria-label="Catálogo de habilidades">
+            <section className={s.section} aria-label={t('skills.catalog.label')}>
               <div className={s.sectionHead}>
-                <span className={s.sectionLabel}>Catálogo</span>
+                <span className={s.sectionLabel}>{t('skills.catalog.label')}</span>
               </div>
 
               {/* Suggestion pills — only visible when no search results yet */}
@@ -592,26 +612,6 @@ export default function SkillsView() {
             </section>
           </StaggerItem>
 
-          {/* ── Teach a skill (full-screen noVNC browser modal) ──────────── */}
-          <StaggerItem>
-            <section className={s.section} aria-label="Enseñar una habilidad">
-              <div className={s.sectionHead}>
-                <span className={s.sectionLabel}>Enseñar</span>
-              </div>
-              <div className={s.teachCard}>
-                <p className={s.teachIntro}>
-                  Enséñale a Lumen a operar en el navegador demostrando la tarea. Se abre un
-                  navegador real (nítido) a pantalla completa que conduces tú; tus pasos se
-                  convierten en una habilidad reutilizable.
-                </p>
-                <Button variant="primary" size="sm" onClick={() => setTeachOpen(true)}>
-                  <Plus size={14} aria-hidden="true" />
-                  Enseñar una habilidad
-                </Button>
-              </div>
-            </section>
-          </StaggerItem>
-
         </Stagger>
       </div>
     </>
@@ -656,22 +656,27 @@ interface SkillRowProps {
   skill: Skill
   loadingDetails: boolean
   onView: () => void
+  onVerify: () => void
   onPromote: () => void
   onUninstall: () => void
 }
 
-function SkillRow({ skill, loadingDetails, onView, onPromote, onUninstall }: SkillRowProps) {
+function SkillRow({ skill, loadingDetails, onView, onVerify, onPromote, onUninstall }: SkillRowProps) {
   const t = useT()
   const reduced = useReducedMotion()
   const name = skill.skill_name ?? skill.name ?? skill.slug ?? ''
   const meta = useStateMeta(skill.state ?? '')
   const version = skill.version ? `v${skill.version}` : ''
-  const surfaces = Array.isArray(skill.surface_kinds)
-    ? skill.surface_kinds.join(' · ')
-    : (skill.surface_kinds ?? '')
+  const surfaceList = Array.isArray(skill.surface_kinds)
+    ? skill.surface_kinds
+    : (skill.surface_kinds ? [skill.surface_kinds] : [])
+  const surfaces = surfaceList.join(' · ')
   const sub = [version, surfaces].filter(Boolean).join(' · ')
   const isValidated = (skill.state ?? '').toLowerCase().includes('valid')
   const isAutonomous = (skill.state ?? '').toLowerCase().includes('autonom')
+  // "Live" = drives the browser (taught live, or has a browser surface) → watchable live.
+  const isLive = skill.teaching_origin === 'teaching_live'
+    || surfaceList.some((k) => String(k).toLowerCase().includes('browser'))
 
   return (
     <motion.div
@@ -690,13 +695,10 @@ function SkillRow({ skill, loadingDetails, onView, onPromote, onUninstall }: Ski
       <div className={s.skillInfo}>
         <div className={s.skillName}>
           {name}
-          {skill.teaching_origin === 'teaching_live' && (
-            <span
-              className={`${s.stateBadge} ${s['stateBadge--accent']}`}
-              style={{ marginLeft: 'var(--space-2)' }}
-              title="Habilidad enseñada en vivo"
-            >
-              live
+          {isLive && (
+            <span className={s.liveBadge} title={t('skills.live.tip')}>
+              <span className={s.liveDot} aria-hidden="true" />
+              {t('skills.live.badge')}
             </span>
           )}
         </div>
@@ -707,31 +709,38 @@ function SkillRow({ skill, loadingDetails, onView, onPromote, onUninstall }: Ski
         {meta.label && (
           <span className={meta.badgeCls}>{meta.label}</span>
         )}
-        <button
-          className="cv-btn cv-btn--secondary cv-btn--sm"
-          onClick={onView}
-          disabled={loadingDetails}
-          aria-label={`Ver instrucciones de ${name}`}
-          aria-busy={loadingDetails}
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={onVerify}
+          title={t('skills.verify.tip')}
+          aria-label={t('skills.verify.aria').replace('{name}', name)}
         >
-          {loadingDetails ? '…' : 'Ver'}
-        </button>
+          <Play size={13} aria-hidden="true" />
+          {t('skills.verify')}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onView}
+          loading={loadingDetails}
+          aria-label={t('skills.view.aria').replace('{name}', name)}
+        >
+          {t('skills.view')}
+        </Button>
         {isValidated && (
-          <button
-            className="cv-btn cv-btn--primary cv-btn--sm"
-            onClick={onPromote}
-            aria-label={t('skills.promote')}
-          >
+          <Button variant="primary" size="sm" onClick={onPromote} aria-label={t('skills.promote')}>
             {t('skills.promote')}
-          </button>
+          </Button>
         )}
-        <button
-          className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
+        <Button
+          variant="danger"
+          size="sm"
           onClick={onUninstall}
-          aria-label={`Desinstalar ${name}`}
+          aria-label={t('skills.uninstall.aria').replace('{name}', name)}
         >
           <X size={13} aria-hidden="true" />
-        </button>
+        </Button>
       </div>
     </motion.div>
   )

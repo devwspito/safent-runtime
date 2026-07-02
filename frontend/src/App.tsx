@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from 'sileo'
 import Layout from './components/Layout'
 import ChatView from './views/ChatView'
+import AjustesView from './views/AjustesView'
 import ProvidersView from './views/ProvidersView'
 import IntegrationsView from './views/IntegrationsView'
 import McpView from './views/McpView'
@@ -114,6 +115,10 @@ export default function App() {
           <Route path="skills" element={
             <ViewGuard viewId="skills"><SkillsView /></ViewGuard>
           } />
+          {/* Ajustes — settings hub; the other 9 sections live here as tabs.
+              No ViewGuard: AjustesView gates its own tabs and falls back to
+              /chat if the tenant has no settings section allowed at all. */}
+          <Route path="ajustes" element={<AjustesView />} />
           <Route path="integraciones" element={
             <ViewGuard viewId="integraciones"><IntegrationsView /></ViewGuard>
           } />
@@ -142,7 +147,7 @@ export default function App() {
           {/* "En vivo" = unified section (Actividad + Enseñar). Replaces the old
               standalone "Enseñar" nav item. */}
           <Route path="en-vivo" element={
-            <ViewGuard viewId="ensenar">
+            <ViewGuard viewId="en-vivo">
               <Suspense fallback={<TeachingFallback />}>
                 <EnVivoView />
               </Suspense>

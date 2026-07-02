@@ -33,6 +33,10 @@ const translations = {
     'nav.proveedores':    'Modelo de IA',
     'nav.seguridad':      'Seguridad',
     'nav.memoria':        'Memoria',
+    'nav.coste':          'Coste',
+    'nav.envivo':         'En vivo',
+    'nav.ajustes':        'Ajustes',
+    'nav.ajustes.pending_aria': '{count} aprobaciones pendientes',
 
     // Language selector
     'settings.language':  'Idioma',
@@ -168,6 +172,7 @@ const translations = {
     'mfa_enroll.done':          'Listo, ya está configurado',
 
     // Skills view
+    'skills.subtitle':          'Amplía las capacidades del agente. Busca, instala o enséñale desde una demostración.',
     'skills.state.autonomous':  'Sin supervisión',
     'skills.state.deprecated':  'Desactualizada',
     'skills.state.validated':   'Verificada',
@@ -178,6 +183,19 @@ const translations = {
     'skills.teach.synth':       'Procesando la demostración…',
     'skills.teach.stop':        'Terminar y guardar habilidad',
     'skills.teach.stop_paused': 'Terminar y guardar habilidad',
+    'skills.teach.open':        'Enseñar habilidad',
+    'skills.view':              'Ver',
+    'skills.view.aria':         'Ver instrucciones de {name}',
+    'skills.uninstall.aria':    'Desinstalar {name}',
+    'skills.verify':            'Verificar',
+    'skills.verify.aria':       'Verificar {name}',
+    'skills.verify.tip':        'Pruébala y mira cómo trabaja',
+    'skills.verify.msg':        'Usa la habilidad "{name}" y muéstrame el resultado.',
+    'skills.live.badge':        'en vivo',
+    'skills.live.tip':          'Puedes verla en directo cuando la usas',
+    'skills.section.live':      'Enseñadas en vivo',
+    'skills.section.rest':      'Habilidades',
+    'skills.catalog.label':     'Catálogo',
 
     // MCP view
     'mcp.env.label':            'Claves de acceso (una por línea, formato CLAVE=VALOR)',
@@ -308,6 +326,10 @@ const translations = {
     'nav.proveedores':    'AI Model',
     'nav.seguridad':      'Security',
     'nav.memoria':        'Memory',
+    'nav.coste':          'Cost',
+    'nav.envivo':         'Live',
+    'nav.ajustes':        'Settings',
+    'nav.ajustes.pending_aria': '{count} pending approvals',
 
     // Language selector
     'settings.language':  'Language',
@@ -443,6 +465,7 @@ const translations = {
     'mfa_enroll.done':          'Done, it\'s all set up',
 
     // Skills view
+    'skills.subtitle':          'Extend the agent\'s capabilities. Search, install, or teach it from a demonstration.',
     'skills.state.autonomous':  'Unsupervised',
     'skills.state.deprecated':  'Outdated',
     'skills.state.validated':   'Verified',
@@ -453,6 +476,19 @@ const translations = {
     'skills.teach.synth':       'Processing the demonstration…',
     'skills.teach.stop':        'Finish and save skill',
     'skills.teach.stop_paused': 'Finish and save skill',
+    'skills.teach.open':        'Teach skill',
+    'skills.view':              'View',
+    'skills.view.aria':         'View instructions for {name}',
+    'skills.uninstall.aria':    'Uninstall {name}',
+    'skills.verify':            'Verify',
+    'skills.verify.aria':       'Verify {name}',
+    'skills.verify.tip':        'Try it and watch it work',
+    'skills.verify.msg':        'Use the "{name}" skill and show me the result.',
+    'skills.live.badge':        'live',
+    'skills.live.tip':          'You can watch it live as it runs',
+    'skills.section.live':      'Taught live',
+    'skills.section.rest':      'Skills',
+    'skills.catalog.label':     'Catalog',
 
     // MCP view
     'mcp.env.label':            'Access keys (one per line, format KEY=VALUE)',
