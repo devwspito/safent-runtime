@@ -1243,6 +1243,11 @@ def create_app() -> FastAPI:
     app.include_router(
         create_training_live_router(orchestrator=_get_training_orchestrator(_DB_PATH))
     )
+    # Read-only live-watch of the agent's internal browser (Verificar).
+    from hermes.shell_server.cowork.watch_live import (  # noqa: PLC0415
+        create_watch_live_router,
+    )
+    app.include_router(create_watch_live_router())
     app.include_router(create_workspace_router())
     app.include_router(create_approvals_router())
     app.include_router(create_policies_router())

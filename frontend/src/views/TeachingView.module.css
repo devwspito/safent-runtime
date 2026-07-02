@@ -184,9 +184,23 @@
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);
   overflow: hidden;
-  /* 16:9 aspect ratio at full width */
+  /* 16:9 at full width, but let it grow tall so the live browser is legible
+     (the old 540px cap made everything tiny and soft). */
   aspect-ratio: 16 / 9;
-  max-height: 540px;
+  max-height: min(74vh, 900px);
+}
+
+/* Fullscreen: fill the whole screen and center the (letterboxed) canvas. */
+.canvasFrame:fullscreen {
+  aspect-ratio: auto;
+  max-height: none;
+  width: 100vw;
+  height: 100vh;
+  border: none;
+  border-radius: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* The live canvas — fills the frame */

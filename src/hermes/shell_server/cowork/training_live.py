@@ -30,9 +30,11 @@ Two concurrent tasks (cancelled on disconnect / error):
 
 Input message contract (client → server JSON text)
 ---------------------------------------------------
-  Mouse:     {"type":"mouse","action":"move","x":<int>,"y":<int>}
-             {"type":"mouse","action":"down","x":<int>,"y":<int>,"button":<0|1|2>}
-             {"type":"mouse","action":"up",  "x":<int>,"y":<int>,"button":<0|1|2>}
+  Mouse:     {"type":"mouse","action":"move","xf":<0..1>,"yf":<0..1>}
+             {"type":"mouse","action":"down","xf":<0..1>,"yf":<0..1>,"button":<0|1|2>}
+             {"type":"mouse","action":"up",  "xf":<0..1>,"yf":<0..1>,"button":<0|1|2>}
+             xf/yf are NORMALIZED fractions of the frame (server maps to CSS px);
+             legacy integer x/y are still accepted for non-web clients.
   Keyboard:  {"type":"key","action":"down","keysym":<int>}
              {"type":"key","action":"up",  "keysym":<int>}
              {"type":"key","action":"char","text":<str>}   (printable text insert)
@@ -71,6 +73,15 @@ _FRAME_INTERVAL_S: float = 0.07
 # Web: 0=left, 1=middle, 2=right.
 # Evdev: BTN_LEFT=0x110(272), BTN_MIDDLE=0x112(274), BTN_RIGHT=0x111(273).
 _BTN_MAP: dict[int, int] = {0: BTN_LEFT, 1: BTN_MIDDLE, 2: BTN_RIGHT}
+
+# Teaching browser LOGICAL viewport (CSS px). Rendered at deviceScaleFactor=2 so
+# the screencast SOURCE is 2x (crisp on Retina / fullscreen). CDP input
+# coordinates are in CSS px (DSF-independent), so the client sends NORMALIZED
+# fractions (0..1 of the frame) and we multiply by these — the mapping is exact
+# and independent of the frame's pixel resolution or the client's DPR.
+_TEACH_VIEWPORT_W: int = 1600
+_TEACH_VIEWPORT_H: int = 900
+_TEACH_DEVICE_SCALE: int = 2
 
 
 def _cdp_url() -> str:
@@ -205,17 +216,24 @@ async def _setup_browser_session():
     browser = await pw.chromium.connect_over_cdp(_cdp_url())
 
     # Isolated context: no shared cookies/storage with the agent.
-    # Viewport 1600x900 at deviceScaleFactor=1: gives the screencast a crisp
-    # 1600-wide source (the frame is upscaled far less on a large/Retina display)
-    # while keeping device pixels == CSS pixels so the operator's click
-    # coordinates map 1:1 to the CDP Input viewport (no DSF correction needed).
+    # Logical viewport 1600x900 at deviceScaleFactor=2 → the screencast SOURCE is
+    # 3200x1800 device px, so it stays crisp on a Retina display and in fullscreen
+    # (a 1x source was upscaled into an illegible blur). Click coordinates are sent
+    # NORMALIZED (fraction of the frame) and converted server-side to CSS px, so the
+    # 2x source does not break input mapping.
     ctx = await browser.new_context(
-        viewport={"width": 1600, "height": 900},
-        device_scale_factor=1,
+        viewport={"width": _TEACH_VIEWPORT_W, "height": _TEACH_VIEWPORT_H},
+        device_scale_factor=_TEACH_DEVICE_SCALE,
     )
     page = await ctx.new_page()
 
-    screen_src = CdpScreencastSource(page=page)
+    # maxWidth/maxHeight must be >= device pixels (viewport x DSF) or CDP downscales
+    # the frame back to a blur. Match the 2x source exactly.
+    screen_src = CdpScreencastSource(
+        page=page,
+        max_width=_TEACH_VIEWPORT_W * _TEACH_DEVICE_SCALE,
+        max_height=_TEACH_VIEWPORT_H * _TEACH_DEVICE_SCALE,
+    )
     await screen_src.start()
 
     # Separate CDPSession for input injection (CdpScreencastSource owns its own).
@@ -283,6 +301,7 @@ async def _recv_input(
             logger.debug("hermes.training_live.recv.bad_json raw=%r", raw)
             continue
 
+        _normalize_mouse_coords(ev)
         _dispatch_event(ev, adapter, page)
         # Semantic capture: resolve a click's coordinate to the actual element so the
         # recorded step is "click the Search button", not "click at (640,300)".
@@ -294,6 +313,27 @@ async def _recv_input(
             except Exception:  # noqa: BLE001 — fall back to coordinates
                 pass
         _record_step(orchestrator, session_id, ev)
+
+
+def _normalize_mouse_coords(ev: dict) -> None:
+    """Convert NORMALIZED client coords (xf/yf ∈ [0,1] of the frame) into CSS px
+    of the teaching viewport, in place, so all downstream code (dispatch, element
+    resolution, step capture) keeps reading ev['x']/ev['y'] as CSS px. The client
+    sends fractions so it never needs to know the source resolution or DSF; the
+    server owns the viewport truth. Legacy pixel events (x/y only) pass through.
+    """
+    if ev.get("type") != "mouse":
+        return
+    xf, yf = ev.get("xf"), ev.get("yf")
+    if xf is None or yf is None:
+        return
+    try:
+        fx = min(1.0, max(0.0, float(xf)))
+        fy = min(1.0, max(0.0, float(yf)))
+    except (TypeError, ValueError):
+        return
+    ev["x"] = round(fx * _TEACH_VIEWPORT_W)
+    ev["y"] = round(fy * _TEACH_VIEWPORT_H)
 
 
 def _dispatch_event(ev: dict, adapter: CdpInputAdapter, page) -> None:

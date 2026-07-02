@@ -33,7 +33,8 @@ import {
   useState,
 } from 'react'
 import { sileo } from 'sileo'
-import { AlertTriangle, Monitor } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { AlertTriangle, Maximize2, Monitor, MessageSquare, X } from 'lucide-react'
 import {
   createTrainingSession,
   startTrainingRecording,
@@ -43,6 +44,7 @@ import {
   cancelTrainingRecording,
   signTrainingSession,
   getTrainingState,
+  postChat,
   ApiError,
 } from '../api/client'
 import { token } from '../lib/token'
@@ -230,7 +232,11 @@ function useLiveCanvas(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
   send: (msg: object) => void,
 ) {
-  const layoutRef = useRef({ scaleX: 1, scaleY: 1, offX: 0, offY: 0 })
+  // Letterbox geometry of the drawn frame IN BACKING-STORE (device) px. Clicks
+  // are mapped to a NORMALIZED fraction of the drawn image so the server (which
+  // owns the viewport) converts to CSS px — exact regardless of source resolution
+  // or DPR (fixes the "click lands off left/right" imprecision).
+  const layoutRef = useRef({ offX: 0, offY: 0, drawW: 1, drawH: 1 })
   const lastMoveAt = useRef(0)
 
   // Keep a stable renderFrame reference; only changes if canvasRef instance changes
@@ -255,7 +261,7 @@ function useLiveCanvas(
       const offX  = (dstW - drawW) / 2
       const offY  = (dstH - drawH) / 2
 
-      layoutRef.current = { scaleX: scale, scaleY: scale, offX, offY }
+      layoutRef.current = { offX, offY, drawW, drawH }
 
       ctx.clearRect(0, 0, dstW, dstH)
       ctx.drawImage(img, offX, offY, drawW, drawH)
@@ -265,31 +271,30 @@ function useLiveCanvas(
     img.src = objUrl
   }, [canvasRef])
 
-  function canvasToRemote(ev: React.MouseEvent<HTMLCanvasElement>): { x: number; y: number } {
+  function canvasToFraction(ev: React.MouseEvent<HTMLCanvasElement>): { xf: number; yf: number } {
     const canvas = canvasRef.current
-    const { scaleX, scaleY, offX, offY } = layoutRef.current
-    // offsetX/Y are in CSS px, but the letterbox layout (offX/offY/scale) is
-    // computed in the canvas BACKING-STORE space (device px = CSS × dpr). Convert
-    // the pointer position to backing-store px using the canvas' own ratio so the
-    // click maps to the correct remote-browser coordinate regardless of dpr.
+    const { offX, offY, drawW, drawH } = layoutRef.current
+    // offsetX/Y are CSS px; the letterbox geometry is in backing-store (device) px.
+    // Scale the pointer to backing-store px via the canvas' own ratio, then express
+    // it as a fraction of the DRAWN image. The server multiplies by the viewport.
     const ratioX = canvas && canvas.clientWidth ? canvas.width / canvas.clientWidth : 1
     const ratioY = canvas && canvas.clientHeight ? canvas.height / canvas.clientHeight : 1
-    return {
-      x: Math.round((ev.nativeEvent.offsetX * ratioX - offX) / scaleX),
-      y: Math.round((ev.nativeEvent.offsetY * ratioY - offY) / scaleY),
-    }
+    const px = ev.nativeEvent.offsetX * ratioX
+    const py = ev.nativeEvent.offsetY * ratioY
+    const clamp = (v: number) => Math.min(1, Math.max(0, v))
+    return { xf: clamp((px - offX) / drawW), yf: clamp((py - offY) / drawH) }
   }
 
   const onMouseDown = useCallback((ev: React.MouseEvent<HTMLCanvasElement>) => {
-    const { x, y } = canvasToRemote(ev)
-    send({ type: 'mouse', action: 'down', x, y, button: ev.button })
+    const { xf, yf } = canvasToFraction(ev)
+    send({ type: 'mouse', action: 'down', xf, yf, button: ev.button })
     canvasRef.current?.focus()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [send])
 
   const onMouseUp = useCallback((ev: React.MouseEvent<HTMLCanvasElement>) => {
-    const { x, y } = canvasToRemote(ev)
-    send({ type: 'mouse', action: 'up', x, y, button: ev.button })
+    const { xf, yf } = canvasToFraction(ev)
+    send({ type: 'mouse', action: 'up', xf, yf, button: ev.button })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [send])
 
@@ -297,8 +302,8 @@ function useLiveCanvas(
     const now = Date.now()
     if (now - lastMoveAt.current < THROTTLE_MS) return
     lastMoveAt.current = now
-    const { x, y } = canvasToRemote(ev)
-    send({ type: 'mouse', action: 'move', x, y, button: 0 })
+    const { xf, yf } = canvasToFraction(ev)
+    send({ type: 'mouse', action: 'move', xf, yf, button: 0 })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [send])
 
@@ -345,8 +350,22 @@ export default function TeachingView() {
   const [busy,      setBusy]      = useState(false)
 
   const canvasRef        = useRef<HTMLCanvasElement>(null)
+  const canvasFrameRef   = useRef<HTMLDivElement>(null)
   const pendingNavRef    = useRef<string | null>(null)
   const [hasFrame,       setHasFrame]      = useState(false)
+  // Non-null while the operator is watching the agent execute the taught skill
+  // live (read-only). Holds the skill name being verified.
+  const [verifying,      setVerifying]     = useState<string | null>(null)
+
+  // Fullscreen the live browser frame. requestFullscreen on the FRAME container
+  // (not the canvas) so the URL bar / hint stay visible; the ResizeObserver grows
+  // the canvas backing store and normalized coords keep clicks exact.
+  const toggleFullscreen = useCallback(() => {
+    const el = canvasFrameRef.current
+    if (!el) return
+    if (document.fullscreenElement) void document.exitFullscreen()
+    else void el.requestFullscreen?.()
+  }, [])
 
   // ── WS callbacks (stable refs inside the hook) ───────────────────────────
 
@@ -498,6 +517,38 @@ export default function TeachingView() {
     }
   }
 
+  // Verificar: save the skill (if not yet), ask the agent (via chat) to USE it,
+  // and open a read-only LIVE view of the agent's internal browser so the human
+  // watches it execute in real time and corroborates it works.
+  async function handleVerify() {
+    const sid =
+      vs.phase === 'review'     ? vs.session.sessionId :
+      vs.phase === 'live'       ? vs.session.sessionId : null
+    const name = (sessionInView?.skillName ?? '').trim()
+    if (!name) { toastWarn('No hay habilidad que verificar'); return }
+    setBusy(true)
+    try {
+      // Ensure the skill is saved before asking the agent to use it. Best-effort:
+      // if it was already signed, the daemon call is a harmless no-op / error we
+      // swallow.
+      if (sid) { try { await signTrainingSession(sid) } catch { /* already saved */ } }
+      await postChat({
+        user_message: `Usa la habilidad "${name}" para hacer la tarea que te acabo de enseñar y muéstrame el resultado.`,
+        dedup_key: `verify:${name}:${Date.now()}`,
+      })
+      closeWs()
+      setHasFrame(false)
+      setVerifying(name)
+      dispatch({ type: 'SIGN_OK' })
+      setSkillName('')
+      setStartUrl('https://')
+    } catch (e) {
+      toastErr(e instanceof ApiError ? e.message : 'No se pudo lanzar la verificación')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function handleCancel() {
     const sid =
       vs.phase === 'live'       ? vs.session.sessionId :
@@ -567,8 +618,13 @@ export default function TeachingView() {
           </FadeIn>
         )}
 
+        {/* ── Verify live-watch (read-only view of the agent executing) ──── */}
+        {verifying && (
+          <VerifyWatch skillName={verifying} onClose={() => setVerifying(null)} />
+        )}
+
         {/* ── Setup card ───────────────────────────────────────────────── */}
-        {vs.phase === 'setup' && (
+        {vs.phase === 'setup' && !verifying && (
           <FadeIn>
             <div className={s.setupCard}>
               <div>
@@ -705,6 +761,18 @@ export default function TeachingView() {
                 </Button>
               )}
 
+              {isReview && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void handleVerify()}
+                  disabled={controlsBusy}
+                  aria-label="Guardar y verificar la habilidad en vivo"
+                >
+                  Verificar
+                </Button>
+              )}
+
               {(isLive || isConnecting || isReview) && (
                 <Button
                   variant="danger"
@@ -726,6 +794,16 @@ export default function TeachingView() {
 
               <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
                 <span className={s.canvasLabel}>Navegador en vivo</span>
+                <div style={{ flex: 1 }} />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={toggleFullscreen}
+                  aria-label="Pantalla completa"
+                >
+                  <Maximize2 size={13} aria-hidden="true" />
+                  Pantalla completa
+                </Button>
               </div>
 
               {/* Inline navigation bar for the live session */}
@@ -741,7 +819,7 @@ export default function TeachingView() {
                 mientras esté enfocado.
               </p>
 
-              <div className={s.canvasFrame}>
+              <div className={s.canvasFrame} ref={canvasFrameRef}>
                 <canvas
                   ref={canvasRef}
                   className={s.liveCanvas}
@@ -793,6 +871,14 @@ export default function TeachingView() {
                     Guardar habilidad
                   </Button>
                   <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void handleVerify()}
+                    disabled={controlsBusy}
+                  >
+                    Verificar en vivo
+                  </Button>
+                  <Button
                     variant="ghost"
                     size="sm"
                     onClick={() => void handleCancel()}
@@ -807,7 +893,7 @@ export default function TeachingView() {
         )}
 
         {/* ── Setup idle hint ───────────────────────────────────────────── */}
-        {vs.phase === 'setup' && (
+        {vs.phase === 'setup' && !verifying && (
           <FadeIn key="setup-hint">
             <EmptyState
               compact
@@ -869,5 +955,128 @@ function LiveUrlBar({ initialUrl, disabled, onNavigate }: LiveUrlBarProps) {
         Ir
       </Button>
     </div>
+  )
+}
+
+// ── VerifyWatch ─────────────────────────────────────────────────────────────────
+
+/**
+ * Read-only LIVE view of the AGENT's internal browser while it executes the
+ * just-taught skill. Streams JPEG frames from WS /api/v1/watch/agent/live and
+ * renders them (DPR-aware, letterboxed) — no input injection. The human watches
+ * and corroborates the run.
+ */
+function VerifyWatch({ skillName, onClose }: { skillName: string; onClose: () => void }) {
+  const navigate = useNavigate()
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const frameRef = useRef<HTMLDivElement>(null)
+  const [hasFrame, setHasFrame] = useState(false)
+
+  const renderFrame = useCallback((bytes: ArrayBuffer) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const objUrl = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }))
+    const img = new Image()
+    img.onload = () => {
+      const srcW = img.naturalWidth || 1600
+      const srcH = img.naturalHeight || 900
+      const dstW = canvas.width
+      const dstH = canvas.height
+      const scale = Math.min(dstW / srcW, dstH / srcH)
+      const drawW = srcW * scale
+      const drawH = srcH * scale
+      const offX = (dstW - drawW) / 2
+      const offY = (dstH - drawH) / 2
+      ctx.clearRect(0, 0, dstW, dstH)
+      ctx.drawImage(img, offX, offY, drawW, drawH)
+      URL.revokeObjectURL(objUrl)
+    }
+    img.onerror = () => URL.revokeObjectURL(objUrl)
+    img.src = objUrl
+  }, [])
+
+  // Keep the canvas backing store at physical resolution (crisp on Retina).
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ro = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect
+      if (!rect) return
+      const dpr = window.devicePixelRatio || 1
+      canvas.width = Math.round(rect.width * dpr)
+      canvas.height = Math.round(rect.height * dpr)
+    })
+    ro.observe(canvas)
+    return () => ro.disconnect()
+  }, [])
+
+  // Open the read-only watch WebSocket.
+  useEffect(() => {
+    const tok = token()
+    if (!tok) return
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(
+      `${proto}//${location.host}/api/v1/watch/agent/live?token=${encodeURIComponent(tok)}`,
+    )
+    ws.binaryType = 'arraybuffer'
+    ws.onmessage = (ev) => {
+      if (ev.data instanceof ArrayBuffer) { renderFrame(ev.data); setHasFrame(true) }
+    }
+    ws.onerror = () => ws.close()
+    return () => ws.close()
+  }, [renderFrame])
+
+  const toggleFullscreen = useCallback(() => {
+    const el = frameRef.current
+    if (!el) return
+    if (document.fullscreenElement) void document.exitFullscreen()
+    else void el.requestFullscreen?.()
+  }, [])
+
+  return (
+    <FadeIn key="verify-area">
+      <div className={s.canvasSection}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+          <span className={s.canvasLabel}>Verificando: {skillName}</span>
+          <div style={{ flex: 1 }} />
+          <Button variant="secondary" size="sm" onClick={toggleFullscreen} aria-label="Pantalla completa">
+            <Maximize2 size={13} aria-hidden="true" />
+            Pantalla completa
+          </Button>
+          <Button variant="secondary" size="sm" onClick={() => navigate('/chat')} aria-label="Abrir el chat de la tarea">
+            <MessageSquare size={13} aria-hidden="true" />
+            Abrir chat
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onClose} aria-label="Cerrar verificación">
+            <X size={13} aria-hidden="true" />
+            Cerrar
+          </Button>
+        </div>
+
+        <p className={s.canvasHint}>
+          Lumen está ejecutando la habilidad en el navegador interno. Obsérvalo y corrobora
+          que funciona; sigue el detalle en el chat.
+        </p>
+
+        <div className={s.canvasFrame} ref={frameRef}>
+          <canvas
+            ref={canvasRef}
+            className={s.liveCanvas}
+            style={{ cursor: 'default' }}
+            aria-label="Navegador del agente en vivo (solo lectura)"
+          />
+          {!hasFrame && (
+            <div className={s.canvasOverlay} aria-live="polite" aria-atomic="true">
+              <span className={s.overlayIcon} aria-hidden="true">
+                <Monitor size={32} />
+              </span>
+              Esperando a que el agente abra el navegador…
+            </div>
+          )}
+        </div>
+      </div>
+    </FadeIn>
   )
 }
