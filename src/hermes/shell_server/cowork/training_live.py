@@ -18,12 +18,12 @@ On connect:
      port is alive before we try to connect.
   2. ``connect_over_cdp(CDP_URL)`` with a *fresh* isolated context
      (no shared cookies / storage with the agent's sessions).
-  3. ``CdpScreencastSource(page)`` receives frames via
-     ``Page.startScreencast``; ``CdpInputAdapter(session)`` injects
+  3. ``CdpScreenshotSource(page)`` polls ``Page.captureScreenshot`` at the
+     client's dpr (crisp + native-sized); ``CdpInputAdapter(session)`` injects
      pointer / keyboard events.
 
 Two concurrent tasks (cancelled on disconnect / error):
-  - SEND: every ~70 ms, forward the latest JPEG frame as binary WS
+  - SEND: forward each new JPEG frame as binary WS
     message.
   - RECV: JSON messages from the client → CdpInputAdapter calls or
     page.goto().
@@ -58,7 +58,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from hermes.agents_os.domain.surface_kind import SurfaceKind
 from hermes.browser.infrastructure.cdp_input_adapter import CdpInputAdapter
-from hermes.browser.infrastructure.cdp_screencast_source import CdpScreencastSource
+from hermes.browser.infrastructure.cdp_screenshot_source import CdpScreenshotSource
 from hermes.shell_server.mirror.button_codes import BTN_LEFT, BTN_MIDDLE, BTN_RIGHT
 
 logger = logging.getLogger("hermes.shell_server.cowork.training_live")
@@ -66,29 +66,30 @@ logger = logging.getLogger("hermes.shell_server.cowork.training_live")
 # CDP URL: use env override or fall back to the fixed veth address.
 _DEFAULT_CDP_URL = "http://10.200.0.2:9333"
 
-# Frame-send interval in seconds (~14 fps, same as MirrorServer).
-_FRAME_INTERVAL_S: float = 0.07
+# Frame-send poll interval. Tight so a new capture reaches the client promptly (the
+# CdpScreenshotSource capture rate is the real fps limiter, not this). We only send
+# when a NEW frame exists (frame-count change), so a static page costs no WS traffic.
+_FRAME_INTERVAL_S: float = 0.012
 
 # Map web button index → evdev code expected by CdpInputAdapter.pointer_button.
 # Web: 0=left, 1=middle, 2=right.
 # Evdev: BTN_LEFT=0x110(272), BTN_MIDDLE=0x112(274), BTN_RIGHT=0x111(273).
 _BTN_MAP: dict[int, int] = {0: BTN_LEFT, 1: BTN_MIDDLE, 2: BTN_RIGHT}
 
-# ADAPTIVE RESOLUTION. GROUND-TRUTH MEASURED (2026-07-02, real jailed path): the CDP
-# screencast frame resolution EQUALS the page LAYOUT VIEWPORT and IGNORES the device-
-# scale-factor at EVERY level — per-context, per-session Emulation, AND the compositor
-# --force-device-scale-factor launch flag (flag confirmed in the running chromium's
-# cmdline → frame STILL 1×viewport). So the ONLY lever for a sharp frame is a LARGER
-# VIEWPORT: the client reports its PHYSICAL canvas size (CSS px × devicePixelRatio)
-# via {"type":"resize"}; we set_viewport_size(physical) → frame = physical → the
-# client paints it into its CSS×dpr backing store 1:1 = crisp on Retina (measured
-# 2400x1400/3200x1800/3840x2160 all MATCH). Trade-off: layout is a physical-px-sized
-# window (content a touch smaller) — the price of sharpness given the DSF is ignored.
-# Clicks use NORMALIZED fractions mapped against the CURRENT viewport → any size exact.
-_TEACH_VIEWPORT_W: int = 1600   # initial, until the client reports its real size
-_TEACH_VIEWPORT_H: int = 900
-_TEACH_MAX_W: int = 4096        # generous screencast cap; physical viewport (≤ this) drives it
-_TEACH_MAX_H: int = 2160
+# RESOLUTION MODEL. GROUND-TRUTH MEASURED (2026-07-02, real jailed path):
+#   • Page.startScreencast IGNORES deviceScaleFactor at EVERY level (per-context,
+#     Emulation, AND the compositor --force-device-scale-factor flag) → its frame is
+#     always 1×viewport → blurry on a Retina canvas. (Do NOT go back to it.)
+#   • Page.captureScreenshot DOES honour deviceScaleFactor (1520×850 @ dsf2 → 3040×
+#     1700). So we drive CdpScreenshotSource: it sets Emulation.setDeviceMetrics-
+#     Override(width=CSS, height=CSS, dsf=client-dpr) → the page LAYS OUT at the
+#     display's CSS size (native proportions — correct dimensions) AND the screenshot
+#     is CSS×dpr device px (crisp). The client paints it 1:1 into its CSS×dpr canvas.
+# The client sends {"type":"resize", width, height, dpr} with its CSS canvas size +
+# devicePixelRatio. Clicks use NORMALIZED fractions mapped against the CSS viewport.
+_TEACH_VIEWPORT_W: int = 1280   # initial CSS width, until the client reports its size
+_TEACH_VIEWPORT_H: int = 720
+_TEACH_DPR: float = 2.0         # initial dpr, overridden by the client's resize
 
 
 def _cdp_url() -> str:
@@ -142,12 +143,14 @@ def create_training_live_router(orchestrator=None) -> APIRouter:
             pw, ctx, page, screen_src, input_adapter = await _setup_browser_session()
             sid = _parse_uuid(session_id)
             # Mutable per-connection viewport (CSS px). Updated by the client's
-            # {"type":"resize"} to its physical canvas size; used BOTH to
-            # set_viewport_size (crisp frame) AND to map normalized clicks → CSS px.
+            # {"type":"resize"}; used BOTH to drive the source's device-metrics
+            # override AND to map normalized clicks → CSS px.
             viewport = {"w": _TEACH_VIEWPORT_W, "h": _TEACH_VIEWPORT_H}
             send_task = asyncio.create_task(_send_frames(websocket, screen_src))
             recv_task = asyncio.create_task(
-                _recv_input(websocket, input_adapter, page, orchestrator, sid, viewport)
+                _recv_input(
+                    websocket, input_adapter, page, orchestrator, sid, viewport, screen_src
+                )
             )
 
             # Wait until either task exits (disconnect or error).
@@ -200,7 +203,7 @@ def create_training_live_router(orchestrator=None) -> APIRouter:
 async def _setup_browser_session():
     """Connect to the jailed CDP, open an isolated context, wire adapters.
 
-    Returns (pw, ctx, page, CdpScreencastSource, CdpInputAdapter).
+    Returns (pw, ctx, page, CdpScreenshotSource, CdpInputAdapter).
     Raises on hard failure (caller closes the WS).
     """
     from playwright.async_api import async_playwright  # noqa: PLC0415
@@ -226,25 +229,25 @@ async def _setup_browser_session():
     pw = await async_playwright().start()
     browser = await pw.chromium.connect_over_cdp(_cdp_url())
 
-    # Isolated context: no shared cookies/storage with the agent. device_scale_factor
-    # is pointless here (the screencast ignores it — see the ADAPTIVE RESOLUTION note
-    # at module top); sharpness comes from the client sending its PHYSICAL canvas size
-    # via {"type":"resize"} → set_viewport_size(physical) → frame = physical = the
-    # client's CSS×dpr backing store → 1:1 crisp. This initial viewport is a
-    # placeholder until the first resize arrives. Screencast cap is generous.
+    # Isolated context: no shared cookies/storage with the agent. The CdpScreenshot-
+    # Source owns the deviceScaleFactor (via Emulation.setDeviceMetricsOverride) — see
+    # the RESOLUTION MODEL note at module top — so no device_scale_factor here.
     ctx = await browser.new_context(
         viewport={"width": _TEACH_VIEWPORT_W, "height": _TEACH_VIEWPORT_H},
     )
     page = await ctx.new_page()
 
-    screen_src = CdpScreencastSource(
+    # Screenshot-based source (NOT startScreencast — that ignores DSF → blurry). It
+    # captures at CSS×dpr so the frame is crisp AND the layout is native-sized.
+    screen_src = CdpScreenshotSource(
         page=page,
-        max_width=_TEACH_MAX_W,
-        max_height=_TEACH_MAX_H,
+        initial_width=_TEACH_VIEWPORT_W,
+        initial_height=_TEACH_VIEWPORT_H,
+        device_scale_factor=_TEACH_DPR,
     )
     await screen_src.start()
 
-    # Separate CDPSession for input injection (CdpScreencastSource owns its own).
+    # Separate CDPSession for input injection (the source owns its own).
     input_session = await ctx.new_cdp_session(page)
     input_adapter = CdpInputAdapter(session=input_session)
 
@@ -271,11 +274,15 @@ async def _try_ensure_browser_running() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _send_frames(ws: WebSocket, src: CdpScreencastSource) -> None:
-    """Forward the latest JPEG from the screencast to the client at ~14 fps."""
+async def _send_frames(ws: WebSocket, src: CdpScreenshotSource) -> None:
+    """Forward each NEW JPEG frame to the client promptly. Dedups by frame count so a
+    static page costs no WS traffic; the source's capture rate is the fps limiter."""
+    last_count = -1
     while True:
         data, _ = src.latest()
-        if data is not None:
+        count = src.frame_count
+        if data is not None and count != last_count:
+            last_count = count
             try:
                 await ws.send_bytes(data)
             except (WebSocketDisconnect, RuntimeError):
@@ -295,6 +302,7 @@ async def _recv_input(
     orchestrator=None,
     session_id: "UUID | None" = None,
     viewport: dict | None = None,
+    screen_src: "CdpScreenshotSource | None" = None,
 ) -> None:
     """Receive JSON input events from the client, dispatch them to the browser,
     and (if recording) capture them as training steps."""
@@ -312,7 +320,7 @@ async def _recv_input(
             continue
 
         if ev.get("type") == "resize":
-            _dispatch_resize(ev, page, vp)
+            _dispatch_resize(ev, screen_src, vp)
             continue
 
         _normalize_mouse_coords(ev, vp)
@@ -350,27 +358,26 @@ def _normalize_mouse_coords(ev: dict, viewport: dict) -> None:
     ev["y"] = round(fy * viewport["h"])
 
 
-def _dispatch_resize(ev: dict, page, viewport: dict) -> None:
-    """Client reported its physical canvas size → resize the teaching page so the
-    screencast frame is 1:1 with the display (crisp at any size / fullscreen).
-    Updates the shared viewport dict (used to map normalized clicks) and schedules
-    page.set_viewport_size (async, fire-and-forget). Clamped to sane bounds.
+def _dispatch_resize(ev: dict, screen_src: "CdpScreenshotSource | None", viewport: dict) -> None:
+    """Client reported its CSS canvas size + devicePixelRatio → tell the source to
+    lay the page out at that CSS size and capture at CSS×dpr (native size + crisp).
+    Also updates the shared viewport dict (CSS px) used to map normalized clicks.
     """
     try:
         w = int(ev.get("width", 0))
         h = int(ev.get("height", 0))
+        dpr = float(ev.get("dpr", _TEACH_DPR))
     except (TypeError, ValueError):
         return
-    w = max(320, min(w, _TEACH_MAX_W))
-    h = max(240, min(h, _TEACH_MAX_H))
-    if w == viewport["w"] and h == viewport["h"]:
+    if w < 1 or h < 1:
         return
+    # Clamp to the source's CSS bounds so the click-mapping viewport matches what the
+    # page is actually laid out at.
+    w = max(320, min(w, 2560))
+    h = max(240, min(h, 1600))
     viewport["w"], viewport["h"] = w, h
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    asyncio.ensure_future(page.set_viewport_size({"width": w, "height": h}), loop=loop)
+    if screen_src is not None:
+        screen_src.set_metrics(w, h, dpr)
 
 
 def _dispatch_event(ev: dict, adapter: CdpInputAdapter, page) -> None:

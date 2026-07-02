@@ -316,23 +316,20 @@ function useLiveCanvas(
     send({ type: 'key', action: 'up', keysym: null, text: ev.key })
   }, [send])
 
-  // Report the canvas' PHYSICAL size (CSS × devicePixelRatio) to the server as the
-  // remote browser VIEWPORT. GROUND-TRUTH MEASURED: the CDP screencast captures at
-  // the page's LAYOUT VIEWPORT resolution and IGNORES deviceScaleFactor at every
-  // level (per-context, Emulation, AND --force-device-scale-factor), so frame =
-  // viewport ALWAYS. To fill the canvas BACKING STORE (which is CSS×dpr) at 1:1 —
-  // i.e. sharp on Retina — the viewport must therefore equal that physical size, so
-  // the frame comes back at CSS×dpr = backing = crisp. Trade-off: the page lays out
-  // for a larger (physical-px) window, so content reads a touch smaller — but sharp,
-  // which is the requirement. (v0.7.4 also sent physical but was blurry only because
-  // the screencast was capped at 1280×720; the cap is now 4096×2160.)
+  // Report the canvas' CSS size + devicePixelRatio to the server. The server drives a
+  // captureScreenshot source with Emulation.setDeviceMetricsOverride(width=CSS,
+  // height=CSS, dsf=dpr): the page LAYS OUT at our CSS size (native proportions —
+  // correct dimensions) AND the screenshot comes back at CSS×dpr device px (crisp).
+  // We paint it 1:1 into the CSS×dpr canvas backing store. GROUND-TRUTH MEASURED:
+  // startScreencast ignores deviceScaleFactor (always 1×viewport → blurry), but
+  // captureScreenshot honours it (1520×850 @dpr2 → 3040×1700).
   const sendViewport = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    const w = canvas.width   // backing store = CSS × dpr (physical px)
-    const h = canvas.height
+    const w = canvas.clientWidth   // CSS px (layout size = native window size)
+    const h = canvas.clientHeight
     if (w < 1 || h < 1) return
-    send({ type: 'resize', width: w, height: h })
+    send({ type: 'resize', width: w, height: h, dpr: window.devicePixelRatio || 1 })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [send])
 
