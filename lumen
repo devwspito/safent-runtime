@@ -257,69 +257,6 @@ cmd_status() {
 
 cmd_logs() { "$RT" logs -f "$NAME"; }
 
-# Teach a skill by demonstrating it in YOUR OWN browser (native quality + speed).
-# Launches your Chrome with a temp profile + CDP, runs the host-side recorder that
-# observes your clicks/inputs/navigations and POSTs them to Lumen, then signs the
-# skill. No headless streaming — you drive your real browser; Lumen just listens.
-cmd_teach() {
-  skill="${1:-}"; url="${2:-about:blank}"
-  [ -n "$skill" ] || { echo '[x] Uso:  lumen teach "<nombre de la habilidad>" <url>'; exit 1; }
-  command -v node >/dev/null 2>&1 || { echo "[x] 'lumen teach' necesita Node (node) en tu Mac."; exit 1; }
-  CHROME=""
-  for c in \
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-    "/Applications/Chromium.app/Contents/MacOS/Chromium" \
-    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
-    "$(command -v google-chrome 2>/dev/null || true)" \
-    "$(command -v chromium 2>/dev/null || true)" \
-    "$(command -v chromium-browser 2>/dev/null || true)"; do
-    [ -n "$c" ] && [ -x "$c" ] && { CHROME="$c"; break; }
-  done
-  [ -n "$CHROME" ] || { echo "[x] No encuentro Google Chrome/Chromium. Instálalo y reintenta."; exit 1; }
-
-  _running || { echo "[*] Arrancando Lumen..."; cmd_start >/dev/null 2>&1 || true; }
-  PORT="$(_port)"
-  TOKEN="$("$RT" exec "$NAME" python3 -c 'from hermes.shell_server.security.secrets import SecretsVault; print(SecretsVault().derive_subkey(label="shell-webui-session").hex())' 2>/dev/null | tr -d "\r\n")"
-  [ -n "$TOKEN" ] || { echo "[x] No pude obtener el token de Lumen. ¿Está arrancado? (lumen status)"; exit 1; }
-
-  RESP="$(curl -s -X POST "http://localhost:$PORT/api/v1/training" -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" -d "{\"skill_name\":\"$skill\"}")"
-  SID="$(printf '%s' "$RESP" | grep -oE '"session_id":"[0-9a-fA-F-]+"' | head -1 | sed 's/.*:"//;s/"//')"
-  [ -n "$SID" ] || { echo "[x] No pude crear la sesión. Respuesta: $RESP"; exit 1; }
-
-  REC="$SECCOMP_DIR/lumen-teach-recorder.js"
-  REC_URL="${LUMEN_RECORDER_URL:-https://raw.githubusercontent.com/devwspito/lumen-runtime/main/ops/teach/lumen-teach-recorder.js}"
-  mkdir -p "$SECCOMP_DIR"
-  curl -fsSL "$REC_URL" -o "$REC" 2>/dev/null || true
-  [ -s "$REC" ] || { echo "[x] No pude descargar el grabador ($REC_URL)."; exit 1; }
-
-  PROFILE="$(mktemp -d 2>/dev/null || echo "/tmp/lumen-teach-$$")"; mkdir -p "$PROFILE"
-  echo "[*] Abriendo tu navegador para enseñar '$skill'..."
-  "$CHROME" --remote-debugging-port=9222 --remote-allow-origins='*' \
-    --user-data-dir="$PROFILE" --no-first-run --no-default-browser-check "$url" >/dev/null 2>&1 &
-  CHROME_PID=$!
-
-  CDP_URL="http://127.0.0.1:9222" LUMEN_URL="http://localhost:$PORT" SESSION_ID="$SID" \
-    LUMEN_TOKEN="$TOKEN" TEACH_VERBOSE=1 node "$REC" &
-  REC_PID=$!
-
-  echo ""
-  echo "  Demuestra la tarea en el navegador que se abrió."
-  echo "  Cuando termines, vuelve aquí y pulsa ENTER para guardar la habilidad."
-  echo ""
-  read -r _dummy
-  kill "$REC_PID" 2>/dev/null || true
-  kill "$CHROME_PID" 2>/dev/null || true
-
-  echo "[*] Guardando la habilidad '$skill'..."
-  # Finish (idle → review, no jailed browser) then sign (review → SKILL.md).
-  curl -s -X POST "http://localhost:$PORT/api/v1/training/$SID/native-stop" \
-    -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" -d '{}' >/dev/null 2>&1 || true
-  curl -s -X POST "http://localhost:$PORT/api/v1/training/$SID/sign" \
-    -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" -d '{}' >/dev/null 2>&1 || true
-  rm -rf "$PROFILE" 2>/dev/null || true
-  echo "[ok] Habilidad guardada. Ábrela en Lumen → Habilidades."
-}
-
 usage() {
   cat <<'EOF'
 lumen - control your local Lumen
@@ -331,7 +268,6 @@ lumen - control your local Lumen
   lumen update     pull the latest version and apply it (keeps your config)
   lumen status     is it running? on which port?
   lumen logs       follow the container journal
-  lumen teach "<skill>" <url>   teach a skill by demonstrating it in YOUR browser
   lumen pair <code>   associate with an enterprise tenant (same image, associate mode)
   lumen unpair        remove the enterprise association (reverts to community edition)
 EOF
@@ -345,7 +281,6 @@ case "${1:-open}" in
   update|actualiza|actualizar) cmd_update ;;
   status|estado)               cmd_status ;;
   logs|log)                    cmd_logs ;;
-  teach|ensena|ensenar)        cmd_teach "${2:-}" "${3:-}" ;;
   pair|vincular)               cmd_pair "${2:-}" ;;
   unpair|desvincular)          cmd_unpair ;;
   -h|--help|help|ayuda)        usage ;;
