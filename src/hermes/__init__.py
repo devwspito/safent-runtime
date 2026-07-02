@@ -65,4 +65,4 @@ __all__ = [
     "ToolSpec",
 ]
 
-__version__ = "0.7.7"  # single source of truth: repo-root VERSION (synced by build.sh)
+__version__ = "0.7.8"  # single source of truth: repo-root VERSION (synced by build.sh)
