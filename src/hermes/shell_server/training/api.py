@@ -496,7 +496,10 @@ def create_training_router(
 
         # Avanza a 'validated' (spec 004/US3: sign → validated, not autonomous).
         # Pre-spec-004 callers reading 'signed' can still function; the DB now
-        # stores the canonical state 'validated'. `persisted` queda en log.
+        # stores the canonical state 'validated'. `persisted` queda en log a
+        # propósito: en el flujo wizard la skill se produce vía /synthesize, así
+        # que sign con 0 pasos capturados es legítimo aquí (a diferencia del
+        # flujo live de teach_vnc, donde ok:true sin persistir SÍ era el bug).
         logger.info(
             "training.sign session=%s persisted=%s steps=%s",
             session_id,

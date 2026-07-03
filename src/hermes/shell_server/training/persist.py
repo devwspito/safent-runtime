@@ -228,11 +228,13 @@ def compile_and_persist(
     try:
         sess = orchestrator.get_session(session_id=session_id)
     except Exception:
-        logger.debug("compile_and_persist: session not in orchestrator; skipping")
+        # warning, not debug: this is a user-visible failed save (the taught
+        # skill will NOT exist) and must show up in production logs.
+        logger.warning("compile_and_persist: session %s not in orchestrator; skipping", session_id)
         return False
 
     if not sess.steps:
-        logger.debug("compile_and_persist: no steps; skipping")
+        logger.warning("compile_and_persist: session %s has no steps; skipping", session_id)
         return False
 
     # SECURITY (red-team 2026-06-19): scan the recorded STEPS for trojan patterns

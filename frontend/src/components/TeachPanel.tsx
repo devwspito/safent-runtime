@@ -27,7 +27,10 @@ export function TeachPanel({ onSaved, fullscreen }: { onSaved?: () => void; full
       setSessionId(r.session_id)
       sileo.success({ title: t('teach.toast.recording') })
     } catch (e) {
-      sileo.error({ title: e instanceof ApiError ? e.message : t('teach.err.start') })
+      // 503 = the jailed browser's CDP isn't accepting yet (startup race) —
+      // the recorder did NOT start; retrying a few seconds later works.
+      const notReady = e instanceof ApiError && e.status === 503
+      sileo.error({ title: notReady ? t('teach.err.notready') : (e instanceof ApiError ? e.message : t('teach.err.start')) })
     } finally {
       setBusy(false)
     }
@@ -37,13 +40,21 @@ export function TeachPanel({ onSaved, fullscreen }: { onSaved?: () => void; full
     if (!sessionId) return
     setBusy(true)
     try {
-      await signTeaching(sessionId)
+      // Defense-in-depth: never toast success without checking ok. A hardcoded
+      // backend ok:true once made a taught skill vanish behind a success toast.
+      const r = await signTeaching(sessionId)
+      if (!r?.ok) {
+        sileo.error({ title: t('teach.err.nosteps') })
+        return
+      }
       sileo.success({ title: t('teach.toast.saved') })
       setSessionId(null)
       setSkill('')
       onSaved?.()
     } catch (e) {
-      sileo.error({ title: e instanceof ApiError ? e.message : t('teach.err.save') })
+      // 409 = nothing captured (the skill was NOT saved) — say it plainly.
+      const noSteps = e instanceof ApiError && e.status === 409
+      sileo.error({ title: noSteps ? t('teach.err.nosteps') : (e instanceof ApiError ? e.message : t('teach.err.save')) })
     } finally {
       setBusy(false)
     }

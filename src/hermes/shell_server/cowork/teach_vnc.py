@@ -89,7 +89,20 @@ class _Recorder:
     async def start(self):
         from playwright.async_api import async_playwright  # noqa: PLC0415
         self._pw = await async_playwright().start()
-        self._browser = await self._pw.chromium.connect_over_cdp(self._cdp_url)
+        # The jailed Chromium may still be binding its CDP port right after
+        # _try_ensure_browser_running() (process-alive ≠ port-accepting). Retry
+        # briefly instead of losing the WHOLE recording to a startup race — the
+        # "taught a skill, save said ok, nothing was captured" bug.
+        last_exc: Exception | None = None
+        for attempt in range(8):
+            try:
+                self._browser = await self._pw.chromium.connect_over_cdp(self._cdp_url)
+                break
+            except Exception as exc:  # noqa: BLE001 — retried; re-raised after the loop
+                last_exc = exc
+                await asyncio.sleep(0.5 * (attempt + 1))
+        else:
+            raise RuntimeError(f"CDP not reachable at {self._cdp_url}: {last_exc}")
         for ctx in self._browser.contexts:
             ctx.on("page", lambda p: asyncio.ensure_future(self._wire(p)))
             for page in ctx.pages:
@@ -212,7 +225,15 @@ def create_teach_vnc_router(orchestrator=None, db_path=None):
             await rec.start()
             _recorders[str(sid)] = rec
         except Exception:  # noqa: BLE001
+            # NEVER pretend to record: without the recorder every demonstrated
+            # step would be lost and /save would have nothing to persist. Fail
+            # loud so the UI tells the user to retry instead of showing a fake
+            # "Grabando…" (this silently ate a whole taught skill once).
             logger.warning("hermes.teach_vnc.recorder.start.failed", exc_info=True)
+            raise HTTPException(
+                status_code=503,
+                detail="browser not ready to record — wait a moment and try again",
+            )
         return {"session_id": str(sid), "skill_name": skill}
 
     @router.post("/api/v1/teach/{session_id}/save")
@@ -265,13 +286,22 @@ def create_teach_vnc_router(orchestrator=None, db_path=None):
             from hermes.shell_server.training.persist import (  # noqa: PLC0415
                 compile_and_persist,
             )
-            compile_and_persist(
+            persisted = compile_and_persist(
                 db_path=db_path, orchestrator=orchestrator, session_id=sid,
                 skill_name=skill_name, signed_at=signed_at,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("hermes.teach_vnc.sign.failed", exc_info=True)
             raise HTTPException(status_code=409, detail=f"could not save skill: {exc}")
+        # compile_and_persist returns False WITHOUT raising when nothing was
+        # persisted (no steps captured, compiler error, SKILL.md write failure).
+        # Honor that contract — a hardcoded ok:true here once swallowed a whole
+        # taught skill ("saved successfully", nothing on disk).
+        if not persisted:
+            raise HTTPException(
+                status_code=409,
+                detail="no steps were captured — the skill was not saved",
+            )
         return {"ok": True, "session_id": str(sid)}
 
     return router
