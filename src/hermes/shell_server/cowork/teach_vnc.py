@@ -75,7 +75,28 @@ def _event_to_payload(ev: dict) -> dict | None:
 
 
 class _Recorder:
-    """Server-side CDP observer of the shared jailed browser for one session."""
+    """Server-side CDP observer of the shared jailed browser for one session.
+
+    RESILIENCE (2026-07-03 — "GUARDAR NO FUNCIONA" / 409 every time): the initial
+    wiring only sees contexts/pages that exist AT CONNECT TIME, and the CDP
+    connection is a handle to ONE Chromium process. Two things invalidate that
+    single snapshot after /teach/start returns 200, both silently:
+      1. A NEW tab/context opened in the SAME process (the ctx.on("page", ...)
+         listener only covers contexts registered at connect time — a brand new
+         context has no listener at all).
+      2. The shared jailed Chromium CRASHES AND RESPAWNS (confirmed reproducible:
+         JailedBrowserManager.ensure_running() transparently relaunches a new
+         process on the same CDP URL whenever the old one dies) — a NEW CDP
+         connection entirely, which the recorder's existing `self._browser`
+         handle knows nothing about.
+      Either case → the operator's demonstration lands on contexts/pages/process
+      the recorder never wired → capture_step is never called → 0 steps →
+      compile_and_persist returns False → /save 409. A background rescan task
+      re-wires new contexts/pages every _RESCAN_INTERVAL_S and reconnects
+      whenever the current CDP connection has dropped, until stop().
+    """
+
+    _RESCAN_INTERVAL_S: float = 1.5
 
     def __init__(self, cdp_url, orchestrator, session_id):
         self._cdp_url = cdp_url
@@ -84,30 +105,77 @@ class _Recorder:
         self._pw = None
         self._browser = None
         self._wired: set[int] = set()
+        self._wired_contexts: set[int] = set()
         self._last_nav: str | None = None
+        self._rescan_task: "asyncio.Task | None" = None
+        self._stopped = False
 
     async def start(self):
         from playwright.async_api import async_playwright  # noqa: PLC0415
         self._pw = await async_playwright().start()
-        # The jailed Chromium may still be binding its CDP port right after
-        # _try_ensure_browser_running() (process-alive ≠ port-accepting). Retry
-        # briefly instead of losing the WHOLE recording to a startup race — the
-        # "taught a skill, save said ok, nothing was captured" bug.
+        self._browser = await self._connect()
+        await self._wire_all_contexts()
+        self._rescan_task = asyncio.ensure_future(self._rescan_loop())
+        logger.info("hermes.teach_vnc.recorder.started session=%s", self._sid)
+
+    async def _connect(self):
+        """connect_over_cdp with retry — used at start() AND by the rescan loop
+        to reconnect after the shared browser crashes and respawns.
+
+        The jailed Chromium may still be binding its CDP port right after
+        _try_ensure_browser_running() (process-alive ≠ port-accepting). Retry
+        briefly instead of losing the WHOLE recording to a startup race — the
+        "taught a skill, save said ok, nothing was captured" bug.
+        """
         last_exc: Exception | None = None
         for attempt in range(8):
             try:
-                self._browser = await self._pw.chromium.connect_over_cdp(self._cdp_url)
-                break
+                return await self._pw.chromium.connect_over_cdp(self._cdp_url)
             except Exception as exc:  # noqa: BLE001 — retried; re-raised after the loop
                 last_exc = exc
                 await asyncio.sleep(0.5 * (attempt + 1))
-        else:
-            raise RuntimeError(f"CDP not reachable at {self._cdp_url}: {last_exc}")
+        raise RuntimeError(f"CDP not reachable at {self._cdp_url}: {last_exc}")
+
+    async def _wire_all_contexts(self):
         for ctx in self._browser.contexts:
+            await self._wire_context(ctx)
+
+    async def _wire_context(self, ctx):
+        """Wire every current page of *ctx* and, once per context, subscribe to
+        its "page" event so pages opened LATER (e.g. a new tab) get wired too."""
+        cid = id(ctx)
+        if cid not in self._wired_contexts:
+            self._wired_contexts.add(cid)
             ctx.on("page", lambda p: asyncio.ensure_future(self._wire(p)))
-            for page in ctx.pages:
-                await self._wire(page)
-        logger.info("hermes.teach_vnc.recorder.started session=%s", self._sid)
+        for page in ctx.pages:
+            await self._wire(page)
+
+    async def _rescan_loop(self):
+        """Periodically re-wire any unwired context/page, and reconnect if the
+        shared browser was replaced (crash-respawn). Fail-soft: a scan error
+        must never kill the loop or abort an in-progress recording."""
+        while not self._stopped:
+            await asyncio.sleep(self._RESCAN_INTERVAL_S)
+            if self._stopped:
+                return
+            await self._rescan_tick()
+
+    async def _rescan_tick(self):
+        """One rescan iteration — reconnect if dropped, then re-wire. Split out
+        from _rescan_loop so it is directly unit-testable without real sleeps."""
+        try:
+            if not self._browser.is_connected():
+                logger.warning(
+                    "hermes.teach_vnc.recorder.reconnecting session=%s "
+                    "— shared browser connection dropped (crash-respawn?)",
+                    self._sid,
+                )
+                self._browser = await self._connect()
+                self._wired.clear()
+                self._wired_contexts.clear()
+            await self._wire_all_contexts()
+        except Exception:  # noqa: BLE001 — never let a scan error kill the loop
+            logger.debug("hermes.teach_vnc.rescan.failed", exc_info=True)
 
     async def _wire(self, page):
         pid = id(page)
@@ -162,6 +230,13 @@ class _Recorder:
             logger.warning("hermes.teach_vnc.capture.FAILED", exc_info=True)
 
     async def stop(self):
+        self._stopped = True
+        if self._rescan_task is not None:
+            self._rescan_task.cancel()
+            try:
+                await self._rescan_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         try:
             if self._pw is not None:
                 await self._pw.stop()  # detach; do NOT close the shared browser
