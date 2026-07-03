@@ -245,8 +245,64 @@ _self_update() {
   return 0
 }
 
+# Make sure the UI-update watcher (`lumen agent`) is installed and running.
+# The UI's "Actualizar" button only drops a flag INSIDE the container; without
+# this host-side watcher nothing picks it up and the UI hangs on "Updating…".
+# Installing it here (not only in get-lumen.sh) means one `lumen update` run is
+# enough to enable UI updates on machines installed before the agent existed.
+_ensure_agent() {
+  self="$(command -v lumen 2>/dev/null || echo "$0")"
+  mkdir -p "$HOME/.lumen" 2>/dev/null || true
+  case "$OS" in
+    Darwin)
+      _pl="$HOME/Library/LaunchAgents/run.lumen.agent.plist"
+      if [ ! -f "$_pl" ] || ! grep -q "$self" "$_pl" 2>/dev/null; then
+        mkdir -p "$HOME/Library/LaunchAgents" 2>/dev/null || return 0
+        cat > "$_pl" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>run.lumen.agent</string>
+  <key>ProgramArguments</key><array><string>$self</string><string>agent</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$HOME/.lumen/agent.log</string>
+  <key>StandardErrorPath</key><string>$HOME/.lumen/agent.log</string>
+</dict></plist>
+PLIST
+        launchctl unload "$_pl" >/dev/null 2>&1 || true
+        launchctl load "$_pl" >/dev/null 2>&1 \
+          && echo "[ok] UI-triggered updates enabled (background agent)." || true
+      fi
+      ;;
+    Linux)
+      if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        _u="$HOME/.config/systemd/user"
+        if [ ! -f "$_u/lumen-agent.service" ]; then
+          mkdir -p "$_u" 2>/dev/null || true
+          cat > "$_u/lumen-agent.service" <<UNIT
+[Unit]
+Description=Lumen UI-triggered update agent
+[Service]
+ExecStart=$self agent
+Restart=always
+RestartSec=10
+[Install]
+WantedBy=default.target
+UNIT
+          systemctl --user daemon-reload >/dev/null 2>&1 || true
+          systemctl --user enable --now lumen-agent.service >/dev/null 2>&1 \
+            && echo "[ok] UI-triggered updates enabled (systemd --user)." || true
+        fi
+      fi
+      ;;
+  esac
+  return 0
+}
+
 cmd_update() {
   _self_update
+  _ensure_agent
   echo "[*] Fetching the latest Lumen image..."
   _ensure_machine
   # Reclaim space BEFORE pulling so the new image has room even on a full disk. See

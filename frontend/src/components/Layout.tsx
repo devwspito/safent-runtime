@@ -102,6 +102,9 @@ function useNavItems(): HubNavItem[] {
 // ── System update ─────────────────────────────────────────────────────────────
 
 const SYSTEM_UPDATE_POLL_MS = 15 * 60_000
+// While an update is in flight, poll fast: the owner is WATCHING "Updating…"
+// and must see completion (or the stale-flag expiry) in seconds, not in 15 min.
+const SYSTEM_UPDATE_ACTIVE_POLL_MS = 20_000
 
 /** Subtle footer line: current version + a calm "Actualizar" affordance when one is available. */
 function SystemUpdateFooter() {
@@ -113,11 +116,12 @@ function SystemUpdateFooter() {
     getSystemUpdate().then(setStatus)
   }, [])
 
+  const updating = !!status?.updating
   useEffect(() => {
     poll()
-    const id = setInterval(poll, SYSTEM_UPDATE_POLL_MS)
+    const id = setInterval(poll, updating ? SYSTEM_UPDATE_ACTIVE_POLL_MS : SYSTEM_UPDATE_POLL_MS)
     return () => clearInterval(id)
-  }, [poll])
+  }, [poll, updating])
 
   async function handleUpdateClick() {
     const ok = await confirmUpdate({

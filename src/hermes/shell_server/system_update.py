@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import urllib.request
 
 from fastapi import APIRouter, HTTPException, Request
@@ -25,6 +26,26 @@ logger = logging.getLogger("hermes.shell_server.system_update")
 # 0755). The host `lumen agent` watches this exact path.
 _INSTANCE_DIR = "/var/lib/hermes/instance"
 _UPDATE_FLAG = os.path.join(_INSTANCE_DIR, ".update-requested")
+
+# A CLI update takes ~2-5 min. If the flag is older than this, no host watcher
+# picked it up (agent not installed / dead) — treat it as stale and clear it so
+# the UI stops showing an eternal "Updating…" and offers the button again.
+_FLAG_STALE_S = 15 * 60
+
+
+def _updating() -> bool:
+    try:
+        st = os.stat(_UPDATE_FLAG)
+    except OSError:
+        return False
+    if time.time() - st.st_mtime > _FLAG_STALE_S:
+        try:
+            os.remove(_UPDATE_FLAG)
+        except OSError:
+            pass
+        logger.warning("hermes.system_update.flag_stale_cleared (no host agent picked it up)")
+        return False
+    return True
 
 # Source of truth for "what's the latest version" — the repo VERSION file on main.
 _LATEST_URL = os.environ.get(
@@ -71,7 +92,7 @@ def create_system_update_router() -> APIRouter:
             "current_version": current,
             "latest_version": latest,
             "update_available": available,
-            "updating": os.path.exists(_UPDATE_FLAG),
+            "updating": _updating(),
         }
 
     @router.post("/api/v1/system/update")
