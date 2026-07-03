@@ -190,17 +190,22 @@ cmd_restart() { cmd_stop; cmd_open; }
 cmd_update() {
   echo "[*] Fetching the latest Lumen image..."
   _ensure_machine
+  # Reclaim disk BEFORE pulling. Each previous update left the old image DANGLING
+  # (its :latest tag moved to the new pull) and each hoards ~7 GB. If we only pruned
+  # AFTER the pull (as before), a disk that had already filled up over time made the
+  # pull itself fail with "no space left on device" — and the prune never ran, so it
+  # stayed stuck. Pruning dangling images + build cache first frees that space so the
+  # pull has room. This NEVER touches the lumen-data volume (your keystore/MFA/
+  # providers/config) nor the running container's current tagged image.
+  echo "[*] Reclaiming space from previous versions (your data is untouched)..."
+  "$RT" image prune -f  >/dev/null 2>&1 || true
+  "$RT" builder prune -f >/dev/null 2>&1 || true
   # Pull the correct image (enterprise or community) based on the current marker.
   "$RT" pull "$(_image)"
   echo "[*] Recreating the container with the new image..."
   _run   # -v lumen-data keeps your config (keystore, MFA, providers)
-  # Reclaim disk WITHOUT losing anything you care about. After the pull+recreate the
-  # PREVIOUS image is untagged (the :latest tag moved) and unused (container was
-  # recreated) → a DANGLING image. Pruning dangling images frees ~7 GB per old
-  # version. It NEVER touches the lumen-data volume (your keystore/MFA/providers/
-  # config) nor the current image — an update keeps everything, it just stops
-  # hoarding old image layers each time (which was filling the disk).
-  echo "[*] Reclaiming space from previous versions (your data is untouched)..."
+  # The image we were running until a second ago is now dangling too (the tag moved
+  # to what we just pulled, and the container was recreated) → prune it as well.
   "$RT" image prune -f >/dev/null 2>&1 || true
   _open_and_print
 }
