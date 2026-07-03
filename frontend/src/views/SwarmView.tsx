@@ -16,6 +16,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ForceGraph3D, { type ForceGraphMethods, type NodeObject, type LinkObject } from 'react-force-graph-3d'
 import * as THREE from 'three'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
+// d3-force-3d ships with the force-graph stack (no types published); collide
+// keeps nodes+labels apart.
+// eslint-disable-next-line import/no-extraneous-dependencies
+// @ts-expect-error — d3-force-3d has no type declarations
+import { forceCollide } from 'd3-force-3d'
 import SpriteText from 'three-spritetext'
 import { Users } from 'lucide-react'
 
@@ -215,12 +220,16 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
     return () => ro.disconnect()
   }, [])
 
-  // Forces + pin the brain at the origin.
+  // Forces + pin the brain at the origin. Layout is PLANAR (numDimensions=2):
+  // the readability of the 2D constellation, rendered with 3D light and depth.
   useEffect(() => {
     const fg = fgRef.current
     if (!fg) return
-    fg.d3Force('charge')?.strength(-320)
-    fg.d3Force('link')?.distance((l: SwarmLink) => ((typeof l.source === 'object' && (l.source as SwarmNode).kind === 'brain') ? 170 : 62))
+    fg.d3Force('charge')?.strength(-380)
+    fg.d3Force('link')?.distance((l: SwarmLink) => ((typeof l.source === 'object' && (l.source as SwarmNode).kind === 'brain') ? 200 : 75))
+    // Collision keeps nodes AND their labels from ever overlapping (the owner's
+    // screenshot showed mashed labels — this is the structural cure).
+    fg.d3Force('collide', forceCollide((n: SwarmNode) => (n.kind === 'brain' ? 30 : n.kind === 'dept' ? 14 : 25)))
     const brain = graph.nodes.find((n) => n.kind === 'brain') as (SwarmNode & { fx?: number; fy?: number; fz?: number }) | undefined
     if (brain) { brain.fx = 0; brain.fy = 0; brain.fz = 0 }
     fg.d3ReheatSimulation()
@@ -236,10 +245,11 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
     if (!fg || dressedRef.current) return
     dressedRef.current = true
     try {
-      // REAL glow: bright emissive pixels bleed light. This is the whole trick.
-      // Tuned so labels stay readable: strength moderate, threshold above the
-      // idle emissive level (only working/brain nodes truly blaze).
-      const bloom = new UnrealBloomPass(new THREE.Vector2(size.w || 800, size.h || 600), 1.25, 0.5, 0.12)
+      // REAL glow: bright emissive pixels bleed light. Calibrated for REAL GPUs
+      // (the owner's retina Mac blooms much harder than SwiftShader): threshold
+      // ABOVE every idle emissive level, so at rest the swarm is calm colored
+      // dots and ONLY working nodes (and sparks) truly blaze.
+      const bloom = new UnrealBloomPass(new THREE.Vector2(size.w || 800, size.h || 600), 1.0, 0.45, 0.18)
       fg.postProcessingComposer().addPass(bloom)
     } catch { /* WebGL edge cases — the graph still renders without bloom */ }
     try {
@@ -264,22 +274,10 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
     } catch { /* ambience is optional */ }
   }, [size.w, size.h])
 
-  // ── Cinematic camera: soft auto-orbit at rest, pause on interaction ────────
-  useEffect(() => {
-    const fg = fgRef.current
-    if (!fg || reduced) return
-    const controls = fg.controls() as { autoRotate?: boolean; autoRotateSpeed?: number; addEventListener?: (e: string, cb: () => void) => void }
-    if (!controls) return
-    controls.autoRotate = true
-    controls.autoRotateSpeed = 0.4
-    let resume: ReturnType<typeof setTimeout> | null = null
-    controls.addEventListener?.('start', () => {
-      controls.autoRotate = false
-      if (resume) clearTimeout(resume)
-      resume = setTimeout(() => { controls.autoRotate = true }, 15_000)
-    })
-    return () => { if (resume) clearTimeout(resume) }
-  }, [reduced, size.w])
+  // ── Cinematic motion: the GALAXY spins slowly in its own plane (labels are
+  // billboards, so they stay horizontal and readable at every moment). The old
+  // camera auto-orbit is gone — it kept landing on ugly edge-on angles.
+  // The spin lives in the pulse rAF loop below. Manual drag/zoom untouched.
 
   // Pause the whole render loop when the tab is hidden (battery/perf).
   useEffect(() => {
@@ -293,31 +291,39 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
     return () => document.removeEventListener('visibilitychange', onVis)
   }, [])
 
-  // ── Pulse loop: working nodes breathe LIGHT (bloom turns it into glow) ─────
+  // ── Pulse loop: working nodes breathe LIGHT (bloom turns it into glow) and
+  // the whole constellation spins slowly in-plane like a galaxy. Idle nodes
+  // stay BELOW the bloom threshold — calm colored dots, never false "working".
   useEffect(() => {
     if (reduced) return
     let raf = 0
     const loop = () => {
       const now = performance.now()
       const pal = palRef.current
+      const fg = fgRef.current
+      if (fg) {
+        try { fg.scene().rotation.z += 0.00035 } catch { /* not mounted yet */ }
+      }
       for (const [id, o] of objsRef.current) {
         const working = o.kind === 'agent'
           ? activeRef.current.has(id)
           : o.kind === 'brain'
             ? brainBusyRef.current || (activeRef.current.size > 0 && activeRef.current.has(id))
             : false
+        const labelMat = o.label.material as THREE.SpriteMaterial
         if (working) {
           const p = 0.5 + 0.5 * Math.sin(now / 300)
-          o.sphere.material.emissiveIntensity = 0.9 + 1.1 * p
-          o.halo.material.opacity = 0.22 + 0.3 * p
+          o.sphere.material.emissiveIntensity = 1.1 + 1.1 * p
+          o.halo.material.opacity = 0.18 + 0.2 * p
           o.halo.material.color.set(o.kind === 'agent' ? pal.working : pal.accent)
           o.label.color = pal.ink
+          labelMat.opacity = 1
         } else {
-          const breathe = 0.5 + 0.5 * Math.sin(now / 1600 + o.sphere.position.x)
-          o.sphere.material.emissiveIntensity = o.kind === 'brain' ? 0.85 : 0.35 + 0.1 * breathe
-          o.halo.material.opacity = o.kind === 'brain' ? 0.18 : 0.05
+          o.sphere.material.emissiveIntensity = o.kind === 'brain' ? 0.5 : o.kind === 'dept' ? 0.12 : 0.22
+          o.halo.material.opacity = o.kind === 'brain' ? 0.10 : 0.03
           o.halo.material.color.copy(o.baseColor)
-          o.label.color = o.kind === 'dept' ? pal.muted : pal.muted
+          o.label.color = pal.muted
+          labelMat.opacity = o.kind === 'dept' ? 0.55 : o.kind === 'brain' ? 1 : 0.72
         }
       }
       raf = requestAnimationFrame(loop)
@@ -382,28 +388,36 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
     const sphere = new THREE.Mesh(
       new THREE.SphereGeometry(r, 24, 24),
       new THREE.MeshPhongMaterial({
-        color, emissive: color, emissiveIntensity: n.kind === 'brain' ? 0.85 : 0.4,
+        color, emissive: color,
+        // Idle emissive BELOW the bloom threshold — see the bloom calibration.
+        emissiveIntensity: n.kind === 'brain' ? 0.5 : n.kind === 'dept' ? 0.12 : 0.22,
         shininess: 60,
       }),
     )
     group.add(sphere)
 
     const halo = new THREE.Mesh(
-      new THREE.SphereGeometry(r * 1.45, 16, 16),
+      new THREE.SphereGeometry(r * 1.28, 16, 16),
       new THREE.MeshBasicMaterial({
-        color, transparent: true, opacity: n.kind === 'brain' ? 0.18 : 0.05,
+        color, transparent: true, opacity: n.kind === 'brain' ? 0.10 : 0.03,
         blending: THREE.AdditiveBlending, depthWrite: false,
       }),
     )
     group.add(halo)
 
     // SpriteText extends THREE.Sprite but its d.ts doesn't expose the base class
-    // fields — cast for position/material access.
+    // fields — cast for position/material access. Dark stroke = readable over
+    // anything (the owner's screenshot had labels mashed into glow).
     const label = new SpriteText(n.label) as SpriteText & THREE.Sprite
     label.color = pal.muted
-    label.textHeight = n.kind === 'brain' ? 5.5 : n.kind === 'dept' ? 3.2 : 4.1
-    label.position.y = -(r + 7)
-    ;(label.material as THREE.SpriteMaterial).depthWrite = false
+    label.textHeight = n.kind === 'brain' ? 6 : n.kind === 'dept' ? 3.4 : 3.8
+    label.fontWeight = '600'
+    label.strokeColor = 'rgba(0,0,8,0.95)'
+    label.strokeWidth = 1
+    label.position.y = -(r + 8)
+    const lm = label.material as THREE.SpriteMaterial
+    lm.depthWrite = false
+    lm.transparent = true
     group.add(label)
 
     objsRef.current.set(n.id, { kind: n.kind, sphere, halo, label, baseColor: color })
@@ -429,6 +443,9 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
               backgroundColor="#000004"
               showNavInfo={false}
               enableNodeDrag={false}
+              /* PLANAR layout: 2D readability, 3D light. The plane + collide force
+                 is what killed the "clumped blobs" look from the owner's Mac. */
+              numDimensions={2}
               warmupTicks={60}
               cooldownTime={9000}
               onEngineStop={() => { try { fgRef.current?.zoomToFit(700, 70) } catch { /* fine */ } }}
@@ -437,20 +454,21 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
               nodeThreeObject={nodeThreeObject}
               nodeLabel={() => ''}
               onNodeClick={handleNodeClick}
+              linkCurvature={0.2}
               linkColor={(l) => {
                 const link = l as SwarmLink
                 const active = link.agentEndpoint
                   ? activeIds.has(link.agentEndpoint)
                   : activeDeptNodes.has(typeof link.target === 'object' ? (link.target as SwarmNode).id : String(link.target))
-                return active ? palRef.current.accent : '#26304a'
+                return active ? palRef.current.accent : '#4a5f8f'
               }}
-              linkOpacity={0.35}
+              linkOpacity={0.55}
               linkWidth={(l) => {
                 const link = l as SwarmLink
                 const active = link.agentEndpoint
                   ? activeIds.has(link.agentEndpoint)
                   : activeDeptNodes.has(typeof link.target === 'object' ? (link.target as SwarmNode).id : String(link.target))
-                return active ? 1.4 : 0.3
+                return active ? 2 : 0.8
               }}
               linkDirectionalParticles={(l) => {
                 const link = l as SwarmLink
