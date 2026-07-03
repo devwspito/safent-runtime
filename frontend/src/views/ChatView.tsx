@@ -193,6 +193,7 @@ interface ToolSummaryProps {
 }
 
 function ToolSummary({ steps, isStreaming }: ToolSummaryProps) {
+  const t = useT()
   if (steps.length === 0) return null
 
   const delegations = steps.filter((s) => DELEGATION_NAMES.has(s.name))
@@ -203,6 +204,10 @@ function ToolSummary({ steps, isStreaming }: ToolSummaryProps) {
   const streamLabel = isStreaming
     ? `${last.label}${last.target ? ` — ${last.target.slice(0, 48)}` : ''}`
     : null
+  const toolsUsedLabel = t(count === 1 ? 'chat.tools.used' : 'chat.tools.used_pl').replace(
+    '{count}',
+    String(count),
+  )
 
   return (
     <>
@@ -218,12 +223,12 @@ function ToolSummary({ steps, isStreaming }: ToolSummaryProps) {
         <details className={styles.toolGroup}>
           <summary>
             <span className={styles.toolGroupLabel}>
-              {streamLabel ?? `Usó ${count} herramienta${count !== 1 ? 's' : ''}`}
+              {streamLabel ?? toolsUsedLabel}
             </span>
             {!isStreaming && count > 0 && (
               <span
                 className={styles.toolGroupCount}
-                aria-label={`${count} herramientas`}
+                aria-label={t('chat.tools.count_aria').replace('{count}', String(count))}
               >
                 {count}
               </span>
@@ -256,12 +261,13 @@ interface ThinkingBlockProps {
 }
 
 function ThinkingBlock({ text, done }: ThinkingBlockProps) {
+  const t = useT()
   if (!text) return null
   return (
     <details className={styles.thinkingBlock}>
       <summary>
         <span className={styles.thinkingLabel}>
-          {done ? 'Proceso de pensamiento' : 'Pensando…'}
+          {done ? t('chat.thinking.done') : t('chat.thinking')}
         </span>
         <span className={styles.thinkingChevron} aria-hidden="true">
           <ChevronIcon />
@@ -287,7 +293,7 @@ const UserMessage = memo(function UserMessage({ text, failed, enterDelay = 0 }: 
       className={[styles.messageRow, styles.messageRowUser].join(' ')}
       style={{ animationDelay: `${enterDelay}ms` }}
       role="article"
-      aria-label="Tu mensaje"
+      aria-label={t('chat.aria.message')}
     >
       <div className={[styles.userBubble, failed ? styles.userBubbleFailed : ''].join(' ')}>
         {text}
@@ -322,6 +328,7 @@ const AssistantMessage = memo(function AssistantMessage({
 }: AssistantMessageProps) {
   const { thinkingText, thinkingDone, toolSteps, activityText, renderedHtml, isStreaming } = message
   const navigate = useNavigate()
+  const t = useT()
 
   // Intercept clicks on internal view links inside the agent's rendered markdown
   // and route them through react-router (respects the /app basename); external
@@ -348,7 +355,7 @@ const AssistantMessage = memo(function AssistantMessage({
       className={styles.messageRow}
       style={{ animationDelay: `${enterDelay}ms` }}
       role="article"
-      aria-label="Respuesta de Lumen"
+      aria-label={t('chat.aria.reply')}
     >
       <div className={styles.agentOutput}>
         <ThinkingBlock text={thinkingText} done={thinkingDone} />
@@ -450,6 +457,7 @@ function ModelPicker() {
   const navigate = useNavigate()
   const provider = useActiveProvider()
   const { allowed } = useFeatures()
+  const t = useT()
 
   // Cloud-managed associate: the `proveedores` view is gated, so listProviders()
   // 403s and `provider` stays null — but a model IS resolved server-side from the
@@ -461,17 +469,17 @@ function ModelPicker() {
     return (
       <span
         className={styles.modelPicker}
-        title="El modelo lo gestiona tu organización"
-        aria-label="Modelo gestionado por tu organización"
+        title={t('chat.model.org_managed_title')}
+        aria-label={t('chat.model.org_managed_aria')}
       >
-        <span className={styles.modelPickerLabel}>Modelo gestionado</span>
+        <span className={styles.modelPickerLabel}>{t('chat.model.org_managed_label')}</span>
       </span>
     )
   }
 
   const label = provider
-    ? (provider.default_model ?? provider.alias ?? provider.name ?? 'Modelo activo')
-    : 'Sin modelo'
+    ? (provider.default_model ?? provider.alias ?? provider.name ?? t('chat.model.active_fallback'))
+    : t('chat.model.none')
 
   return (
     <button
@@ -479,14 +487,14 @@ function ModelPicker() {
       onClick={() => navigate('/proveedores')}
       title={
         provider
-          ? `Proveedor: ${provider.alias ?? provider.name}`
-          : 'Configura un modelo en Proveedores'
+          ? t('chat.model.provider_title').replace('{provider}', String(provider.alias ?? provider.name))
+          : t('chat.model.configure_title')
       }
       type="button"
       aria-label={
         provider
-          ? `Modelo activo: ${label}. Ir a Proveedores`
-          : 'Sin modelo. Ir a Proveedores'
+          ? t('chat.model.active_aria').replace('{name}', label)
+          : t('chat.model.none_aria')
       }
     >
       <span className={styles.modelPickerLabel}>{label}</span>
@@ -505,6 +513,7 @@ interface AttachmentChipProps {
 }
 
 function AttachmentChip({ name, uploading, error, onRemove }: AttachmentChipProps) {
+  const t = useT()
   return (
     <div
       className={[styles.attachChip, error ? styles.attachChipError : ''].join(' ')}
@@ -521,7 +530,7 @@ function AttachmentChip({ name, uploading, error, onRemove }: AttachmentChipProp
       <button
         type="button"
         onClick={onRemove}
-        aria-label={`Quitar adjunto ${name}`}
+        aria-label={t('chat.attach.remove_aria').replace('{name}', name)}
         className={styles.attachChipRemove}
         disabled={uploading}
       >
@@ -598,7 +607,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
 
   async function pickFolder() {
     if (!supportsFolderPicker()) {
-      sileo.error({ title: 'Seleccionar carpeta necesita Chrome o Edge.' })
+      sileo.error({ title: t('chat.folder.picker_unsupported') })
       return
     }
     setMenuOpen(false)
@@ -606,7 +615,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
     try {
       handle = await pickHostDirectory()
     } catch (e) {
-      sileo.error({ title: e instanceof Error ? e.message : 'No se pudo abrir el selector' })
+      sileo.error({ title: e instanceof Error ? e.message : t('chat.folder.picker_err') })
       return
     }
     if (!handle) return
@@ -614,9 +623,11 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
     try {
       const sel = await uploadDirectoryToBridge(handle)
       setBridge(sel)
-      sileo.success({ title: `Carpeta "${sel.name}" lista (${sel.fileCount} ficheros)` })
+      sileo.success({
+        title: t('chat.folder.ready').replace('{name}', sel.name).replace('{count}', String(sel.fileCount)),
+      })
     } catch (e) {
-      sileo.error({ title: e instanceof Error ? e.message : 'No se pudo cargar la carpeta' })
+      sileo.error({ title: e instanceof Error ? e.message : t('chat.folder.load_err') })
     } finally {
       setBridgeBusy(false)
     }
@@ -627,9 +638,9 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
     setBridgeSyncing(true)
     try {
       const n = await syncBridgeToHost(bridge)
-      sileo.success({ title: `Guardado en tu carpeta (${n} ficheros)` })
+      sileo.success({ title: t('chat.folder.saved').replace('{count}', String(n)) })
     } catch (e) {
-      sileo.error({ title: e instanceof Error ? e.message : 'No se pudo guardar en tu carpeta' })
+      sileo.error({ title: e instanceof Error ? e.message : t('chat.folder.save_err') })
     } finally {
       setBridgeSyncing(false)
     }
@@ -755,7 +766,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
   return (
     <div className={styles.composerWrap}>
       {(attachments.length > 0 || selectedSkills.length > 0 || bridge || bridgeBusy) && (
-        <div className={styles.attachmentsRow} aria-label="Contexto del mensaje">
+        <div className={styles.attachmentsRow} aria-label={t('chat.context_aria')}>
           {attachments.map((att) => (
             <AttachmentChip
               key={att.id}
@@ -768,11 +779,11 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
           {selectedSkills.map((sk) => (
             <span key={skillKey(sk)} className={styles.attachChip}>
               <Zap size={12} aria-hidden="true" />
-              {skillLabel(sk)}{isLive(sk) ? ' · live' : ''}
+              {skillLabel(sk)}{isLive(sk) ? ` · ${t('skills.live.badge')}` : ''}
               <button
                 type="button"
                 onClick={() => toggleSkill(sk)}
-                aria-label={`Quitar ${skillLabel(sk)}`}
+                aria-label={t('chat.skill.remove_aria').replace('{name}', skillLabel(sk))}
                 className={styles.attachChipRemove}
               >
                 <X size={11} aria-hidden="true" />
@@ -781,7 +792,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
           ))}
           {bridgeBusy && (
             <span className={styles.attachChip}>
-              <Loader2 size={12} className="spin" aria-hidden="true" /> Cargando carpeta…
+              <Loader2 size={12} className="spin" aria-hidden="true" /> {t('chat.folder.loading')}
             </span>
           )}
           {bridge && (
@@ -792,8 +803,8 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                 type="button"
                 onClick={() => void syncBridge()}
                 disabled={bridgeSyncing}
-                aria-label="Guardar cambios en mi carpeta"
-                title="Guardar los cambios del agente de vuelta en tu carpeta"
+                aria-label={t('chat.folder.save_aria')}
+                title={t('chat.folder.save_title')}
                 className={styles.attachChipRemove}
               >
                 {bridgeSyncing ? <Loader2 size={11} className="spin" /> : <Check size={11} />}
@@ -801,7 +812,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
               <button
                 type="button"
                 onClick={() => setBridge(null)}
-                aria-label="Quitar carpeta"
+                aria-label={t('chat.folder.remove_aria')}
                 className={styles.attachChipRemove}
               >
                 <X size={11} aria-hidden="true" />
@@ -813,19 +824,19 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
 
       <div className={styles.composerBox}>
         {menuOpen && (
-          <div ref={menuRef} className={styles.plusMenu} role="menu" aria-label="Añadir al mensaje">
+          <div ref={menuRef} className={styles.plusMenu} role="menu" aria-label={t('chat.menu.aria')}>
             {menuView === 'root' && (
               <>
                 <button type="button" className={styles.plusItem} role="menuitem"
                   onClick={() => { setMenuOpen(false); fileInputRef.current?.click() }}>
-                  <Paperclip size={14} aria-hidden="true" /> Adjuntar archivos
+                  <Paperclip size={14} aria-hidden="true" /> {t('chat.menu.attach')}
                 </button>
                 <button type="button" className={styles.plusItem} role="menuitem" onClick={() => void pickFolder()}>
-                  <FolderOpen size={14} aria-hidden="true" /> Seleccionar carpeta…
+                  <FolderOpen size={14} aria-hidden="true" /> {t('chat.menu.folder')}
                 </button>
                 <button type="button" className={styles.plusItem} role="menuitem" onClick={() => void enterSkillsView()}>
                   <Zap size={14} aria-hidden="true" />
-                  <span className={styles.plusItemLabel}>Habilidades</span>
+                  <span className={styles.plusItemLabel}>{t('nav.skills')}</span>
                   <ChevronRight size={14} aria-hidden="true" />
                 </button>
               </>
@@ -836,11 +847,11 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                 <button type="button" className={styles.plusItem} role="menuitem"
                   onClick={() => setMenuView('root')}>
                   <ChevronLeft size={14} aria-hidden="true" />
-                  <span className={styles.plusItemLabel}>Habilidades</span>
+                  <span className={styles.plusItemLabel}>{t('nav.skills')}</span>
                 </button>
                 {(() => {
-                  if (!skillsLoaded) return <div className={styles.plusEmpty}>Cargando…</div>
-                  if (skills.length === 0) return <div className={styles.plusEmpty}>Ninguna</div>
+                  if (!skillsLoaded) return <div className={styles.plusEmpty}>{t('chat.menu.loading')}</div>
+                  if (skills.length === 0) return <div className={styles.plusEmpty}>{t('chat.menu.none')}</div>
                   return skills.map((sk) => {
                     const on = selectedSkills.some((s) => skillKey(s) === skillKey(sk))
                     return (
@@ -848,7 +859,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                         aria-checked={on} onClick={() => toggleSkill(sk)}>
                         <Zap size={14} aria-hidden="true" />
                         <span className={[styles.plusItemLabel, styles.plusItemLabelEllipsis].join(' ')}>{skillLabel(sk)}</span>
-                        {isLive(sk) && <span className={styles.plusLiveTag}>live</span>}
+                        {isLive(sk) && <span className={styles.plusLiveTag}>{t('skills.live.badge')}</span>}
                         {on && <Check size={13} aria-hidden="true" />}
                       </button>
                     )
@@ -862,7 +873,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
           ref={textareaRef}
           className={styles.composerTextarea}
           placeholder={t('chat.placeholder')}
-          aria-label="Escribe un mensaje para Lumen"
+          aria-label={t('chat.aria.textarea')}
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
@@ -876,7 +887,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
             accept="image/*,.pdf,.txt,.md,.docx,.csv"
             multiple
             className="sr-only"
-            aria-label="Adjuntar archivo"
+            aria-label={t('chat.attach.input_aria')}
             onChange={handleFileSelect}
             tabIndex={-1}
           />
@@ -886,10 +897,10 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
             className={styles.attachBtn}
             onClick={openMenu}
             disabled={disabled}
-            aria-label="Añadir contexto (archivos, carpeta, habilidades)"
+            aria-label={t('chat.aria.add_context')}
             aria-haspopup="menu"
             aria-expanded={menuOpen}
-            title="Añadir contexto"
+            title={t('chat.context.add_title')}
           >
             <Plus size={16} />
           </button>
@@ -902,7 +913,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                 type="button"
                 className={styles.stopBtn}
                 onClick={onStop}
-                aria-label="Detener generación"
+                aria-label={t('chat.aria.stop')}
               >
                 {t('chat.stop')}
               </button>
@@ -912,10 +923,10 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                 className={styles.sendBtn}
                 onClick={handleSend}
                 disabled={!canSend}
-                aria-label="Enviar mensaje (Enter)"
+                aria-label={t('chat.aria.send')}
                 aria-busy={anyUploading}
               >
-                {anyUploading ? 'Subiendo…' : t('chat.send')}
+                {anyUploading ? t('chat.uploading') : t('chat.send')}
               </button>
             )}
           </div>
@@ -982,6 +993,7 @@ function SpinnerIcon() {
  * fullscreen toggle. Same VNC system as Enseñar / En vivo (sharp + fluid).
  */
 function LiveBrowserPanel() {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
 
@@ -1001,7 +1013,7 @@ function LiveBrowserPanel() {
         className={styles.liveBrowserChip}
       >
         <span className={styles.liveBrowserDot} aria-hidden="true" />
-        <span>Ver en vivo</span>
+        <span>{t('chat.live.watch')}</span>
         <ChevronDown
           size={14}
           aria-hidden="true"
@@ -1013,8 +1025,8 @@ function LiveBrowserPanel() {
           <button
             type="button"
             onClick={toggleFullscreen}
-            aria-label="Pantalla completa"
-            title="Pantalla completa"
+            aria-label={t('agents.fullscreen')}
+            title={t('agents.fullscreen')}
             className={styles.liveBrowserFullscreenBtn}
           >
             <Maximize2 size={14} aria-hidden="true" />
@@ -1112,7 +1124,7 @@ export default function ChatView() {
     status.phase === 'streaming'
       ? status.statusText
       : status.phase === 'sending'
-        ? 'Enviando…'
+        ? t('chat.sending')
         : status.phase === 'error' && !showNoModel
           ? humanizeError(
               (status as { phase: 'error'; message: string }).message ?? '',
@@ -1128,18 +1140,18 @@ export default function ChatView() {
           <div className={styles.topbar}>
             <span className={styles.topbarTitle}>
               {agentName
-                ? `Hablando con ${agentName}`
+                ? t('chat.topbar.talking_to').replace('{name}', agentName)
                 : showWelcome
-                  ? 'Nueva conversación'
-                  : 'Chat'}
+                  ? t('chat.topbar.new_conversation')
+                  : t('nav.chat')}
             </span>
             <button
               className={styles.topbarPanelBtn}
               onClick={() => setPanelOpen((v) => !v)}
               aria-pressed={panelOpen}
-              aria-label={panelOpen ? 'Cerrar panel de contexto' : 'Mostrar panel de contexto'}
+              aria-label={panelOpen ? t('ctx.panel.close.aria') : t('chat.panel.show_aria')}
               type="button"
-              title="Panel de contexto"
+              title={t('chat.panel.title')}
             >
               <PanelToggleIcon />
             </button>
@@ -1150,7 +1162,7 @@ export default function ChatView() {
             className={styles.chatBody}
             ref={bodyRef}
             aria-live="polite"
-            aria-label="Mensajes del chat"
+            aria-label={t('chat.aria.messages')}
           >
             {showWelcome ? (
               <Welcome onSuggestion={handleSuggestion} />
