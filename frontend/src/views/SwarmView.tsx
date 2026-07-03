@@ -151,7 +151,11 @@ export function SwarmView({ roster, runtimeStatus, hasRuflo, onAgentClick }: Swa
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 })
   const palRef = useRef<Palette>(readPalette())
 
-  const graph = useMemo(() => buildGraph(roster, t('swarm.center')), [roster, t])
+  // Depend on the resolved STRING, not on `t` — useT() returns a fresh function
+  // every render, and an unstable dep here rebuilds the graph each render, which
+  // re-heats the force layout forever (visible as endless drifting/looping).
+  const brainLabel = t('swarm.center')
+  const graph = useMemo(() => buildGraph(roster, brainLabel), [roster, brainLabel])
 
   // Fast lookup of the RosterAgent behind an id (for the click handler).
   const agentById = useMemo(() => {
@@ -183,16 +187,24 @@ export function SwarmView({ roster, runtimeStatus, hasRuflo, onAgentClick }: Swa
     return () => ro.disconnect()
   }, [])
 
-  // Gentle forces + pin the brain at the centre so the swarm orbits it.
+  // Roomier forces + pin the brain at the centre so the swarm orbits it.
   useEffect(() => {
     const fg = fgRef.current
     if (!fg) return
-    fg.d3Force('charge')?.strength(-140)
-    fg.d3Force('link')?.distance((l: SwarmLink) => ((typeof l.source === 'object' && l.source.kind === 'brain') ? 90 : 46))
+    fg.d3Force('charge')?.strength(-220)
+    fg.d3Force('link')?.distance((l: SwarmLink) => ((typeof l.source === 'object' && l.source.kind === 'brain') ? 130 : 58))
     const brain = graph.nodes.find((n) => n.kind === 'brain')
     if (brain) { brain.fx = 0; brain.fy = 0 }
     fg.d3ReheatSimulation()
   }, [graph, size.w, size.h])
+
+  // Ambient star dust behind the graph (pure atmosphere — carries no data).
+  const stars = useMemo(() => Array.from({ length: 110 }, (_, i) => ({
+    x: (((i * 73) % 97) / 97 - 0.5) * 1500,
+    y: (((i * 149) % 89) / 89 - 0.5) * 1000,
+    r: 0.6 + ((i * 31) % 10) / 9,
+    phase: (i * 61) % 360,
+  })), [])
 
   // Frame the whole swarm once it has laid out (cooldownTime=Infinity means the
   // engine never "stops", so we fit on a short timer instead of onEngineStop).
@@ -217,9 +229,12 @@ export function SwarmView({ roster, runtimeStatus, hasRuflo, onAgentClick }: Swa
       if (seenDeleg.current.has(key)) continue
       seenDeleg.current.add(key)
       const deptNode = graph.deptOfAgent.get(d.to)
-      if (!deptNode) continue
+      if (!deptNode) continue // delegation target not on this floor — nothing to draw
       const path = new Set([`${graph.brainId}→${deptNode}`, `${deptNode}→${d.to}`])
-      for (const l of graph.links) if (path.has(linkId(l))) fg.emitParticle(l)
+      for (const l of graph.links) {
+        if (!path.has(linkId(l))) continue
+        try { fg.emitParticle(l) } catch { /* a stale link must never crash the view */ }
+      }
     }
     // Bound the memory of seen keys.
     if (seenDeleg.current.size > 256) seenDeleg.current = new Set(Array.from(seenDeleg.current).slice(-128))
@@ -241,10 +256,10 @@ export function SwarmView({ roster, runtimeStatus, hasRuflo, onAgentClick }: Swa
             width={size.w}
             height={size.h}
             backgroundColor="rgba(0,0,0,0)"
-            /* Never freeze the engine: keeps the canvas repainting so the halos
-               breathe/pulse continuously. Node positions still settle (alpha decays),
-               so it stays readable — only the halo radius oscillates. */
-            cooldownTime={Infinity}
+            /* Let the layout SETTLE (finite cooldown) but keep repainting after it
+               stops (autoPauseRedraw=false) so halos breathe/pulse continuously. */
+            cooldownTime={10000}
+            autoPauseRedraw={false}
             warmupTicks={40}
             d3AlphaDecay={0.045}
             d3VelocityDecay={0.32}
@@ -257,55 +272,87 @@ export function SwarmView({ roster, runtimeStatus, hasRuflo, onAgentClick }: Swa
               const a = agentById.get(node.agentId)
               if (a) onAgentClick(a)
             }}
+            linkCurvature={0.14}
             linkColor={(l) => {
               const link = l as SwarmLink
               const active = link.agentEndpoint ? activeIds.has(link.agentEndpoint) : activeDeptNodes.has(typeof link.target === 'object' ? link.target.id : String(link.target))
-              return active ? palRef.current.accent : palRef.current.line
+              return active ? palRef.current.accent : 'rgba(255,255,255,0.07)'
             }}
             linkWidth={(l) => {
               const link = l as SwarmLink
               const active = link.agentEndpoint ? activeIds.has(link.agentEndpoint) : activeDeptNodes.has(typeof link.target === 'object' ? link.target.id : String(link.target))
-              return active ? 1.6 : 0.6
+              return active ? 2.4 : 0.6
             }}
             linkDirectionalParticles={(l) => {
               const link = l as SwarmLink
               const active = link.agentEndpoint ? activeIds.has(link.agentEndpoint) : activeDeptNodes.has(typeof link.target === 'object' ? link.target.id : String(link.target))
               return active ? 2 : 0
             }}
-            linkDirectionalParticleWidth={2.2}
+            linkDirectionalParticleWidth={3.4}
             linkDirectionalParticleSpeed={0.012}
             linkDirectionalParticleColor={() => palRef.current.spark}
+            onRenderFramePre={(ctx) => {
+              // Star dust: tiny twinkling dots drifting very slowly. Ambience only.
+              const now = typeof performance !== 'undefined' ? performance.now() : 0
+              const pal = palRef.current
+              ctx.save()
+              for (const s of stars) {
+                const tw = 0.5 + 0.5 * Math.sin(now / 2600 + s.phase)
+                ctx.beginPath()
+                ctx.arc(s.x + 6 * Math.sin(now / 9000 + s.phase), s.y, s.r, 0, 2 * Math.PI)
+                ctx.fillStyle = pal.muted
+                ctx.globalAlpha = 0.05 + 0.09 * tw
+                ctx.fill()
+              }
+              ctx.restore()
+            }}
             nodeCanvasObject={(node, ctx, scale) => {
               const n = node as SwarmNode
               const pal = palRef.current
               const x = n.x ?? 0
               const y = n.y ?? 0
-              const working = n.kind === 'agent' ? activeIds.has(n.id) : n.kind === 'brain' ? (n.agentId ? activeIds.has(n.agentId) : false) || !!runtimeStatus.ruflo_active : activeDeptNodes.has(n.id)
-              const base = n.kind === 'brain' ? 9 : n.kind === 'dept' ? 5 : 4
-              // Collective slow breathing + a faster pulse on working nodes.
+              const hasDeleg = (runtimeStatus.delegations?.length ?? 0) > 0
+              const working = n.kind === 'agent'
+                ? activeIds.has(n.id)
+                : n.kind === 'brain'
+                  ? (n.agentId ? activeIds.has(n.agentId) : false) || !!runtimeStatus.ruflo_active || hasDeleg
+                  : activeDeptNodes.has(n.id)
+              // Bigger, readable hierarchy: brain ≫ agents > dept hubs.
+              const base = n.kind === 'brain' ? 13 : n.kind === 'dept' ? 4 : 6.5
               const now = typeof performance !== 'undefined' ? performance.now() : 0
-              const breathe = 1 + 0.05 * Math.sin(now / 1400 + x * 0.05)
-              const pulse = working ? 1 + 0.18 * (0.5 + 0.5 * Math.sin(now / 320)) : 1
+              const breathe = 1 + 0.04 * Math.sin(now / 1400 + x * 0.05)
+              const pulse = working ? 1 + 0.14 * (0.5 + 0.5 * Math.sin(now / 320)) : 1
               const r = base * breathe * pulse
               const fill = resolveColor(n.color, pal)
 
-              // Halo for working / brain nodes.
+              // Halo for working / brain nodes — bold enough to read at fit-zoom.
               if (working || n.kind === 'brain') {
                 const halo = working ? (n.kind === 'agent' ? pal.working : pal.accent) : pal.accent
                 ctx.beginPath()
-                ctx.arc(x, y, r + (working ? 5 : 3), 0, 2 * Math.PI)
+                ctx.arc(x, y, r + (working ? 9 : 5), 0, 2 * Math.PI)
                 ctx.fillStyle = halo
-                ctx.globalAlpha = working ? 0.16 + 0.08 * Math.sin(now / 320) : 0.10
+                ctx.globalAlpha = working ? 0.30 + 0.14 * Math.sin(now / 320) : 0.12
                 ctx.fill()
                 ctx.globalAlpha = 1
               }
 
-              // Node body.
-              ctx.beginPath()
-              ctx.arc(x, y, r, 0, 2 * Math.PI)
-              ctx.fillStyle = n.kind === 'dept' ? pal.surface : fill
-              ctx.fill()
-              ctx.lineWidth = working ? 1.6 / scale : 0.8 / scale
+              // Node body — radial gradient for a lit-sphere depth (flat = dated).
+              if (n.kind === 'dept') {
+                ctx.beginPath()
+                ctx.arc(x, y, r, 0, 2 * Math.PI)
+                ctx.fillStyle = pal.surface
+                ctx.fill()
+              } else {
+                const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.35, r * 0.15, x, y, r)
+                g.addColorStop(0, '#ffffff')
+                g.addColorStop(0.18, fill)
+                g.addColorStop(1, fill)
+                ctx.beginPath()
+                ctx.arc(x, y, r, 0, 2 * Math.PI)
+                ctx.fillStyle = g
+                ctx.fill()
+              }
+              ctx.lineWidth = working ? 2.4 / scale : 0.8 / scale
               ctx.strokeStyle = working ? (n.kind === 'agent' ? pal.working : pal.accent) : pal.line
               ctx.stroke()
 
@@ -313,20 +360,20 @@ export function SwarmView({ roster, runtimeStatus, hasRuflo, onAgentClick }: Swa
               if (n.kind !== 'dept') {
                 const initial = n.label.charAt(0).toUpperCase()
                 ctx.fillStyle = '#fff'
-                ctx.font = `600 ${(n.kind === 'brain' ? 8 : 4.5)}px system-ui, sans-serif`
+                ctx.font = `600 ${(n.kind === 'brain' ? 10 : 6)}px system-ui, sans-serif`
                 ctx.textAlign = 'center'
                 ctx.textBaseline = 'middle'
                 ctx.fillText(initial, x, y)
               }
 
-              // Labels (dept always; agent only when zoomed in enough to read).
-              const showLabel = n.kind === 'brain' || n.kind === 'dept' || scale > 1.6
+              // Labels: names always readable — an unlabeled swarm feels soulless.
+              const showLabel = n.kind !== 'agent' || scale > 0.85
               if (showLabel) {
                 ctx.fillStyle = n.kind === 'agent' && !working ? pal.muted : pal.ink
-                ctx.font = `${n.kind === 'brain' ? 5 : 4}px system-ui, sans-serif`
+                ctx.font = `${n.kind === 'brain' ? 6 : 4.5}px system-ui, sans-serif`
                 ctx.textAlign = 'center'
                 ctx.textBaseline = 'top'
-                ctx.fillText(n.label, x, y + r + 2)
+                ctx.fillText(n.label, x, y + r + 3)
               }
             }}
           />
