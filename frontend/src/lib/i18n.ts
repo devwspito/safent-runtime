@@ -35,8 +35,9 @@ const translations = {
     'nav.memoria':        'Memoria',
     'nav.coste':          'Coste',
     'nav.envivo':         'En vivo',
-    'nav.ajustes':        'Ajustes',
-    'nav.ajustes.pending_aria': '{count} aprobaciones pendientes',
+    'nav.section.capabilities': 'Capacidades',
+    'nav.section.system':       'Sistema',
+    'nav.pending_aria':   '{count} aprobaciones pendientes',
 
     // Language selector
     'settings.language':  'Idioma',
@@ -729,9 +730,17 @@ const translations = {
     'agents.subtitle.loading':    'Tu equipo de IA',
     'agents.subtitle.suffix':     '',
     'agents.tab.cards':           'Tarjetas',
-    'agents.tab.live':            'En vivo',
-    'agents.tab.premium':         'Premium',
+    'agents.tab.live':            'Pixel-art',
+    'agents.tab.swarm':           'Enjambre',
     'agents.tab.aria':            'Vista de la oficina',
+    'swarm.aria':                 'Enjambre de agentes en vivo',
+    'swarm.hint':                 'Cada punto es un agente. Se enciende cuando trabaja; salta una chispa del cerebro al especialista cuando delega.',
+    'swarm.legend.working':       'trabajando',
+    'swarm.legend.idle':          'en reposo',
+    'swarm.legend.delegating':    'delegando',
+    'swarm.center':               'Cerebro',
+    'swarm.recenter':             'Centrar',
+    'swarm.empty.title':          'Aún no hay agentes',
     'agents.create.btn':          '+ Crear agente',
     'agents.create.aria':         'Crear nuevo agente',
 
@@ -906,8 +915,9 @@ const translations = {
     'nav.memoria':        'Memory',
     'nav.coste':          'Cost',
     'nav.envivo':         'Live',
-    'nav.ajustes':        'Settings',
-    'nav.ajustes.pending_aria': '{count} pending approvals',
+    'nav.section.capabilities': 'Capabilities',
+    'nav.section.system':       'System',
+    'nav.pending_aria':   '{count} pending approvals',
 
     // Language selector
     'settings.language':  'Language',
@@ -1600,9 +1610,17 @@ const translations = {
     'agents.subtitle.loading':    'Your AI team',
     'agents.subtitle.suffix':     '',
     'agents.tab.cards':           'Cards',
-    'agents.tab.live':            'Live',
-    'agents.tab.premium':         'Premium',
+    'agents.tab.live':            'Pixel art',
+    'agents.tab.swarm':           'Swarm',
     'agents.tab.aria':            'Office view',
+    'swarm.aria':                 'Live agent swarm',
+    'swarm.hint':                 'Each dot is an agent. It lights up while working; a spark jumps from the brain to the specialist when it delegates.',
+    'swarm.legend.working':       'working',
+    'swarm.legend.idle':          'idle',
+    'swarm.legend.delegating':    'delegating',
+    'swarm.center':               'Brain',
+    'swarm.recenter':             'Recenter',
+    'swarm.empty.title':          'No agents yet',
     'agents.create.btn':          '+ New agent',
     'agents.create.aria':         'Create new agent',
 
@@ -1764,7 +1782,7 @@ const translations = {
   },
 } as const
 
-type TranslationKey = keyof (typeof translations)['es']
+export type TranslationKey = keyof (typeof translations)['es']
 
 // ── Context ───────────────────────────────────────────────────────────────────
 

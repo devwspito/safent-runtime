@@ -15,14 +15,17 @@ import { Badge, StatusDot } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
-import { PremiumFloorView } from './PremiumFloorView'
 
 import styles from './OfficeView.module.css'
 
-// ── Lazy-load the canvas so the rAF loop only starts when En-vivo is shown ──
+// ── Lazy-load the heavy canvases so their work only starts when shown ──
 
 const OfficeCanvas = lazy(() =>
   import('./office-live/OfficeCanvas').then((m) => ({ default: m.OfficeCanvas }))
+)
+
+const SwarmView = lazy(() =>
+  import('./SwarmView').then((m) => ({ default: m.SwarmView }))
 )
 
 // ── Map roster → engine types ─────────────────────────────────────────────────
@@ -49,10 +52,10 @@ function rosterAgentToLumenAgent(a: RosterAgent, dept: RosterDepartment): LumenA
 
 // ── View-level state ──────────────────────────────────────────────────────────
 
-type Tab = 'tarjetas' | 'live' | 'premium'
+type Tab = 'enjambre' | 'tarjetas' | 'live'
 
 const AGENTS_VIEW_STORAGE_KEY = 'lumen_agents_view'
-const VALID_TABS: readonly Tab[] = ['tarjetas', 'live', 'premium']
+const VALID_TABS: readonly Tab[] = ['enjambre', 'tarjetas', 'live']
 
 function readStoredTab(): Tab {
   try {
@@ -61,7 +64,7 @@ function readStoredTab(): Tab {
   } catch {
     // localStorage unavailable (private mode, etc.) — fall back to default.
   }
-  return 'live'
+  return 'enjambre'
 }
 
 type DataState =
@@ -443,7 +446,7 @@ function AgentDrawer({ agent, departments, isWorking, open, onClose, onClone, on
   const navigate = useNavigate()
   const { startNewWithAgent } = useOutletContext<ChatOutletContext>()
   const initials = agent.name.charAt(0).toUpperCase()
-  const isFactory = agent.source === 'ruflo'
+  const isFactory = agent.source === 'factory'
   const isDefault = agent.is_default
   const isEditable = !isFactory && !isDefault
   const [showEditModal, setShowEditModal] = useState(false)
@@ -619,7 +622,7 @@ function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
   const t = useT()
   const reduced = useReducedMotion()
   const initials = agent.name.charAt(0).toUpperCase()
-  const isFactory = agent.source === 'ruflo'
+  const isFactory = agent.source === 'factory'
   const deptLabel = departmentDisplayLabel(agent)
 
   const cardClasses = [
@@ -1047,6 +1050,14 @@ export default function OfficeView() {
             <div className={styles.segToggle} role="group" aria-label={t('agents.tab.aria')}>
               <button
                 type="button"
+                className={`${styles.segBtn}${tab === 'enjambre' ? ` ${styles.segBtnActive}` : ''}`}
+                onClick={() => setTab('enjambre')}
+                aria-pressed={tab === 'enjambre'}
+              >
+                {t('agents.tab.swarm')}
+              </button>
+              <button
+                type="button"
                 className={`${styles.segBtn}${tab === 'tarjetas' ? ` ${styles.segBtnActive}` : ''}`}
                 onClick={() => setTab('tarjetas')}
                 aria-pressed={tab === 'tarjetas'}
@@ -1060,14 +1071,6 @@ export default function OfficeView() {
                 aria-pressed={tab === 'live'}
               >
                 {t('agents.tab.live')}
-              </button>
-              <button
-                type="button"
-                className={`${styles.segBtn}${tab === 'premium' ? ` ${styles.segBtnActive}` : ''}`}
-                onClick={() => setTab('premium')}
-                aria-pressed={tab === 'premium'}
-              >
-                {t('agents.tab.premium')}
               </button>
             </div>
           </>
@@ -1245,23 +1248,24 @@ export default function OfficeView() {
                 </motion.div>
               )}
 
-              {tab === 'premium' && (
+              {tab === 'enjambre' && (
                 <motion.div
-                  key="premium"
+                  key="enjambre"
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.14 }}
                   style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
                 >
-                  <PremiumFloorView
-                    roster={state.roster}
-                    runtimeStatus={state.runtimeStatus}
-                    agentStats={state.agentStats}
-                    hasRuflo={state.hasRuflo}
-                    onAgentClick={setSelectedAgent}
-                    onCreateClick={() => setShowCreateFromHeader(true)}
-                  />
+                  <Suspense fallback={<div className={styles.canvasFallback} aria-busy="true" aria-label={t('agents.tab.swarm')} />}>
+                    <SwarmView
+                      roster={state.roster}
+                      runtimeStatus={state.runtimeStatus}
+                      agentStats={state.agentStats}
+                      hasRuflo={state.hasRuflo}
+                      onAgentClick={setSelectedAgent}
+                    />
+                  </Suspense>
                 </motion.div>
               )}
             </AnimatePresence>

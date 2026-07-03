@@ -25,6 +25,13 @@ export interface RuntimeStatus {
   active_agent_id?: string
   activity?: Array<{ task_id?: string; agent_id: string; tool?: string }>
   ruflo_active?: boolean
+  /**
+   * Recent, still-live delegation edges (orchestrator → specialist), emitted by
+   * the backend at the moment a `delegate_task` fires and kept for a short TTL.
+   * Drives the real Cerebro→especialista flow in the swarm view — an actual
+   * event, never fabricated. `from`/`to` are roster agent ids.
+   */
+  delegations?: Array<{ from: string; to: string; task_id?: string; label?: string; since?: string }>
 }
 
 export interface CreateAgentPayload {
@@ -60,7 +67,8 @@ export interface RosterAgent {
   id: string
   name: string
   description: string
-  source: 'ruflo' | 'custom'
+  // The backend (roster_api) emits "factory" (team-provided) or "custom" (user-made).
+  source: 'factory' | 'custom'
   department: string
   is_default: boolean
   color: string | null

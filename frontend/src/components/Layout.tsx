@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Settings } from 'lucide-react'
 import { sileo } from 'sileo'
 import {
   listConversations,
@@ -14,7 +13,7 @@ import { useFeatures } from '../hooks/useFeatures'
 import type { ConversationSummary } from '../api/types'
 import NotificationsPanel from './NotificationsPanel'
 import { useConfirmDialog } from './ConfirmDialog'
-import { useT, useLocale } from '../lib/i18n'
+import { useT, useLocale, type TranslationKey } from '../lib/i18n'
 
 // activeProviderReload lets child views (ProvidersView) trigger a re-check after
 // connecting a model. The "Falta conectar un modelo" nudge was removed — the chat
@@ -150,33 +149,57 @@ function PlusIcon() {
   )
 }
 
-/** Sidebar núcleo: the only 3 views shown as top-level nav. Everything else lives behind Ajustes. */
-function useCoreNavItems(): NavItem[] {
-  const t = useT()
-  return [
-    { to: '/chat',    label: t('nav.chat'),    icon: <ChatIcon /> },
-    { to: '/agentes', label: t('nav.agentes'), icon: <AgentsIcon /> },
-    { to: '/skills',  label: t('nav.skills'),  icon: <SkillsIcon /> },
-  ]
+function LiveIcon() {
+  return (
+    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="1.8" fill="currentColor" />
+      <path d="M4.6 4.6a5 5 0 0 0 0 6.8M11.4 4.6a5 5 0 0 1 0 6.8"
+        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+interface NavSection {
+  /** i18n key for the section header; omitted = no header (the núcleo group). */
+  labelKey?: TranslationKey
+  items: NavItem[]
 }
 
 /**
- * The 8 config sections shown as tabs inside the Ajustes page, in display order.
- * Exported so AjustesView can reuse the same {to, label} pairs instead of
- * duplicating the nav.* label lookups. "En vivo" is the Ajustes page's 9th tab
- * but isn't a sidebar nav item, so it's added separately in AjustesView.
+ * Sidebar grouped into labelled sections (owner decision — the "Ajustes" gear was
+ * dropped): a headerless núcleo (Chat, Agentes), then Capacidades (what the agent
+ * works with + watching it live) and Sistema (governance & config). Every route
+ * already exists standalone in App.tsx; these just group them.
  */
-export function useSettingsNavItems(): NavItem[] {
+function useNavSections(): NavSection[] {
   const t = useT()
   return [
-    { to: '/programadas',   label: t('nav.programadas'),   icon: <TasksIcon /> },
-    { to: '/proveedores',   label: t('nav.proveedores'),   icon: <ProvidersIcon /> },
-    { to: '/integraciones', label: t('nav.integraciones'), icon: <IntegrationsIcon /> },
-    { to: '/mcp',           label: t('nav.mcp'),           icon: <McpIcon /> },
-    { to: '/archivos',      label: t('nav.archivos'),      icon: <ArchivosIcon /> },
-    { to: '/seguridad',     label: t('nav.seguridad'),     icon: <SecurityIcon /> },
-    { to: '/memoria',       label: t('nav.memoria'),       icon: <MemoriaIcon /> },
-    { to: '/coste',         label: t('nav.coste'),         icon: <CosteIcon /> },
+    {
+      items: [
+        { to: '/chat',    label: t('nav.chat'),    icon: <ChatIcon /> },
+        { to: '/agentes', label: t('nav.agentes'), icon: <AgentsIcon /> },
+      ],
+    },
+    {
+      labelKey: 'nav.section.capabilities',
+      items: [
+        { to: '/skills',        label: t('nav.skills'),        icon: <SkillsIcon /> },
+        { to: '/integraciones', label: t('nav.integraciones'), icon: <IntegrationsIcon /> },
+        { to: '/mcp',           label: t('nav.mcp'),           icon: <McpIcon /> },
+        { to: '/en-vivo',       label: t('nav.envivo'),        icon: <LiveIcon /> },
+      ],
+    },
+    {
+      labelKey: 'nav.section.system',
+      items: [
+        { to: '/seguridad',   label: t('nav.seguridad'),   icon: <SecurityIcon /> },
+        { to: '/coste',       label: t('nav.coste'),       icon: <CosteIcon /> },
+        { to: '/proveedores', label: t('nav.proveedores'), icon: <ProvidersIcon /> },
+        { to: '/programadas', label: t('nav.programadas'), icon: <TasksIcon /> },
+        { to: '/memoria',     label: t('nav.memoria'),     icon: <MemoriaIcon /> },
+        { to: '/archivos',    label: t('nav.archivos'),    icon: <ArchivosIcon /> },
+      ],
+    },
   ]
 }
 
@@ -425,19 +448,10 @@ function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps)
 
 export default function Layout({ activeProviderReload }: LayoutProps) {
   const navigate = useNavigate()
-  const coreNavItems = useCoreNavItems()
+  const navSections = useNavSections()
   const t = useT()
   const { locale, setLocale } = useLocale()
   const { isLoading: featuresLoading, allowed } = useFeatures()
-
-  // Strip the leading slash to get the view identifier (e.g. '/proveedores' → 'proveedores').
-  // 'chat' is always forced visible even if the backend omits it (defensive).
-  const navItems = featuresLoading
-    ? [] // render skeleton instead — see below
-    : coreNavItems.filter(({ to }) => {
-        const viewId = to.replace(/^\//, '')
-        return allowed(viewId)
-      })
   // activeProviderReload is exposed on the outlet context so views like
   // ProvidersView can signal an immediate re-check after connecting a model.
   // The hook already self-heals via a 5 s poll; this enables instant feedback.
@@ -518,13 +532,12 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
             loadConversation={chat.loadConversation}
           />
 
-          {/* Main nav */}
-          <div className="sidebar-nav">
-            <div className="sidebar-section-label">{t('layout.navigation')}</div>
-            {featuresLoading ? (
-              // Mirror the real nav: fixed count = no layout shift on load.
+          {/* Grouped nav: núcleo (no header) + Capacidades + Sistema. The pending
+              approvals badge rides on the Seguridad item. */}
+          {featuresLoading ? (
+            <div className="sidebar-nav">
               <ul role="list" aria-busy="true" aria-label={t('layout.loading_nav_aria')}>
-                {Array.from({ length: 3 }, (_, i) => (
+                {Array.from({ length: 6 }, (_, i) => (
                   <li key={i}>
                     <div
                       className="skeleton skeleton--block"
@@ -540,57 +553,44 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
                   </li>
                 ))}
               </ul>
-            ) : (
-              <ul role="list">
-                {navItems.map(({ to, label, icon }) => (
-                  <li key={to}>
-                    <NavLink
-                      to={to}
-                      className={({ isActive }) =>
-                        ['nav-link', isActive ? 'active' : ''].filter(Boolean).join(' ')
-                      }
-                      aria-current={undefined}
-                    >
-                      {icon}
-                      {label}
-                    </NavLink>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </div>
-
-        {/* Ajustes — every other section (programadas, modelo de IA, integraciones,
-            herramientas, archivos, seguridad, memoria, coste, en vivo) lives behind
-            this single entry as tabs. The pending-approvals badge lives here too,
-            since Seguridad is now one tab among the rest. */}
-        <div
-          className="sidebar-nav"
-          style={{ borderTop: '1px solid var(--color-border-subtle)', paddingTop: 'var(--space-2)' }}
-        >
-          <ul role="list">
-            <li>
-              <NavLink
-                to="/ajustes"
-                className={({ isActive }) =>
-                  ['nav-link', isActive ? 'active' : ''].filter(Boolean).join(' ')
-                }
-              >
-                <Settings className="nav-icon" aria-hidden="true" />
-                {t('nav.ajustes')}
-                {pendingCount > 0 && (
-                  <span
-                    className="badge-count"
-                    role="status"
-                    aria-label={t('nav.ajustes.pending_aria').replace('{count}', String(pendingCount))}
-                  >
-                    {pendingCount}
-                  </span>
-                )}
-              </NavLink>
-            </li>
-          </ul>
+            </div>
+          ) : (
+            navSections.map((section, si) => {
+              const items = section.items.filter(({ to }) => allowed(to.replace(/^\//, '')))
+              if (items.length === 0) return null
+              return (
+                <div className="sidebar-nav" key={section.labelKey ?? `core-${si}`}>
+                  {section.labelKey && (
+                    <div className="sidebar-section-label">{t(section.labelKey)}</div>
+                  )}
+                  <ul role="list">
+                    {items.map(({ to, label, icon }) => (
+                      <li key={to}>
+                        <NavLink
+                          to={to}
+                          className={({ isActive }) =>
+                            ['nav-link', isActive ? 'active' : ''].filter(Boolean).join(' ')
+                          }
+                        >
+                          {icon}
+                          {label}
+                          {to === '/seguridad' && pendingCount > 0 && (
+                            <span
+                              className="badge-count"
+                              role="status"
+                              aria-label={t('nav.pending_aria').replace('{count}', String(pendingCount))}
+                            >
+                              {pendingCount}
+                            </span>
+                          )}
+                        </NavLink>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )
+            })
+          )}
         </div>
 
         {/* Language selector + user chip */}
