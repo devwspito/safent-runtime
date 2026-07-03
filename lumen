@@ -262,6 +262,30 @@ cmd_status() {
 
 cmd_logs() { "$RT" logs -f "$NAME"; }
 
+# ---- background update agent (host-side; the UI-triggered update path) -------
+# The container is sandboxed and CANNOT recreate itself (touching the host podman
+# would defeat the cage). So "update from the UI" works like this: the UI writes an
+# "update requested" marker into the data volume; THIS loop — installed once as a
+# launchd agent (macOS) / systemd --user unit or nohup (Linux) by the installer —
+# notices it and runs the same `lumen update` (prune-before-pull + recreate). The
+# user never opens a terminal. It also removes the marker so it runs exactly once
+# per request. Nothing here is privileged beyond the podman the user already runs.
+# In the daemon-owned instance dir (uid 880 can write there — same place as the
+# pairing marker; the parent /var/lib/hermes is root:root 0755 and NOT writable by
+# the daemon). The backend's POST /api/v1/system/update touches this exact path.
+_UPDATE_FLAG="/var/lib/hermes/instance/.update-requested"
+cmd_agent() {
+  echo "[*] Lumen update agent running (watches for UI-triggered updates)."
+  while :; do
+    if _running && "$RT" exec "$NAME" test -f "$_UPDATE_FLAG" 2>/dev/null; then
+      "$RT" exec "$NAME" rm -f "$_UPDATE_FLAG" 2>/dev/null || true
+      echo "[*] Update requested from the UI — applying..."
+      cmd_update || echo "[!] Update failed; re-request it from the UI to retry."
+    fi
+    sleep 20
+  done
+}
+
 usage() {
   cat <<'EOF'
 lumen - control your local Lumen
@@ -284,6 +308,7 @@ case "${1:-open}" in
   stop|para|parar)             cmd_stop ;;
   restart|reinicia)            cmd_restart ;;
   update|actualiza|actualizar) cmd_update ;;
+  agent|watch)                 cmd_agent ;;
   status|estado)               cmd_status ;;
   logs|log)                    cmd_logs ;;
   pair|vincular)               cmd_pair "${2:-}" ;;

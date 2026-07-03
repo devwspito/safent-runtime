@@ -879,6 +879,17 @@ const translations = {
     'cost.gov.failures.note':        ' del total de acciones',
     'cost.gov.selfhosted.label':     'Cómputo propio',
     'cost.gov.selfhosted.note':      'acciones sin coste externo',
+
+    // System update
+    'sysupdate.current':        'Versión {v}',
+    'sysupdate.action':         'Actualizar',
+    'sysupdate.updating':       'Actualizando…',
+    'sysupdate.available':      'Hay una versión nueva',
+    'sysupdate.confirm.title':  '¿Actualizar Lumen?',
+    'sysupdate.confirm.body':   'Se instalará la última versión. Puede tardar unos minutos y la app se recargará sola.',
+    'sysupdate.confirm.ok':     'Actualizar',
+    'sysupdate.toast.started':  'Actualizando… vuelve en un par de minutos.',
+    'sysupdate.err.start':      'No se pudo iniciar la actualización.',
   },
 
   en: {
@@ -1739,6 +1750,17 @@ const translations = {
     'cost.gov.failures.note':        ' of total actions',
     'cost.gov.selfhosted.label':     'Self-hosted compute',
     'cost.gov.selfhosted.note':      'actions with no external cost',
+
+    // System update
+    'sysupdate.current':        'Version {v}',
+    'sysupdate.action':         'Update',
+    'sysupdate.updating':       'Updating…',
+    'sysupdate.available':      'A new version is available',
+    'sysupdate.confirm.title':  'Update Lumen?',
+    'sysupdate.confirm.body':   'The latest version will be installed. It may take a few minutes and the app will reload on its own.',
+    'sysupdate.confirm.ok':     'Update',
+    'sysupdate.toast.started':  'Updating… come back in a couple of minutes.',
+    'sysupdate.err.start':      'Could not start the update.',
   },
 } as const
 

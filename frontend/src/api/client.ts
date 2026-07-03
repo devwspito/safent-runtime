@@ -804,6 +804,30 @@ export function getInstanceFeatures(): Promise<InstanceFeatures> {
   return request<InstanceFeatures>('/instance/features')
 }
 
+// ── System update ─────────────────────────────────────────────────────────────
+
+export interface SystemUpdateStatus {
+  current_version: string
+  latest_version: string | null
+  update_available: boolean
+  updating: boolean
+}
+
+/** Falls back to a "nothing to see here" shape so a transient failure never surfaces a false update prompt. */
+export function getSystemUpdate(): Promise<SystemUpdateStatus> {
+  return request<SystemUpdateStatus>('/system/update').catch(() => ({
+    current_version: '',
+    latest_version: null,
+    update_available: false,
+    updating: false,
+  }))
+}
+
+/** Drops a marker for the host agent to pick up; it applies the update and the container recreates on its own. */
+export function requestSystemUpdate(): Promise<{ ok: boolean; updating: boolean }> {
+  return request('/system/update', { method: 'POST', body: JSON.stringify({}) })
+}
+
 // ── Usage / Cost ──────────────────────────────────────────────────────────────
 
 export function getUsageSummary(period: UsagePeriod): Promise<UsageSummary> {

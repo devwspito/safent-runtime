@@ -17,6 +17,59 @@ LUMEN_CLI_URL="${LUMEN_CLI_URL:-https://raw.githubusercontent.com/devwspito/lume
 
 command -v curl >/dev/null 2>&1 || { echo "[x] You need curl."; exit 1; }
 
+OS="$(uname -s 2>/dev/null || echo unknown)"
+
+# Install the background update agent so updates can be triggered FROM THE UI (no
+# terminal). The container can't recreate itself (sandbox), so `lumen agent` runs on
+# the host, watches for a UI-written "update requested" marker, and applies it. Runs
+# once at install; idempotent; fail-soft (Lumen works fine without it — you can still
+# `lumen update` by hand). Only ever runs the podman the user already runs.
+install_agent() {
+  mkdir -p "$HOME/.lumen" 2>/dev/null || true
+  case "$OS" in
+    Darwin)
+      _pl="$HOME/Library/LaunchAgents/run.lumen.agent.plist"
+      mkdir -p "$HOME/Library/LaunchAgents" 2>/dev/null || return 0
+      cat > "$_pl" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>run.lumen.agent</string>
+  <key>ProgramArguments</key><array><string>$BIN/lumen</string><string>agent</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$HOME/.lumen/agent.log</string>
+  <key>StandardErrorPath</key><string>$HOME/.lumen/agent.log</string>
+</dict></plist>
+PLIST
+      launchctl unload "$_pl" >/dev/null 2>&1 || true
+      launchctl load "$_pl" >/dev/null 2>&1 \
+        && echo "[ok] UI-triggered updates enabled (background agent)." || true
+      ;;
+    Linux)
+      if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        _u="$HOME/.config/systemd/user"; mkdir -p "$_u" 2>/dev/null || true
+        cat > "$_u/lumen-agent.service" <<UNIT
+[Unit]
+Description=Lumen UI-triggered update agent
+[Service]
+ExecStart=$BIN/lumen agent
+Restart=always
+RestartSec=10
+[Install]
+WantedBy=default.target
+UNIT
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+        systemctl --user enable --now lumen-agent.service >/dev/null 2>&1 \
+          && echo "[ok] UI-triggered updates enabled (systemd --user)." || true
+      else
+        pgrep -f "$BIN/lumen agent" >/dev/null 2>&1 \
+          || nohup "$BIN/lumen" agent >"$HOME/.lumen/agent.log" 2>&1 &
+      fi
+      ;;
+  esac
+}
+
 # Pick a writable PATH dir (no sudo). Prefer one already on PATH; else ~/.local/bin.
 BIN=""
 for d in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" "$HOME/bin"; do
@@ -47,6 +100,9 @@ esac
 # First run: pull the image, run it with the cage, open the browser.
 # (Forwards LUMEN_IMAGE / LUMEN_PORT / LUMEN_SECCOMP_URL if you exported them.)
 "$BIN/lumen" update
+
+# Enable UI-triggered updates (background agent). Best-effort; never blocks install.
+install_agent || true
 
 # Enterprise pairing: if LUMEN_PAIR_CODE is set, associate after the first run.
 # The code is copied to a local variable and the env var is unset immediately

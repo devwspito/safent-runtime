@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { Settings } from 'lucide-react'
-import { listConversations, listPendingApprovals } from '../api/client'
+import { sileo } from 'sileo'
+import {
+  listConversations,
+  listPendingApprovals,
+  getSystemUpdate,
+  requestSystemUpdate,
+  type SystemUpdateStatus,
+} from '../api/client'
 import { useChat } from '../hooks/useChat'
 import { useFeatures } from '../hooks/useFeatures'
 import type { ConversationSummary } from '../api/types'
 import NotificationsPanel from './NotificationsPanel'
+import { useConfirmDialog } from './ConfirmDialog'
 import { useT, useLocale } from '../lib/i18n'
 
 // activeProviderReload lets child views (ProvidersView) trigger a re-check after
@@ -170,6 +178,75 @@ export function useSettingsNavItems(): NavItem[] {
     { to: '/memoria',       label: t('nav.memoria'),       icon: <MemoriaIcon /> },
     { to: '/coste',         label: t('nav.coste'),         icon: <CosteIcon /> },
   ]
+}
+
+// ── System update ─────────────────────────────────────────────────────────────
+
+const SYSTEM_UPDATE_POLL_MS = 15 * 60_000
+
+/** Subtle footer line: current version + a calm "Actualizar" affordance when one is available. */
+function SystemUpdateFooter() {
+  const t = useT()
+  const [status, setStatus] = useState<SystemUpdateStatus | null>(null)
+  const [confirmUpdate, confirmUpdateDialog] = useConfirmDialog()
+
+  const poll = useCallback(() => {
+    getSystemUpdate().then(setStatus)
+  }, [])
+
+  useEffect(() => {
+    poll()
+    const id = setInterval(poll, SYSTEM_UPDATE_POLL_MS)
+    return () => clearInterval(id)
+  }, [poll])
+
+  async function handleUpdateClick() {
+    const ok = await confirmUpdate({
+      title: t('sysupdate.confirm.title'),
+      description: t('sysupdate.confirm.body'),
+      confirmLabel: t('sysupdate.confirm.ok'),
+    })
+    if (!ok) return
+
+    try {
+      const res = await requestSystemUpdate()
+      setStatus(prev => (prev ? { ...prev, updating: res.updating } : prev))
+      sileo.success({ title: t('sysupdate.toast.started') })
+    } catch {
+      sileo.error({ title: t('sysupdate.err.start') })
+    }
+  }
+
+  if (!status?.current_version) return null
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 'var(--space-2)',
+        padding: `0 var(--space-4) var(--space-3)`,
+        fontSize: 'var(--text-xs)',
+        color: 'var(--color-text-dim)',
+      }}
+    >
+      <span>{t('sysupdate.current').replace('{v}', status.current_version)}</span>
+      {status.updating ? (
+        <span role="status">{t('sysupdate.updating')}</span>
+      ) : status.update_available ? (
+        <button
+          type="button"
+          className="cv-btn cv-btn--ghost cv-btn--sm"
+          style={{ height: 'auto', padding: `2px var(--space-2)`, fontSize: 'var(--text-xs)' }}
+          onClick={handleUpdateClick}
+          aria-label={`${t('sysupdate.available')} — ${t('sysupdate.action')}`}
+        >
+          {t('sysupdate.action')}
+        </button>
+      ) : null}
+      {confirmUpdateDialog}
+    </div>
+  )
 }
 
 // ── Recientes ─────────────────────────────────────────────────────────────────
@@ -529,6 +606,8 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
             </button>
           </div>
         </div>
+
+        <SystemUpdateFooter />
       </nav>
 
       <main className="main-content page-enter" id="main-content" tabIndex={-1}>

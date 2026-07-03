@@ -1381,6 +1381,13 @@ def create_app() -> FastAPI:
 
     app.include_router(create_instance_router(_DB_PATH, vault))
 
+    # UI-triggered update: GET reports current/latest version, POST drops a marker the
+    # host-side `lumen agent` watches to apply the update (the sandbox can't self-update).
+    from hermes.shell_server.system_update import (  # noqa: PLC0415
+        create_system_update_router,
+    )
+    app.include_router(create_system_update_router())
+
 
     # ------------------------------------------------------------------
     # React SPA — the single official UI, served at /app/ ( / redirects here).
