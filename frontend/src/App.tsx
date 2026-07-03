@@ -3,27 +3,14 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from 'sileo'
 import Layout from './components/Layout'
 import ChatView from './views/ChatView'
-import ProvidersView from './views/ProvidersView'
-import IntegrationsView from './views/IntegrationsView'
-import McpView from './views/McpView'
-import SkillsView from './views/SkillsView'
-import CalendarView from './views/CalendarView'
-import SeguridadView from './views/SeguridadView'
-import MemoriaView from './views/MemoriaView'
-import ArchivosView from './views/ArchivosView'
+import { CapacidadesView, SistemaView } from './views/SectionHubs'
 import { useActiveProvider } from './hooks/useActiveProvider'
 import { useFeatures } from './hooks/useFeatures'
 
-// "En vivo" section (tabs: Actividad + Enseñar). Code-split: the live canvas + WS
-// logic isn't needed on other routes.
-const EnVivoView = lazy(() => import('./views/EnVivoView'))
-
 // Code-split OfficeView at the route boundary; it imports the canvas engine
 // which is non-trivial (~10 kB gzipped) and not needed on other routes.
+// (UsageView/EnVivoView are lazy-loaded inside SectionHubs.)
 const OfficeView = lazy(() => import('./views/OfficeView'))
-
-// Code-split UsageView: recharts (~50 kB gzipped) not needed on other routes.
-const UsageView = lazy(() => import('./views/UsageView'))
 
 
 /** Shared route-boundary skeleton: stacked lines that mirror a view header. */
@@ -54,14 +41,6 @@ function RouteFallback({ label }: { label: string }) {
 
 function OfficeFallback() {
   return <RouteFallback label="Cargando Office…" />
-}
-
-function UsageFallback() {
-  return <RouteFallback label="Cargando Coste…" />
-}
-
-function TeachingFallback() {
-  return <RouteFallback label="Cargando Modo Enseñanza…" />
 }
 
 /**
@@ -99,10 +78,7 @@ export default function App() {
           {/* chat is always allowed — no guard needed */}
           <Route path="chat" element={<ChatView />} />
           {/* tablero removed (owner: "no es útil para nada") — /tablero now falls through to index → /chat */}
-          <Route path="programadas" element={
-            <ViewGuard viewId="programadas"><CalendarView /></ViewGuard>
-          } />
-          {/* Agentes = the unified team view (cards + live floor). Office merged in. */}
+          {/* Agentes = the unified team view (swarm + cards + pixel floor). */}
           <Route path="agentes" element={
             <ViewGuard viewId="agentes">
               <Suspense fallback={<OfficeFallback />}>
@@ -111,48 +87,24 @@ export default function App() {
             </ViewGuard>
           } />
           <Route path="office" element={<Navigate to="/agentes" replace />} />
-          <Route path="skills" element={
-            <ViewGuard viewId="skills"><SkillsView /></ViewGuard>
-          } />
-          {/* Back-compat: the old "Ajustes" hub is gone — the sidebar now groups
-              these views directly (Capacidades / Sistema). Deep-links → Seguridad. */}
-          <Route path="ajustes" element={<Navigate to="/seguridad" replace />} />
-          <Route path="integraciones" element={
-            <ViewGuard viewId="integraciones"><IntegrationsView /></ViewGuard>
-          } />
-          <Route path="mcp" element={
-            <ViewGuard viewId="mcp"><McpView /></ViewGuard>
-          } />
-          <Route path="archivos" element={
-            <ViewGuard viewId="archivos"><ArchivosView /></ViewGuard>
-          } />
-          <Route path="proveedores" element={
-            <ViewGuard viewId="proveedores"><ProvidersView /></ViewGuard>
-          } />
-          <Route path="seguridad" element={
-            <ViewGuard viewId="seguridad"><SeguridadView /></ViewGuard>
-          } />
-          <Route path="memoria" element={
-            <ViewGuard viewId="memoria"><MemoriaView /></ViewGuard>
-          } />
-          <Route path="coste" element={
-            <ViewGuard viewId="coste">
-              <Suspense fallback={<UsageFallback />}>
-                <UsageView />
-              </Suspense>
-            </ViewGuard>
-          } />
-          {/* "En vivo" = unified section (Actividad + Enseñar). Replaces the old
-              standalone "Enseñar" nav item. */}
-          <Route path="en-vivo" element={
-            <ViewGuard viewId="en-vivo">
-              <Suspense fallback={<TeachingFallback />}>
-                <EnVivoView />
-              </Suspense>
-            </ViewGuard>
-          } />
-          {/* Back-compat: /ensenar (deep-links, agent app-map) → /en-vivo. */}
-          <Route path="ensenar" element={<Navigate to="/en-vivo" replace />} />
+          {/* The two hubs (owner decision): everything that isn't Chat/Agentes
+              lives inside them as tabs. Hubs gate their own tabs by features. */}
+          <Route path="capacidades" element={<CapacidadesView />} />
+          <Route path="sistema" element={<SistemaView />} />
+          {/* Back-compat: old standalone paths (deep-links, the agent app-map)
+              → the owning hub tab. */}
+          <Route path="skills" element={<Navigate to="/capacidades?tab=skills" replace />} />
+          <Route path="integraciones" element={<Navigate to="/capacidades?tab=integraciones" replace />} />
+          <Route path="mcp" element={<Navigate to="/capacidades?tab=mcp" replace />} />
+          <Route path="en-vivo" element={<Navigate to="/capacidades?tab=en-vivo" replace />} />
+          <Route path="ensenar" element={<Navigate to="/capacidades?tab=en-vivo" replace />} />
+          <Route path="seguridad" element={<Navigate to="/sistema?tab=seguridad" replace />} />
+          <Route path="coste" element={<Navigate to="/sistema?tab=coste" replace />} />
+          <Route path="proveedores" element={<Navigate to="/sistema?tab=proveedores" replace />} />
+          <Route path="programadas" element={<Navigate to="/sistema?tab=programadas" replace />} />
+          <Route path="memoria" element={<Navigate to="/sistema?tab=memoria" replace />} />
+          <Route path="archivos" element={<Navigate to="/sistema?tab=archivos" replace />} />
+          <Route path="ajustes" element={<Navigate to="/sistema" replace />} />
           {/* Unknown paths (incl. the removed /tablero, stale bookmarks) → chat. */}
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Route>

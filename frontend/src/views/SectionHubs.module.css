@@ -1,0 +1,11 @@
+.hub {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.tabBar {
+  flex-shrink: 0;
+  padding: var(--space-4) var(--space-8) 0;
+}

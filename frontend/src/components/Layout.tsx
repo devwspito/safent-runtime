@@ -13,7 +13,8 @@ import { useFeatures } from '../hooks/useFeatures'
 import type { ConversationSummary } from '../api/types'
 import NotificationsPanel from './NotificationsPanel'
 import { useConfirmDialog } from './ConfirmDialog'
-import { useT, useLocale, type TranslationKey } from '../lib/i18n'
+import { useT, useLocale } from '../lib/i18n'
+import { CAPACIDADES_VIEW_IDS, SISTEMA_VIEW_IDS } from '../views/SectionHubs'
 
 // activeProviderReload lets child views (ProvidersView) trigger a re-check after
 // connecting a model. The "Falta conectar un modelo" nudge was removed — the chat
@@ -39,104 +40,12 @@ function ChatIcon() {
   )
 }
 
-function TasksIcon() {
-  return (
-    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M5 8l2 2 4-4" stroke="currentColor" strokeWidth="1.4"
-        strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
 function AgentsIcon() {
   return (
     <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <circle cx="8" cy="5.5" r="2.5" stroke="currentColor" strokeWidth="1.4" />
       <path d="M2 14c0-3 2.686-4.5 6-4.5S14 11 14 14"
         stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function SkillsIcon() {
-  return (
-    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <polygon points="8,1 10,6 15,6 11,9 13,14 8,11 3,14 5,9 1,6 6,6"
-        stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
-function IntegrationsIcon() {
-  return (
-    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="4" cy="8" r="2" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="12" cy="4" r="2" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="12" cy="12" r="2" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M6 8h2M10 5 7 7M10 11 7 9"
-        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function McpIcon() {
-  return (
-    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M8 2v3M8 11v3M2 8h3M11 8h3"
-        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-      <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.4" />
-    </svg>
-  )
-}
-
-function ProvidersIcon() {
-  return (
-    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <ellipse cx="8" cy="4.5" rx="5.5" ry="2" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M2.5 4.5v7c0 1.1 2.46 2 5.5 2s5.5-.9 5.5-2v-7"
-        stroke="currentColor" strokeWidth="1.4" />
-      <path d="M2.5 8c0 1.1 2.46 2 5.5 2s5.5-.9 5.5-2"
-        stroke="currentColor" strokeWidth="1.4" />
-    </svg>
-  )
-}
-
-function SecurityIcon() {
-  return (
-    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M8 2L3 4v4c0 3.3 2.3 5.6 5 6.4C11.7 13.6 14 11.3 14 8V4L8 2Z"
-        stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
-function MemoriaIcon() {
-  return (
-    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M8 2a4 4 0 0 1 4 4c0 1.2-.4 2.4-1.2 3.2L8 14l-2.8-4.8A4 4 0 0 1 8 2Z"
-        stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
-      <circle cx="8" cy="6" r="1.5" stroke="currentColor" strokeWidth="1.2" />
-    </svg>
-  )
-}
-
-function ArchivosIcon() {
-  return (
-    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M4 2h5l3 3v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z"
-        stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
-      <path d="M9 2v3h3" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
-function CosteIcon() {
-  return (
-    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M2 12l3.5-4 3 3L11 7l3 3"
-        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M2 4h12" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
     </svg>
   )
 }
@@ -149,57 +58,44 @@ function PlusIcon() {
   )
 }
 
-function LiveIcon() {
+function CapacidadesIcon() {
   return (
     <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="8" cy="8" r="1.8" fill="currentColor" />
-      <path d="M4.6 4.6a5 5 0 0 0 0 6.8M11.4 4.6a5 5 0 0 1 0 6.8"
-        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <path d="M8 2 14 5 8 8 2 5 8 2Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <path d="M2 8.5 8 11.5 14 8.5M2 12 8 15 14 12"
+        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
 }
 
-interface NavSection {
-  /** i18n key for the section header; omitted = no header (the núcleo group). */
-  labelKey?: TranslationKey
-  items: NavItem[]
+function SistemaIcon() {
+  return (
+    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M2 5h8M13 5h1M2 11h1M6 11h8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <circle cx="11.5" cy="5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="4.5" cy="11" r="1.6" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  )
+}
+
+interface HubNavItem extends NavItem {
+  /** Visible when ANY of these backend view ids is allowed (hub aggregates them). */
+  anyOf?: string[]
+  /** Show the pending-approvals badge on this item. */
+  showsPendingBadge?: boolean
 }
 
 /**
- * Sidebar grouped into labelled sections (owner decision — the "Ajustes" gear was
- * dropped): a headerless núcleo (Chat, Agentes), then Capacidades (what the agent
- * works with + watching it live) and Sistema (governance & config). Every route
- * already exists standalone in App.tsx; these just group them.
+ * Four clean entries (owner decision): Chat · Agentes · Capacidades · Sistema.
+ * The two hubs contain every other section as tabs (see SectionHubs.tsx).
  */
-function useNavSections(): NavSection[] {
+function useNavItems(): HubNavItem[] {
   const t = useT()
   return [
-    {
-      items: [
-        { to: '/chat',    label: t('nav.chat'),    icon: <ChatIcon /> },
-        { to: '/agentes', label: t('nav.agentes'), icon: <AgentsIcon /> },
-      ],
-    },
-    {
-      labelKey: 'nav.section.capabilities',
-      items: [
-        { to: '/skills',        label: t('nav.skills'),        icon: <SkillsIcon /> },
-        { to: '/integraciones', label: t('nav.integraciones'), icon: <IntegrationsIcon /> },
-        { to: '/mcp',           label: t('nav.mcp'),           icon: <McpIcon /> },
-        { to: '/en-vivo',       label: t('nav.envivo'),        icon: <LiveIcon /> },
-      ],
-    },
-    {
-      labelKey: 'nav.section.system',
-      items: [
-        { to: '/seguridad',   label: t('nav.seguridad'),   icon: <SecurityIcon /> },
-        { to: '/coste',       label: t('nav.coste'),       icon: <CosteIcon /> },
-        { to: '/proveedores', label: t('nav.proveedores'), icon: <ProvidersIcon /> },
-        { to: '/programadas', label: t('nav.programadas'), icon: <TasksIcon /> },
-        { to: '/memoria',     label: t('nav.memoria'),     icon: <MemoriaIcon /> },
-        { to: '/archivos',    label: t('nav.archivos'),    icon: <ArchivosIcon /> },
-      ],
-    },
+    { to: '/chat',        label: t('nav.chat'),                 icon: <ChatIcon /> },
+    { to: '/agentes',     label: t('nav.agentes'),              icon: <AgentsIcon /> },
+    { to: '/capacidades', label: t('nav.section.capabilities'), icon: <CapacidadesIcon />, anyOf: CAPACIDADES_VIEW_IDS },
+    { to: '/sistema',     label: t('nav.section.system'),       icon: <SistemaIcon />, anyOf: SISTEMA_VIEW_IDS, showsPendingBadge: true },
   ]
 }
 
@@ -448,7 +344,7 @@ function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps)
 
 export default function Layout({ activeProviderReload }: LayoutProps) {
   const navigate = useNavigate()
-  const navSections = useNavSections()
+  const navItems = useNavItems()
   const t = useT()
   const { locale, setLocale } = useLocale()
   const { isLoading: featuresLoading, allowed } = useFeatures()
@@ -532,12 +428,12 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
             loadConversation={chat.loadConversation}
           />
 
-          {/* Grouped nav: núcleo (no header) + Capacidades + Sistema. The pending
-              approvals badge rides on the Seguridad item. */}
-          {featuresLoading ? (
-            <div className="sidebar-nav">
+          {/* Four clean entries; the hubs are visible when ANY of their child
+              views is allowed. Pending-approvals badge rides on Sistema. */}
+          <div className="sidebar-nav">
+            {featuresLoading ? (
               <ul role="list" aria-busy="true" aria-label={t('layout.loading_nav_aria')}>
-                {Array.from({ length: 6 }, (_, i) => (
+                {Array.from({ length: 4 }, (_, i) => (
                   <li key={i}>
                     <div
                       className="skeleton skeleton--block"
@@ -553,44 +449,36 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
                   </li>
                 ))}
               </ul>
-            </div>
-          ) : (
-            navSections.map((section, si) => {
-              const items = section.items.filter(({ to }) => allowed(to.replace(/^\//, '')))
-              if (items.length === 0) return null
-              return (
-                <div className="sidebar-nav" key={section.labelKey ?? `core-${si}`}>
-                  {section.labelKey && (
-                    <div className="sidebar-section-label">{t(section.labelKey)}</div>
-                  )}
-                  <ul role="list">
-                    {items.map(({ to, label, icon }) => (
-                      <li key={to}>
-                        <NavLink
-                          to={to}
-                          className={({ isActive }) =>
-                            ['nav-link', isActive ? 'active' : ''].filter(Boolean).join(' ')
-                          }
-                        >
-                          {icon}
-                          {label}
-                          {to === '/seguridad' && pendingCount > 0 && (
-                            <span
-                              className="badge-count"
-                              role="status"
-                              aria-label={t('nav.pending_aria').replace('{count}', String(pendingCount))}
-                            >
-                              {pendingCount}
-                            </span>
-                          )}
-                        </NavLink>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )
-            })
-          )}
+            ) : (
+              <ul role="list">
+                {navItems
+                  .filter(({ to, anyOf }) =>
+                    anyOf ? anyOf.some((id) => allowed(id)) : allowed(to.replace(/^\//, '')))
+                  .map(({ to, label, icon, showsPendingBadge }) => (
+                    <li key={to}>
+                      <NavLink
+                        to={to}
+                        className={({ isActive }) =>
+                          ['nav-link', isActive ? 'active' : ''].filter(Boolean).join(' ')
+                        }
+                      >
+                        {icon}
+                        {label}
+                        {showsPendingBadge && pendingCount > 0 && (
+                          <span
+                            className="badge-count"
+                            role="status"
+                            aria-label={t('nav.pending_aria').replace('{count}', String(pendingCount))}
+                          >
+                            {pendingCount}
+                          </span>
+                        )}
+                      </NavLink>
+                    </li>
+                  ))}
+              </ul>
+            )}
+          </div>
         </div>
 
         {/* Language selector + user chip */}
