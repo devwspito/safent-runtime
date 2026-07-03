@@ -1,23 +1,23 @@
 /**
- * SwarmView — the live agent "brain/swarm", 3D edition (Enterprise candidate).
+ * SwarmView — the live agent "synaptic brain" (Enterprise candidate).
  *
- * react-force-graph-3d + UnrealBloomPass: emissive spheres with REAL bloom, a
- * deterministic starfield, cinematic camera (soft auto-orbit at rest, fly-to on
- * click) and a live activity feed beside the canvas.
+ * react-force-graph-3d + UnrealBloomPass: agents float in real 3D as glowing
+ * Fresnel orbs, wired by a visible neural web — curved links that carry energy
+ * particles (ambient "synapses firing" at rest, bright fast flow on activity).
  *
  * Everything drawn/listed is TRUTHFUL:
- *   • node "working" state ← runtimeStatus.activity[] (a real in-flight tool),
- *   • sparks + feed entries ← runtimeStatus.delegations[] (real delegate_task
- *     events, short TTL) and activity[] transitions,
- *   • ruflo_active → the brain lights up.
- * Idle nodes just breathe. No fabricated traffic.
+ *   • node "working" ← runtimeStatus.activity[] (a real in-flight tool),
+ *   • bright Cerebro→specialist spark ← runtimeStatus.delegations[] (real
+ *     delegate_task events, short TTL),
+ *   • ruflo_active → the brain blazes.
+ * Idle nodes just breathe. Ambient particles show the network is ALIVE, not that
+ * anyone is falsely "working".
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ForceGraph3D, { type ForceGraphMethods, type NodeObject, type LinkObject } from 'react-force-graph-3d'
 import * as THREE from 'three'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
-// d3-force-3d ships with the force-graph stack (no types published); collide
-// keeps nodes+labels apart.
+// d3-force-3d ships with the force-graph stack (no published types).
 // eslint-disable-next-line import/no-extraneous-dependencies
 // @ts-expect-error — d3-force-3d has no type declarations
 import { forceCollide } from 'd3-force-3d'
@@ -32,7 +32,7 @@ import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
 import styles from './SwarmView.module.css'
 
-// ── Graph model (unchanged from the 2D swarm — same truth, new renderer) ──────
+// ── Graph model (unchanged — same truth, new look) ────────────────────────────
 
 type NodeKind = 'brain' | 'dept' | 'agent'
 
@@ -48,7 +48,6 @@ interface SwarmNode extends NodeObject {
 interface SwarmLink extends LinkObject {
   source: string | SwarmNode
   target: string | SwarmNode
-  /** id of the agent this link ultimately feeds (dept→agent, or brain→dept-of-agent). */
   agentEndpoint?: string
 }
 
@@ -69,30 +68,17 @@ function buildGraph(roster: AgentRoster, brainLabel: string): GraphData {
 
   const brainAgent = cerebroDepts[0]?.agents[0]
   const brainId = brainAgent?.id ?? SYNTHETIC_BRAIN
-  nodes.push({
-    id: brainId,
-    kind: 'brain',
-    label: brainAgent?.name ?? brainLabel,
-    color: brainAgent?.color ?? '#6aa6ff',
-    agentId: brainAgent?.id,
-  })
+  nodes.push({ id: brainId, kind: 'brain', label: brainAgent?.name ?? brainLabel, color: brainAgent?.color ?? '#6aa6ff', agentId: brainAgent?.id })
 
   const allDepts = [...cerebroDepts, ...customDepts, ...factoryDepts]
   for (const dept of allDepts) {
     const agents = dept.agents.filter((a) => a.id !== brainId)
     if (agents.length === 0) continue
     const deptNodeId = `dept:${dept.id}`
-    nodes.push({ id: deptNodeId, kind: 'dept', label: dept.name, color: '#8b93a3', deptId: dept.id })
+    nodes.push({ id: deptNodeId, kind: 'dept', label: dept.name, color: '#7f8aa3', deptId: dept.id })
     links.push({ source: brainId, target: deptNodeId })
     for (const a of agents) {
-      nodes.push({
-        id: a.id,
-        kind: 'agent',
-        label: a.name,
-        color: a.color ?? '#6aa6ff',
-        agentId: a.id,
-        deptId: dept.id,
-      })
+      nodes.push({ id: a.id, kind: 'agent', label: a.name, color: a.color ?? '#6aa6ff', agentId: a.id, deptId: dept.id })
       links.push({ source: deptNodeId, target: a.id, agentEndpoint: a.id })
       deptOfAgent.set(a.id, deptNodeId)
     }
@@ -100,7 +86,7 @@ function buildGraph(roster: AgentRoster, brainLabel: string): GraphData {
   return { nodes, links, brainId, deptOfAgent }
 }
 
-// ── Palette from CSS tokens (three.js needs concrete colors) ──────────────────
+// ── Palette ───────────────────────────────────────────────────────────────────
 
 interface Palette { accent: string; working: string; ink: string; muted: string }
 
@@ -109,7 +95,6 @@ function readVar(name: string, fallback: string): string {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
   return v || fallback
 }
-
 function readPalette(): Palette {
   return {
     accent: readVar('--color-accent', '#6aa6ff'),
@@ -118,34 +103,64 @@ function readPalette(): Palette {
     muted: readVar('--color-text-muted', '#8b93a3'),
   }
 }
-
 function resolveColor(c: string, pal: Palette): string {
   return c.startsWith('var(') ? pal.accent : c
 }
 
-// ── Per-node three.js objects (kept so the pulse loop can mutate materials) ───
+// ── Fresnel "energy orb" shell material (rim glow — the premium node look) ─────
+
+const FRESNEL_VERT = `
+  varying vec3 vN;
+  varying vec3 vV;
+  void main() {
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vN = normalize(mat3(modelMatrix) * normal);
+    vV = normalize(cameraPosition - wp.xyz);
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`
+const FRESNEL_FRAG = `
+  uniform vec3 uColor;
+  uniform float uPower;
+  uniform float uIntensity;
+  varying vec3 vN;
+  varying vec3 vV;
+  void main() {
+    float f = pow(1.0 - abs(dot(normalize(vN), normalize(vV))), uPower);
+    gl_FragColor = vec4(uColor * f * uIntensity, f);
+  }
+`
+function makeShell(color: THREE.Color): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: color.clone() },
+      uPower: { value: 2.4 },
+      uIntensity: { value: 1.0 },
+    },
+    vertexShader: FRESNEL_VERT,
+    fragmentShader: FRESNEL_FRAG,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.FrontSide,
+  })
+}
+
+// ── Per-node three objects (kept so the pulse loop can mutate them) ───────────
 
 interface NodeObjects {
   kind: NodeKind
-  sphere: THREE.Mesh<THREE.SphereGeometry, THREE.MeshPhongMaterial>
-  halo: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>
-  label: SpriteText
+  core: THREE.Mesh<THREE.SphereGeometry, THREE.MeshStandardMaterial>
+  shell: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial> | null
+  label: SpriteText & THREE.Sprite
   baseColor: THREE.Color
 }
 
-const NODE_R: Record<NodeKind, number> = { brain: 11, dept: 2.6, agent: 6.2 }
+const NODE_R: Record<NodeKind, number> = { brain: 9, dept: 1.7, agent: 4.6 }
 
 // ── Live feed model ───────────────────────────────────────────────────────────
 
-interface FeedEvent {
-  id: string
-  ts: number
-  type: 'deleg' | 'tool'
-  agentId: string
-  title: string
-  detail?: string
-}
-
+interface FeedEvent { id: string; ts: number; type: 'deleg' | 'tool'; agentId: string; title: string; detail?: string }
 const FEED_MAX = 30
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -170,8 +185,6 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
     [],
   )
 
-  // Graph rebuilt ONLY on roster CONTENT change (identity churn must never reset
-  // node positions — see the 0.8.3 "jumping pile" postmortem).
   const brainLabel = t('swarm.center')
   const rosterKey = useMemo(
     () => roster.departments
@@ -183,6 +196,12 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
   rosterRef.current = roster
   // eslint-disable-next-line react-hooks/exhaustive-deps -- rosterKey IS the roster identity
   const graph = useMemo(() => {
+    // Dispose the previous frame's GPU resources before rebuilding.
+    for (const o of objsRef.current.values()) {
+      o.core.geometry.dispose(); o.core.material.dispose()
+      o.shell?.geometry.dispose(); o.shell?.material.dispose()
+      o.label.material.dispose()
+    }
     objsRef.current.clear()
     return buildGraph(rosterRef.current, brainLabel)
   }, [rosterKey, brainLabel])
@@ -194,21 +213,23 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
   }, [roster])
 
   const activeIds = useMemo(() => activeAgentIds(runtimeStatus), [runtimeStatus])
-  const activeRef = useRef(activeIds)
-  activeRef.current = activeIds
+  const activeRef = useRef(activeIds); activeRef.current = activeIds
   const brainBusy = !!runtimeStatus.ruflo_active || (runtimeStatus.delegations?.length ?? 0) > 0
-  const brainBusyRef = useRef(brainBusy)
-  brainBusyRef.current = brainBusy
+  const brainBusyRef = useRef(brainBusy); brainBusyRef.current = brainBusy
 
   const activeDeptNodes = useMemo(() => {
     const s = new Set<string>()
     for (const [agentId, deptNode] of graph.deptOfAgent) if (activeIds.has(agentId)) s.add(deptNode)
     return s
   }, [graph, activeIds])
+  const linkActive = useCallback((link: SwarmLink) => (
+    link.agentEndpoint
+      ? activeIds.has(link.agentEndpoint)
+      : activeDeptNodes.has(typeof link.target === 'object' ? (link.target as SwarmNode).id : String(link.target))
+  ), [activeIds, activeDeptNodes])
 
   useEffect(() => { palRef.current = readPalette() }, [rosterKey])
 
-  // Container size → canvas dimensions.
   useEffect(() => {
     const el = wrapRef.current
     if (!el) return
@@ -220,80 +241,64 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
     return () => ro.disconnect()
   }, [])
 
-  // Forces + pin the brain at the origin. Layout is PLANAR (numDimensions=2):
-  // the readability of the 2D constellation, rendered with 3D light and depth.
+  // Real 3D layout: no plane. Collide keeps orbs from overlapping; brain pinned.
   useEffect(() => {
     const fg = fgRef.current
     if (!fg) return
-    fg.d3Force('charge')?.strength(-380)
-    fg.d3Force('link')?.distance((l: SwarmLink) => ((typeof l.source === 'object' && (l.source as SwarmNode).kind === 'brain') ? 200 : 75))
-    // Collision keeps nodes AND their labels from ever overlapping (the owner's
-    // screenshot showed mashed labels — this is the structural cure).
-    fg.d3Force('collide', forceCollide((n: SwarmNode) => (n.kind === 'brain' ? 30 : n.kind === 'dept' ? 14 : 25)))
+    fg.d3Force('charge')?.strength(-300)
+    fg.d3Force('link')?.distance((l: SwarmLink) => ((typeof l.source === 'object' && (l.source as SwarmNode).kind === 'brain') ? 170 : 70))
+    fg.d3Force('collide', forceCollide((n: SwarmNode) => (n.kind === 'brain' ? 26 : n.kind === 'dept' ? 8 : 18)))
     const brain = graph.nodes.find((n) => n.kind === 'brain') as (SwarmNode & { fx?: number; fy?: number; fz?: number }) | undefined
     if (brain) { brain.fx = 0; brain.fy = 0; brain.fz = 0 }
     fg.d3ReheatSimulation()
-    // Frame the whole swarm once the layout has mostly settled.
-    const id = setTimeout(() => { try { fg.zoomToFit(700, 70) } catch { /* not ready */ } }, 1800)
+    const id = setTimeout(() => { try { fg.zoomToFit(800, 80) } catch { /* not ready */ } }, 1800)
     return () => clearTimeout(id)
   }, [graph])
 
-  // ── Scene dressing: BLOOM + starfield (once per mount) ─────────────────────
+  // Bloom + starfield + fog — the atmosphere (once per mount).
   const dressedRef = useRef(false)
   useEffect(() => {
     const fg = fgRef.current
     if (!fg || dressedRef.current) return
     dressedRef.current = true
     try {
-      // REAL glow: bright emissive pixels bleed light. Calibrated for REAL GPUs
-      // (the owner's retina Mac blooms much harder than SwiftShader): threshold
-      // ABOVE every idle emissive level, so at rest the swarm is calm colored
-      // dots and ONLY working nodes (and sparks) truly blaze.
-      const bloom = new UnrealBloomPass(new THREE.Vector2(size.w || 800, size.h || 600), 1.0, 0.45, 0.18)
+      const bloom = new UnrealBloomPass(new THREE.Vector2(size.w || 800, size.h || 600), 1.15, 0.5, 0.15)
       fg.postProcessingComposer().addPass(bloom)
-    } catch { /* WebGL edge cases — the graph still renders without bloom */ }
+    } catch { /* WebGL edge cases — graph still renders */ }
     try {
-      // Deterministic star shell (ambience only — carries no data).
-      const N = 420
+      const scene = fg.scene()
+      scene.fog = new THREE.FogExp2(0x00030a, 0.0016)
+      const N = 480
       const pos = new Float32Array(N * 3)
       for (let i = 0; i < N; i++) {
-        const a = (i * 137.508) % 360 / 180 * Math.PI      // golden angle
-        const b = ((i * 61) % 180 - 90) / 180 * Math.PI
-        const r = 700 + ((i * 97) % 500)
+        const a = ((i * 137.508) % 360) / 180 * Math.PI
+        const b = (((i * 61) % 180) - 90) / 180 * Math.PI
+        const r = 750 + ((i * 97) % 620)
         pos[i * 3] = r * Math.cos(b) * Math.cos(a)
-        pos[i * 3 + 1] = r * Math.sin(b) * 0.6
+        pos[i * 3 + 1] = r * Math.sin(b)
         pos[i * 3 + 2] = r * Math.cos(b) * Math.sin(a)
       }
       const geo = new THREE.BufferGeometry()
       geo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
-      const mat = new THREE.PointsMaterial({
-        color: 0x8899bb, size: 1.5, sizeAttenuation: true,
-        transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false,
-      })
-      fg.scene().add(new THREE.Points(geo, mat))
-    } catch { /* ambience is optional */ }
+      scene.add(new THREE.Points(geo, new THREE.PointsMaterial({
+        color: 0x8fa2c8, size: 1.4, sizeAttenuation: true, transparent: true, opacity: 0.5,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      })))
+    } catch { /* ambience optional */ }
   }, [size.w, size.h])
 
-  // ── Cinematic motion: the GALAXY spins slowly in its own plane (labels are
-  // billboards, so they stay horizontal and readable at every moment). The old
-  // camera auto-orbit is gone — it kept landing on ugly edge-on angles.
-  // The spin lives in the pulse rAF loop below. Manual drag/zoom untouched.
-
-  // Pause the whole render loop when the tab is hidden (battery/perf).
   useEffect(() => {
     const onVis = () => {
       const fg = fgRef.current
       if (!fg) return
-      if (document.hidden) fg.pauseAnimation()
-      else fg.resumeAnimation()
+      if (document.hidden) fg.pauseAnimation(); else fg.resumeAnimation()
     }
     document.addEventListener('visibilitychange', onVis)
     return () => document.removeEventListener('visibilitychange', onVis)
   }, [])
 
-  // ── Pulse loop: working nodes breathe LIGHT (bloom turns it into glow) and
-  // the whole constellation spins slowly in-plane like a galaxy. Idle nodes
-  // stay BELOW the bloom threshold — calm colored dots, never false "working".
+  // Pulse loop: orbs breathe LIGHT (bloom → glow), and the whole brain spins
+  // slowly around Y (labels are billboards → always readable).
   useEffect(() => {
     if (reduced) return
     let raf = 0
@@ -301,29 +306,27 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
       const now = performance.now()
       const pal = palRef.current
       const fg = fgRef.current
-      if (fg) {
-        try { fg.scene().rotation.z += 0.00035 } catch { /* not mounted yet */ }
-      }
+      if (fg) { try { fg.scene().rotation.y += 0.0006 } catch { /* not mounted */ } }
       for (const [id, o] of objsRef.current) {
         const working = o.kind === 'agent'
           ? activeRef.current.has(id)
           : o.kind === 'brain'
-            ? brainBusyRef.current || (activeRef.current.size > 0 && activeRef.current.has(id))
+            ? brainBusyRef.current || activeRef.current.has(id)
             : false
         const labelMat = o.label.material as THREE.SpriteMaterial
         if (working) {
           const p = 0.5 + 0.5 * Math.sin(now / 300)
-          o.sphere.material.emissiveIntensity = 1.1 + 1.1 * p
-          o.halo.material.opacity = 0.18 + 0.2 * p
-          o.halo.material.color.set(o.kind === 'agent' ? pal.working : pal.accent)
+          o.core.material.emissiveIntensity = 1.3 + 1.2 * p
+          if (o.shell) o.shell.material.uniforms.uIntensity.value = 1.8 + 1.0 * p
+          if (o.shell) o.shell.material.uniforms.uColor.value.set(o.kind === 'agent' ? pal.working : pal.accent)
           o.label.color = pal.ink
           labelMat.opacity = 1
         } else {
-          o.sphere.material.emissiveIntensity = o.kind === 'brain' ? 0.5 : o.kind === 'dept' ? 0.12 : 0.22
-          o.halo.material.opacity = o.kind === 'brain' ? 0.10 : 0.03
-          o.halo.material.color.copy(o.baseColor)
+          const breathe = 0.5 + 0.5 * Math.sin(now / 1700 + (o.core.position.x || 0))
+          o.core.material.emissiveIntensity = o.kind === 'brain' ? 0.55 : o.kind === 'dept' ? 0.15 : 0.28 + 0.06 * breathe
+          if (o.shell) { o.shell.material.uniforms.uIntensity.value = o.kind === 'brain' ? 1.1 : 0.85; o.shell.material.uniforms.uColor.value.copy(o.baseColor) }
           o.label.color = pal.muted
-          labelMat.opacity = o.kind === 'dept' ? 0.55 : o.kind === 'brain' ? 1 : 0.72
+          labelMat.opacity = o.kind === 'dept' ? 0.4 : o.kind === 'brain' ? 1 : 0.7
         }
       }
       raf = requestAnimationFrame(loop)
@@ -332,7 +335,7 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
     return () => cancelAnimationFrame(raf)
   }, [reduced])
 
-  // ── Real delegation sparks (same dedup as always) ──────────────────────────
+  // Real delegation sparks (dedup).
   const seenDeleg = useRef<Set<string>>(new Set())
   useEffect(() => {
     const fg = fgRef.current
@@ -352,20 +355,19 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
       const path = new Set([`${graph.brainId}→${deptNode}`, `${deptNode}→${d.to}`])
       for (const l of graph.links) {
         if (!path.has(linkId(l))) continue
-        try { fg.emitParticle(l) } catch { /* stale link must never crash the view */ }
+        try { fg.emitParticle(l) } catch { /* stale link never crashes the view */ }
       }
     }
     if (seenDeleg.current.size > 256) seenDeleg.current = new Set(Array.from(seenDeleg.current).slice(-128))
   }, [runtimeStatus.delegations, graph])
 
-  // ── Fly-to (click on node / feed row) ──────────────────────────────────────
   const flyTo = useCallback((agentId: string) => {
     const fg = fgRef.current
     if (!fg) return
     const n = graph.nodes.find((x) => x.id === agentId) as (SwarmNode & { x?: number; y?: number; z?: number }) | undefined
     if (!n || n.x == null) return
     const dist = Math.hypot(n.x, n.y ?? 0, n.z ?? 0) || 1
-    const ratio = 1 + 110 / dist
+    const ratio = 1 + 120 / dist
     fg.cameraPosition({ x: n.x * ratio, y: (n.y ?? 0) * ratio, z: (n.z ?? 0) * ratio }, n as { x: number; y: number; z: number }, 900)
   }, [graph])
 
@@ -377,7 +379,7 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
     if (a) onAgentClick(a)
   }, [flyTo, agentById, onAgentClick])
 
-  // ── Node factory ───────────────────────────────────────────────────────────
+  // Node factory — glowing Fresnel energy orb.
   const nodeThreeObject = useCallback((node: NodeObject) => {
     const n = node as SwarmNode
     const pal = palRef.current
@@ -385,42 +387,30 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
     const color = new THREE.Color(resolveColor(n.color, pal))
 
     const group = new THREE.Group()
-    const sphere = new THREE.Mesh(
-      new THREE.SphereGeometry(r, 24, 24),
-      new THREE.MeshPhongMaterial({
-        color, emissive: color,
-        // Idle emissive BELOW the bloom threshold — see the bloom calibration.
-        emissiveIntensity: n.kind === 'brain' ? 0.5 : n.kind === 'dept' ? 0.12 : 0.22,
-        shininess: 60,
-      }),
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(r * 0.62, 24, 24),
+      new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: n.kind === 'brain' ? 0.55 : 0.28, roughness: 0.35, metalness: 0.1 }),
     )
-    group.add(sphere)
+    group.add(core)
 
-    const halo = new THREE.Mesh(
-      new THREE.SphereGeometry(r * 1.28, 16, 16),
-      new THREE.MeshBasicMaterial({
-        color, transparent: true, opacity: n.kind === 'brain' ? 0.10 : 0.03,
-        blending: THREE.AdditiveBlending, depthWrite: false,
-      }),
-    )
-    group.add(halo)
+    let shell: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial> | null = null
+    if (n.kind !== 'dept') {
+      shell = new THREE.Mesh(new THREE.SphereGeometry(r, 32, 32), makeShell(color))
+      group.add(shell)
+    }
 
-    // SpriteText extends THREE.Sprite but its d.ts doesn't expose the base class
-    // fields — cast for position/material access. Dark stroke = readable over
-    // anything (the owner's screenshot had labels mashed into glow).
     const label = new SpriteText(n.label) as SpriteText & THREE.Sprite
     label.color = pal.muted
-    label.textHeight = n.kind === 'brain' ? 6 : n.kind === 'dept' ? 3.4 : 3.8
+    label.textHeight = n.kind === 'brain' ? 6 : n.kind === 'dept' ? 3 : 3.6
     label.fontWeight = '600'
-    label.strokeColor = 'rgba(0,0,8,0.95)'
+    label.strokeColor = 'rgba(0,0,10,0.95)'
     label.strokeWidth = 1
-    label.position.y = -(r + 8)
+    label.position.y = -(r + 7)
     const lm = label.material as THREE.SpriteMaterial
-    lm.depthWrite = false
-    lm.transparent = true
+    lm.depthWrite = false; lm.transparent = true
     group.add(label)
 
-    objsRef.current.set(n.id, { kind: n.kind, sphere, halo, label, baseColor: color })
+    objsRef.current.set(n.id, { kind: n.kind, core, shell, label, baseColor: color })
     return group
   }, [])
 
@@ -440,52 +430,34 @@ export function SwarmView({ roster, runtimeStatus, onAgentClick }: SwarmViewProp
               graphData={graph}
               width={size.w}
               height={size.h}
-              backgroundColor="#000004"
+              backgroundColor="#00030a"
               showNavInfo={false}
               enableNodeDrag={false}
-              /* PLANAR layout: 2D readability, 3D light. The plane + collide force
-                 is what killed the "clumped blobs" look from the owner's Mac. */
-              numDimensions={2}
               warmupTicks={60}
               cooldownTime={9000}
-              onEngineStop={() => { try { fgRef.current?.zoomToFit(700, 70) } catch { /* fine */ } }}
+              onEngineStop={() => { try { fgRef.current?.zoomToFit(800, 80) } catch { /* fine */ } }}
               d3AlphaDecay={0.045}
-              d3VelocityDecay={0.32}
+              d3VelocityDecay={0.34}
               nodeThreeObject={nodeThreeObject}
               nodeLabel={() => ''}
               onNodeClick={handleNodeClick}
-              linkCurvature={0.2}
-              linkColor={(l) => {
-                const link = l as SwarmLink
-                const active = link.agentEndpoint
-                  ? activeIds.has(link.agentEndpoint)
-                  : activeDeptNodes.has(typeof link.target === 'object' ? (link.target as SwarmNode).id : String(link.target))
-                return active ? palRef.current.accent : '#4a5f8f'
-              }}
-              linkOpacity={0.55}
-              linkWidth={(l) => {
-                const link = l as SwarmLink
-                const active = link.agentEndpoint
-                  ? activeIds.has(link.agentEndpoint)
-                  : activeDeptNodes.has(typeof link.target === 'object' ? (link.target as SwarmNode).id : String(link.target))
-                return active ? 2 : 0.8
-              }}
-              linkDirectionalParticles={(l) => {
-                const link = l as SwarmLink
-                const active = link.agentEndpoint
-                  ? activeIds.has(link.agentEndpoint)
-                  : activeDeptNodes.has(typeof link.target === 'object' ? (link.target as SwarmNode).id : String(link.target))
-                return active ? 3 : 0
-              }}
-              linkDirectionalParticleWidth={2.6}
-              linkDirectionalParticleSpeed={0.011}
-              linkDirectionalParticleColor={() => palRef.current.accent}
+              linkCurvature={0.25}
+              linkColor={(l) => (linkActive(l as SwarmLink) ? palRef.current.accent : '#5a76b8')}
+              linkOpacity={0.7}
+              linkWidth={(l) => (linkActive(l as SwarmLink) ? 1.8 : 0.6)}
+              /* Particles on EVERY link = the visible synaptic web (ambient at
+                 rest, bright/fast on real activity). This is what makes the
+                 "neural network" legible. */
+              linkDirectionalParticles={(l) => (linkActive(l as SwarmLink) ? 3 : 1)}
+              linkDirectionalParticleWidth={(l) => (linkActive(l as SwarmLink) ? 2.6 : 1.3)}
+              linkDirectionalParticleSpeed={(l) => (linkActive(l as SwarmLink) ? 0.012 : 0.004)}
+              linkDirectionalParticleColor={(l) => (linkActive(l as SwarmLink) ? palRef.current.accent : '#6d84c0')}
             />
           ) : null}
 
           {hasAgents && (
             <div className={styles.controls}>
-              <Button type="button" variant="ghost" size="sm" onClick={() => fgRef.current?.zoomToFit(700, 60)}>
+              <Button type="button" variant="ghost" size="sm" onClick={() => fgRef.current?.zoomToFit(800, 70)}>
                 {t('swarm.recenter')}
               </Button>
             </div>
@@ -519,7 +491,6 @@ function LiveFeed({ runtimeStatus, agentById, brainId, onFocus }: {
   const [events, setEvents] = useState<FeedEvent[]>([])
   const seenDeleg = useRef<Set<string>>(new Set())
   const lastTool = useRef<Map<string, string>>(new Map())
-  // Re-render every 30 s so relative timestamps stay honest.
   const [, setTick] = useState(0)
   useEffect(() => {
     const id = setInterval(() => setTick((v) => v + 1), 30_000)
@@ -533,27 +504,17 @@ function LiveFeed({ runtimeStatus, agentById, brainId, onFocus }: {
       const key = `${d.task_id ?? ''}|${d.to}|${d.since ?? ''}`
       if (seenDeleg.current.has(key)) continue
       seenDeleg.current.add(key)
-      fresh.push({
-        id: `d:${key}`, ts: Date.now(), type: 'deleg', agentId: d.to,
-        title: `${name(d.from) || name(brainId)} → ${name(d.to)}`,
-        detail: d.label || undefined,
-      })
+      fresh.push({ id: `d:${key}`, ts: Date.now(), type: 'deleg', agentId: d.to, title: `${name(d.from) || name(brainId)} → ${name(d.to)}`, detail: d.label || undefined })
     }
     for (const a of runtimeStatus.activity ?? []) {
       const key = `${a.task_id ?? ''}|${a.agent_id}`
       const tool = a.tool ?? ''
       if (!tool || lastTool.current.get(key) === tool) continue
       lastTool.current.set(key, tool)
-      fresh.push({
-        id: `t:${key}:${tool}:${Date.now()}`, ts: Date.now(), type: 'tool', agentId: a.agent_id,
-        title: name(a.agent_id),
-        detail: toolLabel(tool) ?? tool,
-      })
+      fresh.push({ id: `t:${key}:${tool}:${Date.now()}`, ts: Date.now(), type: 'tool', agentId: a.agent_id, title: name(a.agent_id), detail: toolLabel(tool) ?? tool })
     }
     if (fresh.length > 0) {
       setEvents((prev) => {
-        // Visual dedup: don't stack identical consecutive rows within 60 s
-        // (e.g. a backend re-emitting the same delegation with a fresh ts).
         const out = [...prev]
         for (const e of fresh) {
           const top = out[0]
