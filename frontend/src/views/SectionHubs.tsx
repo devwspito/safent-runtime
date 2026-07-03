@@ -15,7 +15,6 @@ import { useT, type TranslationKey } from '../lib/i18n'
 import SkillsView from './SkillsView'
 import IntegrationsView from './IntegrationsView'
 import McpView from './McpView'
-import CalendarView from './CalendarView'
 import ProvidersView from './ProvidersView'
 import SeguridadView from './SeguridadView'
 import MemoriaView from './MemoriaView'
@@ -89,13 +88,14 @@ const CAPACIDADES_TABS: HubTab[] = [
   ) },
 ]
 
+// "Programadas" is NOT here: the recurring-tasks calendar belongs to the agents,
+// so it lives as the "Tareas" tab inside Agentes (owner decision).
 const SISTEMA_TABS: HubTab[] = [
   { key: 'seguridad',   labelKey: 'nav.seguridad',   render: () => <SeguridadView /> },
   { key: 'coste',       labelKey: 'nav.coste',       render: () => (
     <Suspense fallback={<TabFallback />}><UsageView /></Suspense>
   ) },
   { key: 'proveedores', labelKey: 'nav.proveedores', render: () => <ProvidersView /> },
-  { key: 'programadas', labelKey: 'nav.programadas', render: () => <CalendarView /> },
   { key: 'memoria',     labelKey: 'nav.memoria',     render: () => <MemoriaView /> },
   { key: 'archivos',    labelKey: 'nav.archivos',    render: () => <ArchivosView /> },
 ]

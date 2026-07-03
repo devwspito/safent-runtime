@@ -101,7 +101,8 @@ export default function App() {
           <Route path="seguridad" element={<Navigate to="/sistema?tab=seguridad" replace />} />
           <Route path="coste" element={<Navigate to="/sistema?tab=coste" replace />} />
           <Route path="proveedores" element={<Navigate to="/sistema?tab=proveedores" replace />} />
-          <Route path="programadas" element={<Navigate to="/sistema?tab=programadas" replace />} />
+          {/* The recurring-tasks calendar lives inside Agentes ("Tareas" tab). */}
+          <Route path="programadas" element={<Navigate to="/agentes?tab=tareas" replace />} />
           <Route path="memoria" element={<Navigate to="/sistema?tab=memoria" replace />} />
           <Route path="archivos" element={<Navigate to="/sistema?tab=archivos" replace />} />
           <Route path="ajustes" element={<Navigate to="/sistema" replace />} />

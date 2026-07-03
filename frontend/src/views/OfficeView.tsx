@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import { useNavigate, useOutletContext } from 'react-router-dom'
+import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
 import { sileo } from 'sileo'
 import { X, AlertTriangle, Users, RefreshCw, Maximize2 } from 'lucide-react'
 
@@ -28,6 +28,9 @@ const SwarmView = lazy(() =>
   import('./SwarmView').then((m) => ({ default: m.SwarmView }))
 )
 
+// The agents' recurring-tasks calendar (the old standalone "Programadas" view).
+const CalendarView = lazy(() => import('./CalendarView'))
+
 // ── Map roster → engine types ─────────────────────────────────────────────────
 
 /**
@@ -52,10 +55,12 @@ function rosterAgentToLumenAgent(a: RosterAgent, dept: RosterDepartment): LumenA
 
 // ── View-level state ──────────────────────────────────────────────────────────
 
-type Tab = 'enjambre' | 'tarjetas' | 'live'
+// "tareas" = the agents' recurring-tasks calendar (CalendarView). It lives here —
+// not in Sistema — because scheduled tasks belong to the agents, not to config.
+type Tab = 'enjambre' | 'tarjetas' | 'live' | 'tareas'
 
 const AGENTS_VIEW_STORAGE_KEY = 'lumen_agents_view'
-const VALID_TABS: readonly Tab[] = ['enjambre', 'tarjetas', 'live']
+const VALID_TABS: readonly Tab[] = ['enjambre', 'tarjetas', 'live', 'tareas']
 
 function readStoredTab(): Tab {
   try {
@@ -874,7 +879,13 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
 
 export default function OfficeView() {
   const t = useT()
-  const [tab, setTabState] = useState<Tab>(readStoredTab)
+  const [searchParams] = useSearchParams()
+  // Deep-links (e.g. the old /programadas route → /agentes?tab=tareas) may pin
+  // the initial tab; otherwise restore the user's last choice.
+  const [tab, setTabState] = useState<Tab>(() => {
+    const q = searchParams.get('tab')
+    return q && (VALID_TABS as readonly string[]).includes(q) ? (q as Tab) : readStoredTab()
+  })
   const [state, dispatch] = useReducer(dataReducer, { status: 'loading' })
   const [showCreateFromHeader, setShowCreateFromHeader] = useState(false)
   const [selectedAgent, setSelectedAgent] = useState<RosterAgent | null>(null)
@@ -1072,6 +1083,14 @@ export default function OfficeView() {
               >
                 {t('agents.tab.live')}
               </button>
+              <button
+                type="button"
+                className={`${styles.segBtn}${tab === 'tareas' ? ` ${styles.segBtnActive}` : ''}`}
+                onClick={() => setTab('tareas')}
+                aria-pressed={tab === 'tareas'}
+              >
+                {t('agents.tab.tasks')}
+              </button>
             </div>
           </>
         }
@@ -1245,6 +1264,21 @@ export default function OfficeView() {
                       </Suspense>
                     </div>
                   </div>
+                </motion.div>
+              )}
+
+              {tab === 'tareas' && (
+                <motion.div
+                  key="tareas"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.14 }}
+                  style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'auto' }}
+                >
+                  <Suspense fallback={<div className={styles.canvasFallback} aria-busy="true" aria-label={t('agents.tab.tasks')} />}>
+                    <CalendarView />
+                  </Suspense>
                 </motion.div>
               )}
 
