@@ -584,13 +584,14 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
       </div>
 
       <div className={styles.serverActions}>
-        <button
-          className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
+        <Button
+          variant="danger"
+          size="sm"
           onClick={onRemove}
           aria-label={t('mcp.remove.aria').replace('{name}', server.label ?? t('mcp.fallback_name_lower'))}
         >
           <X size={13} aria-hidden="true" />
-        </button>
+        </Button>
       </div>
     </HoverRow>
   )

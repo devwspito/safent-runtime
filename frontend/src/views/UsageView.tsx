@@ -25,6 +25,7 @@ import { PageHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Stagger, StaggerItem, FadeIn } from '../components/ui/motion'
+import { useT, useLocale, type Locale } from '../lib/i18n'
 import styles from './UsageView.module.css'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -41,10 +42,10 @@ function formatNumber(value: number): string {
   return String(value)
 }
 
-function formatDay(day: string): string {
+function formatDay(day: string, locale: Locale): string {
   try {
     const d = new Date(day + 'T00:00:00')
-    return d.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })
+    return d.toLocaleDateString(locale === 'en' ? 'en-US' : 'es-ES', { day: 'numeric', month: 'short' })
   } catch {
     return day
   }
@@ -87,12 +88,8 @@ function LoadingSkeleton() {
           {[...Array(4)].map((_, i) => (
             <div
               key={i}
-              className="skeleton"
-              style={{
-                height: 88,
-                borderRadius: 'var(--radius-md)',
-                animationDelay: `${i * 40}ms`,
-              }}
+              className={`skeleton ${styles.skeletonHeroCard}`}
+              style={{ animationDelay: `${i * 40}ms` }}
             />
           ))}
         </div>
@@ -101,8 +98,8 @@ function LoadingSkeleton() {
       {/* Chart block */}
       <StaggerItem>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-          <div className="skeleton skeleton--line-sm" style={{ width: 120 }} />
-          <div className="skeleton" style={{ height: 220, borderRadius: 'var(--radius-md)', animationDelay: '80ms' }} />
+          <div className={`skeleton skeleton--line-sm ${styles.skeletonLabel}`} />
+          <div className={`skeleton ${styles.skeletonChartBlock}`} style={{ animationDelay: '80ms' }} />
         </div>
       </StaggerItem>
 
@@ -111,7 +108,7 @@ function LoadingSkeleton() {
         <div className={styles.skeletonBreakdownGrid}>
           {[0, 1].map(col => (
             <div key={col} className={styles.skeletonSection}>
-              <div className="skeleton skeleton--line-sm" style={{ width: 96, animationDelay: `${col * 30}ms` }} />
+              <div className={`skeleton skeleton--line-sm ${styles.skeletonLabel}`} style={{ animationDelay: `${col * 30}ms` }} />
               {[...Array(4)].map((_, i) => (
                 <div
                   key={i}
@@ -126,10 +123,10 @@ function LoadingSkeleton() {
 
       <StaggerItem>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-          <div className="skeleton skeleton--line-sm" style={{ width: 100 }} />
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 'var(--space-3)' }}>
+          <div className={`skeleton skeleton--line-sm ${styles.skeletonLabel}`} />
+          <div className={styles.govGrid}>
             {[0, 1].map(i => (
-              <div key={i} className="skeleton" style={{ height: 72, borderRadius: 'var(--radius-md)', animationDelay: `${i * 50}ms` }} />
+              <div key={i} className={`skeleton ${styles.skeletonGovCard}`} style={{ animationDelay: `${i * 50}ms` }} />
             ))}
           </div>
         </div>
@@ -146,20 +143,21 @@ interface PeriodSelectorProps {
   disabled: boolean
 }
 
-const PERIOD_OPTIONS: { value: UsagePeriod; label: string }[] = [
-  { value: '7d', label: '7 días' },
-  { value: '30d', label: '30 días' },
-  { value: 'mtd', label: 'Este mes' },
-]
-
 function PeriodSelector({ value, onChange, disabled }: PeriodSelectorProps) {
+  const t = useT()
+  const periodOptions: { value: UsagePeriod; label: string }[] = [
+    { value: '7d', label: t('cost.period.7d') },
+    { value: '30d', label: t('cost.period.30d') },
+    { value: 'mtd', label: t('cost.period.mtd') },
+  ]
+
   return (
     <div
       className="office-seg-toggle"
       role="group"
-      aria-label="Periodo de análisis"
+      aria-label={t('cost.period.aria')}
     >
-      {PERIOD_OPTIONS.map(opt => (
+      {periodOptions.map(opt => (
         <button
           key={opt.value}
           type="button"
@@ -223,13 +221,15 @@ interface ChartTooltipProps {
 }
 
 function ChartTooltip({ active, payload, label, dimension }: ChartTooltipProps) {
+  const t = useT()
+  const { locale } = useLocale()
   if (!active || !payload?.length) return null
   const value = payload[0]?.value ?? 0
   return (
     <div className={styles.tooltip}>
-      <div className={styles.tooltipDate}>{label ? formatDay(label) : ''}</div>
+      <div className={styles.tooltipDate}>{label ? formatDay(label, locale) : ''}</div>
       <div className={styles.tooltipValue}>
-        {dimension === 'cost' ? formatUSD(value) : `${formatNumber(value)} acciones`}
+        {dimension === 'cost' ? formatUSD(value) : `${formatNumber(value)} ${t('cost.unit.actions')}`}
       </div>
     </div>
   )
@@ -243,6 +243,7 @@ interface AgentRankingProps {
 }
 
 function AgentRanking({ byAgent, onRowClick }: AgentRankingProps) {
+  const t = useT()
   const agents = (byAgent.agents ?? []).slice().sort((a, b) => b.cost_usd - a.cost_usd)
 
   if (!byAgent.available || agents.length === 0) {
@@ -254,8 +255,8 @@ function AgentRanking({ byAgent, onRowClick }: AgentRankingProps) {
             <path d="M5 24c0-4.418 4.03-8 9-8s9 3.582 9 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
           </svg>
         }
-        title="Sin actividad por empleado"
-        description="El desglose aparecerá en cuanto haya acciones registradas en el periodo seleccionado."
+        title={t('cost.agent.empty.title')}
+        description={t('cost.agent.empty.desc')}
       />
     )
   }
@@ -268,13 +269,13 @@ function AgentRanking({ byAgent, onRowClick }: AgentRankingProps) {
             type="button"
             className={`${styles.rankRow} ${styles['rankRow--clickable']} usage-agent-row`}
             onClick={() => onRowClick(agent.agent_id)}
-            aria-label={`Ver detalle de ${agent.name}`}
+            aria-label={t('cost.agent.row.aria').replace('{name}', agent.name)}
           >
             <div className={styles.rankRowInfo}>
               <div className={styles.rankRowName}>{agent.name}</div>
               <div className={styles.rankRowMeta}>
                 <span className="num">{formatNumber(agent.cycles)}</span>
-                {' acciones · '}
+                {` ${t('cost.unit.actions')} · `}
                 <span className="num">{(agent.share * 100).toFixed(0)}%</span>
               </div>
             </div>
@@ -296,6 +297,7 @@ interface ModelBreakdownProps {
 }
 
 function ModelBreakdown({ summary }: ModelBreakdownProps) {
+  const t = useT()
   const models = summary.top_models ?? []
 
   if (!summary.available || models.length === 0) {
@@ -307,8 +309,8 @@ function ModelBreakdown({ summary }: ModelBreakdownProps) {
             <path d="M9 16l3.5-3.5L16 16l3.5-4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         }
-        title="Sin datos de consumo por modelo"
-        description="El desglose por modelo estará disponible cuando se registre actividad en el periodo."
+        title={t('cost.model.empty.title')}
+        description={t('cost.model.empty.desc')}
       />
     )
   }
@@ -324,12 +326,12 @@ function ModelBreakdown({ summary }: ModelBreakdownProps) {
                 <div className={styles.rankRowName}>{m.model}</div>
                 <div className={styles.rankRowMeta}>
                   <span className="num">{(m.share * 100).toFixed(0)}%</span>
-                  {' del consumo'}
+                  {t('cost.model.share_suffix')}
                 </div>
               </div>
               <ShareBar share={m.share} success={isSelfHosted} />
               <span className={`${styles.rankRowCost}${isSelfHosted ? ` ${styles['rankRowCost--selfhosted']}` : ''} num`}>
-                {isSelfHosted ? 'Propio' : formatUSD(m.cost_usd)}
+                {isSelfHosted ? t('cost.model.selfhosted') : formatUSD(m.cost_usd)}
               </span>
             </div>
           </li>
@@ -346,6 +348,7 @@ interface GovernanceRowProps {
 }
 
 function GovernanceRow({ summary }: GovernanceRowProps) {
+  const t = useT()
   const failurePct = summary.cycles > 0
     ? ((summary.failures / summary.cycles) * 100).toFixed(1)
     : '0.0'
@@ -354,7 +357,7 @@ function GovernanceRow({ summary }: GovernanceRowProps) {
   return (
     <div className={styles.govGrid}>
       <div className={styles.govCard}>
-        <span className={styles.govCardLabel}>Acciones con incidencia</span>
+        <span className={styles.govCardLabel}>{t('cost.gov.failures.label')}</span>
         <span
           className={styles.govCardValue}
           style={{ color: summary.failures > 0 ? 'var(--color-warning)' : 'var(--color-text)' }}
@@ -364,18 +367,18 @@ function GovernanceRow({ summary }: GovernanceRowProps) {
         {hasData && (
           <span className={styles.govCardNote}>
             <span className="num">{failurePct}%</span>
-            {' del total de acciones'}
+            {t('cost.gov.failures.note')}
           </span>
         )}
       </div>
 
       <div className={styles.govCard}>
-        <span className={styles.govCardLabel}>Cómputo propio</span>
+        <span className={styles.govCardLabel}>{t('cost.gov.selfhosted.label')}</span>
         <span className={styles.govCardValue} style={{ color: 'var(--color-success)' }}>
           {hasData ? formatNumber(summary.self_hosted_cycles) : '—'}
         </span>
         {hasData && (
-          <span className={styles.govCardNote}>acciones sin coste externo</span>
+          <span className={styles.govCardNote}>{t('cost.gov.selfhosted.note')}</span>
         )}
       </div>
     </div>
@@ -392,6 +395,8 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 
 export default function UsageView() {
   const navigate = useNavigate()
+  const t = useT()
+  const { locale } = useLocale()
   const [state, dispatch] = useReducer(reducer, { status: 'loading' })
 
   const currentPeriod: UsagePeriod = state.status === 'success' ? state.period : '30d'
@@ -413,10 +418,10 @@ export default function UsageView() {
     }).catch((err: unknown) => {
       dispatch({
         type: 'FAILED',
-        message: err instanceof Error ? err.message : 'No se pudo cargar el resumen de costes.',
+        message: err instanceof Error ? err.message : t('cost.err.default'),
       })
     })
-  }, [])
+  }, [t])
 
   useEffect(() => { load(currentPeriod, currentDimension) }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -440,8 +445,8 @@ export default function UsageView() {
   return (
     <>
       <PageHeader
-        title="Coste"
-        subtitle="Gasto y actividad del sistema por periodo."
+        title={t('cost.title')}
+        subtitle={t('cost.subtitle')}
         actions={
           <div className={styles.controlsRow}>
             <PeriodSelector
@@ -468,7 +473,7 @@ export default function UsageView() {
               </svg>
               <p className={styles.errorMessage}>{state.message}</p>
               <Button variant="secondary" onClick={() => load(currentPeriod, currentDimension)}>
-                Reintentar
+                {t('cost.retry')}
               </Button>
             </div>
           </FadeIn>
@@ -493,8 +498,8 @@ export default function UsageView() {
                     <path d="M10 24l7-7 5 5 7-9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                 }
-                title="Sin actividad en este periodo"
-                description="El gasto y la actividad aparecerán aquí en cuanto el sistema procese acciones."
+                title={t('cost.empty.title')}
+                description={t('cost.empty.desc')}
               />
             )
           }
@@ -507,25 +512,25 @@ export default function UsageView() {
                 <div
                   className={styles.heroGrid}
                   role="list"
-                  aria-label="Resumen del periodo"
+                  aria-label={t('cost.summary.aria')}
                 >
                   <StatCard
-                    label="Gasto del periodo"
+                    label={t('cost.kpi.spend')}
                     value={formatUSD(summary.total_cost_usd)}
                     highlight
                   />
                   <StatCard
-                    label="Proyección"
+                    label={t('cost.kpi.projection')}
                     value={formatUSD(summary.projected_cost_usd)}
-                    suffix="a este ritmo"
+                    suffix={t('cost.kpi.projection_suffix')}
                   />
                   <StatCard
-                    label="Actividad"
+                    label={t('cost.kpi.activity')}
                     value={formatNumber(summary.cycles)}
-                    suffix="acciones"
+                    suffix={t('cost.unit.actions')}
                   />
                   <StatCard
-                    label="Incidencias"
+                    label={t('cost.kpi.issues')}
                     value={formatNumber(summary.failures)}
                   />
                 </div>
@@ -533,25 +538,28 @@ export default function UsageView() {
 
               {/* ── 2. Time series chart ── */}
               <StaggerItem>
-                <section aria-label="Gasto en el tiempo">
+                <section aria-label={t('cost.chart.spend_over_time')}>
                   <div className={styles.sectionHeader}>
                     <SectionTitle>
-                      {state.dimension === 'cost' ? 'Gasto en el tiempo' : 'Actividad en el tiempo'}
+                      {state.dimension === 'cost' ? t('cost.chart.spend_over_time') : t('cost.chart.activity_over_time')}
                     </SectionTitle>
-                    <button
-                      type="button"
-                      className={styles.dimToggle}
+                    <Button
+                      variant="ghost"
+                      size="sm"
                       onClick={handleDimensionToggle}
-                      aria-label={`Cambiar a vista de ${state.dimension === 'cost' ? 'actividad' : 'gasto'}`}
+                      aria-label={t('cost.chart.toggle_aria').replace(
+                        '{mode}',
+                        state.dimension === 'cost' ? t('cost.chart.mode.activity') : t('cost.chart.mode.spend'),
+                      )}
                     >
-                      {state.dimension === 'cost' ? 'Ver actividad' : 'Ver gasto'}
-                    </button>
+                      {state.dimension === 'cost' ? t('cost.chart.view_activity') : t('cost.chart.view_spend')}
+                    </Button>
                   </div>
 
                   <div className={styles.chartCard}>
                     {chartPoints.length === 0 ? (
                       <div className={styles.chartEmpty}>
-                        Sin datos para este periodo.
+                        {t('cost.chart.empty')}
                       </div>
                     ) : (
                       <ResponsiveContainer width="100%" height={220}>
@@ -569,7 +577,7 @@ export default function UsageView() {
                           />
                           <XAxis
                             dataKey="day"
-                            tickFormatter={formatDay}
+                            tickFormatter={(d: string) => formatDay(d, locale)}
                             tick={{ fontSize: 11, fill: 'var(--color-text-dim)', fontFamily: 'var(--font-ui)' }}
                             axisLine={false}
                             tickLine={false}
@@ -607,16 +615,16 @@ export default function UsageView() {
               {/* ── 3. Two-column: by agent + by model ── */}
               <StaggerItem>
                 <div className={styles.breakdownGrid}>
-                  <section aria-label="Gasto por empleado">
+                  <section aria-label={t('cost.section.by_employee.aria')}>
                     <div className={styles.sectionHeader}>
-                      <SectionTitle>Por empleado</SectionTitle>
+                      <SectionTitle>{t('cost.section.by_employee.title')}</SectionTitle>
                     </div>
                     <AgentRanking byAgent={byAgent} onRowClick={handleAgentRowClick} />
                   </section>
 
-                  <section aria-label="Gasto por modelo">
+                  <section aria-label={t('cost.section.by_model.aria')}>
                     <div className={styles.sectionHeader}>
-                      <SectionTitle>Por modelo</SectionTitle>
+                      <SectionTitle>{t('cost.section.by_model.title')}</SectionTitle>
                     </div>
                     <ModelBreakdown summary={summary} />
                   </section>
@@ -625,9 +633,9 @@ export default function UsageView() {
 
               {/* ── 4. Governance row ── */}
               <StaggerItem>
-                <section aria-label="Gobernanza">
+                <section aria-label={t('cost.section.governance.aria')}>
                   <div className={styles.sectionHeader}>
-                    <SectionTitle>Gobernanza</SectionTitle>
+                    <SectionTitle>{t('cost.section.governance.title')}</SectionTitle>
                   </div>
                   <GovernanceRow summary={summary} />
                 </section>

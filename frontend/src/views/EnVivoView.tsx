@@ -6,13 +6,17 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { Square } from 'lucide-react'
+import { Inbox, Loader2, MonitorPlay, Square } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
+import { EmptyState } from '../components/ui/EmptyState'
+import { ListRow } from '../components/ui/ListRow'
+import { AnimatePresence, AnimatedListItem } from '../components/ui/motion'
 import { VncFrame } from '../components/VncView'
 import { listRecentTasks, cancelTask, getRuntimeStatus, ApiError } from '../api/client'
 import type { RecentTask } from '../api/types'
+import css from './EnVivoView.module.css'
 
 function ActividadPanel() {
   const t = useT()
@@ -56,74 +60,56 @@ function ActividadPanel() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+    <div className={css.panel}>
       {showLive ? (
         <VncFrame viewOnly />
       ) : (
-        <div style={{
-          border: '1px dashed var(--color-border-subtle)',
-          borderRadius: 'var(--radius-md)',
-          padding: 'var(--space-8) var(--space-4)',
-          textAlign: 'center',
-          color: 'var(--color-text-muted)',
-          fontSize: 'var(--text-sm)',
-        }}>
-          {tasks.length > 0
-            ? t('envivo.no_browser_yet')
-            : t('envivo.no_tasks')}
-        </div>
+        <EmptyState
+          icon={<MonitorPlay size={32} />}
+          title={tasks.length > 0 ? t('envivo.no_browser_yet') : t('envivo.no_tasks')}
+        />
       )}
 
-      <section>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}>
-          <h2 style={{ fontSize: 'var(--text-base)', fontWeight: 'var(--weight-semibold)', margin: 0 }}>
-            {t('envivo.running_tasks')}
-          </h2>
-          {tasks.length > 0 && (
-            <span style={{
-              fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)',
-              background: 'var(--color-bg-subtle)', borderRadius: 'var(--radius-sm)',
-              padding: '1px 7px',
-            }}>{tasks.length}</span>
-          )}
+      <section className={css.section} aria-label={t('envivo.running_tasks')}>
+        <div className={css.sectionHead}>
+          <h2 className={css.sectionLabel}>{t('envivo.running_tasks')}</h2>
+          {tasks.length > 0 && <span className={css.countChip}>{tasks.length}</span>}
         </div>
 
-        {tasks.length === 0 && (
-          <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>
-            {t('envivo.no_tasks_running')}
-          </p>
+        {tasks.length === 0 ? (
+          <EmptyState
+            compact
+            icon={<Inbox size={28} />}
+            title={t('envivo.no_tasks_running')}
+          />
+        ) : (
+          <ul className="cv-list" role="list">
+            <AnimatePresence initial={false}>
+              {tasks.map((task) => (
+                <AnimatedListItem key={task.task_id}>
+                  <ListRow
+                    className={css.taskRow}
+                    icon={<Loader2 size={14} className="spin" aria-hidden="true" />}
+                    label={task.label || task.name || task.task_id}
+                    actions={
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        loading={cancelling === task.task_id}
+                        onClick={() => void handleCancel(task.task_id!)}
+                        disabled={!task.task_id}
+                        aria-label={t('envivo.stop.aria')}
+                      >
+                        <Square size={12} aria-hidden="true" />
+                        {t('envivo.stop')}
+                      </Button>
+                    }
+                  />
+                </AnimatedListItem>
+              ))}
+            </AnimatePresence>
+          </ul>
         )}
-
-        <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-          {tasks.map((task) => (
-            <li
-              key={task.task_id}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
-                border: '1px solid var(--color-border-subtle)', borderRadius: 'var(--radius-md)',
-                padding: 'var(--space-3) var(--space-4)',
-              }}
-            >
-              <span style={{
-                flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                fontSize: 'var(--text-sm)',
-              }}>
-                {task.label || task.name || task.task_id}
-              </span>
-              <Button
-                variant="danger"
-                size="sm"
-                loading={cancelling === task.task_id}
-                onClick={() => void handleCancel(task.task_id!)}
-                disabled={!task.task_id}
-                aria-label={t('envivo.stop.aria')}
-              >
-                <Square size={12} aria-hidden="true" />
-                {t('envivo.stop')}
-              </Button>
-            </li>
-          ))}
-        </ul>
       </section>
     </div>
   )

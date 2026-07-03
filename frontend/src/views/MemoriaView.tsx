@@ -75,10 +75,7 @@ function MemorySkeletonRows() {
           style={{ animationDelay: `${i * 40}ms` }}
         >
           <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
-            <div
-              className="skeleton"
-              style={{ width: 28, height: 28, borderRadius: 'var(--radius-sm)', flexShrink: 0 }}
-            />
+            <div className={`skeleton ${styles.skeletonIcon}`} />
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
               <div
                 className="skeleton skeleton--line"

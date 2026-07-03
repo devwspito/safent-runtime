@@ -176,40 +176,6 @@
   line-height: 1.4;
 }
 
-/* ── Connect button (app card variant) ──────────────────────────────────── */
-
-.connectBtn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 26px;
-  padding: 0 var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-text-muted);
-  font-family: var(--font-ui);
-  font-size: 0.75rem; /* --text-sm */
-  font-weight: var(--weight-medium);
-  cursor: pointer;
-  transition:
-    background var(--dur-quick) var(--ease),
-    border-color var(--dur-quick) var(--ease),
-    color var(--dur-quick) var(--ease);
-  white-space: nowrap;
-}
-
-.connectBtn:hover:not(:disabled) {
-  background: var(--color-surface-hover);
-  border-color: var(--color-accent);
-  color: var(--color-accent-text);
-}
-
-.connectBtn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
 /* ── Setup card (no key yet) ─────────────────────────────────────────────── */
 
 .setupCard {

@@ -18,7 +18,7 @@ import {
   type ChangeEvent,
 } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
-import { GitBranch, Loader2, CheckCircle2, AlertTriangle, FileText, X, Plus, Paperclip, FolderOpen, Zap, Check, Maximize2, ChevronDown } from 'lucide-react'
+import { GitBranch, Loader2, CheckCircle2, AlertTriangle, FileText, X, Plus, Paperclip, FolderOpen, Zap, Check, Maximize2, ChevronDown, ChevronRight, ChevronLeft } from 'lucide-react'
 import { VncFrame } from '../components/VncView'
 import type { ChatMessage, ToolStep } from '../hooks/useChat'
 import { listProviders, uploadWorkspaceFile, getRuntimeStatus, listSkills, ApiError } from '../api/client'
@@ -39,28 +39,6 @@ import { toolLabel } from '../lib/toolLabels'
 import { useFeatures } from '../hooks/useFeatures'
 import styles from './ChatView.module.css'
 
-// ── Static strings ─────────────────────────────────────────────────────────
-
-const STRINGS = {
-  welcomeTitle:   'Hola, soy Lumen',
-  welcomeSubtitle: 'Tu agente de trabajo personal. Dime en qué puedo ayudarte hoy.',
-  suggest1: 'Investiga los mejores CRMs para una startup B2B',
-  suggest2: 'Redacta un email de propuesta comercial',
-  suggest3: 'Organiza mis tareas de esta semana en un plan de acción',
-  suggest4: 'Analiza este documento y extrae los puntos clave',
-  placeholder: 'Escribe a Lumen…',
-  send: 'Enviar',
-  stop: 'Detener',
-  disclaimer: 'Lumen es IA y puede cometer errores. Verifica las respuestas importantes.',
-}
-
-const SUGGESTIONS = [
-  STRINGS.suggest1,
-  STRINGS.suggest2,
-  STRINGS.suggest3,
-  STRINGS.suggest4,
-]
-
 /** Map raw backend/stream errors to human-readable copy. */
 function humanizeError(msg: string, t: (key: Parameters<ReturnType<typeof useT>>[0]) => string): string {
   if (/connection refused|econnrefused|network/i.test(msg)) return t('chat.err.connection')
@@ -80,13 +58,20 @@ interface WelcomeProps {
 }
 
 function Welcome({ onSuggestion }: WelcomeProps) {
+  const t = useT()
+  const suggestions = [
+    t('chat.suggest.1'),
+    t('chat.suggest.2'),
+    t('chat.suggest.3'),
+    t('chat.suggest.4'),
+  ]
   return (
     <div className={styles.welcome} role="main">
       <div className={styles.welcomeMark} aria-hidden="true">L</div>
-      <h1 className={styles.welcomeTitle}>{STRINGS.welcomeTitle}</h1>
-      <p className={styles.welcomeSubtitle}>{STRINGS.welcomeSubtitle}</p>
-      <div className={styles.welcomeSuggestions} role="list" aria-label="Sugerencias">
-        {SUGGESTIONS.map((s) => (
+      <h1 className={styles.welcomeTitle}>{t('chat.welcome.title')}</h1>
+      <p className={styles.welcomeSubtitle}>{t('chat.welcome.subtitle')}</p>
+      <div className={styles.welcomeSuggestions} role="list" aria-label={t('chat.suggestions_aria')}>
+        {suggestions.map((s) => (
           <button
             key={s}
             className={styles.suggestionPill}
@@ -110,6 +95,8 @@ const DELEGATION_NAMES = new Set(['delegate_task', 'mixture_of_agents'])
 function useDelegationActivity(isActive: boolean): { tool: string; agentId: string } | null {
   const [activity, setActivity] = useState<{ tool: string; agentId: string } | null>(null)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const t = useT()
+  const workingFallback = t('chat.delegation.working_fallback')
 
   useEffect(() => {
     if (!isActive) {
@@ -126,10 +113,10 @@ function useDelegationActivity(isActive: boolean): { tool: string; agentId: stri
           (a) => a.tool && a.tool !== 'chat_responding' && a.tool !== 'delegate_task',
         )
         if (entry) {
-          setActivity({ tool: entry.tool ?? 'trabajando', agentId: entry.agent_id })
+          setActivity({ tool: entry.tool ?? workingFallback, agentId: entry.agent_id })
         } else {
           const fallback = (status.activity ?? [])[0]
-          setActivity(fallback ? { tool: fallback.tool ?? 'trabajando', agentId: fallback.agent_id } : null)
+          setActivity(fallback ? { tool: fallback.tool ?? workingFallback, agentId: fallback.agent_id } : null)
         }
       } catch {
         // Transient error — keep last state
@@ -143,7 +130,7 @@ function useDelegationActivity(isActive: boolean): { tool: string; agentId: stri
       alive = false
       if (intervalRef.current !== null) clearInterval(intervalRef.current)
     }
-  }, [isActive])
+  }, [isActive, workingFallback])
 
   return activity
 }
@@ -154,7 +141,8 @@ interface DelegationStepProps {
 }
 
 function DelegationStep({ step, isStreaming }: DelegationStepProps) {
-  const specialist = step.target || step.label || 'especialista'
+  const t = useT()
+  const specialist = step.target || step.label || t('chat.delegation.specialist_fallback')
   const liveActivity = useDelegationActivity(isStreaming)
 
   return (
@@ -164,14 +152,18 @@ function DelegationStep({ step, isStreaming }: DelegationStepProps) {
         isStreaming ? styles.delegationCardActive : styles.delegationCardDone,
       ].join(' ')}
       role="status"
-      aria-label={isStreaming ? `Delegando a ${specialist}` : `Completado por ${specialist}`}
+      aria-label={
+        isStreaming
+          ? t('chat.delegation.aria_active').replace('{specialist}', specialist)
+          : t('chat.delegation.aria_done').replace('{specialist}', specialist)
+      }
     >
       <span className={styles.delegationIcon} aria-hidden="true">
         <GitBranch size={14} />
       </span>
       <div className={styles.delegationBody}>
         <div className={styles.delegationLabel}>
-          {isStreaming ? 'Delegando a' : 'Delegado a'}{' '}
+          {isStreaming ? t('chat.delegation.delegating_to') : t('chat.delegation.delegated_to')}{' '}
           <span className={styles.delegationSpecialist}>{specialist}</span>
           {isStreaming ? (
             <Loader2 size={11} className="spin" aria-hidden="true" />
@@ -781,7 +773,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                 type="button"
                 onClick={() => toggleSkill(sk)}
                 aria-label={`Quitar ${skillLabel(sk)}`}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', display: 'inline-flex' }}
+                className={styles.attachChipRemove}
               >
                 <X size={11} aria-hidden="true" />
               </button>
@@ -802,7 +794,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                 disabled={bridgeSyncing}
                 aria-label="Guardar cambios en mi carpeta"
                 title="Guardar los cambios del agente de vuelta en tu carpeta"
-                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', display: 'inline-flex' }}
+                className={styles.attachChipRemove}
               >
                 {bridgeSyncing ? <Loader2 size={11} className="spin" /> : <Check size={11} />}
               </button>
@@ -810,7 +802,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                 type="button"
                 onClick={() => setBridge(null)}
                 aria-label="Quitar carpeta"
-                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', display: 'inline-flex' }}
+                className={styles.attachChipRemove}
               >
                 <X size={11} aria-hidden="true" />
               </button>
@@ -833,8 +825,8 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                 </button>
                 <button type="button" className={styles.plusItem} role="menuitem" onClick={() => void enterSkillsView()}>
                   <Zap size={14} aria-hidden="true" />
-                  <span style={{ flex: 1, textAlign: 'left' }}>Habilidades</span>
-                  <span aria-hidden="true">›</span>
+                  <span className={styles.plusItemLabel}>Habilidades</span>
+                  <ChevronRight size={14} aria-hidden="true" />
                 </button>
               </>
             )}
@@ -843,8 +835,8 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
               <>
                 <button type="button" className={styles.plusItem} role="menuitem"
                   onClick={() => setMenuView('root')}>
-                  <span aria-hidden="true">‹</span>
-                  <span style={{ flex: 1, textAlign: 'left' }}>Habilidades</span>
+                  <ChevronLeft size={14} aria-hidden="true" />
+                  <span className={styles.plusItemLabel}>Habilidades</span>
                 </button>
                 {(() => {
                   if (!skillsLoaded) return <div className={styles.plusEmpty}>Cargando…</div>
@@ -855,7 +847,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                       <button key={skillKey(sk)} type="button" className={styles.plusItem} role="menuitemcheckbox"
                         aria-checked={on} onClick={() => toggleSkill(sk)}>
                         <Zap size={14} aria-hidden="true" />
-                        <span style={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis' }}>{skillLabel(sk)}</span>
+                        <span className={[styles.plusItemLabel, styles.plusItemLabelEllipsis].join(' ')}>{skillLabel(sk)}</span>
                         {isLive(sk) && <span className={styles.plusLiveTag}>live</span>}
                         {on && <Check size={13} aria-hidden="true" />}
                       </button>
@@ -869,7 +861,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
         <textarea
           ref={textareaRef}
           className={styles.composerTextarea}
-          placeholder={STRINGS.placeholder}
+          placeholder={t('chat.placeholder')}
           aria-label="Escribe un mensaje para Lumen"
           value={value}
           onChange={handleChange}
@@ -912,7 +904,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                 onClick={onStop}
                 aria-label="Detener generación"
               >
-                {STRINGS.stop}
+                {t('chat.stop')}
               </button>
             ) : (
               <button
@@ -923,13 +915,13 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                 aria-label="Enviar mensaje (Enter)"
                 aria-busy={anyUploading}
               >
-                {anyUploading ? 'Subiendo…' : STRINGS.send}
+                {anyUploading ? 'Subiendo…' : t('chat.send')}
               </button>
             )}
           </div>
         </div>
       </div>
-      <p className={styles.composerFooter}>{STRINGS.disclaimer}</p>
+      <p className={styles.composerFooter}>{t('chat.disclaimer')}</p>
     </div>
   )
 }
@@ -1001,46 +993,29 @@ function LiveBrowserPanel() {
   }
 
   return (
-    <div style={{ padding: '0 var(--space-4) var(--space-2)' }}>
+    <div className={styles.liveBrowserWrap}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        style={{
-          display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)',
-          padding: '5px 12px', borderRadius: 'var(--radius-full)',
-          border: '1px solid var(--color-border-subtle)', background: 'var(--color-bg-subtle)',
-          color: 'var(--color-text)', fontSize: 'var(--text-sm)', cursor: 'pointer',
-        }}
+        className={styles.liveBrowserChip}
       >
-        <span
-          aria-hidden="true"
-          style={{
-            width: 8, height: 8, borderRadius: '50%', background: 'var(--color-danger)',
-            boxShadow: '0 0 0 3px color-mix(in srgb, var(--color-danger) 22%, transparent)',
-          }}
-        />
+        <span className={styles.liveBrowserDot} aria-hidden="true" />
         <span>Ver en vivo</span>
         <ChevronDown
           size={14}
           aria-hidden="true"
-          style={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}
+          className={[styles.liveBrowserChevron, open ? styles.liveBrowserChevronOpen : ''].join(' ')}
         />
       </button>
       {open && (
-        <div ref={wrapRef} style={{ position: 'relative', marginTop: 'var(--space-2)' }}>
+        <div ref={wrapRef} className={styles.liveBrowserFrame}>
           <button
             type="button"
             onClick={toggleFullscreen}
             aria-label="Pantalla completa"
             title="Pantalla completa"
-            style={{
-              position: 'absolute', top: 8, right: 8, zIndex: 2,
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              width: 28, height: 28, borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--color-border-subtle)',
-              background: 'rgba(0,0,0,0.55)', color: 'var(--slate-12)', cursor: 'pointer',
-            }}
+            className={styles.liveBrowserFullscreenBtn}
           >
             <Maximize2 size={14} aria-hidden="true" />
           </button>

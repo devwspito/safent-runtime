@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { sileo } from 'sileo'
-import { Save, CheckCircle, ShieldCheck } from 'lucide-react'
+import { Save, CheckCircle, ShieldCheck, Globe } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import {
   listPendingApprovals,
@@ -39,6 +39,9 @@ import ApprovalCard from '../components/ApprovalCard'
 import MfaEnroll from '../components/MfaEnroll'
 import MfaModal from '../components/MfaModal'
 import type { MfaFactors } from '../components/MfaModal'
+import { Button } from '../components/ui/Button'
+import { PageHeader } from '../components/ui/PageHeader'
+import { EmptyState } from '../components/ui/EmptyState'
 import {
   AnimatePresence,
   AnimatedListItem,
@@ -47,12 +50,22 @@ import {
   Stagger,
   StaggerItem,
   HoverRow,
-  FadeIn,
   motion,
   SPRING,
   TWEEN,
 } from '../components/ui/motion'
 import s from './SeguridadView.module.css'
+
+/**
+ * Translate a key not yet registered in the central i18n dictionary.
+ * Falls back to the given literal until the key is added centrally
+ * (see report). `useT()`'s key type is a closed union derived from the
+ * dictionary, so new keys need this narrow, intentional cast.
+ */
+type Translate = ReturnType<typeof useT>
+function tNew(t: Translate, key: string, fallback: string): string {
+  return t(key as Parameters<Translate>[0], fallback)
+}
 
 // ── Approvals section ─────────────────────────────────────────────────────────
 
@@ -381,6 +394,44 @@ type PendingAction =
   | { kind: 'batch'; changes: Record<string, boolean> }
   | { kind: 'mfa_dangers'; enabled: boolean }
 
+// ── Pending changes banner (shared by catalog + legacy tool lists) ──────────
+
+interface PendingChangesBannerProps {
+  count: number
+  busy: boolean
+  onSave: () => void
+  onDiscard: () => void
+}
+
+function PendingChangesBanner({ count, busy, onSave, onDiscard }: PendingChangesBannerProps) {
+  const t = useT()
+  return (
+    <AnimatePresence initial={false}>
+      {count > 0 && (
+        <motion.div
+          className={s.changesBanner}
+          aria-live="polite"
+          initial={{ opacity: 0, y: -6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -6 }}
+          transition={TWEEN}
+        >
+          <span className={s.changesBannerText}>
+            {count} cambio{count !== 1 ? 's' : ''} pendiente{count !== 1 ? 's' : ''}.
+          </span>
+          <Button type="button" variant="primary" size="sm" onClick={onSave} disabled={busy}>
+            <Save size={13} aria-hidden="true" />
+            {tNew(t, 'seg.changes.save', 'Guardar cambios')}
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={onDiscard} disabled={busy}>
+            {tNew(t, 'seg.changes.discard', 'Descartar')}
+          </Button>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+}
+
 // ── Governance section ────────────────────────────────────────────────────────
 
 function GovernanceSection() {
@@ -662,9 +713,10 @@ function GovernanceSection() {
                   : 'seg.preset.bloqueado.desc'
                 )
                 return (
-                  <button
+                  <Button
                     key={id}
-                    className={`cv-btn cv-btn--sm ${currentPreset === id ? 'cv-btn--primary' : 'cv-btn--secondary'}`}
+                    variant={currentPreset === id ? 'primary' : 'secondary'}
+                    size="sm"
                     title={desc}
                     onClick={() => setPendingPreset(id)}
                     type="button"
@@ -672,7 +724,7 @@ function GovernanceSection() {
                     aria-pressed={currentPreset === id}
                   >
                     {label}
-                  </button>
+                  </Button>
                 )
               })}
             </div>
@@ -691,22 +743,24 @@ function GovernanceSection() {
                   <span className={s.presetSaveBannerText}>
                     {t('seg.policies.preset.hint').replace('{preset}', pendingPreset ?? '')}
                   </span>
-                  <button
+                  <Button
                     type="button"
-                    className="cv-btn cv-btn--primary cv-btn--sm"
+                    variant="primary"
+                    size="sm"
                     onClick={requestPresetSave}
                     disabled={busy}
                   >
-                    Guardar
-                  </button>
-                  <button
+                    {tNew(t, 'seg.preset.save', 'Guardar')}
+                  </Button>
+                  <Button
                     type="button"
-                    className="cv-btn cv-btn--ghost cv-btn--sm"
+                    variant="ghost"
+                    size="sm"
                     onClick={() => setPendingPreset(null)}
                     disabled={busy}
                   >
-                    Cancelar
-                  </button>
+                    {tNew(t, 'seg.preset.cancel', 'Cancelar')}
+                  </Button>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -731,41 +785,12 @@ function GovernanceSection() {
                 ))}
               </Stagger>
 
-              {/* Animated changes pending banner */}
-              <AnimatePresence initial={false}>
-                {hasPendingTools && (
-                  <motion.div
-                    className={s.changesBanner}
-                    aria-live="polite"
-                    initial={{ opacity: 0, y: -6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -6 }}
-                    transition={TWEEN}
-                  >
-                    <span className={s.changesBannerText}>
-                      {Object.keys(toolPending).length} cambio{Object.keys(toolPending).length !== 1 ? 's' : ''} pendiente{Object.keys(toolPending).length !== 1 ? 's' : ''}.
-                    </span>
-                    <button
-                      type="button"
-                      className="cv-btn cv-btn--primary cv-btn--sm"
-                      onClick={handleSaveToolChanges}
-                      disabled={busy}
-                      style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-1)' }}
-                    >
-                      <Save size={13} aria-hidden="true" />
-                      Guardar cambios
-                    </button>
-                    <button
-                      type="button"
-                      className="cv-btn cv-btn--ghost cv-btn--sm"
-                      onClick={() => setToolPending({})}
-                      disabled={busy}
-                    >
-                      Descartar
-                    </button>
-                  </motion.div>
-                )}
-              </AnimatePresence>
+              <PendingChangesBanner
+                count={Object.keys(toolPending).length}
+                busy={busy}
+                onSave={handleSaveToolChanges}
+                onDiscard={() => setToolPending({})}
+              />
             </div>
           )}
 
@@ -816,40 +841,12 @@ function GovernanceSection() {
                 </div>
               </details>
 
-              <AnimatePresence initial={false}>
-                {hasPendingTools && (
-                  <motion.div
-                    className={s.changesBanner}
-                    aria-live="polite"
-                    initial={{ opacity: 0, y: -6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -6 }}
-                    transition={TWEEN}
-                  >
-                    <span className={s.changesBannerText}>
-                      {Object.keys(toolPending).length} cambio{Object.keys(toolPending).length !== 1 ? 's' : ''} pendiente{Object.keys(toolPending).length !== 1 ? 's' : ''}.
-                    </span>
-                    <button
-                      type="button"
-                      className="cv-btn cv-btn--primary cv-btn--sm"
-                      onClick={handleSaveToolChanges}
-                      disabled={busy}
-                      style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-1)' }}
-                    >
-                      <Save size={13} aria-hidden="true" />
-                      Guardar cambios
-                    </button>
-                    <button
-                      type="button"
-                      className="cv-btn cv-btn--ghost cv-btn--sm"
-                      onClick={() => setToolPending({})}
-                      disabled={busy}
-                    >
-                      Descartar
-                    </button>
-                  </motion.div>
-                )}
-              </AnimatePresence>
+              <PendingChangesBanner
+                count={Object.keys(toolPending).length}
+                busy={busy}
+                onSave={handleSaveToolChanges}
+                onDiscard={() => setToolPending({})}
+              />
             </>
           )}
         </div>
@@ -966,32 +963,37 @@ function AllowModePanel({ denyList, blocklistCount, onAdd, onRemove }: AllowMode
           onKeyDown={e => { if (e.key === 'Enter') { void handleAdd() } }}
           aria-label="Dominio a bloquear"
         />
-        <button
-          className="cv-btn cv-btn--secondary"
+        <Button
+          variant="secondary"
           onClick={() => { void handleAdd() }}
           type="button"
           disabled={!input.trim()}
         >
-          Bloquear
-        </button>
+          {tNew(t, 'seg.network.block', 'Bloquear')}
+        </Button>
       </div>
 
       {denyList.length === 0 ? (
-        <p className="cv-empty">{t('seg.network.none_blocked')}</p>
+        <EmptyState
+          compact
+          icon={<Globe size={18} />}
+          title={t('seg.network.none_blocked')}
+        />
       ) : (
         <ul className="cv-list" aria-label="Dominios bloqueados manualmente">
           <AnimatePresence initial={false}>
             {denyList.map(d => (
               <AnimatedListItem key={d} className={s.egressDomainRow}>
                 <code className={s.egressDomainCode}>{d}</code>
-                <button
-                  className="cv-btn cv-btn--ghost cv-btn--sm"
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => { void onRemove(d) }}
                   type="button"
-                  aria-label={`Desbloquear dominio ${d}`}
+                  aria-label={tNew(t, 'seg.network.unblock_aria', 'Desbloquear dominio {domain}').replace('{domain}', d)}
                 >
-                  Desbloquear
-                </button>
+                  {tNew(t, 'seg.network.unblock', 'Desbloquear')}
+                </Button>
               </AnimatedListItem>
             ))}
           </AnimatePresence>
@@ -1043,32 +1045,37 @@ function DenyModePanel({ allowList, onGrant, onRevoke }: DenyModeProps) {
           onKeyDown={e => { if (e.key === 'Enter') { void handleGrant() } }}
           aria-label="Dominio a autorizar"
         />
-        <button
-          className="cv-btn cv-btn--primary"
+        <Button
+          variant="primary"
           onClick={() => { void handleGrant() }}
           type="button"
           disabled={!input.trim()}
         >
-          Autorizar
-        </button>
+          {tNew(t, 'seg.network.authorize', 'Autorizar')}
+        </Button>
       </div>
 
       {allowList.length === 0 ? (
-        <p className="cv-empty">{t('seg.network.none_allowed')}</p>
+        <EmptyState
+          compact
+          icon={<Globe size={18} />}
+          title={t('seg.network.none_allowed')}
+        />
       ) : (
         <ul className="cv-list" aria-label="Dominios autorizados">
           <AnimatePresence initial={false}>
             {allowList.map(d => (
               <AnimatedListItem key={d} className={s.egressDomainRow}>
                 <code className={s.egressDomainCode}>{d}</code>
-                <button
-                  className="cv-btn cv-btn--ghost cv-btn--sm"
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => { void onRevoke(d) }}
                   type="button"
                   aria-label={`${t('seg.network.revoke')} ${d}`}
                 >
                   {t('seg.network.revoke')}
-                </button>
+                </Button>
               </AnimatedListItem>
             ))}
           </AnimatePresence>
@@ -1320,20 +1327,21 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
           </span>
         )}
         {flagged && !allowed && scanId && (
-          <button
-            className="cv-btn cv-btn--ghost cv-btn--sm"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => setShowModal(true)}
             type="button"
             disabled={busy}
           >
             {t('seg.scan.allow')}
-          </button>
+          </Button>
         )}
       </div>
 
       {showModal && (
         <MfaModal
-          title="Permitir instalación"
+          title={tNew(t, 'seg.scan.allow_modal_title', 'Permitir instalación')}
           onSign={handleAllow}
           onCancel={() => setShowModal(false)}
         />
@@ -1383,15 +1391,15 @@ function SecurityCenterSection() {
         )}
       </div>
       {!scans || scans.length === 0 ? (
-        <FadeIn>
-          <div className={s.sectionEmpty} role="status">
-            <ShieldCheck size={28} className={s.sectionEmptyIcon} aria-hidden="true" />
-            <p className={s.sectionEmptyTitle}>{t('seg.scans.empty')}</p>
-            <p className={s.sectionEmptyDesc}>
-              No se han registrado escaneos de seguridad. Los análisis aparecen aquí cuando el agente intenta instalar software o ejecutar acciones sensibles.
-            </p>
-          </div>
-        </FadeIn>
+        <EmptyState
+          icon={<ShieldCheck size={28} />}
+          title={t('seg.scans.empty')}
+          description={tNew(
+            t,
+            'seg.scans.empty_desc',
+            'No se han registrado escaneos de seguridad. Los análisis aparecen aquí cuando el agente intenta instalar software o ejecutar acciones sensibles.',
+          )}
+        />
       ) : (
         <div className="cv-list">
           <AnimatePresence initial={false}>
@@ -1410,6 +1418,7 @@ function SecurityCenterSection() {
 // ── SeguridadView ─────────────────────────────────────────────────────────────
 
 export default function SeguridadView() {
+  const t = useT()
   const [mfaDisabled, setMfaDisabled] = useState(false)
 
   useEffect(() => {
@@ -1417,18 +1426,18 @@ export default function SeguridadView() {
   }, [])
 
   return (
-    <div className="cv-view-body">
-      <div className={s.viewHeader}>
-        <h1 className="view-title">Seguridad y gobernanza</h1>
-        <p className="view-subtitle">
-          Aprobaciones, políticas del agente y escaneos de seguridad.
-        </p>
-      </div>
+    <>
+      <PageHeader
+        title={t('view.seguridad')}
+        subtitle={tNew(t, 'seg.subtitle', 'Aprobaciones, políticas del agente y escaneos de seguridad.')}
+      />
 
-      <ApprovalsSection mfaDisabled={mfaDisabled} />
-      <GovernanceSection />
-      <EgressSection />
-      <SecurityCenterSection />
-    </div>
+      <div className="view-body cv-view-body">
+        <ApprovalsSection mfaDisabled={mfaDisabled} />
+        <GovernanceSection />
+        <EgressSection />
+        <SecurityCenterSection />
+      </div>
+    </>
   )
 }

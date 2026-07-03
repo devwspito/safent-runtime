@@ -2,13 +2,6 @@
 /* All tokens reference canonical --color-* / --space-* / --radius-* / --dur-* */
 /* Never hardcode hex, raw px, or ms durations when a token exists.            */
 
-/* ── Page header ─────────────────────────────────────────────────────────── */
-
-.viewHeader {
-  padding: 0;
-  border: none;
-}
-
 /* ── Posture summary strip ────────────────────────────────────────────────── */
 
 .postureStrip {
@@ -637,35 +630,6 @@
   border-radius: var(--radius-pill);
   border: 1px solid var(--color-border-subtle);
   font-variant-numeric: tabular-nums;
-}
-
-/* ── Empty state for sections ─────────────────────────────────────────────── */
-
-.sectionEmpty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-8) var(--space-6);
-  text-align: center;
-}
-
-.sectionEmptyIcon {
-  color: var(--color-text-dim);
-  opacity: 0.4;
-}
-
-.sectionEmptyTitle {
-  font-size: var(--text-base);
-  font-weight: var(--weight-medium);
-  color: var(--color-text-muted);
-}
-
-.sectionEmptyDesc {
-  font-size: var(--text-sm);
-  color: var(--color-text-dim);
-  max-width: 280px;
-  line-height: var(--leading-normal);
 }
 
 /* ── Approvals empty (different visual weight) ───────────────────────────── */

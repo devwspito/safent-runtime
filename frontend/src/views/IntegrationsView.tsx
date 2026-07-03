@@ -398,13 +398,14 @@ function AppCard({ app, isConnected, onConnect }: AppCardProps) {
             </span>
           )
           : (
-            <button
-              className={styles.connectBtn}
+            <Button
+              variant="ghost"
+              size="sm"
               aria-label={t('int.connect_aria').replace('{name}', displayName)}
               onClick={() => onConnect?.(app)}
             >
               {t('int.connect_btn')}
-            </button>
+            </Button>
           )
         }
       </div>

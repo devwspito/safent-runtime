@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useEffect, useId, useState } from 'react'
+import { ChevronDown, X, File, Download, Zap, Globe } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import {
   listWorkspaceFiles,
@@ -13,96 +14,22 @@ import {
   listComposioConnected,
 } from '../api/client'
 import type { WorkspaceFile, Skill, ComposioApp } from '../api/types'
+import { EmptyState } from './ui/EmptyState'
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
+// lucide-react, matching the iconography used across the rest of the app.
 
-function ChevronDownIcon({ rotated }: { rotated: boolean }) {
+function SectionChevron({ open }: { open: boolean }) {
   return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 12 12"
-      fill="none"
+    <ChevronDown
+      size={12}
       aria-hidden="true"
       style={{
         transition: 'transform 200ms ease',
-        transform: rotated ? 'rotate(-90deg)' : 'none',
+        transform: open ? 'none' : 'rotate(-90deg)',
         flexShrink: 0,
       }}
-    >
-      <path
-        d="M2 4l4 4 4-4"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
-}
-
-function CloseIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-      <path
-        d="M3 3l8 8M11 3l-8 8"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      />
-    </svg>
-  )
-}
-
-function FileIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
-      <path
-        d="M3 1h6l3 3v9a1 1 0 01-1 1H3a1 1 0 01-1-1V2a1 1 0 011-1z"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinejoin="round"
-      />
-      <path d="M9 1v3h3" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
-function DownloadIcon() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true" style={{ flexShrink: 0, opacity: 0.5 }}>
-      <path
-        d="M6 2v6M3 6l3 3 3-3"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path d="M2 10h8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function SkillIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
-      <polygon
-        points="8,1 10,6 15,6 11,9 13,14 8,11 3,14 5,9 1,6 6,6"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
-}
-
-function GlobeIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
-      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.3" />
-      <ellipse cx="8" cy="8" rx="2.5" ry="6" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M2 8h12" stroke="currentColor" strokeWidth="1.3" />
-    </svg>
+    />
   )
 }
 
@@ -128,7 +55,7 @@ function PanelSection({ title, children, defaultOpen = true }: PanelSectionProps
         type="button"
       >
         <span className="ctx-panel-section__title">{title}</span>
-        <ChevronDownIcon rotated={!open} />
+        <SectionChevron open={open} />
       </button>
       <div id={bodyId} hidden={!open}>
         {children}
@@ -169,7 +96,7 @@ function FilesList({ files, loading }: FilesListProps) {
   }
 
   if (files.length === 0) {
-    return <p className="ctx-empty">{t('ctx.files.empty')}</p>
+    return <EmptyState compact icon={<File size={28} />} title={t('ctx.files.empty')} />
   }
 
   return (
@@ -184,9 +111,9 @@ function FilesList({ files, loading }: FilesListProps) {
             className="ctx-file-row__link"
             rel="noopener"
           >
-            <FileIcon />
+            <File size={13} aria-hidden="true" style={{ flexShrink: 0 }} />
             <span className="ctx-file-row__name">{truncate(f.name, 28)}</span>
-            <DownloadIcon />
+            <Download size={11} aria-hidden="true" style={{ flexShrink: 0, opacity: 0.5 }} />
           </a>
         </li>
       ))}
@@ -204,7 +131,7 @@ function SkillsList({ skills, loading }: SkillsListProps) {
   if (loading) return <div className="ctx-skeleton" aria-hidden="true" />
 
   if (skills.length === 0) {
-    return <p className="ctx-empty">{t('ctx.skills.empty')}</p>
+    return <EmptyState compact icon={<Zap size={28} />} title={t('ctx.skills.empty')} />
   }
 
   return (
@@ -213,7 +140,7 @@ function SkillsList({ skills, loading }: SkillsListProps) {
         const name = s.name ?? s.slug ?? s.skill_name ?? t('ctx.skill_fallback')
         return (
           <li key={s.package_id ?? s.skill_id ?? i} className="ctx-tag-row">
-            <SkillIcon />
+            <Zap size={12} aria-hidden="true" style={{ flexShrink: 0 }} />
             <span className="ctx-tag-row__name">{name}</span>
           </li>
         )
@@ -238,7 +165,7 @@ function ConnectorsList({ connected, loading }: ConnectorsListProps) {
     <ul className="ctx-list" role="list" aria-label={t('ctx.connectors.aria')}>
       {all.map(c => (
         <li key={c.slug} className="ctx-tag-row">
-          <GlobeIcon />
+          <Globe size={12} aria-hidden="true" style={{ flexShrink: 0 }} />
           <span className="ctx-tag-row__name">{c.name}</span>
         </li>
       ))}
@@ -294,7 +221,7 @@ export default function ContextPanel({ onClose }: ContextPanelProps) {
           aria-label={t('ctx.panel.close.aria')}
           type="button"
         >
-          <CloseIcon />
+          <X size={14} aria-hidden="true" />
         </button>
       </div>
 
