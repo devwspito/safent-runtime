@@ -6,6 +6,7 @@
 import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
+import { useT } from '../lib/i18n'
 import { TeachPanel } from './TeachPanel'
 
 export function TeachModal({
@@ -17,6 +18,7 @@ export function TeachModal({
   onClose: () => void
   onSaved?: () => void
 }) {
+  const t = useT()
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -35,7 +37,7 @@ export function TeachModal({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Enseñar una habilidad"
+      aria-label={t('teach.title')}
       style={{
         position: 'fixed', inset: 0, zIndex: 400,
         background: 'var(--color-bg, #0a0a0a)',
@@ -52,18 +54,17 @@ export function TeachModal({
       >
         <div style={{ flex: 1, minWidth: 0 }}>
           <h2 style={{ margin: 0, fontSize: 'var(--text-lg)', fontWeight: 'var(--weight-semibold)' }}>
-            Enseñar una habilidad
+            {t('teach.title')}
           </h2>
           <p style={{ margin: '2px 0 0', color: 'var(--color-text-dim)', fontSize: 'var(--text-sm)' }}>
-            Ponle nombre, pulsa «Empezar a enseñar» y demuestra la tarea en el navegador. Tus pasos
-            se convierten en una habilidad reutilizable.
+            {t('teach.intro')}
           </p>
         </div>
         <button
           type="button"
           onClick={onClose}
-          aria-label="Cerrar"
-          title="Cerrar (Esc)"
+          aria-label={t('teach.close')}
+          title={t('teach.close.title')}
           style={{
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
             width: 34, height: 34, borderRadius: 'var(--radius-md)',

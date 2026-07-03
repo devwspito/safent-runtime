@@ -21,6 +21,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import RFB from '@novnc/novnc'
+import { useT } from '../lib/i18n'
 import { token } from '../lib/token'
 import { getBrowserClipboard, setBrowserClipboard } from '../api/client'
 
@@ -65,6 +66,7 @@ export function VncView({
   viewOnly?: boolean
   className?: string
 }) {
+  const t = useT()
   const ref = useRef<HTMLDivElement>(null)
   const [status, setStatus] = useState<Status>('connecting')
 
@@ -193,7 +195,7 @@ export function VncView({
             pointerEvents: 'none',
           }}
         >
-          {status === 'connecting' ? 'Conectando al navegador…' : 'Reconectando…'}
+          {status === 'connecting' ? t('vnc.connecting') : t('vnc.reconnecting')}
         </div>
       )}
     </div>

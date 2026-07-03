@@ -176,15 +176,15 @@ export function useSettingsNavItems(): NavItem[] {
 
 const PREVIEW_COUNT = 3
 
-function relativeTime(iso?: string): string {
+function relativeTime(iso: string | undefined, t: ReturnType<typeof useT>): string {
   if (!iso) return ''
   const diff = Date.now() - new Date(iso).getTime()
   const mins = Math.floor(diff / 60_000)
-  if (mins < 1) return 'Ahora'
-  if (mins < 60) return `Hace ${mins} min`
+  if (mins < 1) return t('layout.time.now')
+  if (mins < 60) return t('layout.time.mins_ago').replace('{n}', String(mins))
   const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `Hace ${hrs} h`
-  return `Hace ${Math.floor(hrs / 24)} d`
+  if (hrs < 24) return t('layout.time.hours_ago').replace('{n}', String(hrs))
+  return t('layout.time.days_ago').replace('{n}', String(Math.floor(hrs / 24)))
 }
 
 function truncate(s: string, n: number) {
@@ -223,6 +223,7 @@ interface RecentsSectionProps {
 }
 
 function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps) {
+  const t = useT()
   const navigate = useNavigate()
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -260,8 +261,8 @@ function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps)
 
   if (loading) {
     return (
-      <div className="sidebar-recents" aria-label="Conversaciones recientes">
-        <div className="sidebar-section-label">Recientes</div>
+      <div className="sidebar-recents" aria-label={t('layout.recents.aria')}>
+        <div className="sidebar-section-label">{t('layout.recents.label')}</div>
         {Array.from({ length: PREVIEW_COUNT }, (_, i) => (
           <div
             key={i}
@@ -279,25 +280,26 @@ function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps)
 
   if (conversations.length === 0) {
     return (
-      <div className="sidebar-recents" aria-label="Conversaciones recientes">
-        <div className="sidebar-section-label">Recientes</div>
-        <p className="recent-empty">Sin conversaciones recientes</p>
+      <div className="sidebar-recents" aria-label={t('layout.recents.aria')}>
+        <div className="sidebar-section-label">{t('layout.recents.label')}</div>
+        <p className="recent-empty">{t('layout.recents.empty')}</p>
       </div>
     )
   }
 
   return (
-    <div className="sidebar-recents" aria-label="Conversaciones recientes">
-      <div className="sidebar-section-label">Recientes</div>
-      <ul role="listbox" aria-label="Conversaciones recientes">
+    <div className="sidebar-recents" aria-label={t('layout.recents.aria')}>
+      <div className="sidebar-section-label">{t('layout.recents.label')}</div>
+      <ul role="listbox" aria-label={t('layout.recents.aria')}>
         {visible.map(c => {
           const id = (c as ConversationSummary & { conversation_id?: string }).conversation_id ?? c.id
           if (!id) return null
-          const title = c.title ?? 'Sin título'
+          const title = c.title ?? t('layout.recents.untitled')
           const time = relativeTime(
             (c as ConversationSummary & { last_msg_at?: string }).last_msg_at
             ?? c.updated_at
-            ?? c.created_at
+            ?? c.created_at,
+            t,
           )
           const isActive = id === activeConvId
 
@@ -323,7 +325,7 @@ function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps)
               type="button"
               aria-expanded={expanded}
             >
-              {expanded ? 'Ver menos' : `Cargar más (${overflow})`}
+              {expanded ? t('layout.recents.less') : t('layout.recents.more').replace('{n}', String(overflow))}
             </button>
           </li>
         )}
@@ -398,7 +400,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
 
   return (
     <div className="app-shell">
-      <nav className="sidebar" aria-label="Navegación principal">
+      <nav className="sidebar" aria-label={t('layout.nav.aria')}>
         {/* Wordmark */}
         <div className="sidebar-wordmark">
           <div className="sidebar-wordmark-inner">
@@ -411,12 +413,12 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
         {/* New chat button — always resets the conversation */}
         <button
           className="sidebar-new-chat"
-          aria-label="Nuevo chat"
+          aria-label={t('layout.new_chat')}
           type="button"
           onClick={handleNewChat}
         >
           <PlusIcon />
-          Nuevo chat
+          {t('layout.new_chat')}
         </button>
 
         {/* Scrollable area */}
@@ -429,10 +431,10 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
 
           {/* Main nav */}
           <div className="sidebar-nav">
-            <div className="sidebar-section-label">Navegación</div>
+            <div className="sidebar-section-label">{t('layout.navigation')}</div>
             {featuresLoading ? (
               // Mirror the real nav: fixed count = no layout shift on load.
-              <ul role="list" aria-busy="true" aria-label="Cargando navegación">
+              <ul role="list" aria-busy="true" aria-label={t('layout.loading_nav_aria')}>
                 {Array.from({ length: 3 }, (_, i) => (
                   <li key={i}>
                     <div

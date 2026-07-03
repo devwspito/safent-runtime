@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { Square } from 'lucide-react'
+import { useT } from '../lib/i18n'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
 import { VncFrame } from '../components/VncView'
@@ -14,6 +15,7 @@ import { listRecentTasks, cancelTask, getRuntimeStatus, ApiError } from '../api/
 import type { RecentTask } from '../api/types'
 
 function ActividadPanel() {
+  const t = useT()
   const [tasks, setTasks] = useState<RecentTask[]>([])
   const [cancelling, setCancelling] = useState<string | null>(null)
   // Sticky: once a running task touches the browser, keep the live frame visible
@@ -44,10 +46,10 @@ function ActividadPanel() {
     setCancelling(id)
     try {
       await cancelTask(id)
-      sileo.success({ title: 'Deteniendo la tarea…' })
+      sileo.success({ title: t('envivo.stopping') })
       setTimeout(() => void refresh(), 1500)
     } catch (e) {
-      sileo.error({ title: e instanceof ApiError ? e.message : 'No se pudo detener la tarea' })
+      sileo.error({ title: e instanceof ApiError ? e.message : t('envivo.err.stop') })
     } finally {
       setCancelling(null)
     }
@@ -67,15 +69,15 @@ function ActividadPanel() {
           fontSize: 'var(--text-sm)',
         }}>
           {tasks.length > 0
-            ? 'Hay tareas en ejecución, pero ninguna está usando el navegador ahora mismo. Cuando un agente navegue, verás aquí su navegador en directo (nítido).'
-            : 'No hay ninguna tarea en ejecución. Cuando un agente empiece a navegar, verás aquí su navegador en directo y podrás detenerlo.'}
+            ? t('envivo.no_browser_yet')
+            : t('envivo.no_tasks')}
         </div>
       )}
 
       <section>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}>
           <h2 style={{ fontSize: 'var(--text-base)', fontWeight: 'var(--weight-semibold)', margin: 0 }}>
-            Tareas en ejecución
+            {t('envivo.running_tasks')}
           </h2>
           {tasks.length > 0 && (
             <span style={{
@@ -88,15 +90,14 @@ function ActividadPanel() {
 
         {tasks.length === 0 && (
           <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>
-            No hay tareas ejecutándose ahora mismo. Cuando un agente esté trabajando aparecerá aquí
-            y podrás detenerlo.
+            {t('envivo.no_tasks_running')}
           </p>
         )}
 
         <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-          {tasks.map((t) => (
+          {tasks.map((task) => (
             <li
-              key={t.task_id}
+              key={task.task_id}
               style={{
                 display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
                 border: '1px solid var(--color-border-subtle)', borderRadius: 'var(--radius-md)',
@@ -107,18 +108,18 @@ function ActividadPanel() {
                 flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                 fontSize: 'var(--text-sm)',
               }}>
-                {t.label || t.name || t.task_id}
+                {task.label || task.name || task.task_id}
               </span>
               <Button
                 variant="danger"
                 size="sm"
-                loading={cancelling === t.task_id}
-                onClick={() => void handleCancel(t.task_id!)}
-                disabled={!t.task_id}
-                aria-label="Detener esta tarea"
+                loading={cancelling === task.task_id}
+                onClick={() => void handleCancel(task.task_id!)}
+                disabled={!task.task_id}
+                aria-label={t('envivo.stop.aria')}
               >
                 <Square size={12} aria-hidden="true" />
-                Detener
+                {t('envivo.stop')}
               </Button>
             </li>
           ))}
@@ -129,11 +130,12 @@ function ActividadPanel() {
 }
 
 export default function EnVivoView() {
+  const t = useT()
   return (
     <>
       <PageHeader
-        title="En vivo"
-        subtitle="Observa a tus agentes trabajar en tiempo real y detén una tarea si algo va mal. Para enseñar una habilidad nueva, ve a Habilidades."
+        title={t('nav.envivo')}
+        subtitle={t('envivo.subtitle')}
       />
       <div className="view-body">
         <ActividadPanel />

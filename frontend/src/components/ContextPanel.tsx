@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useEffect, useId, useState } from 'react'
+import { useT } from '../lib/i18n'
 import {
   listWorkspaceFiles,
   listSkills,
@@ -156,9 +157,10 @@ interface FilesListProps {
 }
 
 function FilesList({ files, loading }: FilesListProps) {
+  const t = useT()
   if (loading) {
     return (
-      <ul className="ctx-list" aria-label="Archivos del espacio de trabajo">
+      <ul className="ctx-list" aria-label={t('ctx.files.aria')}>
         {[0, 1, 2].map(i => (
           <li key={i} className="ctx-file-row ctx-file-row--skeleton" aria-hidden="true" />
         ))}
@@ -167,18 +169,18 @@ function FilesList({ files, loading }: FilesListProps) {
   }
 
   if (files.length === 0) {
-    return <p className="ctx-empty">Sin archivos todavía</p>
+    return <p className="ctx-empty">{t('ctx.files.empty')}</p>
   }
 
   return (
-    <ul className="ctx-list" role="list" aria-label="Archivos del espacio de trabajo">
+    <ul className="ctx-list" role="list" aria-label={t('ctx.files.aria')}>
       {files.map(f => (
         <li key={f.name} className="ctx-file-row">
           <a
             href={fileDownloadUrl(f.path)}
             download={f.name}
-            title={`Descargar ${f.name}`}
-            aria-label={`Descargar ${f.name}`}
+            title={t('ctx.files.download').replace('{name}', f.name)}
+            aria-label={t('ctx.files.download').replace('{name}', f.name)}
             className="ctx-file-row__link"
             rel="noopener"
           >
@@ -198,16 +200,17 @@ interface SkillsListProps {
 }
 
 function SkillsList({ skills, loading }: SkillsListProps) {
+  const t = useT()
   if (loading) return <div className="ctx-skeleton" aria-hidden="true" />
 
   if (skills.length === 0) {
-    return <p className="ctx-empty">Sin habilidades configuradas</p>
+    return <p className="ctx-empty">{t('ctx.skills.empty')}</p>
   }
 
   return (
-    <ul className="ctx-list" role="list" aria-label="Habilidades activas">
+    <ul className="ctx-list" role="list" aria-label={t('ctx.skills.aria')}>
       {skills.map((s, i) => {
-        const name = s.name ?? s.slug ?? s.skill_name ?? 'skill'
+        const name = s.name ?? s.slug ?? s.skill_name ?? t('ctx.skill_fallback')
         return (
           <li key={s.package_id ?? s.skill_id ?? i} className="ctx-tag-row">
             <SkillIcon />
@@ -225,13 +228,14 @@ interface ConnectorsListProps {
 }
 
 function ConnectorsList({ connected, loading }: ConnectorsListProps) {
+  const t = useT()
   if (loading) return <div className="ctx-skeleton" aria-hidden="true" />
 
-  const builtIn: { name: string; slug: string }[] = [{ name: 'Búsqueda web', slug: 'web_search' }]
+  const builtIn: { name: string; slug: string }[] = [{ name: t('ctx.web_search'), slug: 'web_search' }]
   const all = [...builtIn, ...connected.map(c => ({ name: c.name ?? c.slug, slug: c.slug }))]
 
   return (
-    <ul className="ctx-list" role="list" aria-label="Conectores activos">
+    <ul className="ctx-list" role="list" aria-label={t('ctx.connectors.aria')}>
       {all.map(c => (
         <li key={c.slug} className="ctx-tag-row">
           <GlobeIcon />
@@ -249,6 +253,7 @@ interface ContextPanelProps {
 }
 
 export default function ContextPanel({ onClose }: ContextPanelProps) {
+  const t = useT()
   const [files, setFiles] = useState<WorkspaceFile[]>([])
   const [skills, setSkills] = useState<Skill[]>([])
   const [connected, setConnected] = useState<ComposioApp[]>([])
@@ -280,13 +285,13 @@ export default function ContextPanel({ onClose }: ContextPanelProps) {
   useEffect(() => { loadAll() }, [loadAll])
 
   return (
-    <aside className="ctx-panel" aria-label="Panel de contexto">
+    <aside className="ctx-panel" aria-label={t('ctx.panel.aria')}>
       <div className="ctx-panel-header">
-        <span className="ctx-panel-title">Contexto</span>
+        <span className="ctx-panel-title">{t('ctx.panel.title')}</span>
         <button
           className="ctx-panel-close"
           onClick={onClose}
-          aria-label="Cerrar panel de contexto"
+          aria-label={t('ctx.panel.close.aria')}
           type="button"
         >
           <CloseIcon />
@@ -294,15 +299,15 @@ export default function ContextPanel({ onClose }: ContextPanelProps) {
       </div>
 
       <div className="ctx-panel-body">
-        <PanelSection title="Carpeta de trabajo">
+        <PanelSection title={t('ctx.section.workspace')}>
           <FilesList files={files} loading={filesLoading} />
         </PanelSection>
 
-        <PanelSection title="Habilidades">
+        <PanelSection title={t('ctx.section.skills')}>
           <SkillsList skills={skills} loading={skillsLoading} />
         </PanelSection>
 
-        <PanelSection title="Conectores">
+        <PanelSection title={t('ctx.section.connectors')}>
           <ConnectorsList connected={connected} loading={connectorsLoading} />
         </PanelSection>
       </div>

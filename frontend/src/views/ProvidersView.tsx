@@ -1,6 +1,7 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { AlertCircle, Cloud, Cpu, Globe, Server } from 'lucide-react'
+import { useT } from '../lib/i18n'
 import {
   listProviders, listNativeProviders, getNativeActive, addProvider, configureNativeProvider, setActiveProvider,
   testProvider, deleteProvider, startProviderOAuth, getProviderOAuthStatus,
@@ -56,6 +57,14 @@ function badgeLabel(p: Provider): string {
   if (a.includes('oauth')) return 'OAuth'
   if (a.includes('api')) return 'API key'
   return 'Modelo'
+}
+
+// Translated display text for the badge — kept separate from `badgeLabel` so the
+// KIND_COLORS lookup (keyed on the raw label) is unaffected by locale.
+function badgeDisplayLabel(label: string, t: ReturnType<typeof useT>): string {
+  if (label === 'API key') return t('providers.badge.apikey')
+  if (label === 'Modelo') return t('providers.badge.model')
+  return label
 }
 
 function isOAuthProvider(p: Provider): boolean {
@@ -142,6 +151,7 @@ function SkeletonRows({ count }: { count: number }) {
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 export default function ProvidersView() {
+  const t = useT()
   const [state, dispatch] = useReducer(reducer, { status: 'loading' })
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
@@ -165,7 +175,7 @@ export default function ProvidersView() {
       .catch((err: unknown) => {
         dispatch({
           type: 'FAILED',
-          message: err instanceof ApiError ? err.message : 'No se pudieron cargar los proveedores.',
+          message: err instanceof ApiError ? err.message : t('providers.err.load'),
         })
       })
   }
@@ -180,14 +190,14 @@ export default function ProvidersView() {
     <>
       {ConfirmDialogNode}
       <PageHeader
-        title="Proveedores"
-        subtitle="Conecta modelos de lenguaje. Activa el que Lumen usará por defecto."
+        title={t('providers.title')}
+        subtitle={t('providers.subtitle')}
       />
 
       <div className={`view-body ${css.body}`}>
         {state.status === 'loading' && (
-          <section className={css.section} aria-label="Cargando proveedores">
-            <div className={css.sectionLabel} aria-hidden="true">Configurados</div>
+          <section className={css.section} aria-label={t('providers.loading_aria')}>
+            <div className={css.sectionLabel} aria-hidden="true">{t('providers.section.configured')}</div>
             <SkeletonRows count={3} />
           </section>
         )}
@@ -198,7 +208,7 @@ export default function ProvidersView() {
               <AlertCircle size={16} style={{ color: 'var(--color-danger)', flexShrink: 0, marginTop: 1 }} aria-hidden="true" />
               <span className={css.errorText}>{state.message}</span>
               <Button variant="secondary" size="sm" onClick={load}>
-                Reintentar
+                {t('providers.retry')}
               </Button>
             </div>
           </FadeIn>
@@ -209,19 +219,19 @@ export default function ProvidersView() {
 
             {/* ── Configured providers ── */}
             <StaggerItem>
-              <section className={css.section} aria-label="Proveedores configurados">
-                <h2 className={css.sectionLabel}>Configurados</h2>
+              <section className={css.section} aria-label={t('providers.section.configured.aria')}>
+                <h2 className={css.sectionLabel}>{t('providers.section.configured')}</h2>
                 {state.configured.length === 0 ? (
                   <EmptyState
                     compact
                     icon={<Cpu size={32} />}
-                    title="Sin proveedores configurados"
-                    description="Añade uno del catálogo para empezar a usar el chat."
+                    title={t('providers.empty.title')}
+                    description={t('providers.empty.desc')}
                     action={
                       <Button variant="primary" size="sm" onClick={() => {
                         document.getElementById('pv-catalogue')?.scrollIntoView({ behavior: 'smooth' })
                       }}>
-                        Ver catálogo
+                        {t('providers.empty.cta')}
                       </Button>
                     }
                   />
@@ -247,8 +257,8 @@ export default function ProvidersView() {
 
             {/* ── Custom / local model ── */}
             <StaggerItem>
-              <section className={css.section} aria-label="Modelo propio o local">
-                <h2 className={css.sectionLabel}>Modelo propio / local</h2>
+              <section className={css.section} aria-label={t('providers.section.custom.aria')}>
+                <h2 className={css.sectionLabel}>{t('providers.section.custom')}</h2>
                 <CustomProviderCard onAdded={load} onToast={show} />
               </section>
             </StaggerItem>
@@ -258,12 +268,12 @@ export default function ProvidersView() {
               <section
                 id="pv-catalogue"
                 className={css.section}
-                aria-label="Catálogo nativo Hermes"
+                aria-label={t('providers.section.native.aria')}
               >
-                <h2 className={css.sectionLabel}>Catálogo nativo Hermes</h2>
+                <h2 className={css.sectionLabel}>{t('providers.section.native')}</h2>
                 {state.native.length === 0 ? (
                   <p className={css.catalogueEmpty}>
-                    Catálogo no disponible en esta versión.
+                    {t('providers.native.empty')}
                   </p>
                 ) : (
                   <ul className={css.list} role="list">
@@ -308,6 +318,7 @@ interface ProviderRowProps {
 }
 
 function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: ProviderRowProps) {
+  const t = useT()
   const reduced = useReducedMotion()
   const [testing, setTesting] = useState(false)
   const [oauthPending, setOauthPending] = useState(false)
@@ -318,6 +329,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const label = badgeLabel(provider)
+  const displayLabel = badgeDisplayLabel(label, t)
   const kindColor = KIND_COLORS[label.toLowerCase()] ?? 'var(--color-text-dim)'
   const name = providerName(provider)
   const id = provider.provider_id ?? ''
@@ -331,10 +343,10 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
   async function handleActivate() {
     try {
       await setActiveProvider(id)
-      onToast(`${name} activado — ya puedes chatear`, 'ok')
+      onToast(t('providers.toast.activated').replace('{name}', name), 'ok')
       onRefresh()
     } catch (e) {
-      onToast(e instanceof Error ? e.message : 'Error', 'error')
+      onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
     }
   }
 
@@ -342,33 +354,33 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
     setTesting(true)
     try {
       const r = await testProvider(id)
-      onToast(r?.ok ? 'Conexión exitosa' : 'Sin respuesta del servidor', r?.ok ? 'ok' : 'warn')
+      onToast(r?.ok ? t('providers.test.ok') : t('providers.test.fail'), r?.ok ? 'ok' : 'warn')
     } catch (e) {
-      onToast(e instanceof Error ? e.message : 'Error', 'error')
+      onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
     } finally { setTesting(false) }
   }
 
   async function handleDelete() {
     const ok = await onConfirm({
-      title: `¿Eliminar ${name}?`,
+      title: t('providers.delete.confirm.title').replace('{name}', name),
       description: isActive
-        ? 'Este es el proveedor activo. Si lo eliminas, el chat dejará de funcionar hasta que configures otro.'
+        ? t('providers.delete.confirm.desc_active')
         : undefined,
-      confirmLabel: 'Eliminar',
+      confirmLabel: t('providers.delete'),
       variant: 'danger',
     })
     if (!ok) return
     try {
       await deleteProvider(id)
-      onToast('Proveedor eliminado', 'ok')
+      onToast(t('providers.toast.deleted'), 'ok')
       onRefresh()
     } catch (e) {
-      onToast(e instanceof Error ? e.message : 'Error', 'error')
+      onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
     }
   }
 
   async function handleAddConfirm() {
-    if (!apiKeyInput.trim()) { onToast('Introduce la clave API', 'warn'); return }
+    if (!apiKeyInput.trim()) { onToast(t('providers.err.enter_key'), 'warn'); return }
     setAddingKey(true)
     try {
       // Native catalogue providers go through /providers/native by their registry
@@ -393,14 +405,14 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
       if (testPassed) {
         await setActiveProvider(realId)
         setAddConnFailed(false)
-        onToast(`${name} conectado y verificado — pruébalo en el chat`, 'ok')
+        onToast(t('providers.toast.connected_verified').replace('{name}', name), 'ok')
         onRefresh()
       } else {
         setAddConnFailed(true)
         onRefresh()
       }
     } catch (e) {
-      onToast(e instanceof Error ? e.message : 'Error', 'error')
+      onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
     } finally {
       setAddingKey(false)
     }
@@ -412,13 +424,13 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
     try {
       r = await startProviderOAuth(id)
     } catch (e) {
-      onToast(e instanceof Error ? e.message : 'No se pudo conectar', 'error')
+      onToast(e instanceof Error ? e.message : t('providers.oauth.err.connect'), 'error')
       setOauthPending(false)
       return
     }
 
     if (!r || r['error']) {
-      onToast(`No se pudo conectar: ${(r?.['error'] as string) ?? 'error desconocido'}`, 'error')
+      onToast(t('providers.oauth.err.connect_reason').replace('{reason}', (r?.['error'] as string) ?? t('providers.err.unknown')), 'error')
       setOauthPending(false)
       return
     }
@@ -429,12 +441,12 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
 
     if (url) {
       window.open(url, '_blank', 'noopener,noreferrer')
-      onToast(`Abriendo el navegador para conectar ${name}…`, 'ok')
+      onToast(t('providers.oauth.opening').replace('{name}', name), 'ok')
     }
     if (code) {
-      onToast(`Ve a ${url ?? ''} e introduce el código: ${code}`, 'ok')
+      onToast(t('providers.oauth.go_and_code').replace('{url}', url ?? '').replace('{code}', code), 'ok')
     } else {
-      onToast(`Esperando autorización de ${name}…`, 'ok')
+      onToast(t('providers.oauth.waiting').replace('{name}', name), 'ok')
     }
 
     if (!session) { setOauthPending(false); return }
@@ -444,25 +456,25 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
 
     const poll = async () => {
       if (Date.now() > deadline) {
-        onToast('La sesión de conexión expiró — vuelve a intentarlo', 'warn')
+        onToast(t('providers.oauth.expired'), 'warn')
         setOauthPending(false)
         return
       }
       const st = await getProviderOAuthStatus(session)
       const status = String(st?.status ?? '').toLowerCase()
       if (status === 'approved' || status === 'connected' || status === 'success') {
-        onToast(`${name} conectado — pruébalo en el chat`, 'ok')
+        onToast(t('providers.oauth.connected').replace('{name}', name), 'ok')
         setOauthPending(false)
         onRefresh()
         return
       }
       if (status === 'error' || status === 'failed') {
-        onToast(`No se pudo conectar: ${st?.error_message ?? st?.error ?? 'error desconocido'}`, 'error')
+        onToast(t('providers.oauth.err.connect_reason').replace('{reason}', String(st?.error_message ?? st?.error ?? t('providers.err.unknown'))), 'error')
         setOauthPending(false)
         return
       }
       if (status === 'expired') {
-        onToast('La sesión de conexión expiró — vuelve a intentarlo', 'warn')
+        onToast(t('providers.oauth.expired'), 'warn')
         setOauthPending(false)
         return
       }
@@ -494,7 +506,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
             className={css.kindBadge}
             style={{ '--kind-color': kindColor } as React.CSSProperties}
           >
-            {label}
+            {displayLabel}
           </span>
 
           {provider.default_model && (
@@ -504,16 +516,16 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
           )}
 
           {isActive && (
-            <Badge variant="ok">Activo</Badge>
+            <Badge variant="ok">{t('providers.active')}</Badge>
           )}
 
           {isCloudManaged && (
-            <Badge variant="neutral">Gestionado por tu organización</Badge>
+            <Badge variant="neutral">{t('providers.managed_by_org')}</Badge>
           )}
 
           {addConnFailed && (
             <Badge variant="danger">
-              <span role="alert">Conexión fallida — revisa la clave</span>
+              <span role="alert">{t('providers.conn_failed')}</span>
             </Badge>
           )}
         </div>
@@ -524,7 +536,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
           <>
             {!provider.is_active && !isCloudManaged && (
               <Button variant="secondary" size="sm" onClick={handleActivate}>
-                Activar
+                {t('providers.activate')}
               </Button>
             )}
             <Button
@@ -534,16 +546,16 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
               disabled={testing}
               loading={testing}
             >
-              {testing ? 'Probando…' : 'Probar'}
+              {testing ? t('providers.testing') : t('providers.test')}
             </Button>
             {!isCloudManaged && (
               <Button
                 variant="danger"
                 size="sm"
                 onClick={handleDelete}
-                aria-label={`Eliminar proveedor ${name}`}
+                aria-label={t('providers.delete.aria').replace('{name}', name)}
               >
-                Eliminar
+                {t('providers.delete')}
               </Button>
             )}
           </>
@@ -555,7 +567,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
             disabled={oauthPending}
             loading={oauthPending}
           >
-            {oauthPending ? 'Conectando…' : 'Conectar'}
+            {oauthPending ? t('providers.connecting') : t('providers.connect')}
           </Button>
         ) : !showKeyForm ? (
           <Button
@@ -563,7 +575,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
             size="sm"
             onClick={() => { setShowKeyForm(true); setAddConnFailed(false) }}
           >
-            {addConnFailed ? 'Reintentar clave' : 'Añadir'}
+            {addConnFailed ? t('providers.retry_key') : t('providers.add')}
           </Button>
         ) : null}
       </div>
@@ -572,14 +584,14 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
       <AnimatedExpanderContent open={!isConfigured && !isOAuthProvider(provider) && showKeyForm}>
         <div className={css.keyForm}>
           <label className="sr-only" htmlFor={`pv-key-${id}`}>
-            Clave API para {name}
+            {t('providers.key.label').replace('{name}', name)}
           </label>
           <input
             id={`pv-key-${id}`}
             className={css.keyInput}
             type="password"
             autoComplete="new-password"
-            placeholder={`Clave API para ${name}`}
+            placeholder={t('providers.key.label').replace('{name}', name)}
             value={apiKeyInput}
             onChange={e => setApiKeyInput(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') void handleAddConfirm() }}
@@ -595,7 +607,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
               disabled={addingKey}
               loading={addingKey}
             >
-              {addingKey ? 'Guardando…' : 'Guardar'}
+              {addingKey ? t('providers.saving') : t('providers.save')}
             </Button>
           </motion.div>
           <Button
@@ -603,7 +615,7 @@ function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: 
             size="sm"
             onClick={() => { setShowKeyForm(false); setApiKeyInput('') }}
           >
-            Cancelar
+            {t('providers.cancel')}
           </Button>
         </div>
       </AnimatedExpanderContent>
@@ -619,6 +631,7 @@ interface CustomProviderCardProps {
 }
 
 function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [connFailed, setConnFailed] = useState(false)
@@ -631,11 +644,11 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
   async function handleSave() {
     const base_url = urlRef.current?.value.trim() ?? ''
     const default_model = modelRef.current?.value.trim() ?? ''
-    const alias = aliasRef.current?.value.trim() || default_model || 'Modelo local'
+    const alias = aliasRef.current?.value.trim() || default_model || t('providers.custom.default_alias')
     const api_key = keyRef.current?.value.trim() || undefined
 
     if (!base_url || !default_model) {
-      onToast('Pon al menos la URL base y el nombre del modelo.', 'warn')
+      onToast(t('providers.custom.err.required'), 'warn')
       return
     }
 
@@ -660,14 +673,14 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
         if (urlRef.current) urlRef.current.value = ''
         if (modelRef.current) modelRef.current.value = ''
         if (keyRef.current) keyRef.current.value = ''
-        onToast('Modelo añadido y activado — pruébalo en el chat', 'ok')
+        onToast(t('providers.custom.toast.added'), 'ok')
         onAdded()
       } else {
         setConnFailed(true)
         onAdded()
       }
     } catch (e) {
-      onToast(e instanceof Error ? e.message : 'Error', 'error')
+      onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
     } finally { setSaving(false) }
   }
 
@@ -675,7 +688,7 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
     <motion.div className={css.customCard} layout>
       <div className={css.customCardHeader}>
         <p className={css.customCardIntro}>
-          Conecta cualquier servidor compatible: vLLM, LM Studio, Ollama o uno propio.
+          {t('providers.custom.intro')}
         </p>
         {!open && (
           <Button
@@ -684,7 +697,7 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
             onClick={() => setOpen(true)}
             style={{ alignSelf: 'flex-start', flexShrink: 0 }}
           >
-            Añadir modelo propio
+            {t('providers.custom.add_btn')}
           </Button>
         )}
       </div>
@@ -692,31 +705,31 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
       <AnimatedExpanderContent open={open}>
         <div className={css.formStack}>
           <div className={css.formField}>
-            <label className={css.formLabel} htmlFor="pv-c-alias">Nombre</label>
+            <label className={css.formLabel} htmlFor="pv-c-alias">{t('providers.custom.name.label')}</label>
             <input
               id="pv-c-alias"
               ref={aliasRef}
               className={css.formInput}
               type="text"
-              placeholder='Nombre del modelo (p. ej. "Qwen local")'
+              placeholder={t('providers.custom.name.placeholder')}
               autoComplete="off"
             />
           </div>
 
           <div className={css.formField}>
-            <label className={css.formLabel} htmlFor="pv-c-url">URL base del servidor</label>
+            <label className={css.formLabel} htmlFor="pv-c-url">{t('providers.custom.url.label')}</label>
             <input
               id="pv-c-url"
               ref={urlRef}
               className={css.formInput}
               type="text"
-              placeholder="https://tu-servidor/v1"
+              placeholder={t('providers.custom.url.placeholder')}
               autoComplete="off"
             />
           </div>
 
           <div className={css.formField}>
-            <label className={css.formLabel} htmlFor="pv-c-model">Identificador del modelo</label>
+            <label className={css.formLabel} htmlFor="pv-c-model">{t('providers.custom.model.label')}</label>
             <input
               id="pv-c-model"
               ref={modelRef}
@@ -729,22 +742,21 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
 
           <div className={css.formField}>
             <label className={css.formLabel} htmlFor="pv-c-key">
-              Clave API{' '}
-              <span style={{ fontWeight: 400, color: 'var(--color-text-dim)' }}>(opcional)</span>
+              {t('providers.custom.key.label')}{' '}
+              <span style={{ fontWeight: 400, color: 'var(--color-text-dim)' }}>({t('providers.optional')})</span>
             </label>
             <input
               id="pv-c-key"
               ref={keyRef}
               className={css.formInput}
               type="password"
-              placeholder="Solo si tu servidor la requiere"
+              placeholder={t('providers.custom.key.placeholder')}
               autoComplete="new-password"
             />
           </div>
 
           <p className={css.formHint}>
-            La URL base debe terminar en <code style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)' }}>/v1</code>.
-            La clave API solo si tu servidor la pide.
+            {t('providers.custom.hint_pre')} <code style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)' }}>/v1</code>{t('providers.custom.hint_post')}
           </p>
 
           {connFailed && (
@@ -757,8 +769,7 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
             >
               <AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1 }} aria-hidden="true" />
               <span>
-                Conexión fallida — el modelo se guardó pero no está activo.
-                Corrige la URL o la clave y vuelve a guardar.
+                {t('providers.custom.conn_failed')}
               </span>
             </motion.div>
           )}
@@ -771,14 +782,14 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
               disabled={saving}
               loading={saving}
             >
-              {saving ? 'Guardando…' : connFailed ? 'Reintentar conexión' : 'Guardar y activar'}
+              {saving ? t('providers.saving') : connFailed ? t('providers.custom.retry_conn') : t('providers.custom.save_activate')}
             </Button>
             <Button
               variant="ghost"
               size="sm"
               onClick={() => { setOpen(false); setConnFailed(false) }}
             >
-              Cancelar
+              {t('providers.cancel')}
             </Button>
           </div>
         </div>

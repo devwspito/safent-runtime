@@ -13,6 +13,7 @@ import {
   LayoutGrid, List, RefreshCw, Download, ChevronRight,
   Loader2, Upload,
 } from 'lucide-react'
+import { useT } from '../lib/i18n'
 import { listWorkspaceFiles, workspaceDownloadUrl, uploadWorkspaceFile } from '../api/client'
 import type { WorkspaceFile } from '../api/types'
 import { Drawer } from '../components/ui/Drawer'
@@ -38,16 +39,16 @@ function formatBytes(bytes: number | undefined): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-function formatDate(iso: string | undefined): string {
+function formatDate(iso: string | undefined, t: ReturnType<typeof useT>): string {
   if (!iso) return '—'
   const d = new Date(iso)
   if (isNaN(d.getTime())) return '—'
   const now = Date.now()
   const diffMs = now - d.getTime()
   const diffDays = Math.floor(diffMs / 86_400_000)
-  if (diffDays === 0) return 'Hoy ' + d.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })
-  if (diffDays === 1) return 'Ayer'
-  if (diffDays < 7) return `Hace ${diffDays} días`
+  if (diffDays === 0) return `${t('archivos.date.today')} ${d.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' })}`
+  if (diffDays === 1) return t('archivos.date.yesterday')
+  if (diffDays < 7) return t('archivos.date.days_ago').replace('{n}', String(diffDays))
   return d.toLocaleDateString('es', { day: 'numeric', month: 'short' })
 }
 
@@ -83,13 +84,14 @@ type BrowseState =
 // ── Skeleton — mirrors the final list layout so there is no layout shift ──────
 
 function ListSkeleton() {
+  const t = useT()
   // Name widths cycle to avoid a uniform-row look
   const widths = ['62%', '44%', '55%', '38%', '68%', '50%']
   return (
     <div
       className={styles.skeletonList}
       aria-busy="true"
-      aria-label="Cargando archivos…"
+      aria-label={t('archivos.loading_aria')}
       role="status"
     >
       {widths.map((w, i) => (
@@ -128,10 +130,11 @@ interface BreadcrumbProps {
 }
 
 function Breadcrumb({ path, onNavigate }: BreadcrumbProps) {
+  const t = useT()
   const segments = path ? path.split('/').filter(Boolean) : []
 
   return (
-    <nav className={styles.breadcrumb} aria-label="Ruta de navegación">
+    <nav className={styles.breadcrumb} aria-label={t('archivos.breadcrumb.aria')}>
       <span className={styles.breadcrumbSegment}>
         <button
           type="button"
@@ -139,7 +142,7 @@ function Breadcrumb({ path, onNavigate }: BreadcrumbProps) {
           onClick={() => onNavigate('')}
           aria-current={segments.length === 0 ? 'page' : undefined}
         >
-          Workspace
+          {t('archivos.breadcrumb.root')}
         </button>
       </span>
       {segments.map((seg, i) => {
@@ -175,8 +178,10 @@ interface EntryProps {
 }
 
 function ListEntry({ entry, onClick }: EntryProps) {
+  const t = useT()
   const isDir = Boolean(entry.is_dir || entry.kind === 'directory')
   const colorClass = iconColorClass(entry.kind, isDir)
+  const kindLabel = isDir ? t('archivos.entry.folder') : t('archivos.entry.file')
   return (
     <HoverRow
       className={styles.entry}
@@ -186,7 +191,7 @@ function ListEntry({ entry, onClick }: EntryProps) {
       onKeyDown={e => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() }
       }}
-      aria-label={`${isDir ? 'Carpeta' : 'Archivo'}: ${entry.name}`}
+      aria-label={`${kindLabel}: ${entry.name}`}
     >
       <span className={`${styles.entryIcon} ${colorClass}`} aria-hidden="true">
         {fileIconForKind(entry.kind, isDir)}
@@ -195,7 +200,7 @@ function ListEntry({ entry, onClick }: EntryProps) {
         {entry.name}
       </span>
       <span className={styles.entrySize}>{isDir ? '—' : formatBytes(entry.size)}</span>
-      <span className={styles.entryDate}>{formatDate(entry.modified)}</span>
+      <span className={styles.entryDate}>{formatDate(entry.modified, t)}</span>
     </HoverRow>
   )
 }
@@ -203,8 +208,10 @@ function ListEntry({ entry, onClick }: EntryProps) {
 // ── File/Folder entry — grid view ─────────────────────────────────────────────
 
 function GridEntry({ entry, onClick }: EntryProps) {
+  const t = useT()
   const isDir = Boolean(entry.is_dir || entry.kind === 'directory')
   const colorClass = iconColorClass(entry.kind, isDir)
+  const kindLabel = isDir ? t('archivos.entry.folder') : t('archivos.entry.file')
   return (
     <HoverRow
       className={styles.gridEntry}
@@ -214,7 +221,7 @@ function GridEntry({ entry, onClick }: EntryProps) {
       onKeyDown={e => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() }
       }}
-      aria-label={`${isDir ? 'Carpeta' : 'Archivo'}: ${entry.name}`}
+      aria-label={`${kindLabel}: ${entry.name}`}
     >
       <span className={`${styles.entryIcon} ${colorClass}`} aria-hidden="true" style={{ width: 'auto', height: 'auto' }}>
         {isDir
@@ -235,6 +242,7 @@ interface FileDrawerProps {
 }
 
 function FileDrawer({ file, onClose }: FileDrawerProps) {
+  const t = useT()
   const [preview, setPreview] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
 
@@ -259,19 +267,19 @@ function FileDrawer({ file, onClose }: FileDrawerProps) {
         <div className={styles.fileMeta}>
           <div className={styles.fileMetaRows}>
             <div className={styles.fileMetaRow}>
-              <span className={styles.fileMetaLabel}>Tamaño</span>
+              <span className={styles.fileMetaLabel}>{t('archivos.meta.size')}</span>
               <span className={styles.fileMetaValue}>{formatBytes(file.size)}</span>
             </div>
             <div className={styles.fileMetaRow}>
-              <span className={styles.fileMetaLabel}>Tipo</span>
-              <span className={styles.fileMetaValue}>{file.kind ?? 'archivo'}</span>
+              <span className={styles.fileMetaLabel}>{t('archivos.meta.type')}</span>
+              <span className={styles.fileMetaValue}>{file.kind ?? t('archivos.meta.type.file')}</span>
             </div>
             <div className={styles.fileMetaRow}>
-              <span className={styles.fileMetaLabel}>Modificado</span>
-              <span className={styles.fileMetaValue}>{formatDate(file.modified)}</span>
+              <span className={styles.fileMetaLabel}>{t('archivos.meta.modified')}</span>
+              <span className={styles.fileMetaValue}>{formatDate(file.modified, t)}</span>
             </div>
             <div className={styles.fileMetaRow}>
-              <span className={styles.fileMetaLabel}>Ruta</span>
+              <span className={styles.fileMetaLabel}>{t('archivos.meta.path')}</span>
               <span className={styles.fileMetaValue}>{file.path}</span>
             </div>
           </div>
@@ -285,18 +293,18 @@ function FileDrawer({ file, onClose }: FileDrawerProps) {
             style={{ alignSelf: 'flex-start' }}
           >
             <Download size={13} aria-hidden="true" />
-            Descargar archivo
+            {t('archivos.download')}
           </a>
 
           {previewLoading && (
             <div className={styles.previewLoading}>
               <Loader2 size={13} className="spin" aria-hidden="true" />
-              <span>Cargando vista previa…</span>
+              <span>{t('archivos.preview.loading')}</span>
             </div>
           )}
 
           {preview !== null && !previewLoading && (
-            <pre className={styles.preview} aria-label="Vista previa del contenido">
+            <pre className={styles.preview} aria-label={t('archivos.preview.aria')}>
               {preview}
             </pre>
           )}
@@ -309,12 +317,13 @@ function FileDrawer({ file, onClose }: FileDrawerProps) {
 // ── List header row ───────────────────────────────────────────────────────────
 
 function ListColumnHeader() {
+  const t = useT()
   return (
     <div className={styles.listHeader} aria-hidden="true">
       <span style={{ width: 20, flexShrink: 0 }} />
-      <span className={styles.listHeaderName}>Nombre</span>
-      <span className={styles.listHeaderSize}>Tamaño</span>
-      <span className={styles.listHeaderDate}>Modificado</span>
+      <span className={styles.listHeaderName}>{t('archivos.col.name')}</span>
+      <span className={styles.listHeaderSize}>{t('archivos.col.size')}</span>
+      <span className={styles.listHeaderDate}>{t('archivos.col.modified')}</span>
     </div>
   )
 }
@@ -322,6 +331,7 @@ function ListColumnHeader() {
 // ── ArchivosView ──────────────────────────────────────────────────────────────
 
 export default function ArchivosView() {
+  const t = useT()
   const [currentPath, setCurrentPath] = useState('')
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list')
   const [browseState, setBrowseState] = useState<BrowseState>({ status: 'loading' })
@@ -346,7 +356,7 @@ export default function ArchivosView() {
     } catch (err) {
       setBrowseState({
         status: 'error',
-        message: err instanceof Error ? err.message : 'No se pudieron cargar los archivos.',
+        message: err instanceof Error ? err.message : t('archivos.err.load'),
       })
     }
   }, [])
@@ -366,13 +376,13 @@ export default function ArchivosView() {
     for (const f of Array.from(picked)) {
       try { await uploadWorkspaceFile(f); ok += 1 }
       catch (err) {
-        sileo.error({ title: `No se pudo subir «${f.name}»`, description: err instanceof Error ? err.message : undefined })
+        sileo.error({ title: t('archivos.upload.err').replace('{name}', f.name), description: err instanceof Error ? err.message : undefined })
       }
     }
     setUploading(false)
     e.target.value = '' // reset so the same file can be re-selected
     if (ok > 0) {
-      sileo.success({ title: ok === 1 ? 'Archivo subido' : `${ok} archivos subidos` })
+      sileo.success({ title: ok === 1 ? t('archivos.upload.ok_one') : t('archivos.upload.ok_many').replace('{n}', String(ok)) })
       // Uploads land at the workspace root — go there so the file is visible.
       navigate('')
       void load('')
@@ -395,8 +405,8 @@ export default function ArchivosView() {
   return (
     <>
       <PageHeader
-        title="Archivos"
-        subtitle="Espacio de trabajo del agente."
+        title={t('view.archivos')}
+        subtitle={t('archivos.subtitle')}
         actions={
           <>
             <input
@@ -411,21 +421,21 @@ export default function ArchivosView() {
               variant="secondary"
               size="sm"
               onClick={() => fileInputRef.current?.click()}
-              aria-label="Subir archivos al espacio de trabajo"
+              aria-label={t('archivos.upload.aria')}
               loading={uploading}
             >
               <Upload size={13} aria-hidden="true" />
-              Subir
+              {t('archivos.upload')}
             </Button>
             <Button
               variant="ghost"
               size="sm"
               onClick={() => load(currentPath)}
-              aria-label="Actualizar lista de archivos"
+              aria-label={t('archivos.refresh.aria')}
               loading={browseState.status === 'loading'}
             >
               <RefreshCw size={13} aria-hidden="true" />
-              Actualizar
+              {t('archivos.refresh')}
             </Button>
           </>
         }
@@ -439,13 +449,13 @@ export default function ArchivosView() {
           <div
             className={styles.viewToggle}
             role="group"
-            aria-label="Modo de vista"
+            aria-label={t('archivos.view_mode.aria')}
           >
             <button
               type="button"
               className={`${styles.viewToggleBtn}${viewMode === 'list' ? ` ${styles.viewToggleBtnActive}` : ''}`}
               onClick={() => setViewMode('list')}
-              aria-label="Vista de lista"
+              aria-label={t('archivos.view_mode.list')}
               aria-pressed={viewMode === 'list'}
             >
               <List size={13} aria-hidden="true" />
@@ -454,7 +464,7 @@ export default function ArchivosView() {
               type="button"
               className={`${styles.viewToggleBtn}${viewMode === 'grid' ? ` ${styles.viewToggleBtnActive}` : ''}`}
               onClick={() => setViewMode('grid')}
-              aria-label="Vista de cuadrícula"
+              aria-label={t('archivos.view_mode.grid')}
               aria-pressed={viewMode === 'grid'}
             >
               <LayoutGrid size={13} aria-hidden="true" />
@@ -475,7 +485,7 @@ export default function ArchivosView() {
                 size="sm"
                 onClick={() => load(currentPath)}
               >
-                Reintentar
+                {t('archivos.retry')}
               </Button>
             </div>
           </FadeIn>
@@ -494,14 +504,14 @@ export default function ArchivosView() {
               {browseState.entries.length === 0 ? (
                 <EmptyState
                   icon={<Folder size={40} />}
-                  title="Esta carpeta está vacía"
-                  description="Los archivos que cree el agente aparecen aquí. También puedes subir los tuyos con el botón Subir."
+                  title={t('archivos.empty.title')}
+                  description={t('archivos.empty.desc')}
                 />
               ) : (
                 <>
                   {/* Accessible count badge below toolbar */}
                   <p className={styles.countLabel}>
-                    {entryCount} elemento{entryCount === 1 ? '' : 's'}
+                    {(entryCount === 1 ? t('archivos.count.one') : t('archivos.count.many')).replace('{n}', String(entryCount))}
                   </p>
 
                   {viewMode === 'list' ? (
@@ -510,7 +520,7 @@ export default function ArchivosView() {
                       <ul
                         className={styles.list}
                         role="list"
-                        aria-label={`${entryCount} elemento${entryCount === 1 ? '' : 's'}`}
+                        aria-label={(entryCount === 1 ? t('archivos.count.one') : t('archivos.count.many')).replace('{n}', String(entryCount))}
                       >
                         <AnimatePresence initial={false}>
                           {browseState.entries.map(entry => (
@@ -528,7 +538,7 @@ export default function ArchivosView() {
                     <ul
                       className={styles.grid}
                       role="list"
-                      aria-label={`${entryCount} elemento${entryCount === 1 ? '' : 's'}`}
+                      aria-label={(entryCount === 1 ? t('archivos.count.one') : t('archivos.count.many')).replace('{n}', String(entryCount))}
                     >
                       <AnimatePresence initial={false}>
                         {browseState.entries.map(entry => (

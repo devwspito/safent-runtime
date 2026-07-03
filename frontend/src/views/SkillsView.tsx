@@ -37,7 +37,7 @@ interface PollHandle {
   cancel(): void
 }
 
-function pollHubOp(opId: string, { onDone, onError }: { onDone?: () => void; onError?: (r: string) => void }): PollHandle {
+function pollHubOp(opId: string, t: ReturnType<typeof useT>, { onDone, onError }: { onDone?: () => void; onError?: (r: string) => void }): PollHandle {
   let tries = 0
   let unknownStreak = 0
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -55,7 +55,7 @@ function pollHubOp(opId: string, { onDone, onError }: { onDone?: () => void; onE
     // streak (tolerate a registration race) instead of polling ~100s to "timeout".
     if (status === 'unknown') {
       if (++unknownStreak >= 3) {
-        onError?.('La operación ya no existe (se perdió o el servicio se reinició).')
+        onError?.(t('skills.hub.op_lost'))
         return
       }
     } else {
@@ -177,10 +177,10 @@ export default function SkillsView() {
     } catch (e) {
       dispatch({
         type: 'FAILED',
-        message: e instanceof ApiError ? e.message : 'No se pudieron cargar las habilidades.',
+        message: e instanceof ApiError ? e.message : t('skills.err.load'),
       })
     }
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { loadInstalled() }, [loadInstalled])
 
@@ -244,7 +244,7 @@ export default function SkillsView() {
       })
       await doInstallSkill(identifier, name, onBtnUpdate, true)
     } catch (e) {
-      show(e instanceof Error ? e.message : 'Error al registrar la decisión', 'error')
+      show(e instanceof Error ? e.message : t('skills.err.decision'), 'error')
       onBtnUpdate('ready')
     }
   }
@@ -259,11 +259,11 @@ export default function SkillsView() {
       const op: HubInstallResponse = await installSkill(identifier, force)
 
       if (op && op.blocked) {
-        const risksText = (op.risks ?? []).slice(0, 3).join('; ') || 'varios riesgos detectados'
+        const risksText = (op.risks ?? []).slice(0, 3).join('; ') || t('skills.install.risks_fallback')
         const ok = await confirm({
-          title: `El análisis de seguridad bloqueó "${name}"`,
-          description: `Puntuación: ${op.score ?? '?'}/100. Riesgos: ${risksText}.\n\n¿Instalar igualmente bajo tu responsabilidad?`,
-          confirmLabel: 'Instalar igualmente',
+          title: t('skills.install.blocked.title').replace('{name}', name),
+          description: t('skills.install.blocked.desc').replace('{score}', String(op.score ?? '?')).replace('{risks}', risksText),
+          confirmLabel: t('skills.install.blocked.confirm'),
           variant: 'danger',
         })
         if (ok) {
@@ -275,24 +275,24 @@ export default function SkillsView() {
       }
 
       if (op && (op.ok === false || op.error)) {
-        throw new Error(op.error ?? 'No se pudo instalar: security')
+        throw new Error(op.error ?? t('skills.install.err.security'))
       }
       handleInstallOp(op, name, onBtnUpdate)
     } catch (e) {
-      show(`No se pudo instalar: ${e instanceof Error ? e.message : 'error'}`, 'error')
+      show(t('skills.install.err').replace('{reason}', e instanceof Error ? e.message : t('skills.err.generic')), 'error')
       onBtnUpdate('ready')
     }
   }
 
   function handleInstallOp(op: HubInstallResponse, name: string, onBtnUpdate: (st: 'installing' | 'installed' | 'ready') => void) {
     if (op?.op_id) {
-      show(`Instalando "${name}"…`, 'ok')
-      trackPoll(pollHubOp(op.op_id, {
-        onDone: () => { show(`"${name}" instalada — pruébala en el chat`, 'ok'); onBtnUpdate('installed'); loadInstalled() },
-        onError: r => { show(`No se pudo instalar: ${r}`, 'error'); onBtnUpdate('ready') },
+      show(t('skills.install.installing').replace('{name}', name), 'ok')
+      trackPoll(pollHubOp(op.op_id, t, {
+        onDone: () => { show(t('skills.install.installed').replace('{name}', name), 'ok'); onBtnUpdate('installed'); loadInstalled() },
+        onError: r => { show(t('skills.install.err').replace('{reason}', r), 'error'); onBtnUpdate('ready') },
       }))
     } else {
-      show(`"${name}" instalada — pruébala en el chat`, 'ok')
+      show(t('skills.install.installed').replace('{name}', name), 'ok')
       onBtnUpdate('installed')
       loadInstalled()
     }
@@ -306,7 +306,7 @@ export default function SkillsView() {
       const details = await getSkillDetails(pkgId)
       setSkillDetails(details)
     } catch (e) {
-      show(e instanceof Error ? e.message : 'No se pudieron cargar los detalles', 'error')
+      show(e instanceof Error ? e.message : t('skills.err.details'), 'error')
     } finally {
       setLoadingDetailsId(null)
     }
@@ -334,30 +334,30 @@ export default function SkillsView() {
           const pkgId = sk.package_id ?? sk.skill_id ?? ''
           try {
             await promoteSkill(pkgId)
-            show('El agente puede usar esta habilidad de forma autónoma', 'ok')
+            show(t('skills.promote.toast'), 'ok')
             loadInstalled()
-          } catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
+          } catch (e) { show(e instanceof Error ? e.message : t('skills.err.generic'), 'error') }
         }}
         onUninstall={async () => {
           const name = sk.skill_name ?? sk.name ?? sk.package_id ?? ''
           const ok = await confirm({
-            title: `¿Desinstalar "${name}"?`,
-            description: 'El agente dejará de tener esta habilidad.',
-            confirmLabel: 'Desinstalar',
+            title: t('skills.uninstall.confirm.title').replace('{name}', name),
+            description: t('skills.uninstall.confirm.desc'),
+            confirmLabel: t('skills.uninstall.confirm.label'),
             variant: 'danger',
           })
           if (!ok) return
           try {
             const op = await uninstallHubSkill(name)
             if (op?.op_id) {
-              trackPoll(pollHubOp(op.op_id, {
-                onDone: () => { show(`"${name}" desinstalada`, 'ok'); loadInstalled() },
-                onError: r => { show(`No se pudo desinstalar: ${r}`, 'error'); loadInstalled() },
+              trackPoll(pollHubOp(op.op_id, t, {
+                onDone: () => { show(t('skills.uninstall.done').replace('{name}', name), 'ok'); loadInstalled() },
+                onError: r => { show(t('skills.uninstall.err').replace('{reason}', r), 'error'); loadInstalled() },
               }))
             } else {
-              show(`"${name}" desinstalada`, 'ok'); loadInstalled()
+              show(t('skills.uninstall.done').replace('{name}', name), 'ok'); loadInstalled()
             }
-          } catch (e) { show(e instanceof Error ? e.message : 'Error', 'error') }
+          } catch (e) { show(e instanceof Error ? e.message : t('skills.err.generic'), 'error') }
         }}
       />
     </AnimatedListItem>
@@ -408,11 +408,11 @@ export default function SkillsView() {
 
           {/* ── Installed skills ─────────────────────────────────────────── */}
           <StaggerItem>
-            <section className={s.section} aria-label="Habilidades instaladas">
+            <section className={s.section} aria-label={t('skills.installed.aria')}>
               <div className={s.sectionHead}>
                 <span className={s.sectionLabel}>{t('skills.installed.label')}</span>
                 {installedCount !== null && installedCount > 0 && (
-                  <span className={s.sectionCount} aria-label={`${installedCount} habilidades`}>
+                  <span className={s.sectionCount} aria-label={t('skills.count.aria').replace('{n}', String(installedCount))}>
                     {installedCount}
                   </span>
                 )}
@@ -420,7 +420,7 @@ export default function SkillsView() {
 
               {/* Loading skeletons */}
               {state.status === 'loading' && (
-                <ul className={s.list} aria-busy="true" aria-label="Cargando habilidades">
+                <ul className={s.list} aria-busy="true" aria-label={t('skills.loading_aria')}>
                   {[0, 1, 2].map(i => (
                     <li key={i}>
                       <SkillRowSkeleton delay={i * 60} />
@@ -437,11 +437,11 @@ export default function SkillsView() {
                       <AlertTriangle size={16} />
                     </span>
                     <div className={s.errorBody}>
-                      <p className={s.errorTitle}>No se pudieron cargar las habilidades</p>
+                      <p className={s.errorTitle}>{t('skills.err.load')}</p>
                       <p className={s.errorDesc}>{state.message}</p>
                       <div className={s.errorActions}>
                         <Button variant="secondary" size="sm" onClick={loadInstalled}>
-                          Reintentar
+                          {t('skills.retry')}
                         </Button>
                       </div>
                     </div>
@@ -458,7 +458,7 @@ export default function SkillsView() {
                         compact
                         icon={<Zap size={28} />}
                         title={t('skills.installed.empty')}
-                        description="Busca en el catálogo e instala la primera en segundos."
+                        description={t('skills.installed.empty.desc')}
                         action={
                           <Button
                             variant="secondary"
@@ -468,7 +468,7 @@ export default function SkillsView() {
                               hubInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
                             }}
                           >
-                            Explorar el catálogo
+                            {t('skills.explore_catalog')}
                           </Button>
                         }
                       />
@@ -518,7 +518,7 @@ export default function SkillsView() {
                 {!hubSearching && hubResults.length === 0 && (
                   <motion.div
                     className={s.pillsRow}
-                    aria-label="Búsquedas sugeridas"
+                    aria-label={t('skills.suggestions.aria')}
                     initial={{ opacity: 0, y: 4 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -4 }}
@@ -533,7 +533,7 @@ export default function SkillsView() {
                         initial={{ opacity: 0, scale: 0.9 }}
                         animate={{ opacity: 1, scale: 1 }}
                         transition={{ ...SPRING, delay: i * 0.04 }}
-                        aria-label={`Buscar ${chip}`}
+                        aria-label={t('skills.search_for.aria').replace('{term}', chip)}
                       >
                         {chip}
                       </motion.button>
@@ -544,7 +544,7 @@ export default function SkillsView() {
 
               {/* Search row */}
               <div className={s.searchRow}>
-                <label className="sr-only" htmlFor="hub-search">Buscar en el catálogo de habilidades</label>
+                <label className="sr-only" htmlFor="hub-search">{t('skills.hub_search.label')}</label>
                 <div className={s.searchWrap}>
                   <span className={s.searchIcon} aria-hidden="true">
                     <SearchIcon size={14} />
@@ -554,7 +554,7 @@ export default function SkillsView() {
                     ref={hubInputRef}
                     className={s.searchInput}
                     type="search"
-                    placeholder="Buscar habilidades…"
+                    placeholder={t('skills.hub_search.placeholder')}
                     autoComplete="off"
                     value={hubQuery}
                     onChange={e => setHubQuery(e.target.value)}
@@ -567,7 +567,7 @@ export default function SkillsView() {
                   onClick={runSearch}
                   loading={hubSearching}
                 >
-                  Buscar
+                  {t('skills.search')}
                 </Button>
               </div>
 
@@ -576,8 +576,8 @@ export default function SkillsView() {
                 <FadeIn>
                   <EmptyState
                     icon={<SearchIcon size={28} />}
-                    title={`Sin resultados para "${hubQuery}"`}
-                    description="Prueba con otro término o explora las búsquedas sugeridas."
+                    title={t('skills.search.empty.title').replace('{query}', hubQuery)}
+                    description={t('skills.search.empty.desc')}
                   />
                 </FadeIn>
               )}
@@ -593,7 +593,7 @@ export default function SkillsView() {
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
                     transition={{ duration: 0.15 }}
-                    aria-label={`${hubResults.length} resultados`}
+                    aria-label={t('skills.results.aria').replace('{n}', String(hubResults.length))}
                   >
                     <AnimatePresence initial={false}>
                       {hubResults.map((item, i) => (
@@ -764,6 +764,7 @@ interface HubResultRowProps {
 }
 
 function HubResultRow({ item, installedNames, onInstall }: HubResultRowProps) {
+  const t = useT()
   const reduced = useReducedMotion()
   const [btnState, setBtnState] = useState<'ready' | 'installing' | 'installed'>('ready')
   const name = item.name ?? item.identifier ?? item.slug ?? ''
@@ -772,9 +773,9 @@ function HubResultRow({ item, installedNames, onInstall }: HubResultRowProps) {
   const trust = item.trust_level ?? ''
 
   const installLabel =
-    already || btnState === 'installed' ? 'Instalada' :
-    btnState === 'installing' ? 'Instalando…' :
-    'Instalar'
+    already || btnState === 'installed' ? t('skills.installed_badge') :
+    btnState === 'installing' ? t('skills.installing') :
+    t('skills.install')
 
   return (
     <motion.div
@@ -811,9 +812,9 @@ function HubResultRow({ item, installedNames, onInstall }: HubResultRowProps) {
             target="_blank"
             rel="noopener noreferrer"
             className={s.docLink}
-            aria-label={`Documentación de ${name} (abre en nueva pestaña)`}
+            aria-label={t('skills.docs.aria').replace('{name}', name)}
           >
-            Docs
+            {t('skills.docs')}
           </a>
         )}
         <button

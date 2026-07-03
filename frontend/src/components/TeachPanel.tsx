@@ -8,24 +8,26 @@
  */
 import { useState } from 'react'
 import { sileo } from 'sileo'
+import { useT } from '../lib/i18n'
 import { Button } from './ui/Button'
 import { VncFrame } from './VncView'
 import { startTeaching, signTeaching, ApiError } from '../api/client'
 
 export function TeachPanel({ onSaved, fullscreen }: { onSaved?: () => void; fullscreen?: boolean }) {
+  const t = useT()
   const [skill, setSkill] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   async function handleStart() {
-    if (!skill.trim()) { sileo.error({ title: 'Ponle un nombre a la habilidad' }); return }
+    if (!skill.trim()) { sileo.error({ title: t('teach.err.name') }); return }
     setBusy(true)
     try {
       const r = await startTeaching(skill.trim())
       setSessionId(r.session_id)
-      sileo.success({ title: 'Grabando. Demuestra la tarea en el navegador de abajo.' })
+      sileo.success({ title: t('teach.toast.recording') })
     } catch (e) {
-      sileo.error({ title: e instanceof ApiError ? e.message : 'No se pudo iniciar' })
+      sileo.error({ title: e instanceof ApiError ? e.message : t('teach.err.start') })
     } finally {
       setBusy(false)
     }
@@ -36,12 +38,12 @@ export function TeachPanel({ onSaved, fullscreen }: { onSaved?: () => void; full
     setBusy(true)
     try {
       await signTeaching(sessionId)
-      sileo.success({ title: '¡Habilidad guardada! Aparece en tus habilidades.' })
+      sileo.success({ title: t('teach.toast.saved') })
       setSessionId(null)
       setSkill('')
       onSaved?.()
     } catch (e) {
-      sileo.error({ title: e instanceof ApiError ? e.message : 'No se pudo guardar' })
+      sileo.error({ title: e instanceof ApiError ? e.message : t('teach.err.save') })
     } finally {
       setBusy(false)
     }
@@ -58,7 +60,7 @@ export function TeachPanel({ onSaved, fullscreen }: { onSaved?: () => void; full
           value={skill}
           onChange={(e) => setSkill(e.target.value)}
           disabled={!!sessionId}
-          placeholder='Nombre de la habilidad (p. ej. "Reservar plaza")'
+          placeholder={t('teach.name.placeholder')}
           style={{
             flex: 1, minWidth: 240,
             padding: 'var(--space-2) var(--space-3)',
@@ -70,18 +72,18 @@ export function TeachPanel({ onSaved, fullscreen }: { onSaved?: () => void; full
         />
         {sessionId ? (
           <Button variant="primary" size="sm" loading={busy} onClick={() => void handleSave()}>
-            Guardar habilidad
+            {t('teach.save')}
           </Button>
         ) : (
           <Button variant="primary" size="sm" loading={busy} onClick={() => void handleStart()}>
-            Empezar a enseñar
+            {t('teach.start')}
           </Button>
         )}
       </div>
       <p style={{ color: 'var(--color-text-dim)', fontSize: 'var(--text-sm)', margin: 0 }}>
         {sessionId
-          ? 'Navega y haz la tarea en el navegador de abajo, como lo harías normalmente. Cuando termines, pulsa «Guardar habilidad».'
-          : 'Ponle nombre y pulsa «Empezar a enseñar». Se abre un navegador real (nítido) que puedes conducir; tus pasos se convierten en una habilidad reutilizable.'}
+          ? t('teach.help.recording')
+          : t('teach.help.idle')}
       </p>
       <VncFrame fill={fullscreen} />
     </div>

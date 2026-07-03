@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { Brain, CalendarClock, ChevronRight, Save, Search, Trash2 } from 'lucide-react'
+import { useT } from '../lib/i18n'
 import { listMemory, searchMemory, forgetMemoryItem, getMemoryEntry, updateMemoryEntry, ApiError } from '../api/client'
 import type { MemoryItem, MemoryEntryDetail } from '../api/types'
 import { Drawer } from '../components/ui/Drawer'
@@ -64,8 +65,9 @@ function entryId(item: MemoryItem): string {
 // ── Skeleton rows (mirrors final item layout) ─────────────────────────────────
 
 function MemorySkeletonRows() {
+  const t = useT()
   return (
-    <div className={styles.skeletonList} aria-busy="true" aria-label="Cargando entradas de memoria">
+    <div className={styles.skeletonList} aria-busy="true" aria-label={t('memoria.loading_aria')}>
       {[80, 65, 72, 55].map((w, i) => (
         <div
           key={i}
@@ -103,8 +105,10 @@ interface MemoryRowProps {
 }
 
 function MemoryRow({ item, index, onClick }: MemoryRowProps) {
+  const t = useT()
   const content = memoryContent(item)
   const time = formatDate(item.created_at)
+  const rowLabel = t('memoria.row.aria').replace('{n}', String(index + 1))
 
   return (
     <HoverRow
@@ -113,7 +117,7 @@ function MemoryRow({ item, index, onClick }: MemoryRowProps) {
       tabIndex={0}
       onClick={onClick}
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
-      aria-label={`Entrada de memoria ${index + 1}${item.target ? ` — ${item.target}` : ''}`}
+      aria-label={`${rowLabel}${item.target ? ` — ${item.target}` : ''}`}
     >
       {/* Left icon chip */}
       <span className={styles.memIcon} aria-hidden="true">
@@ -122,7 +126,7 @@ function MemoryRow({ item, index, onClick }: MemoryRowProps) {
 
       {/* Body */}
       <div className={styles.memBody}>
-        <p className={styles.memContent}>{content || '(sin contenido)'}</p>
+        <p className={styles.memContent}>{content || t('memoria.content.empty')}</p>
         {(item.target || time) && (
           <div className={styles.memMeta}>
             {item.target && (
@@ -148,6 +152,7 @@ function MemoryRow({ item, index, onClick }: MemoryRowProps) {
 // ── MemoriaView ───────────────────────────────────────────────────────────────
 
 export default function MemoriaView() {
+  const t = useT()
   const [state, setState] = useState<MemoryState>({ status: 'loading' })
   const [searchInput, setSearchInput] = useState('')
   const [drawer, setDrawer] = useState<DrawerState>({ open: false })
@@ -163,7 +168,7 @@ export default function MemoriaView() {
       const items = Array.isArray(raw) ? raw : []
       setState({ status: 'success', items, query })
     } catch (e) {
-      const msg = e instanceof ApiError ? e.message : 'No se pudo cargar la memoria.'
+      const msg = e instanceof ApiError ? e.message : t('memoria.err.load')
       setState({ status: 'error', message: msg })
       sileo.error({ title: msg })
     }
@@ -207,20 +212,20 @@ export default function MemoriaView() {
     if (!drawer.open) return
     const item = drawer.item
     const id = entryId(item)
-    if (!id) { sileo.error({ title: 'No se puede editar esta entrada.' }); return }
+    if (!id) { sileo.error({ title: t('memoria.err.no_edit') }); return }
     const next = editValue.trim()
-    if (!next) { sileo.warning({ title: 'El contenido no puede estar vacío.' }); return }
+    if (!next) { sileo.warning({ title: t('memoria.err.empty_content') }); return }
     setSaving(true)
     try {
       await updateMemoryEntry(id, next)
-      sileo.success({ title: 'Entrada actualizada' })
+      sileo.success({ title: t('memoria.toast.saved') })
       // Reflect the saved value in the open drawer without a refetch.
       setDrawer(prev => prev.open
         ? { ...prev, detail: prev.detail ? { ...prev.detail, content: next } : prev.detail }
         : prev)
       void load(searchInput.trim())
     } catch (e) {
-      sileo.error({ title: e instanceof ApiError ? e.message : 'No se pudo guardar' })
+      sileo.error({ title: e instanceof ApiError ? e.message : t('memoria.err.save') })
     } finally {
       setSaving(false)
     }
@@ -230,15 +235,15 @@ export default function MemoriaView() {
     if (!drawer.open) return
     const item = drawer.item
     const id = entryId(item)
-    if (!id) { sileo.error({ title: 'No se puede eliminar esta entrada.' }); return }
+    if (!id) { sileo.error({ title: t('memoria.err.no_delete') }); return }
     setDeleting(true)
     try {
       await forgetMemoryItem(id)
-      sileo.success({ title: 'Entrada eliminada' })
+      sileo.success({ title: t('memoria.toast.deleted') })
       closeDrawer()
       void load(searchInput.trim())
     } catch (e) {
-      sileo.error({ title: e instanceof Error ? e.message : 'Error al eliminar' })
+      sileo.error({ title: e instanceof Error ? e.message : t('memoria.err.delete') })
     } finally {
       setDeleting(false)
     }
@@ -255,8 +260,8 @@ export default function MemoriaView() {
   return (
     <>
       <PageHeader
-        title="Memoria"
-        subtitle="Lo que Lumen recuerda entre conversaciones."
+        title={t('view.memoria')}
+        subtitle={t('memoria.subtitle')}
       />
 
       <div className="view-body cv-view-body">
@@ -264,7 +269,7 @@ export default function MemoriaView() {
 
           {/* ── Search ──────────────────────────────────────────────────────── */}
           <StaggerItem>
-            <div className={styles.searchPanel} role="search" aria-label="Buscar en memoria">
+            <div className={styles.searchPanel} role="search" aria-label={t('memoria.search.aria')}>
               <div className={styles.searchRow}>
                 <div className={styles.searchInputWrap}>
                   <Search
@@ -272,13 +277,13 @@ export default function MemoriaView() {
                     aria-hidden="true"
                     className={styles.searchIcon}
                   />
-                  <label className="sr-only" htmlFor="memory-search">Buscar en memoria</label>
+                  <label className="sr-only" htmlFor="memory-search">{t('memoria.search.aria')}</label>
                   <input
                     id="memory-search"
                     ref={inputRef}
                     className={styles.searchInput}
                     type="search"
-                    placeholder="Buscar en memoria…"
+                    placeholder={t('memoria.search.placeholder')}
                     autoComplete="off"
                     value={searchInput}
                     onChange={e => setSearchInput(e.target.value)}
@@ -291,7 +296,7 @@ export default function MemoriaView() {
                   onClick={handleSearch}
                   loading={state.status === 'loading'}
                 >
-                  Buscar
+                  {t('memoria.search.btn')}
                 </Button>
               </div>
             </div>
@@ -299,12 +304,12 @@ export default function MemoriaView() {
 
           {/* ── Results ─────────────────────────────────────────────────────── */}
           <StaggerItem>
-            <section className={styles.resultsSection} aria-label="Entradas de memoria">
+            <section className={styles.resultsSection} aria-label={t('memoria.results.aria')}>
 
               {/* Section header */}
               <div className={styles.sectionHead}>
                 <h2 className={styles.sectionLabel}>
-                  {activeQuery ? `Resultados para "${activeQuery}"` : 'Entradas recientes'}
+                  {activeQuery ? t('memoria.results.for').replace('{query}', activeQuery) : t('memoria.results.recent')}
                 </h2>
                 {isSuccess && itemCount > 0 && (
                   <span className={styles.countChip}>{itemCount}</span>
@@ -320,7 +325,7 @@ export default function MemoriaView() {
                   <div role="alert" className={styles.errorState}>
                     <p className={styles.errorMessage}>{state.message}</p>
                     <Button variant="secondary" size="sm" onClick={handleRetry}>
-                      Reintentar
+                      {t('memoria.retry')}
                     </Button>
                   </div>
                 </FadeIn>
@@ -340,11 +345,11 @@ export default function MemoriaView() {
                       <EmptyState
                         icon={<Brain size={36} />}
                         title={activeQuery
-                          ? `Sin resultados para "${activeQuery}"`
-                          : 'Aún no hay recuerdos'}
+                          ? t('memoria.empty.noresults').replace('{query}', activeQuery)
+                          : t('memoria.empty.title')}
                         description={activeQuery
                           ? undefined
-                          : 'Lumen irá guardando lo importante de tus conversaciones automáticamente.'}
+                          : t('memoria.empty.desc')}
                       />
                     )}
 
@@ -376,7 +381,7 @@ export default function MemoriaView() {
       {/* ── Full-content drawer ──────────────────────────────────────────────── */}
       <Drawer
         open={drawer.open}
-        title={drawer.open && drawer.item.target ? drawer.item.target : 'Detalle de entrada'}
+        title={drawer.open && drawer.item.target ? drawer.item.target : t('memoria.drawer.title_default')}
         onClose={closeDrawer}
         footer={
           drawer.open ? (
@@ -392,10 +397,10 @@ export default function MemoriaView() {
                   !editValue.trim() ||
                   editValue.trim() === (drawer.detail?.content ?? memoryContent(drawer.item)).trim()
                 }
-                aria-label="Guardar cambios en esta entrada de memoria"
+                aria-label={t('memoria.drawer.save.aria')}
               >
                 <Save size={13} aria-hidden="true" />
-                Guardar cambios
+                {t('memoria.drawer.save')}
               </Button>
               <div className={styles.drawerFooterSpacer} />
               <Button
@@ -404,10 +409,10 @@ export default function MemoriaView() {
                 onClick={handleDelete}
                 loading={deleting}
                 disabled={saving}
-                aria-label="Eliminar esta entrada de memoria"
+                aria-label={t('memoria.drawer.delete.aria')}
               >
                 <Trash2 size={13} aria-hidden="true" />
-                Eliminar entrada
+                {t('memoria.drawer.delete')}
               </Button>
             </div>
           ) : undefined
@@ -421,7 +426,7 @@ export default function MemoriaView() {
               <div className={styles.drawerMeta}>
                 {drawer.item.target && (
                   <>
-                    <p className={styles.drawerTargetLabel}>Contexto</p>
+                    <p className={styles.drawerTargetLabel}>{t('memoria.drawer.context')}</p>
                     <p className={styles.drawerTargetValue}>{drawer.item.target}</p>
                   </>
                 )}
@@ -437,25 +442,25 @@ export default function MemoriaView() {
             {/* Content body — editable */}
             {drawer.loading ? (
               <div className={styles.drawerLoadingWrap}>
-                <Spinner size={14} label="Cargando contenido completo…" />
+                <Spinner size={14} label={t('memoria.drawer.loading')} />
                 <div className="skeleton skeleton--line" style={{ width: '90%' }} />
                 <div className="skeleton skeleton--line" style={{ width: '75%' }} />
                 <div className="skeleton skeleton--line-sm" style={{ width: '55%' }} />
               </div>
             ) : (
               <FadeIn>
-                <label className="sr-only" htmlFor="memory-edit">Contenido de la entrada</label>
+                <label className="sr-only" htmlFor="memory-edit">{t('memoria.drawer.edit.label')}</label>
                 <textarea
                   id="memory-edit"
                   className={styles.editArea}
                   value={editValue}
                   onChange={e => setEditValue(e.target.value)}
                   spellCheck={false}
-                  aria-label="Editar el contenido de esta entrada de memoria"
-                  placeholder="Contenido de la entrada…"
+                  aria-label={t('memoria.drawer.edit.aria')}
+                  placeholder={t('memoria.drawer.edit.placeholder')}
                 />
                 <p className={styles.editHint}>
-                  Edita el texto y pulsa <strong>Guardar cambios</strong>. Lumen usará esto como contexto en futuras conversaciones.
+                  {t('memoria.drawer.hint_pre')} <strong>{t('memoria.drawer.save')}</strong>{t('memoria.drawer.hint_post')}
                 </p>
               </FadeIn>
             )}

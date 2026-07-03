@@ -27,32 +27,34 @@ import {
 import styles from './McpView.module.css'
 
 // Curated catalog of verified one-click MCP servers (npx/uvx).
-const MCP_CATALOG: McpRegistryEntry[] = [
-  {
-    server_id: 'github',
-    label: 'GitHub',
-    tag: 'Dev',
-    description: 'Acceso a tus repositorios, issues y pull requests de GitHub.',
-    argv: ['npx', '-y', '@modelcontextprotocol/server-github'],
-    repository: 'https://github.com/github/github-mcp-server',
-  },
-  {
-    server_id: 'context7',
-    label: 'Context7',
-    tag: 'Docs',
-    description: 'Documentación de librerías en vivo, siempre actualizada.',
-    argv: ['npx', '-y', '@upstash/context7-mcp'],
-    repository: 'https://github.com/upstash/context7',
-  },
-  {
-    server_id: 'filesystem',
-    label: 'Archivos locales',
-    tag: 'Sistema',
-    description: 'Lee y escribe ficheros locales. Cada acción requiere tu permiso.',
-    argv: ['npx', '-y', '@modelcontextprotocol/server-filesystem', '/var/lib/hermes/workspace'],
-    repository: 'https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem',
-  },
-]
+function mcpCatalog(t: ReturnType<typeof useT>): McpRegistryEntry[] {
+  return [
+    {
+      server_id: 'github',
+      label: 'GitHub',
+      tag: t('mcp.catalog.tag.dev'),
+      description: t('mcp.catalog.github.desc'),
+      argv: ['npx', '-y', '@modelcontextprotocol/server-github'],
+      repository: 'https://github.com/github/github-mcp-server',
+    },
+    {
+      server_id: 'context7',
+      label: 'Context7',
+      tag: t('mcp.catalog.tag.docs'),
+      description: t('mcp.catalog.context7.desc'),
+      argv: ['npx', '-y', '@upstash/context7-mcp'],
+      repository: 'https://github.com/upstash/context7',
+    },
+    {
+      server_id: 'filesystem',
+      label: t('mcp.catalog.filesystem.label'),
+      tag: t('mcp.catalog.tag.system'),
+      description: t('mcp.catalog.filesystem.desc'),
+      argv: ['npx', '-y', '@modelcontextprotocol/server-filesystem', '/var/lib/hermes/workspace'],
+      repository: 'https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem',
+    },
+  ]
+}
 
 function slugify(name: string): string {
   return String(name || '')
@@ -160,6 +162,8 @@ interface PendingInstall {
 }
 
 export default function McpView() {
+  const t = useT()
+  const MCP_CATALOG = mcpCatalog(t)
   const [state, dispatch] = useReducer(reducer, { status: 'loading' })
   const [registryState, setRegistryState] = useState<RegistryState>({ status: 'idle' })
   const [pendingInstall, setPendingInstall] = useState<PendingInstall | null>(null)
@@ -174,7 +178,7 @@ export default function McpView() {
       .then(servers => dispatch({ type: 'LOADED', servers: servers.filter(s => s.slug !== 'ruflo') }))
       .catch((e: unknown) => dispatch({
         type: 'FAILED',
-        message: e instanceof ApiError ? e.message : 'No se pudieron cargar las herramientas externas.',
+        message: e instanceof ApiError ? e.message : t('mcp.err.load'),
       }))
   }
 
@@ -201,13 +205,13 @@ export default function McpView() {
       })
       const name = entry.label ?? entry.name ?? ''
       if (res && res.tool_count === 0) {
-        show(`"${name}" se conectó pero no tiene herramientas disponibles. Revisa su configuración.`, 'warn', 7000)
+        show(t('mcp.toast.no_tools').replace('{name}', name), 'warn', 7000)
       } else {
-        show(`"${name}" añadida — tus agentes ya pueden usarla`, 'ok')
+        show(t('mcp.toast.added').replace('{name}', name), 'ok')
       }
       load()
     } catch (e) {
-      show(e instanceof Error ? e.message : 'Error', 'error')
+      show(e instanceof Error ? e.message : t('mcp.err.generic'), 'error')
     } finally {
       onDone()
     }
@@ -222,7 +226,7 @@ export default function McpView() {
     const runner = getRunner(entry.argv)
     const ALLOWED_RUNNERS = ['npx', 'uvx']
     if (runner && !ALLOWED_RUNNERS.includes(runner)) {
-      show(`Por ahora se admiten herramientas npx y uvx (esta usa ${runner}).`, 'warn', 7000)
+      show(t('mcp.unsupported_runner').replace('{runner}', runner), 'warn', 7000)
       onDone()
       return
     }
@@ -267,7 +271,7 @@ export default function McpView() {
       })
       await doAddMcpServer(entry, collectedEnv, onDone, true)
     } catch (e) {
-      show(e instanceof Error ? e.message : 'Error al registrar la decisión', 'error')
+      show(e instanceof Error ? e.message : t('mcp.err.decision'), 'error')
       onDone()
     }
   }
@@ -283,7 +287,7 @@ export default function McpView() {
     } catch (e) {
       setRegistryState({
         status: 'error',
-        message: e instanceof ApiError ? e.message : 'No se pudo buscar en el registro.',
+        message: e instanceof ApiError ? e.message : t('mcp.err.registry_search'),
       })
     }
   }
@@ -303,8 +307,8 @@ export default function McpView() {
         />
       )}
       <PageHeader
-        title="Herramientas externas"
-        subtitle="Conecta conjuntos de herramientas externos para ampliar las capacidades del agente."
+        title={t('view.mcp')}
+        subtitle={t('mcp.subtitle')}
       />
 
       <div className="view-body cv-view-body">
@@ -312,14 +316,14 @@ export default function McpView() {
 
           {/* ── Active servers ──────────────────────────────────────────────── */}
           <StaggerItem>
-            <section className="cv-section" aria-label="Herramientas activas">
-              <h2 className={styles.sectionLabel}>Activas</h2>
+            <section className="cv-section" aria-label={t('mcp.active.aria')}>
+              <h2 className={styles.sectionLabel}>{t('mcp.active')}</h2>
 
               {state.status === 'loading' && (
                 <div
                   style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}
                   aria-busy="true"
-                  aria-label="Cargando herramientas…"
+                  aria-label={t('mcp.loading_aria')}
                 >
                   {[...Array(2)].map((_, i) => (
                     <div key={i} className={styles.skeletonRow}>
@@ -348,7 +352,7 @@ export default function McpView() {
                     <p className={styles.errorMessage}>{state.message}</p>
                     <div>
                       <Button variant="secondary" size="sm" onClick={load}>
-                        Reintentar
+                        {t('mcp.retry')}
                       </Button>
                     </div>
                   </div>
@@ -361,8 +365,8 @@ export default function McpView() {
                     <EmptyState
                       compact
                       icon={<Wrench size={32} />}
-                      title="Sin herramientas conectadas"
-                      description="Añade una del catálogo sugerido o busca en el registro para ampliar las capacidades del agente."
+                      title={t('mcp.empty.title')}
+                      description={t('mcp.empty.desc')}
                       action={
                         <Button
                           variant="secondary"
@@ -371,7 +375,7 @@ export default function McpView() {
                             document.getElementById('mcp-registry-input')?.focus()
                           }}
                         >
-                          Buscar herramientas
+                          {t('mcp.empty.cta')}
                         </Button>
                       }
                     />
@@ -386,18 +390,18 @@ export default function McpView() {
                               onRemove={async () => {
                                 const name = s.label ?? s.server_id ?? ''
                                 const ok = await confirm({
-                                  title: `¿Eliminar "${name}"?`,
-                                  description: 'El agente dejará de tener acceso a estas herramientas.',
-                                  confirmLabel: 'Eliminar',
+                                  title: t('mcp.remove.confirm.title').replace('{name}', name),
+                                  description: t('mcp.remove.confirm.desc'),
+                                  confirmLabel: t('mcp.remove'),
                                   variant: 'danger',
                                 })
                                 if (!ok) return
                                 try {
                                   await removeMcpServer(s.server_id ?? s.id ?? '')
-                                  show('Conjunto de herramientas eliminado', 'ok')
+                                  show(t('mcp.toast.removed'), 'ok')
                                   load()
                                 } catch (e) {
-                                  show(e instanceof Error ? e.message : 'Error', 'error')
+                                  show(e instanceof Error ? e.message : t('mcp.err.generic'), 'error')
                                 }
                               }}
                             />
@@ -412,8 +416,8 @@ export default function McpView() {
 
           {/* ── Suggested catalog ───────────────────────────────────────────── */}
           <StaggerItem>
-            <section className="cv-section" aria-label="Herramientas sugeridas">
-              <h2 className={styles.sectionLabel}>Sugeridas</h2>
+            <section className="cv-section" aria-label={t('mcp.suggested.aria')}>
+              <h2 className={styles.sectionLabel}>{t('mcp.suggested')}</h2>
               <ul className="cv-list" role="list">
                 <AnimatePresence initial={false}>
                   {MCP_CATALOG.map(entry => (
@@ -432,11 +436,11 @@ export default function McpView() {
 
           {/* ── Official registry search ─────────────────────────────────── */}
           <StaggerItem>
-            <section className="cv-section" aria-label="Buscar más herramientas">
-              <h2 className={styles.sectionLabel}>Buscar más herramientas</h2>
+            <section className="cv-section" aria-label={t('mcp.search.aria')}>
+              <h2 className={styles.sectionLabel}>{t('mcp.search.title')}</h2>
               <div className={styles.searchBar}>
                 <label className="sr-only" htmlFor="mcp-registry-input">
-                  Buscar herramientas externas
+                  {t('mcp.search.label')}
                 </label>
                 <div className={styles.searchInputWrap}>
                   <span className={styles.searchIcon} aria-hidden="true">
@@ -458,11 +462,11 @@ export default function McpView() {
                   onClick={searchRegistry}
                   loading={registryState.status === 'loading'}
                 >
-                  Buscar
+                  {t('mcp.search.btn')}
                 </Button>
               </div>
               <p className={styles.searchHint}>
-                Conectado al registro oficial de herramientas externas
+                {t('mcp.search.hint')}
               </p>
 
               {registryState.status === 'error' && (
@@ -471,7 +475,7 @@ export default function McpView() {
                     <p className={styles.errorMessage}>{registryState.message}</p>
                     <div>
                       <Button variant="secondary" size="sm" onClick={searchRegistry}>
-                        Reintentar
+                        {t('mcp.retry')}
                       </Button>
                     </div>
                   </div>
@@ -497,8 +501,8 @@ export default function McpView() {
               {registryState.status === 'success' && registryState.results.length === 0 && (
                 <EmptyState
                   icon={<Search size={28} />}
-                  title="Sin resultados"
-                  description="Prueba con otro término de búsqueda."
+                  title={t('mcp.search.empty.title')}
+                  description={t('mcp.search.empty.desc')}
                 />
               )}
             </section>
@@ -506,10 +510,10 @@ export default function McpView() {
 
           {/* ── Manual add ──────────────────────────────────────────────────── */}
           <StaggerItem>
-            <section className="cv-section" aria-label="Añadir manualmente">
-              <h2 className={styles.sectionLabel}>Añadir manualmente</h2>
+            <section className="cv-section" aria-label={t('mcp.manual.aria')}>
+              <h2 className={styles.sectionLabel}>{t('mcp.manual.aria')}</h2>
               <AddMcpForm
-                onAdded={() => { show('Herramienta añadida — tus agentes ya pueden usarla', 'ok'); load() }}
+                onAdded={() => { show(t('mcp.toast.added_generic'), 'ok'); load() }}
                 onToast={show}
               />
             </section>
@@ -529,14 +533,16 @@ interface McpServerRowProps {
 }
 
 function McpServerRow({ server, onRemove }: McpServerRowProps) {
+  const t = useT()
   const [showCmd, setShowCmd] = useState(false)
   const argv = Array.isArray(server.argv) ? server.argv.join(' ') : (server.argv ?? '')
   const healthy = String(server.health ?? '').toLowerCase() === 'healthy'
   const hasHealth = server.health != null && server.health !== ''
   const toolCount = server.tool_count
   const toolLabel = toolCount != null
-    ? `${toolCount} herramienta${toolCount === 1 ? '' : 's'}`
+    ? (toolCount === 1 ? t('mcp.tool_count.one') : t('mcp.tool_count.many').replace('{n}', String(toolCount)))
     : ''
+  const serverName = server.label ?? server.server_id ?? t('mcp.fallback_name')
 
   return (
     <HoverRow className={styles.serverRow}>
@@ -546,7 +552,7 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
 
       <div className={styles.serverInfo}>
         <div className={styles.serverName}>
-          {server.label ?? server.server_id ?? 'Herramienta externa'}
+          {serverName}
 
           {hasHealth && (
             <StatusDot
@@ -565,10 +571,10 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
             className={styles.serverCmdToggle}
             onClick={() => setShowCmd(v => !v)}
             aria-expanded={showCmd}
-            aria-label={showCmd ? 'Ocultar detalles técnicos' : 'Ver detalles técnicos'}
+            aria-label={showCmd ? t('mcp.details.hide') : t('mcp.details.show')}
           >
             <AnimatedChevron open={showCmd} size={10} />
-            <span>Detalles técnicos</span>
+            <span>{t('mcp.details.label')}</span>
           </button>
         )}
 
@@ -581,7 +587,7 @@ function McpServerRow({ server, onRemove }: McpServerRowProps) {
         <button
           className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
           onClick={onRemove}
-          aria-label={`Eliminar ${server.label ?? 'herramienta externa'}`}
+          aria-label={t('mcp.remove.aria').replace('{name}', server.label ?? t('mcp.fallback_name_lower'))}
         >
           <X size={13} aria-hidden="true" />
         </button>
@@ -599,6 +605,7 @@ interface CatalogCardProps {
 }
 
 function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
+  const t = useT()
   const [installing, setInstalling] = useState(false)
   const [showEnvForm, setShowEnvForm] = useState(false)
   const [envValues, setEnvValues] = useState<Record<string, string>>({})
@@ -626,7 +633,7 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
     // Validate required fields
     for (const field of envSchema) {
       if (field.required && !(envValues[field.key] ?? '').trim()) {
-        show(`"${field.label}" es obligatorio`, 'warn')
+        show(t('mcp.env.required').replace('{field}', field.label), 'warn')
         return
       }
     }
@@ -655,10 +662,10 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
               <DsBadge variant="default">{entry.tag}</DsBadge>
             )}
             {needsEnv && (
-              <DsBadge variant="warning">Requiere clave API</DsBadge>
+              <DsBadge variant="warning">{t('mcp.badge.requires_key')}</DsBadge>
             )}
             {already && (
-              <DsBadge variant="success">Añadida</DsBadge>
+              <DsBadge variant="success">{t('mcp.badge.added')}</DsBadge>
             )}
           </div>
 
@@ -670,8 +677,8 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
             <p className={styles.catalogCardWarn}>
               {entry.unsupported_reason ?? (
                 runner === ''
-                  ? 'Solo remoto — sin paquete stdio npm/pypi.'
-                  : `Solo se admiten herramientas npx/uvx (esta usa ${runner}).`
+                  ? t('mcp.unsupported.remote_only')
+                  : t('mcp.unsupported.runner').replace('{runner}', runner)
               )}
             </p>
           )}
@@ -684,10 +691,10 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
               target="_blank"
               rel="noopener noreferrer"
               className={styles.docsLink}
-              aria-label={`Documentación de ${entry.label ?? entry.name ?? id} (se abre en nueva pestaña)`}
+              aria-label={t('mcp.docs.aria').replace('{name}', entry.label ?? entry.name ?? id)}
             >
               <ExternalLink size={11} aria-hidden="true" style={{ marginRight: 4 }} />
-              Docs
+              {t('mcp.docs')}
             </a>
           )}
           {!showEnvForm && (
@@ -698,7 +705,7 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
               loading={installing}
               onClick={handleInstallClick}
             >
-              {already ? 'Añadida' : unsupported ? 'No disponible' : 'Añadir'}
+              {already ? t('mcp.badge.added') : unsupported ? t('mcp.unavailable') : t('mcp.add')}
             </Button>
           )}
         </div>
@@ -724,7 +731,7 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
           ))}
           <div className={styles.envActions}>
             <Button variant="primary" size="sm" type="button" onClick={handleEnvSubmit}>
-              Añadir
+              {t('mcp.add')}
             </Button>
             <Button
               variant="ghost"
@@ -732,7 +739,7 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
               type="button"
               onClick={() => { setShowEnvForm(false); setEnvValues({}) }}
             >
-              Cancelar
+              {t('mcp.cancel')}
             </Button>
           </div>
         </div>
@@ -759,7 +766,7 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
     const label = labelRef.current?.value.trim() ?? ''
     const argvRaw = argvRef.current?.value.trim() ?? ''
     if (!label || !argvRaw) {
-      onToast('Nombre y comando de arranque son obligatorios', 'warn')
+      onToast(t('mcp.form.err.required'), 'warn')
       return
     }
 
@@ -781,16 +788,16 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
       })
       const name = label
       if (res && res.tool_count === 0) {
-        onToast(`"${name}" se conectó pero no tiene herramientas disponibles. Revisa su configuración.`, 'warn')
+        onToast(t('mcp.toast.no_tools').replace('{name}', name), 'warn')
       } else {
-        onToast('Herramienta añadida — tus agentes ya pueden usarla', 'ok')
+        onToast(t('mcp.toast.added_generic'), 'ok')
       }
       if (labelRef.current) labelRef.current.value = ''
       if (argvRef.current) argvRef.current.value = ''
       if (envRef.current) envRef.current.value = ''
       onAdded()
     } catch (e) {
-      onToast(e instanceof Error ? e.message : 'Error', 'error')
+      onToast(e instanceof Error ? e.message : t('mcp.err.generic'), 'error')
     } finally { setAdding(false) }
   }
 
@@ -801,11 +808,11 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
       transition={TWEEN_FAST}
       layout
     >
-      <h3 className={styles.addFormTitle}>Añadir herramienta externa</h3>
+      <h3 className={styles.addFormTitle}>{t('mcp.form.title')}</h3>
 
       <div className={styles.addFormField}>
         <label className={styles.addFormLabel} htmlFor="mcp-label">
-          Nombre
+          {t('mcp.form.name')}
         </label>
         <input
           id="mcp-label"
@@ -819,7 +826,7 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
 
       <div className={styles.addFormField}>
         <label className={styles.addFormLabel} htmlFor="mcp-argv">
-          Comando de arranque
+          {t('mcp.form.command')}
         </label>
         <input
           id="mcp-argv"
@@ -852,7 +859,7 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
           loading={adding}
           disabled={adding}
         >
-          Añadir
+          {t('mcp.add')}
         </Button>
       </div>
     </motion.div>

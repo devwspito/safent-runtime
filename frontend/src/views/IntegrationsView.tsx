@@ -61,8 +61,9 @@ function show(message: string, kind: 'ok' | 'warn' | 'error' | 'info' = 'ok') {
 // ── Skeleton grid — mirrors the final app-card layout ────────────────────────
 
 function AppGridSkeleton() {
+  const t = useT()
   return (
-    <div className={styles.skeletonGrid} aria-busy="true" aria-label="Cargando apps">
+    <div className={styles.skeletonGrid} aria-busy="true" aria-label={t('int.loading_apps_aria')}>
       {Array.from({ length: 6 }, (_, i) => (
         <div
           key={i}
@@ -106,7 +107,7 @@ export default function IntegrationsView() {
     } catch (e) {
       dispatch({
         type: 'FAILED',
-        message: e instanceof ApiError ? e.message : 'No se pudo contactar con el servidor de integraciones.',
+        message: e instanceof ApiError ? e.message : t('int.err.composio'),
       })
       return
     }
@@ -138,7 +139,7 @@ export default function IntegrationsView() {
     } catch (e) {
       setWsState({
         status: 'error',
-        message: e instanceof ApiError ? e.message : 'No se pudo cargar el estado de búsqueda web.',
+        message: e instanceof ApiError ? e.message : t('int.err.websearch'),
       })
     }
   }
@@ -155,7 +156,7 @@ export default function IntegrationsView() {
   return (
     <>
       <PageHeader
-        title="Integraciones"
+        title={t('view.integraciones')}
         subtitle={t('int.subtitle')}
       />
 
@@ -164,15 +165,15 @@ export default function IntegrationsView() {
 
           {/* ── Web search (Brave) ─────────────────────────────────────────── */}
           <StaggerItem>
-            <section className={styles.section} aria-label="Búsqueda web">
-              <h2 className={styles.sectionLabel}>Búsqueda web</h2>
+            <section className={styles.section} aria-label={t('int.websearch.label')}>
+              <h2 className={styles.sectionLabel}>{t('int.websearch.label')}</h2>
 
               {wsState.status === 'loading' && (
                 <div
                   className="skeleton skeleton--block"
                   style={{ height: 56, borderRadius: 'var(--radius-md)' }}
                   aria-busy="true"
-                  aria-label="Cargando estado de búsqueda web"
+                  aria-label={t('int.websearch.loading_aria')}
                 />
               )}
 
@@ -181,7 +182,7 @@ export default function IntegrationsView() {
                   <div role="alert" className={styles.errorRow}>
                     <p className={styles.errorText}>{wsState.message}</p>
                     <Button variant="secondary" size="sm" onClick={loadWebSearch}>
-                      Reintentar
+                      {t('int.retry')}
                     </Button>
                   </div>
                 </FadeIn>
@@ -190,7 +191,7 @@ export default function IntegrationsView() {
               {wsState.status === 'ready' && (
                 <WebSearchCard
                   status={wsState.data}
-                  onSaved={() => { loadWebSearch(); show('Brave activado — las búsquedas del agente ya usan Brave', 'ok') }}
+                  onSaved={() => { loadWebSearch(); show(t('int.brave.activated_toast'), 'ok') }}
                   onToast={show}
                 />
               )}
@@ -199,15 +200,15 @@ export default function IntegrationsView() {
 
           {/* ── Composio connection status ────────────────────────────────── */}
           <StaggerItem>
-            <section className={styles.section} aria-label="Servicios conectados">
-              <h2 className={styles.sectionLabel}>Conecta tus apps</h2>
+            <section className={styles.section} aria-label={t('int.connected_services.aria')}>
+              <h2 className={styles.sectionLabel}>{t('int.connect_apps')}</h2>
 
               {composioState.status === 'loading' && (
                 <div
                   className="skeleton skeleton--block"
                   style={{ height: 48, borderRadius: 'var(--radius-md)' }}
                   aria-busy="true"
-                  aria-label="Comprobando conexión con Composio"
+                  aria-label={t('int.composio.checking_aria')}
                 />
               )}
 
@@ -215,7 +216,7 @@ export default function IntegrationsView() {
                 <ComposioSetupCard
                   onSaved={() => {
                     loadComposio()
-                    show('Composio conectado — ahora puedes conectar tus apps', 'ok')
+                    show(t('int.composio.connected_toast'), 'ok')
                   }}
                   onToast={show}
                 />
@@ -226,7 +227,7 @@ export default function IntegrationsView() {
                   <div role="alert" className={styles.errorRow}>
                     <p className={styles.errorText}>{composioState.message}</p>
                     <Button variant="secondary" size="sm" onClick={loadComposio}>
-                      Reintentar
+                      {t('int.retry')}
                     </Button>
                   </div>
                 </FadeIn>
@@ -234,14 +235,14 @@ export default function IntegrationsView() {
 
               {composioState.status === 'ready' && (
                 <FadeIn>
-                  <div className={styles.statusBanner} aria-label="Composio activo">
+                  <div className={styles.statusBanner} aria-label={t('int.composio.active_aria')}>
                     <Check
                       size={14}
                       className={styles.statusBannerCheck}
                       aria-hidden="true"
                     />
                     <span>
-                      Composio activo · Cuenta:{' '}
+                      {t('int.composio.active_account')}{' '}
                       <code className={styles.statusBannerCode}>
                         {composioState.info.entity_id ?? '—'}
                       </code>
@@ -254,14 +255,14 @@ export default function IntegrationsView() {
 
           {/* ── Connected apps ────────────────────────────────────────────── */}
           <StaggerItem>
-            <section className={styles.section} aria-label="Apps conectadas">
-              <h2 className={styles.sectionLabel}>Conectadas</h2>
+            <section className={styles.section} aria-label={t('int.connected_apps.aria')}>
+              <h2 className={styles.sectionLabel}>{t('int.connected_apps.label')}</h2>
 
               {composioState.status === 'loading' && <AppGridSkeleton />}
 
               {(composioState.status === 'no-key' || composioState.status === 'error') && (
                 <p className={styles.lockedPlaceholder}>
-                  Conecta Composio (arriba) para ver y gestionar tus apps.
+                  {t('int.locked.connected')}
                 </p>
               )}
 
@@ -271,8 +272,8 @@ export default function IntegrationsView() {
                     <EmptyState
                       compact
                       icon={<Plug size={28} />}
-                      title="Sin apps conectadas todavía"
-                      description="Conéctate a Gmail, Slack, Notion y más desde el catálogo de abajo."
+                      title={t('int.empty.connected.title')}
+                      description={t('int.empty.connected.desc')}
                     />
                   )
                   : (
@@ -292,14 +293,14 @@ export default function IntegrationsView() {
 
           {/* ── Available apps ────────────────────────────────────────────── */}
           <StaggerItem>
-            <section className={styles.section} aria-label="Apps disponibles">
-              <h2 className={styles.sectionLabel}>Catálogo</h2>
+            <section className={styles.section} aria-label={t('int.available_apps.aria')}>
+              <h2 className={styles.sectionLabel}>{t('int.catalog.label')}</h2>
 
               {composioState.status === 'loading' && <AppGridSkeleton />}
 
               {(composioState.status === 'no-key' || composioState.status === 'error') && (
                 <p className={styles.lockedPlaceholder}>
-                  Conecta Composio (arriba) para explorar el catálogo de apps.
+                  {t('int.locked.catalog')}
                 </p>
               )}
 
@@ -309,8 +310,8 @@ export default function IntegrationsView() {
                   ? (
                     <EmptyState
                       icon={<Globe size={28} />}
-                      title="Todo conectado"
-                      description="No hay más apps disponibles en tu cuenta de Composio."
+                      title={t('int.empty.all_connected.title')}
+                      description={t('int.empty.all_connected.desc')}
                     />
                   )
                   : (
@@ -327,10 +328,10 @@ export default function IntegrationsView() {
                                   if (r?.redirect_url) {
                                     window.open(r.redirect_url, '_blank', 'noopener,noreferrer')
                                   }
-                                  show(`Conectando ${a.name ?? a.slug}… completa la autorización en el navegador`, 'info')
+                                  show(t('int.connecting_app_toast').replace('{name}', a.name ?? a.slug), 'info')
                                   reloadTimerRef.current = setTimeout(loadComposio, 3000)
                                 } catch (e) {
-                                  show(e instanceof Error ? e.message : 'Error', 'error')
+                                  show(e instanceof Error ? e.message : t('int.err.generic'), 'error')
                                 }
                               }}
                             />
@@ -358,6 +359,7 @@ interface AppCardProps {
 }
 
 function AppCard({ app, isConnected, onConnect }: AppCardProps) {
+  const t = useT()
   const displayName =
     app.name ??
     (app as unknown as Record<string, unknown>).toolkit_slug as string | undefined ??
@@ -392,16 +394,16 @@ function AppCard({ app, isConnected, onConnect }: AppCardProps) {
           ? (
             <span className={styles.connectedBadge}>
               <Check size={10} aria-hidden="true" />
-              Conectado
+              {t('int.connected_badge')}
             </span>
           )
           : (
             <button
               className={styles.connectBtn}
-              aria-label={`Conectar ${displayName}`}
+              aria-label={t('int.connect_aria').replace('{name}', displayName)}
               onClick={() => onConnect?.(app)}
             >
-              Conectar
+              {t('int.connect_btn')}
             </button>
           )
         }
@@ -418,45 +420,46 @@ interface ComposioSetupCardProps {
 }
 
 function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
+  const t = useT()
   const [saving, setSaving] = useState(false)
   const keyRef = useRef<HTMLInputElement>(null)
 
   async function handleSave() {
     const key = keyRef.current?.value.trim() ?? ''
-    if (!key) { onToast('Introduce una clave API', 'warn'); return }
+    if (!key) { onToast(t('int.err.enter_key'), 'warn'); return }
     setSaving(true)
     try {
       await setComposioApiKey(key)
       if (keyRef.current) keyRef.current.value = ''
       onSaved()
     } catch (e) {
-      onToast(e instanceof Error ? e.message : 'Error', 'error')
+      onToast(e instanceof Error ? e.message : t('int.err.generic'), 'error')
     } finally { setSaving(false) }
   }
 
   return (
     <div className={styles.setupCard}>
-      <p className={styles.setupCardTitle}>Conecta tus apps del día a día</p>
+      <p className={styles.setupCardTitle}>{t('int.composio.setup.title')}</p>
       <p className={styles.setupCardBody}>
-        Gmail, Slack, Notion y más de 250 servicios. Gratis para empezar.
+        {t('int.composio.setup.body')}
       </p>
       <p className={styles.setupCardSteps}>
-        1) Entra en{' '}
+        {t('int.composio.setup.step1')}{' '}
         <a href="https://app.composio.dev/developers" target="_blank" rel="noopener noreferrer">
           app.composio.dev
         </a>
-        {'  ·  '}2) Crea una cuenta gratis{'  ·  '}3) En{' '}
-        <strong>Settings → API Keys</strong> genera una clave y pégala aquí.
+        {'  ·  '}{t('int.composio.setup.step2')}{'  ·  '}{t('int.composio.setup.step3_pre')}{' '}
+        <strong>Settings → API Keys</strong> {t('int.composio.setup.step3_post')}
       </p>
       <div className={styles.formInline}>
-        <label className="sr-only" htmlFor="composio-apikey">Clave de acceso</label>
+        <label className="sr-only" htmlFor="composio-apikey">{t('int.access_key.label')}</label>
         {/* Secret: password input, never echoed back */}
         <input
           id="composio-apikey"
           ref={keyRef}
           className={styles.keyInput}
           type="password"
-          placeholder="Pega tu clave de acceso"
+          placeholder={t('int.access_key.placeholder')}
           autoComplete="new-password"
           onKeyDown={e => { if (e.key === 'Enter') handleSave() }}
         />
@@ -467,7 +470,7 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
           disabled={saving}
           loading={saving}
         >
-          {saving ? 'Conectando…' : 'Conectar'}
+          {saving ? t('int.connecting') : t('int.connect_btn')}
         </Button>
       </div>
     </div>
@@ -483,12 +486,13 @@ interface WebSearchCardProps {
 }
 
 function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
+  const t = useT()
   const [saving, setSaving] = useState(false)
   const keyRef = useRef<HTMLInputElement>(null)
 
   async function handleSave() {
     const key = keyRef.current?.value.trim() ?? ''
-    if (!key) { onToast('Pega tu clave API de Brave', 'warn'); return }
+    if (!key) { onToast(t('int.brave.err.enter_key'), 'warn'); return }
     setSaving(true)
     try {
       const r = await setWebSearchKey('brave', key)
@@ -496,24 +500,23 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
       if (keyRef.current) keyRef.current.value = ''
       onSaved()
     } catch (e) {
-      onToast(`No se pudo activar: ${e instanceof Error ? e.message : 'error'}`, 'error')
+      onToast(t('int.brave.err.activate').replace('{reason}', e instanceof Error ? e.message : t('int.err.generic')), 'error')
     } finally { setSaving(false) }
   }
 
   return (
     <div className={styles.setupCard}>
-      <p className={styles.setupCardTitle}>Mejora tus búsquedas con Brave</p>
+      <p className={styles.setupCardTitle}>{t('int.brave.setup.title')}</p>
       <p className={styles.setupCardBody}>
-        Lumen ya busca en la web (DuckDuckGo, sin configurar). Con Brave obtienes
-        resultados más precisos y sin rastreo.
+        {t('int.brave.setup.body')}
       </p>
       <p className={styles.setupCardSteps}>
-        1) Entra en{' '}
+        {t('int.composio.setup.step1')}{' '}
         <a href="https://api.search.brave.com/app/keys" target="_blank" rel="noopener noreferrer">
           api.search.brave.com
         </a>
-        {'  ·  '}2) Crea una cuenta y elige el plan gratuito (Free){'  ·  '}
-        3) Genera una clave API y pégala aquí.
+        {'  ·  '}{t('int.brave.setup.step2')}{'  ·  '}
+        {t('int.brave.setup.step3')}
       </p>
 
       <div
@@ -523,19 +526,19 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
         {status.brave && <Check size={12} aria-hidden="true" />}
         <span>
           {status.brave
-            ? 'Brave activo · DuckDuckGo de reserva'
-            : 'Activo: DuckDuckGo (sin clave Brave)'}
+            ? t('int.brave.status.active')
+            : t('int.brave.status.fallback')}
         </span>
       </div>
 
       <div className={styles.formInline}>
-        <label className="sr-only" htmlFor="brave-key">Clave API de Brave Search</label>
+        <label className="sr-only" htmlFor="brave-key">{t('int.brave.key.label')}</label>
         <input
           id="brave-key"
           ref={keyRef}
           className={styles.keyInput}
           type="password"
-          placeholder="Clave API de Brave Search"
+          placeholder={t('int.brave.key.label')}
           autoComplete="new-password"
           onKeyDown={e => { if (e.key === 'Enter') handleSave() }}
         />
@@ -546,7 +549,7 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
           disabled={saving}
           loading={saving}
         >
-          {saving ? 'Activando…' : 'Activar Brave'}
+          {saving ? t('int.brave.activating') : t('int.brave.activate_btn')}
         </Button>
       </div>
     </div>
