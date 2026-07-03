@@ -15,6 +15,7 @@ import {
 } from '../api/client'
 import type { WorkspaceFile, Skill, ComposioApp } from '../api/types'
 import { EmptyState } from './ui/EmptyState'
+import { isLiveSkill } from '../lib/skills'
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
 // lucide-react, matching the iconography used across the rest of the app.
@@ -142,6 +143,11 @@ function SkillsList({ skills, loading }: SkillsListProps) {
           <li key={s.package_id ?? s.skill_id ?? i} className="ctx-tag-row">
             <Zap size={12} aria-hidden="true" style={{ flexShrink: 0 }} />
             <span className="ctx-tag-row__name">{name}</span>
+            {isLiveSkill(s) && (
+              <span className="ctx-live-tag" title={t('skills.live.tip')}>
+                {t('skills.live.badge')}
+              </span>
+            )}
           </li>
         )
       })}

@@ -36,6 +36,7 @@ import ContextPanel from '../components/ContextPanel'
 import PendingApprovalsInChat from '../components/PendingApprovalsInChat'
 import { useT } from '../lib/i18n'
 import { toolLabel } from '../lib/toolLabels'
+import { isLiveSkill } from '../lib/skills'
 import { useFeatures } from '../hooks/useFeatures'
 import styles from './ChatView.module.css'
 
@@ -579,7 +580,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
 
   const skillKey = (sk: Skill) => sk.skill_id ?? sk.package_id ?? sk.skill_name ?? sk.name ?? ''
   const skillLabel = (sk: Skill) => sk.skill_name ?? sk.name ?? sk.slug ?? skillKey(sk)
-  const isLive = (sk: Skill) => sk.teaching_origin === 'teaching_live'
+  const isLive = isLiveSkill
 
   function openMenu() {
     setMenuView('root')

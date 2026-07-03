@@ -4104,6 +4104,21 @@ details[open] .cv-teach-chevron {
   white-space: nowrap;
 }
 
+/* "en vivo" pill on skills that drive the browser — same look as the
+   Habilidades view badge so the concept reads identically everywhere. */
+.ctx-live-tag {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  font-size: 10px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.02em;
+  color: var(--color-danger);
+  background: var(--color-danger-surface);
+  border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
+}
+
 /* Skeleton inside section */
 .ctx-skeleton {
   height: 30px;

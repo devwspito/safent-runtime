@@ -3,6 +3,7 @@ import { useNavigate, useOutletContext } from 'react-router-dom'
 import { sileo } from 'sileo'
 import { X, Zap, Search as SearchIcon, Plus, Play, Package, AlertTriangle } from 'lucide-react'
 import { useT } from '../lib/i18n'
+import { isLiveSkill } from '../lib/skills'
 import type { ChatOutletContext } from '../components/Layout'
 import {
   listSkills, searchSkillsHub, listHubSkills, installSkill, getHubOpStatus,
@@ -674,9 +675,7 @@ function SkillRow({ skill, loadingDetails, onView, onVerify, onPromote, onUninst
   const sub = [version, surfaces].filter(Boolean).join(' · ')
   const isValidated = (skill.state ?? '').toLowerCase().includes('valid')
   const isAutonomous = (skill.state ?? '').toLowerCase().includes('autonom')
-  // "Live" = drives the browser (taught live, or has a browser surface) → watchable live.
-  const isLive = skill.teaching_origin === 'teaching_live'
-    || surfaceList.some((k) => String(k).toLowerCase().includes('browser'))
+  const isLive = isLiveSkill(skill)
 
   return (
     <motion.div
