@@ -3,13 +3,13 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { sileo } from 'sileo'
 import {
   listConversations,
-  listPendingApprovals,
   getSystemUpdate,
   requestSystemUpdate,
   type SystemUpdateStatus,
 } from '../api/client'
 import { useChat } from '../hooks/useChat'
 import { useFeatures } from '../hooks/useFeatures'
+import { usePendingApprovals } from '../hooks/usePendingApprovals'
 import type { ConversationSummary } from '../api/types'
 import NotificationsPanel from './NotificationsPanel'
 import { useConfirmDialog } from './ConfirmDialog'
@@ -362,23 +362,12 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
   // fire an immediate poll without waiting for the 3 s interval.
   const [approvalRefreshTick, setApprovalRefreshTick] = useState(0)
 
-  // Global pending-approvals count → badge on the Seguridad nav. HITL cards from
-  // NON-chat cycles (scheduled / autonomous tasks; conversation_id=null) don't
-  // anchor to a chat thread, so without this they'd be invisible outside the
-  // Security view. The badge guarantees the owner always sees there's something
-  // waiting to approve.
-  const [pendingCount, setPendingCount] = useState(0)
-  useEffect(() => {
-    let alive = true
-    const poll = () => {
-      listPendingApprovals()
-        .then(a => { if (alive) setPendingCount(Array.isArray(a) ? a.length : 0) })
-        .catch(() => { /* transient — keep last known count */ })
-    }
-    poll()
-    const id = setInterval(poll, 6000)
-    return () => { alive = false; clearInterval(id) }
-  }, [approvalRefreshTick])
+  // Global FRESH pending-approvals count → badge on the Sistema nav item. HITL
+  // cards from NON-chat cycles (scheduled / autonomous; conversation_id=null)
+  // don't anchor to a chat thread, so without this they'd be invisible outside
+  // the Security view. Shares the exact freshness rule with SeguridadView — a
+  // stale approval must never produce a phantom badge.
+  const pendingCount = usePendingApprovals(6000, approvalRefreshTick).length
 
   async function handleSendMessage(text: string) {
     await chat.sendMessage(text)

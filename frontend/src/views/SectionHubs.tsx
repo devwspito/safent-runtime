@@ -11,6 +11,7 @@ import { lazy, Suspense, useMemo } from 'react'
 import { Navigate, useSearchParams } from 'react-router-dom'
 import { Tabs, type Tab } from '../components/ui/Tabs'
 import { useFeatures } from '../hooks/useFeatures'
+import { usePendingApprovals } from '../hooks/usePendingApprovals'
 import { useT, type TranslationKey } from '../lib/i18n'
 import SkillsView from './SkillsView'
 import IntegrationsView from './IntegrationsView'
@@ -40,7 +41,12 @@ interface HubTab {
   render: () => React.ReactNode
 }
 
-function Hub({ tabs, ariaLabelKey }: { tabs: HubTab[]; ariaLabelKey: TranslationKey }) {
+function Hub({ tabs, ariaLabelKey, tabAlerts }: {
+  tabs: HubTab[]
+  ariaLabelKey: TranslationKey
+  /** Per-tab needs-attention counts (e.g. pending approvals on 'seguridad'). */
+  tabAlerts?: Record<string, number>
+}) {
   const t = useT()
   const { isLoading: featuresLoading, allowed } = useFeatures()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -50,7 +56,11 @@ function Hub({ tabs, ariaLabelKey }: { tabs: HubTab[]; ariaLabelKey: Translation
     // allowed is stable per features state; tabs is a module-level constant per hub
     [tabs, allowed],
   )
-  const uiTabs: Tab[] = visibleTabs.map(({ key, labelKey }) => ({ key, label: t(labelKey) }))
+  const uiTabs: Tab[] = visibleTabs.map(({ key, labelKey }) => ({
+    key,
+    label: t(labelKey),
+    alertCount: tabAlerts?.[key],
+  }))
 
   const requestedTab = searchParams.get('tab')
   const activeKey = requestedTab && visibleTabs.some((tab) => tab.key === requestedTab)
@@ -109,5 +119,8 @@ export function CapacidadesView() {
 }
 
 export function SistemaView() {
-  return <Hub tabs={SISTEMA_TABS} ariaLabelKey="nav.section.system" />
+  // Same fresh-approvals source as the sidebar badge — the red count on the
+  // Seguridad tab always matches what the Seguridad list actually shows.
+  const pending = usePendingApprovals().length
+  return <Hub tabs={SISTEMA_TABS} ariaLabelKey="nav.section.system" tabAlerts={{ seguridad: pending }} />
 }

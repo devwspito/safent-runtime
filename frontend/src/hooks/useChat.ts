@@ -510,7 +510,8 @@ export function useChat(): UseChatReturn {
             currentTaskIdRef.current = null
             sessionStorage.removeItem(SS_TASK_ID)
             setReconnecting(false)
-            setLiveBrowserActive(false)
+            // liveBrowserActive stays ON: the jailed browser session (and the
+            // "Ver en vivo" chip) persists for the whole conversation.
             clearPoll()
           }
         })
@@ -537,7 +538,9 @@ export function useChat(): UseChatReturn {
     currentTaskIdRef.current = null
     sessionStorage.removeItem(SS_TASK_ID)
     setReconnecting(false)
-    setLiveBrowserActive(false)
+    // NOT resetting liveBrowserActive here: stopStream also runs on manual stop
+    // mid-conversation, and the live chip must persist per conversation. The
+    // reset lives in startNew/loadConversation (conversation switches).
   }, [clearPoll, flushPending, clearFlushTimer])
 
   const startNew = useCallback(() => {
@@ -545,6 +548,7 @@ export function useChat(): UseChatReturn {
     sessionStorage.removeItem(SS_CONV_ID)
     sessionStorage.removeItem(SS_TASK_ID)
     sessionStorage.removeItem(SS_AGENT_ID)
+    setLiveBrowserActive(false)
     dispatch({ type: 'RESET' })
   }, [stopStream])
 
@@ -760,7 +764,8 @@ export function useChat(): UseChatReturn {
               currentTaskIdRef.current = null
               sessionStorage.removeItem(SS_TASK_ID)
               setReconnecting(false)
-              setLiveBrowserActive(false)
+              // liveBrowserActive intentionally NOT reset — the "Ver en vivo"
+              // chip persists for the rest of the conversation (owner ask).
             },
             onError(_msg) {
               // On WS error after re-attach, keep the poll running — the task may
@@ -945,6 +950,7 @@ export function useChat(): UseChatReturn {
 
   const loadConversation = useCallback(async (id: string) => {
     stopStream()
+    setLiveBrowserActive(false) // switching conversations — new live context
     try {
       const detail = await getConversation(id)
       // Null-guard messages + content (parity with the mount-restore path): the

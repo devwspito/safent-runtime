@@ -28,16 +28,25 @@ function ActividadPanel() {
   const [showLive, setShowLive] = useState(false)
 
   const refresh = useCallback(async () => {
+    // Each source fails independently — a tasks-list error must never blind the
+    // live panel (chat tasks aren't always listed there anyway), and vice versa.
     const [r, status] = await Promise.all([
-      listRecentTasks(40),
+      listRecentTasks(40).catch(() => null),
       getRuntimeStatus().catch(() => null),
     ])
-    const running = (r.tasks ?? []).filter((t) => t.status === 'in_progress')
+    const running = (r?.tasks ?? []).filter((t) => t.status === 'in_progress')
     setTasks(running)
-    const browserNow = !!status?.activity?.some((a) => (a.tool ?? '').startsWith('browser'))
+    // The live browser keys on RUNTIME ACTIVITY (covers chat + scheduled tasks),
+    // NOT on the recent-tasks list: chat cycles don't always appear there, which
+    // used to hide the frame while the agent was visibly navigating.
+    const activity = status?.activity ?? []
+    const browserNow = activity.some((a) => (a.tool ?? '').startsWith('browser'))
+    const anythingRunning = activity.length > 0
+      || (status?.active_task_count ?? 0) > 0
+      || running.length > 0
     if (browserNow) browserSeen.current = true
-    if (running.length === 0) browserSeen.current = false // reset when idle
-    setShowLive(running.length > 0 && browserSeen.current)
+    if (!anythingRunning) browserSeen.current = false // reset only when ALL idle
+    setShowLive(browserSeen.current)
   }, [])
 
   useEffect(() => {

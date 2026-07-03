@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { sileo } from 'sileo'
 import { Save, CheckCircle, ShieldCheck, Globe } from 'lucide-react'
 import { useT } from '../lib/i18n'
+import { isApprovalFresh } from '../hooks/usePendingApprovals'
 import {
   listPendingApprovals,
   mfaStatus,
@@ -70,15 +71,6 @@ function tNew(t: Translate, key: string, fallback: string): string {
 // ── Approvals section ─────────────────────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 3000
-
-// Backend approval window is 600 s (10 min). Discard anything older client-side
-// so ghost cards never render even if a poll cycle lags. null/absent = keep (back-compat).
-const APPROVAL_MAX_AGE_MS = 11 * 60 * 1000
-
-function isApprovalFresh(createdAt: string | null | undefined): boolean {
-  if (!createdAt) return true
-  return Date.now() - new Date(createdAt).getTime() < APPROVAL_MAX_AGE_MS
-}
 
 function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
   const t = useT()
