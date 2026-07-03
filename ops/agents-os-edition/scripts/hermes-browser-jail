@@ -187,10 +187,41 @@ fi
 # refuses the profile ("appears to be in use by another process") and exits 21,
 # breaking the jailed browser permanently until manual cleanup. Strip stale
 # singletons for the target --user-data-dir before launch so the browser self-heals.
+#
+# ── Ephemeral execution profile (self-heal, exec-* sessions only) ───────────
+# ROOT CAUSE (repro'd on a clean image, aarch64): a `exec-browse` profile that
+# had accumulated state across MANY container lifetimes (656MB, since the
+# volume is a durable `lumen-data` named volume) crashed the confined Chromium
+# with status=5/TRAP ~0.6s after EVERY launch. Restoring the EXACT SAME
+# corrupted directory reproduced the crash 100% of the time; wiping it to an
+# empty dir at the IDENTICAL path, under the IDENTICAL confinement (netns +
+# Landlock BROWSER ruleset + the PASS-3 seccomp shim + ProtectSystem=strict),
+# made the browser stay up (CDP answering, x11vnc listening) indefinitely. The
+# confinement combo is NOT the trigger — a half-written profile is: Chromium
+# is SIGKILLed via cgroup-kill on every earlier crash, so it never gets a
+# chance to repair whatever JSON/SQLite state it half-wrote, and the next
+# launch's startup CHECK-failure -> IMMEDIATE_CRASH() (the deliberate hardware
+# trap Chromium release builds use for unrecoverable invariant violations)
+# fires again before crashpad can even ptrace-diagnose it here (CAP_SYS_PTRACE
+# is dropped) — an unrecoverable crash-loop with no path to self-repair.
+#
+# FIX: exec-* sessions are per-task/live-view EXECUTION sessions, not the
+# owner's persistent identity — that's `teaching-*`, which intentionally keeps
+# its logins across restarts and is NOT touched here. exec-* carries no state
+# the agent needs to survive a crash or container restart, so wipe it to a
+# pristine directory on every (re)launch. This breaks the corruption chain at
+# its source instead of loosening seccomp/Landlock/ProtectSystem — a broader
+# jail allowance would not have fixed a corrupted profile anyway, since the
+# crash's cause is the profile's OWN data, not a denied syscall or path.
 for _arg in "$@"; do
     case "$_arg" in
         --user-data-dir=*)
             _udd="${_arg#--user-data-dir=}"
+            case "$(basename "${_udd}")" in
+                exec-*)
+                    find "${_udd}" -mindepth 1 -delete 2>/dev/null || true
+                    ;;
+            esac
             rm -f "${_udd}/SingletonLock" "${_udd}/SingletonSocket" "${_udd}/SingletonCookie" 2>/dev/null || true
             ;;
     esac
