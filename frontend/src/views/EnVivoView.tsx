@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { Inbox, Loader2, MonitorPlay, Square } from 'lucide-react'
+import { Loader2, MonitorPlay, Square } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
@@ -70,19 +70,15 @@ function ActividadPanel() {
         />
       )}
 
-      <section className={css.section} aria-label={t('envivo.running_tasks')}>
-        <div className={css.sectionHead}>
-          <h2 className={css.sectionLabel}>{t('envivo.running_tasks')}</h2>
-          {tasks.length > 0 && <span className={css.countChip}>{tasks.length}</span>}
-        </div>
+      {/* Only render the running-tasks section when there IS something running —
+          when idle it would just repeat the empty state above. */}
+      {tasks.length > 0 && (
+        <section className={css.section} aria-label={t('envivo.running_tasks')}>
+          <div className={css.sectionHead}>
+            <h2 className={css.sectionLabel}>{t('envivo.running_tasks')}</h2>
+            <span className={css.countChip}>{tasks.length}</span>
+          </div>
 
-        {tasks.length === 0 ? (
-          <EmptyState
-            compact
-            icon={<Inbox size={28} />}
-            title={t('envivo.no_tasks_running')}
-          />
-        ) : (
           <ul className="cv-list" role="list">
             <AnimatePresence initial={false}>
               {tasks.map((task) => (
@@ -109,8 +105,8 @@ function ActividadPanel() {
               ))}
             </AnimatePresence>
           </ul>
-        )}
-      </section>
+        </section>
+      )}
     </div>
   )
 }
