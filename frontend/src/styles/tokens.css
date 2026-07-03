@@ -99,6 +99,11 @@
   --shadow-overlay: 0 8px 32px rgba(0, 0, 0, 0.56), 0 2px 8px rgba(0, 0, 0, 0.32);
   --shadow-popover: 0 4px 16px rgba(0, 0, 0, 0.48), 0 1px 4px rgba(0, 0, 0, 0.24);
 
+  /* ── Glass + glow (premium 2026 facelift) ────────────────────────────────── */
+  --shadow-glow: 0 0 20px color-mix(in srgb, var(--color-accent) 14%, transparent);
+  --surface-glass: color-mix(in srgb, var(--color-surface) 78%, transparent);
+  --border-glass: color-mix(in srgb, #ffffff 9%, transparent);
+
   /* ── Motion — animate ONLY transform/opacity; never "transition: all" ────── */
   --dur-quick: 100ms;
   --dur-base:  160ms;

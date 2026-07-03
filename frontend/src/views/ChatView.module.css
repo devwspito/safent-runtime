@@ -605,20 +605,41 @@
   align-items: center;
   justify-content: center;
   letter-spacing: var(--tracking-tighter);
-  /* ambient glow via layered shadows — only on decorative icon */
-  box-shadow:
-    0 0 0 8px color-mix(in srgb, var(--color-accent) 10%, transparent),
-    0 0 0 16px color-mix(in srgb, var(--color-accent) 5%, transparent);
+  /* soft ambient glow — decorative icon only */
+  box-shadow: 0 0 42px color-mix(in srgb, var(--color-accent) 38%, transparent);
   font-family: var(--font-ui);
+  animation: markBreathe 4s ease-in-out infinite alternate;
+}
+
+@keyframes markBreathe {
+  from {
+    transform: scale(1);
+    box-shadow: 0 0 42px color-mix(in srgb, var(--color-accent) 30%, transparent);
+  }
+  to {
+    transform: scale(1.02);
+    box-shadow: 0 0 46px color-mix(in srgb, var(--color-accent) 44%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .welcomeMark { animation: none; }
 }
 
 .welcomeTitle {
   font-size: var(--text-2xl);
-  font-weight: var(--weight-semibold);
-  color: var(--color-text);
-  letter-spacing: var(--tracking-tighter);
+  font-weight: 650;
+  letter-spacing: -0.02em;
   text-align: center;
   line-height: var(--leading-dense);
+  background: linear-gradient(
+    92deg,
+    var(--color-text) 30%,
+    color-mix(in srgb, var(--color-accent) 75%, var(--color-text))
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 .welcomeSubtitle {
@@ -638,18 +659,22 @@
 }
 
 .suggestionPill {
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--border-glass);
   border-radius: var(--radius-pill);
-  background: var(--color-surface);
+  background: var(--surface-glass);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   color: var(--color-text-muted);
   font-size: var(--text-sm);
   font-family: var(--font-ui);
   padding: var(--space-2) var(--space-4);
   cursor: pointer;
-  transition: background var(--dur-quick) var(--ease),
-              border-color var(--dur-quick) var(--ease),
-              color var(--dur-quick) var(--ease),
-              transform var(--dur-quick) var(--ease);
+  transition: background var(--dur-base) var(--ease),
+              border-color var(--dur-base) var(--ease),
+              color var(--dur-base) var(--ease),
+              transform var(--dur-base) var(--ease),
+              box-shadow var(--dur-base) var(--ease);
   /* fade-in only — entrance never touches `transform`, so the hover/active
      transform transitions below stay free to animate immediately. */
   animation: pillIn var(--dur-slow) var(--ease) both;
@@ -670,10 +695,13 @@
 }
 
 .suggestionPill:hover {
-  background: var(--color-surface-raise);
   color: var(--color-text);
-  border-color: var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 35%, var(--color-border));
   transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 8px 28px rgba(0, 0, 0, 0.35),
+    var(--shadow-glow);
 }
 
 .suggestionPill:active {
@@ -696,17 +724,24 @@
 
 .composerBox {
   position: relative;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
+  background: var(--surface-glass);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-xl);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   /* overflow visible so the "+" menu can render ABOVE the box (outside it). */
   overflow: visible;
-  transition: border-color var(--dur-base) var(--ease);
+  transition: border-color var(--dur-base) var(--ease),
+              box-shadow var(--dur-base) var(--ease);
 }
 
 .composerBox:focus-within {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 15%, transparent);
+  border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 8px 28px rgba(0, 0, 0, 0.35),
+    0 0 18px color-mix(in srgb, var(--color-accent) 22%, transparent);
 }
 
 .composerTextarea {
@@ -803,7 +838,11 @@
   gap: var(--space-2);
   height: 30px;
   padding: 0 var(--space-4);
-  background: var(--color-accent);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--color-accent) 88%, white),
+    var(--color-accent)
+  );
   color: #fff;
   border: none;
   border-radius: var(--radius-sm);
@@ -811,14 +850,14 @@
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-tight);
   cursor: pointer;
-  transition: background var(--dur-quick) var(--ease),
+  transition: box-shadow var(--dur-quick) var(--ease),
               opacity var(--dur-quick) var(--ease),
               transform var(--dur-quick) var(--ease);
   white-space: nowrap;
 }
 
 .sendBtn:hover:not(:disabled) {
-  background: var(--color-accent-hover);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--color-accent) 30%, transparent);
   transform: translateY(-1px);
 }
 

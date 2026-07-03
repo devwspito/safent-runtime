@@ -163,6 +163,39 @@ img, svg { display: block; }
   display: flex;
   height: 100dvh;
   overflow: hidden;
+  position: relative;
+}
+
+/* Aurora backdrop — two slow-drifting radial glows behind all content */
+.app-shell::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      42% 38% at 82% 6%,
+      color-mix(in srgb, var(--color-accent) 18%, transparent),
+      transparent 45%
+    ),
+    radial-gradient(
+      46% 42% at 10% 94%,
+      color-mix(in srgb, color-mix(in srgb, var(--color-accent) 50%, #a855f7) 12%, transparent),
+      transparent 45%
+    );
+  filter: blur(90px);
+  opacity: 0.07;
+  animation: aurora-drift 36s ease-in-out infinite alternate;
+}
+
+@keyframes aurora-drift {
+  from { transform: translate3d(-2.5%, -2%, 0); }
+  to   { transform: translate3d(2.5%, 2.5%, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell::before { animation: none; }
 }
 
 /* ── Left Sidebar ─────────────────────────────────────────────────────────── */
@@ -170,11 +203,15 @@ img, svg { display: block; }
 .sidebar {
   width: var(--sidebar-width);
   flex-shrink: 0;
-  background: var(--color-surface);
-  border-right: 1px solid var(--color-border-subtle);
+  background: var(--surface-glass);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  backdrop-filter: blur(14px) saturate(1.2);
+  border-right: 1px solid var(--border-glass);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
+  z-index: 1;
 }
 
 .sidebar-wordmark {
@@ -280,6 +317,7 @@ img, svg { display: block; }
 }
 
 .nav-link {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -307,8 +345,20 @@ img, svg { display: block; }
 }
 
 .nav-link.active {
-  background: var(--color-accent-surface);
-  color: var(--color-accent-text);
+  background: color-mix(in srgb, var(--color-accent) 13%, transparent);
+  color: var(--color-text);
+}
+
+.nav-link.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent);
+  box-shadow: 0 0 8px var(--color-accent);
 }
 
 .nav-link:focus-visible {
@@ -456,9 +506,11 @@ img, svg { display: block; }
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  background: var(--color-bg);
+  background: transparent;
   display: flex;
   flex-direction: column;
+  position: relative;
+  z-index: 1;
 }
 
 /* ── View header ─────────────────────────────────────────────────────────── */
@@ -481,10 +533,10 @@ img, svg { display: block; }
 }
 
 .view-title {
-  font-size: var(--text-2xl);
-  font-weight: var(--weight-semibold);
+  font-size: var(--text-3xl);
+  font-weight: 650;
   color: var(--color-text);
-  letter-spacing: var(--tracking-tighter);
+  letter-spacing: -0.02em;
   line-height: var(--leading-dense);
 }
 
@@ -5024,9 +5076,9 @@ details[open] .cv-teach-chevron {
 
 /* PageHeader: stronger type hierarchy */
 .view-header .view-title {
-  font-size: 26px;
-  font-weight: 700;
-  letter-spacing: -.04em;
+  font-size: var(--text-3xl);
+  font-weight: 650;
+  letter-spacing: -0.02em;
   line-height: 1.2;
 }
 
@@ -5793,3 +5845,94 @@ details[open] .cv-teach-chevron {
   flex-shrink: 0;
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Lumen premium 2026 facelift — glass surfaces + interaction glow
+   Cascade-final overrides; colors derive from tokens via color-mix only.
+   Note: no backdrop-filter on anything overlaying <canvas>/VNC frames.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Glass cards / panels ────────────────────────────────────────────────── */
+
+.agent-card,
+.mcp-card,
+.cv-teach-card,
+.cv-form-card,
+.office-create-card,
+.seg-approval-card,
+.modal-card,
+.confirm-card {
+  background: var(--surface-glass);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  backdrop-filter: blur(14px) saturate(1.2);
+  border-radius: var(--radius-xl);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* List rows: translucent surface + hairline, but NO backdrop-filter —
+   they render in long lists (and inside VNC-adjacent views); keep them cheap. */
+.ds-list-row {
+  background: var(--surface-glass);
+  border-color: var(--border-glass);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* ── Glow on interaction (hoverable cards / rows) ────────────────────────── */
+
+.agent-card,
+.office-agent-card {
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.agent-card:hover,
+.office-agent-card:hover,
+.ds-list-row--clickable:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--color-accent) 35%, var(--color-border));
+  box-shadow:
+    0 8px 28px rgba(0, 0, 0, 0.35),
+    0 0 20px color-mix(in srgb, var(--color-accent) 14%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-card:hover,
+  .office-agent-card:hover,
+  .ds-list-row--clickable:hover {
+    transform: none;
+  }
+}
+
+/* ── Primary button: soft top-lit gradient + hover glow ──────────────────── */
+
+.cv-btn--primary {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--color-accent) 88%, white),
+    var(--color-accent)
+  );
+  transition:
+    background var(--dur-base) var(--ease),
+    border-color var(--dur-base) var(--ease),
+    opacity var(--dur-base) var(--ease),
+    box-shadow var(--dur-base) var(--ease),
+    transform var(--dur-quick) var(--ease);
+}
+
+.cv-btn--primary:hover:not(:disabled) {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--color-accent-hover) 88%, white),
+    var(--color-accent-hover)
+  );
+  opacity: 1;
+  box-shadow: 0 0 18px color-mix(in srgb, var(--color-accent) 30%, transparent);
+}
+
+/* Ghost / secondary: accent-tinted border on hover */
+.cv-btn--secondary:hover:not(:disabled),
+.cv-btn--ghost:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border));
+}
