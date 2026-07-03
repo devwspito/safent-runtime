@@ -147,6 +147,8 @@ export class OfficeState {
 
   private paletteCounter = 0
   _activeA2A: Map<string, { fromId: string; toId: string }> = new Map()
+  /** Orchestrator (cerebro) agent id — fallback origin for delegation edges. */
+  _brainId: string | null = null
   private _coffeeTiles: Map<string, { col: number; row: number }> = new Map()
   _pendingParticles: Array<{
     agentId: string
@@ -164,6 +166,9 @@ export class OfficeState {
   ): void {
     const depts = buildDepartmentsFromAgents(agents)
     const agentInfos = toAgentInfos(agents, runtimeStatus)
+    // Remember the orchestrator so delegation edges can fall back to it when the
+    // backend's from-id isn't a seated character (same tolerance as the swarm).
+    this._brainId = agents.find((a) => a.department_kind === 'cerebro')?.id ?? null
 
     // Two-pass layout: tight → viewport-expanded
     const tightLayout = buildOfficeLayout(depts, agentInfos)
@@ -311,9 +316,14 @@ export class OfficeState {
     // but guard anyway). Edge keyed "<fromId>-><toId>" for dedup.
     this._activeA2A.clear()
     for (const d of status.delegations ?? []) {
-      if (!d.from || !d.to || d.from === d.to) continue
-      if (!this.characters.has(d.from) || !this.characters.has(d.to)) continue
-      this._activeA2A.set(`${d.from}->${d.to}`, { fromId: d.from, toId: d.to })
+      if (!d.to || !this.characters.has(d.to)) continue // target must be on the floor
+      // Same tolerance as the swarm: if the backend's from-id isn't a seated
+      // character (internal id, unseated agent…), route the edge from the brain.
+      const from = d.from && this.characters.has(d.from)
+        ? d.from
+        : (this._brainId && this.characters.has(this._brainId) ? this._brainId : null)
+      if (!from || from === d.to) continue
+      this._activeA2A.set(`${from}->${d.to}`, { fromId: from, toId: d.to })
     }
     // Legacy fallback: infer edges from active_agent_id (orchestrator) → other
     // active agents. Kept for backends that populate it; a no-op otherwise.
