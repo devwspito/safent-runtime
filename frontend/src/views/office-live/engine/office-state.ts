@@ -59,6 +59,8 @@ export interface LumenRuntimeStatus {
   active_agent_id?: string
   activity?: Array<{ agent_id: string; tool?: string }>
   ruflo_active?: boolean
+  /** Real, still-live delegation edges the backend emits when delegate_task fires. */
+  delegations?: Array<{ from: string; to: string }>
 }
 
 // ── Internal agent info shape the engine expects ───────────────
@@ -302,19 +304,28 @@ export class OfficeState {
     }
 
     // ── A2A delegation edges ────────────────────────────────────────────────
-    // When the orchestrator (active_agent_id) delegates to specialist agents
-    // (activity entries with a different agent_id), draw a green connection line
-    // between them. The edge is keyed "<fromId>-><toId>" for dedup.
+    // Primary source: status.delegations — the REAL orchestrator→specialist edges
+    // the backend emits at the moment delegate_task fires (short TTL). Draw the
+    // connection line + phone emotes between them while the edge is live. Both
+    // ends must exist on the floor (match_specialist can only return roster ids,
+    // but guard anyway). Edge keyed "<fromId>-><toId>" for dedup.
     this._activeA2A.clear()
+    for (const d of status.delegations ?? []) {
+      if (!d.from || !d.to || d.from === d.to) continue
+      if (!this.characters.has(d.from) || !this.characters.has(d.to)) continue
+      this._activeA2A.set(`${d.from}->${d.to}`, { fromId: d.from, toId: d.to })
+    }
+    // Legacy fallback: infer edges from active_agent_id (orchestrator) → other
+    // active agents. Kept for backends that populate it; a no-op otherwise.
     const orchestratorId = status.active_agent_id
     if (orchestratorId) {
       for (const entry of status.activity ?? []) {
         const specialistId = entry.agent_id
-        // Only draw the edge when the specialist differs from the orchestrator
-        // (to avoid a self-loop when the orchestrator is the only active agent)
         if (specialistId && specialistId !== orchestratorId) {
           const edgeKey = `${orchestratorId}->${specialistId}`
-          this._activeA2A.set(edgeKey, { fromId: orchestratorId, toId: specialistId })
+          if (!this._activeA2A.has(edgeKey)) {
+            this._activeA2A.set(edgeKey, { fromId: orchestratorId, toId: specialistId })
+          }
         }
       }
     }
