@@ -594,7 +594,8 @@ class DbusRuntimeServiceWiring:
 
     def runtime_status(self) -> dict:
         """Return the real live runtime status: state, active_task_count,
-        activity (in-flight tool per task), and ruflo_active signal.
+        activity (in-flight tool per task), ruflo_active signal, and
+        delegations (short-lived agent→agent hand-off edges).
 
         Read-only, no authZ. Fail-soft: core keys always present.
         Note: active_agent_id has been removed — there is no global active agent.
@@ -622,6 +623,7 @@ class DbusRuntimeServiceWiring:
             status["ruflo_active"] = any(
                 e.get("tool", "").startswith("mcp__ruflo__") for e in activity
             )
+            status["delegations"] = live_activity.snapshot_delegations()
         except Exception:  # noqa: BLE001 — activity is additive; omit on error
             logger.debug("hermes.dbus.runtime_status_activity_error", exc_info=True)
 

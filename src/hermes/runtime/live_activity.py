@@ -6,9 +6,13 @@ asyncio event loop.
 
 API
 ---
-record(task_id, agent_id, tool)  — call before each tool dispatch.
-clear(task_id)                   — call in the task-lifecycle finally block.
-snapshot()                       — returns a list[dict] safe to serialise.
+record(task_id, agent_id, tool)                  — call before each tool dispatch.
+clear(task_id)                                    — call in the task-lifecycle finally block.
+snapshot()                                        — returns a list[dict] safe to serialise.
+record_delegation(task_id, from_id, to_id, label) — call when the orchestrator hands a
+                                                     task off to a specialist via delegate_task.
+snapshot_delegations()                            — returns a list[dict] of live (unexpired)
+                                                     delegation edges, oldest→newest.
 
 Design constraints:
 - Dependency-free (stdlib only).
@@ -29,6 +33,10 @@ logger = logging.getLogger("hermes.runtime.live_activity")
 
 _lock: threading.Lock = threading.Lock()
 _registry: dict[str, dict[str, Any]] = {}
+
+_delegations: list[dict[str, Any]] = []
+_DELEGATION_TTL_S: float = 30.0
+_DELEGATION_MAX: int = 64
 
 
 def record(task_id: str, agent_id: str, tool: str) -> None:
@@ -82,4 +90,65 @@ def snapshot() -> list[dict[str, str]]:
             ]
     except Exception:  # noqa: BLE001
         logger.debug("hermes.live_activity.snapshot_failed")
+        return []
+
+
+def record_delegation(task_id: str, from_id: str, to_id: str, label: str = "") -> None:
+    """Record a real agent→agent delegation edge (e.g. Cerebro → specialist).
+
+    Skips silently if from_id/to_id are empty or equal (no self-edges).
+    Entries expire after _DELEGATION_TTL_S and the list is capped at
+    _DELEGATION_MAX so this stays a short-lived stream, not a history log.
+    Fail-soft: logs at DEBUG and swallows all exceptions.
+    """
+    try:
+        if not from_id or not to_id or from_id == to_id:
+            return
+        now = datetime.now(tz=UTC)
+        entry = {
+            "task_id": task_id,
+            "from": from_id,
+            "to": to_id,
+            "label": (label or "")[:120],
+            "since": now.isoformat(),
+            "_ts": now.timestamp(),
+        }
+        with _lock:
+            _delegations.append(entry)
+            cutoff = now.timestamp() - _DELEGATION_TTL_S
+            _delegations[:] = [e for e in _delegations if e["_ts"] >= cutoff]
+            del _delegations[:-_DELEGATION_MAX]
+    except Exception:  # noqa: BLE001 — must never crash tool dispatch
+        logger.debug(
+            "hermes.live_activity.record_delegation_failed task_id=%s from=%s to=%s",
+            task_id,
+            from_id,
+            to_id,
+        )
+
+
+def snapshot_delegations() -> list[dict[str, str]]:
+    """Return a point-in-time copy of all live (unexpired) delegation edges.
+
+    Each item: {"task_id", "from", "to", "label", "since"} (ISO-8601), oldest→
+    newest insertion order. Also opportunistically prunes expired entries from
+    the backing list. Returns an empty list on error.
+    """
+    try:
+        with _lock:
+            cutoff = datetime.now(tz=UTC).timestamp() - _DELEGATION_TTL_S
+            live = [e for e in _delegations if e["_ts"] >= cutoff]
+            _delegations[:] = live
+            return [
+                {
+                    "task_id": e["task_id"],
+                    "from": e["from"],
+                    "to": e["to"],
+                    "label": e["label"],
+                    "since": e["since"],
+                }
+                for e in live
+            ]
+    except Exception:  # noqa: BLE001
+        logger.debug("hermes.live_activity.snapshot_delegations_failed")
         return []

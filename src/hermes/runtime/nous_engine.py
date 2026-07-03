@@ -588,7 +588,9 @@ def _build_tool_call_emitter(
             # Delegación: atribuir la actividad EN VIVO al especialista del roster que
             # mejor encaja, para que el Office muestre a ESE muñeco "trabajando"
             # (conectado) durante la sub-tarea, no al Cerebro.
-            if function_name == "delegate_task":
+            is_delegation = function_name == "delegate_task"
+            spec_id: str | None = None
+            if is_delegation:
                 from hermes.agents.domain.default_roster import match_specialist  # noqa: PLC0415
                 spec_text = " ".join(
                     str(function_args.get(k, ""))
@@ -599,6 +601,23 @@ def _build_tool_call_emitter(
                     activity_agent = spec_id
                     activity_tool = "trabajando"
             live_activity.record(_task_id_str, activity_agent, activity_tool)
+            if is_delegation and spec_id and spec_id != live_agent_id:
+                try:
+                    label = ""
+                    for key in ("goal", "role", "task"):
+                        raw = function_args.get(key)
+                        if raw:
+                            label = str(raw).strip()[:80]
+                            break
+                    live_activity.record_delegation(
+                        _task_id_str, from_id=live_agent_id, to_id=spec_id, label=label
+                    )
+                except Exception:  # noqa: BLE001 — a label/edge failure must never break dispatch
+                    logger.debug(
+                        "hermes.nous_engine.record_delegation_failed task=%s to=%s",
+                        _task_id_str,
+                        spec_id,
+                    )
         chunk = TaskStreamChunk(kind=StreamChunkKind.TOOL_CALL, tool_call=descriptor)
         try:
             fut = asyncio.run_coroutine_threadsafe(
