@@ -187,26 +187,48 @@ cmd_stop() {
 
 cmd_restart() { cmd_stop; cmd_open; }
 
+# Reclaim disk used by OLD Lumen images + dangling layers + the build cache. This is
+# surgical and cannot lose data:
+#   • It removes ONLY images of the Lumen repo, and NEVER the one the current container
+#     runs on (so a failed pull always leaves you on the working version).
+#   • It leaves every other app's images alone.
+#   • It never runs `volume prune`, so the lumen-data volume (keystore / MFA / providers
+#     / config / memory) is physically out of reach of this path — nothing can be lost.
+# Each old version hoards ~7 GB; on a machine that filled up over time, freeing them
+# BEFORE the pull is what stops "no space left on device" from wedging the update.
+_reclaim_space() {
+  repo="${IMAGE%:*}"                                                   # ghcr.io/devwspito/lumen
+  keep="$("$RT" inspect -f '{{.Image}}' "$NAME" 2>/dev/null | sed 's/^sha256://')"
+  n=0
+  if [ -n "$keep" ]; then
+    old="$("$RT" images --no-trunc --format '{{.ID}} {{.Repository}}' 2>/dev/null \
+          | awk -v r="$repo" '$2==r {print $1}' | sed 's/^sha256://' | sort -u)"
+    for id in $old; do
+      [ "$id" = "$keep" ] && continue                                 # never the running image
+      "$RT" rmi -f "sha256:$id" >/dev/null 2>&1 && n=$((n + 1)) || true
+    done
+  fi
+  "$RT" image prune -f   >/dev/null 2>&1 || true                       # untagged/dangling leftovers
+  "$RT" builder prune -f >/dev/null 2>&1 || true                       # build cache (safe to drop)
+  [ "$n" -gt 0 ] && echo "[ok] Freed space from $n old Lumen image(s)."
+  return 0
+}
+
 cmd_update() {
   echo "[*] Fetching the latest Lumen image..."
   _ensure_machine
-  # Reclaim disk BEFORE pulling. Each previous update left the old image DANGLING
-  # (its :latest tag moved to the new pull) and each hoards ~7 GB. If we only pruned
-  # AFTER the pull (as before), a disk that had already filled up over time made the
-  # pull itself fail with "no space left on device" — and the prune never ran, so it
-  # stayed stuck. Pruning dangling images + build cache first frees that space so the
-  # pull has room. This NEVER touches the lumen-data volume (your keystore/MFA/
-  # providers/config) nor the running container's current tagged image.
+  # Reclaim space BEFORE pulling so the new image has room even on a full disk. See
+  # _reclaim_space: it only ever touches old Lumen images / dangling layers / build
+  # cache — your data volume is never in scope.
   echo "[*] Reclaiming space from previous versions (your data is untouched)..."
-  "$RT" image prune -f  >/dev/null 2>&1 || true
-  "$RT" builder prune -f >/dev/null 2>&1 || true
+  _reclaim_space
   # Pull the correct image (enterprise or community) based on the current marker.
   "$RT" pull "$(_image)"
   echo "[*] Recreating the container with the new image..."
   _run   # -v lumen-data keeps your config (keystore, MFA, providers)
-  # The image we were running until a second ago is now dangling too (the tag moved
-  # to what we just pulled, and the container was recreated) → prune it as well.
-  "$RT" image prune -f >/dev/null 2>&1 || true
+  # The image we ran until a second ago is now unreferenced (tag moved to the new pull,
+  # container recreated) → reclaim it too, same surgical path.
+  _reclaim_space
   _open_and_print
 }
 
