@@ -117,7 +117,18 @@ class JailedBrowserManager:
     async def ensure_running(self) -> None:
         """Ensure the jailed headless Chromium is alive; launch if needed.
 
-        Fast path: if already started and CDP port accepts, returns immediately.
+        Fast path: if the CDP port accepts, a healthy browser is already running
+        — return immediately WITHOUT relaunching. This check does NOT depend on
+        self._started: callers (e.g. the vnc_proxy/training_live websocket
+        handlers) construct a FRESH JailedBrowserManager() per request, so
+        self._started is always False on that instance even though the eager
+        boot-time singleton (or another instance) already launched the browser.
+        Gating the fast path on self._started made ensure_running() relaunch
+        (via a redundant systemd-run) on every single call from a fresh
+        instance, even against an already-healthy browser — wasted work at
+        best, and a spurious BrowserLauncherError/JailedBrowserUnavailable at
+        worst (systemd-run fails outright when the transient unit name is
+        already active).
         Slow path (under lock): delegates launch to BrowserLauncherClient, then
         polls the CDP port for up to _POLL_TIMEOUT_S seconds.
 
@@ -127,13 +138,16 @@ class JailedBrowserManager:
         """
         port = _resolve_cdp_port()
 
-        # Fast path: already started and port is live.
-        if self._started and _cdp_port_accepting(port):
+        # Fast path: the port is live — a browser is already running, launched
+        # by this instance, another instance, or the boot-time eager start.
+        if _cdp_port_accepting(port):
+            self._started = True
             return
 
         async with self._lock:
             # Re-check under lock (another coroutine may have just launched).
-            if self._started and _cdp_port_accepting(port):
+            if _cdp_port_accepting(port):
+                self._started = True
                 return
 
             self._started = False
