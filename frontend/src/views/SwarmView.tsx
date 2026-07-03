@@ -151,11 +151,21 @@ export function SwarmView({ roster, runtimeStatus, hasRuflo, onAgentClick }: Swa
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 })
   const palRef = useRef<Palette>(readPalette())
 
-  // Depend on the resolved STRING, not on `t` — useT() returns a fresh function
-  // every render, and an unstable dep here rebuilds the graph each render, which
-  // re-heats the force layout forever (visible as endless drifting/looping).
+  // Rebuild the graph ONLY when the roster's CONTENT changes, never on object
+  // identity. A rebuilt graph = fresh node objects = the force layout resets to
+  // the centre; any spurious rebuild shows up as the whole swarm collapsing into
+  // a jumping pile. (useT() also had to be memoized — see lib/i18n.ts.)
   const brainLabel = t('swarm.center')
-  const graph = useMemo(() => buildGraph(roster, brainLabel), [roster, brainLabel])
+  const rosterKey = useMemo(
+    () => roster.departments
+      .map((d) => `${d.id}~${d.kind}~${d.agents.map((a) => `${a.id}:${a.name}:${a.color ?? ''}`).join(',')}`)
+      .join('|'),
+    [roster],
+  )
+  const rosterRef = useRef(roster)
+  rosterRef.current = roster
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- rosterKey IS the roster identity
+  const graph = useMemo(() => buildGraph(rosterRef.current, brainLabel), [rosterKey, brainLabel])
 
   // Fast lookup of the RosterAgent behind an id (for the click handler).
   const agentById = useMemo(() => {

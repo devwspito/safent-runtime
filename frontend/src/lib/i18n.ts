@@ -11,7 +11,7 @@
  * language naturally; this only controls the platform UI strings.
  */
 
-import { createContext, useContext, useState, createElement, type ReactNode } from 'react'
+import { createContext, useContext, useMemo, useState, createElement, type ReactNode } from 'react'
 
 export type Locale = 'es' | 'en'
 
@@ -1820,10 +1820,17 @@ export function useLocale(): I18nContextValue {
 
 export function useT(): (key: TranslationKey, fallback?: string) => string {
   const { locale } = useContext(I18nContext)
-  return function t(key: TranslationKey, fallback?: string): string {
+  // STABLE per locale. Components use `t` in effect/memo dependency arrays
+  // ([t] is all over the app); returning a fresh function every render made
+  // those effects re-run on every render — in OfficeView that meant an endless
+  // refetch loop (new roster object each time → the swarm graph rebuilt →
+  // node positions reset to the centre → the "jumping pile" bug).
+  return useMemo(() => {
     const dict = translations[locale] as Record<string, string>
-    return dict[key] ?? fallback ?? key
-  }
+    return function t(key: TranslationKey, fallback?: string): string {
+      return dict[key] ?? fallback ?? key
+    }
+  }, [locale])
 }
 
 /** Derive a human title from the approval's kind field. Falls back to the summary. */
