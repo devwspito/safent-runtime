@@ -231,19 +231,31 @@ function SystemUpdateFooter() {
       }}
     >
       <span>{t('sysupdate.current').replace('{v}', status.current_version)}</span>
+      <span style={{ flex: 1 }} />
       {status.updating ? (
         <span role="status">{t('sysupdate.updating')}</span>
-      ) : status.update_available ? (
+      ) : (
         <button
           type="button"
           className="cv-btn cv-btn--ghost cv-btn--sm"
-          style={{ height: 'auto', padding: `2px var(--space-2)`, fontSize: 'var(--text-xs)' }}
+          style={{
+            height: 'auto', padding: `2px var(--space-2)`, fontSize: 'var(--text-xs)',
+            display: 'inline-flex', alignItems: 'center', gap: '6px',
+          }}
           onClick={handleUpdateClick}
-          aria-label={`${t('sysupdate.available')} — ${t('sysupdate.action')}`}
+          title={status.update_available ? t('sysupdate.available') : undefined}
+          aria-label={status.update_available
+            ? `${t('sysupdate.available')} — ${t('sysupdate.action')}`
+            : t('sysupdate.action')}
         >
+          {status.update_available && (
+            <span aria-hidden="true" style={{
+              width: 6, height: 6, borderRadius: '50%', background: 'var(--color-accent)',
+            }} />
+          )}
           {t('sysupdate.action')}
         </button>
-      ) : null}
+      )}
       {confirmUpdateDialog}
     </div>
   )
