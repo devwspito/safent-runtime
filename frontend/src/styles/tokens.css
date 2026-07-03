@@ -91,6 +91,7 @@
   --radius-sm:   4px;
   --radius-md:   6px;
   --radius-lg:   8px;
+  --radius-xl:   12px;    /* rare larger panels */
   --radius-pill: 9999px;
   --radius-full: 9999px; /* alias of --radius-pill */
 

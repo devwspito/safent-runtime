@@ -18,7 +18,7 @@
   --ok:     var(--color-success);
   --warn:   var(--color-warning);
   --danger: var(--color-danger);
-  --info:   #52a9ff;  /* blue-11, used for informational HITL */
+  --info:   var(--blue-11);  /* informational HITL */
 
   /* Ink scale — slate-12…9 gives perceptible hierarchy at dark-13px density */
   --ink:  var(--slate-12);   /* #ecedee — primary text */
@@ -43,17 +43,17 @@
   --r-sm: var(--radius-sm);  /* 4px */
   --r-md: var(--radius-md);  /* 6px */
   --r-lg: var(--radius-lg);  /* 8px */
-  --r-xl: 12px;              /* rare larger panels */
+  --r-xl: var(--radius-xl);  /* 12px */
 
   /* Spacing — unchanged 4-px grid */
   --sp-1:  var(--space-1);   /*  4px */
   --sp-2:  var(--space-2);   /*  8px */
   --sp-3:  var(--space-3);   /* 12px */
   --sp-4:  var(--space-4);   /* 16px */
-  --sp-5:  1.25rem;          /* 20px */
+  --sp-5:  var(--space-5);   /* 20px */
   --sp-6:  var(--space-6);   /* 24px */
   --sp-8:  var(--space-8);   /* 32px */
-  --sp-10: 2.5rem;           /* 40px */
+  --sp-10: var(--space-10);  /* 40px */
 
   /* Control heights */
   --ctrl-sm: 32px;  /* compact — matches enterprise density */
@@ -63,16 +63,16 @@
   --font-prose: 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Palatino,
     'Georgia Pro', Georgia, ui-serif, serif;
 
-  /* Type scale — enterprise-matched sizes (px kept for legacy callers) */
-  --text-display:  28px;   /* --text-3xl */
-  --text-title:    22px;   /* --text-2xl */
-  --text-subtitle: 17px;   /* between --text-xl and --text-lg */
-  --text-lead:     16px;   /* --text-lg */
-  --text-button:   13px;   /* --text-base — dense action labels */
-  --text-body:     13px;   /* --text-base */
-  --text-label:    12px;   /* --text-sm */
-  --text-caption:  11px;   /* --text-xs */
-  --text-micro:    11px;   /* --text-xs */
+  /* Type scale — aliased to the canonical rem scale (identical px values) */
+  --text-display:  var(--text-3xl);   /* 28px */
+  --text-title:    var(--text-2xl);   /* 22px */
+  --text-subtitle: 17px;              /* no canonical 17px — kept explicit */
+  --text-lead:     var(--text-lg);    /* 16px */
+  --text-button:   var(--text-base);  /* 13px — dense action labels */
+  --text-body:     var(--text-base);  /* 13px */
+  --text-label:    var(--text-sm);    /* 12px */
+  --text-caption:  var(--text-xs);    /* 11px */
+  --text-micro:    var(--text-xs);    /* 11px */
 
   /* Overlays + popover — only elevated surfaces cast shadows */
   --shadow-raised:   none;                /* depth via border, not shadow */

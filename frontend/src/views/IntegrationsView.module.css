@@ -308,9 +308,3 @@
   padding: var(--space-4) 0;
   line-height: var(--leading-normal);
 }
-
-/* ── Empty state tweak — narrower max-width in grid context ─────────────── */
-
-.emptyWrap {
-  grid-column: 1 / -1;
-}

@@ -44,7 +44,6 @@ import type {
   InstallScanResponse,
   SecurityDecisionPayload,
   SkillDetails,
-  TrainingState,
   UsageSummary,
   UsageByAgent,
   UsageTimeseries,
@@ -341,49 +340,6 @@ export function promoteSkill(packageId: string): Promise<unknown> {
     method: 'POST',
     body: JSON.stringify({ confirm: true }),
   })
-}
-
-export function createTrainingSession(payload: { skill_name: string; description: string; surface_kind: string }): Promise<{ session_id: string }> {
-  return request<{ session_id: string }>('/training', { method: 'POST', body: JSON.stringify(payload) })
-}
-
-export function startTrainingRecording(sessionId: string): Promise<unknown> {
-  return request<unknown>(`/training/${encodeURIComponent(sessionId)}/start`, { method: 'POST', body: '{}' })
-}
-
-export function stopTrainingRecording(sessionId: string): Promise<unknown> {
-  return request<unknown>(`/training/${encodeURIComponent(sessionId)}/stop`, { method: 'POST', body: '{}' })
-}
-
-export function synthesizeSkill(sessionId: string): Promise<unknown> {
-  return request<unknown>(`/training/${encodeURIComponent(sessionId)}/synthesize`, { method: 'POST', body: '{}' })
-}
-
-export function abandonTrainingSession(sessionId: string): Promise<unknown> {
-  return request<unknown>(
-    `/training/${encodeURIComponent(sessionId)}/abandon`,
-    { method: 'POST', body: '{}' },
-  ).catch(() => ({}))
-}
-
-export function pauseTrainingRecording(sessionId: string): Promise<TrainingState> {
-  return request<TrainingState>(`/training/${encodeURIComponent(sessionId)}/pause`, { method: 'POST', body: '{}' })
-}
-
-export function resumeTrainingRecording(sessionId: string): Promise<TrainingState> {
-  return request<TrainingState>(`/training/${encodeURIComponent(sessionId)}/resume`, { method: 'POST', body: '{}' })
-}
-
-export function cancelTrainingRecording(sessionId: string): Promise<TrainingState> {
-  return request<TrainingState>(`/training/${encodeURIComponent(sessionId)}/cancel`, { method: 'POST', body: '{}' })
-}
-
-export function getTrainingState(sessionId: string): Promise<TrainingState> {
-  return request<TrainingState>(`/training/${encodeURIComponent(sessionId)}`)
-}
-
-export function signTrainingSession(sessionId: string): Promise<TrainingState> {
-  return request<TrainingState>(`/training/${encodeURIComponent(sessionId)}/sign`, { method: 'POST', body: '{}' })
 }
 
 export function getSkillDetails(packageId: string): Promise<SkillDetails> {

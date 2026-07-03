@@ -555,20 +555,6 @@ export interface AgentStatsResponse {
   agents: AgentStat[]
 }
 
-// ── Training state ─────────────────────────────────────────────────────────────
-
-export interface TrainingState {
-  session_id: string
-  skill_name: string
-  description: string | null
-  state: 'idle' | 'capturing' | 'paused' | 'review' | 'validated' | 'cancelled' | 'abandoned' | string
-  started_at: string
-  stopped_at: string | null
-  signed_at: string | null
-  step_count: number
-  surface_kind: string
-}
-
 // ── Memory ────────────────────────────────────────────────────────────────────
 
 export interface MemoryItem {
