@@ -744,6 +744,10 @@ const translations = {
     'swarm.center':               'Cerebro',
     'swarm.recenter':             'Centrar',
     'swarm.empty.title':          'Aún no hay agentes',
+    'swarm.feed.title':           'En directo',
+    'swarm.feed.empty':           'Sin actividad ahora mismo. Cuando un agente trabaje o el cerebro delegue, lo verás aquí.',
+    'swarm.feed.now':             'ahora',
+    'swarm.feed.mins':            'hace {n} min',
     'agents.create.btn':          '+ Crear agente',
     'agents.create.aria':         'Crear nuevo agente',
 
@@ -1627,6 +1631,10 @@ const translations = {
     'swarm.center':               'Brain',
     'swarm.recenter':             'Recenter',
     'swarm.empty.title':          'No agents yet',
+    'swarm.feed.title':           'Live',
+    'swarm.feed.empty':           'No activity right now. When an agent works or the brain delegates, it shows up here.',
+    'swarm.feed.now':             'now',
+    'swarm.feed.mins':            '{n} min ago',
     'agents.create.btn':          '+ New agent',
     'agents.create.aria':         'Create new agent',
 
