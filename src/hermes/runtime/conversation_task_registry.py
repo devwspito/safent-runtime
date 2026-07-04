@@ -72,6 +72,30 @@ def clear_current_cycle_task() -> None:
     _current.task_id = ""
 
 
+# Ambient per-thread active agent_id for THIS cycle (Enterprise Fase 2 Phase 1).
+# Mirrors set/get/clear_current_cycle_task exactly: the security hook only
+# receives (tool_name, args, task_id) from hermes-agent's plugin manager —
+# never the active agent_id — so the native per-agent access-scope floor
+# (security_hook._check_agent_access_scope) resolves it from here instead of
+# threading a new kwarg through a plugin surface this repo does not own.
+_current_agent = threading.local()
+
+
+def set_current_cycle_agent(agent_id: str) -> None:
+    """Stamp the current cycle's active agent_id for THIS thread (the cycle's executor thread)."""
+    _current_agent.agent_id = agent_id or ""
+
+
+def get_current_cycle_agent() -> str:
+    """The current cycle's active agent_id for THIS thread, or "" outside a cycle."""
+    return getattr(_current_agent, "agent_id", "")
+
+
+def clear_current_cycle_agent() -> None:
+    """Drop the thread's current-cycle agent stamp (cycle's finally; reused-thread safe)."""
+    _current_agent.agent_id = ""
+
+
 # Ambient current-turn user message for intent-based semantic tool retrieval.
 # A ContextVar (NOT thread-local): the async cycle (run_cycle) resolves external
 # tools in the EVENT-LOOP thread via `await _tools_source()`, but the rest of the

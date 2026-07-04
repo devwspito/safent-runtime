@@ -249,8 +249,37 @@ def _recreate_pending_approvals_status_check_if_needed(
         conn.execute(f"PRAGMA foreign_keys = {'ON' if fk_prev else 'OFF'}")
 
 
+# ── DDL: agent_access_scopes (Enterprise Fase 2 Phase 1 — runtime-only
+# per-agent native-tool access scope; NO cloud/config-sync in this phase) ──
+# Una fila por (tenant_id, agent_id): el PK compuesto hace que upsert() (T042,
+# SqliteAgentAccessScopeRepo) reemplace SIEMPRE la única fila del agente en vez
+# de acumular historial. `enforced=0` (default) es el estado de una instancia
+# local/sin política cloud: no gobierna nada — el runtime se comporta EXACTAMENTE
+# como antes de que esta tabla existiera (fail-open leído por
+# security_hook._check_agent_access_scope y nous_engine._apply_agent_filter).
+_DDL_AGENT_ACCESS_SCOPES = """
+CREATE TABLE IF NOT EXISTS agent_access_scopes (
+    tenant_id            TEXT NOT NULL,
+    agent_id             TEXT NOT NULL,
+    scope_id             TEXT NOT NULL,
+    native_tools         TEXT NOT NULL DEFAULT '[]',
+    policy_overlay       TEXT NOT NULL DEFAULT '{}',
+    views                TEXT NOT NULL DEFAULT '[]',
+    cerebro_unrestricted INTEGER NOT NULL DEFAULT 1,
+    enforced             INTEGER NOT NULL DEFAULT 0,
+    updated_by           INTEGER NOT NULL,
+    managed_by           TEXT,
+    updated_at           TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS agent_access_scopes_agent_idx
+    ON agent_access_scopes (agent_id);
+"""
+
+
 def ensure_capabilities_schema(conn: sqlite3.Connection) -> None:
-    """Aplica el DDL de `pending_approvals` sobre una conexión abierta.
+    """Aplica el DDL de `pending_approvals` + `agent_access_scopes` sobre una
+    conexión abierta.
 
     Idempotente: CREATE TABLE/INDEX IF NOT EXISTS + ALTER en try/except + una
     recreación controlada del CHECK de `status` bajo guard por inspección del
@@ -264,3 +293,5 @@ def ensure_capabilities_schema(conn: sqlite3.Connection) -> None:
     _recreate_pending_approvals_status_check_if_needed(conn)
     # (Re)crea todos los índices: idempotente + repuebla tras la recreación.
     conn.executescript(_DDL_PENDING_APPROVALS_INDEXES)
+    # Enterprise Fase 2 Phase 1: runtime-only per-agent access scope table.
+    conn.executescript(_DDL_AGENT_ACCESS_SCOPES)

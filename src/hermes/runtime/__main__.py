@@ -524,6 +524,7 @@ def _build_reasoning_engine(
     capability_consent_ref=None,
     composio_connection_repo=None,
     capability_binding_repo=None,
+    access_scope_repo=None,
     cerebro_browser_manager=None,
     jailed_browser_manager=None,
 ):
@@ -541,6 +542,7 @@ def _build_reasoning_engine(
         agent_registry=agent_registry,
         composio_connection_repo=composio_connection_repo,
         capability_binding_repo=capability_binding_repo,
+        access_scope_repo=access_scope_repo,
         cerebro_browser_manager=cerebro_browser_manager,
         jailed_browser_manager=jailed_browser_manager,
     )
@@ -556,6 +558,7 @@ def _build_nous_engine(
     agent_registry=None,
     composio_connection_repo=None,
     capability_binding_repo=None,
+    access_scope_repo=None,
     cerebro_browser_manager=None,
     jailed_browser_manager=None,
 ):
@@ -636,6 +639,7 @@ def _build_nous_engine(
         agent_registry=agent_registry,
         composio_connection_repo=composio_connection_repo,
         capability_binding_repo=capability_binding_repo,
+        access_scope_repo=access_scope_repo,
         cerebro_browser_manager=cerebro_browser_manager,
         jailed_browser_manager=jailed_browser_manager,
     )
@@ -1385,8 +1389,27 @@ async def _run(*, systemd_notify: bool) -> None:
     if os_native_dispatcher is not None:
         os_native_dispatcher.wire_computer_use_broker(broker)
 
+    # Enterprise Fase 2 Phase 1: per-agent access scope repo (SAME shell-state.db).
+    # Built once here and reused by BOTH the security hook (native-tool floor)
+    # and the Nous engine (CEO/Cerebro scopable bypass) — single source of truth.
+    # Fail-soft: repo construction failure disables both (fail-open, unchanged
+    # from before this feature existed).
+    _access_scope_repo = None
+    try:
+        from hermes.capabilities.infrastructure.sqlite_agent_access_scope_repo import (  # noqa: PLC0415
+            SqliteAgentAccessScopeRepo,
+        )
+        _access_scope_repo = SqliteAgentAccessScopeRepo(db_path=db_path)
+    except Exception as _scope_repo_exc:  # noqa: BLE001
+        logger.warning(
+            "hermes.runtime.access_scope_repo_unavailable: %s — "
+            "per-agent native-tool floor disabled (fail-open)",
+            _scope_repo_exc,
+        )
+
     # Register native security hooks on hermes-agent's global PluginManager.
-    # pre_tool_call: kill-switch + hardline floor + command/code guards + denylist.
+    # pre_tool_call: kill-switch + access-scope floor + hardline floor +
+    # command/code guards + denylist.
     # post_tool_call: signed audit entry for every tool execution (allow or deny).
     # Must run AFTER broker + signer + audit_repo are fully constructed and
     # BEFORE the engine is built (GovernedAIAgent is built per-cycle in run_cycle).
@@ -1401,6 +1424,8 @@ async def _run(*, systemd_notify: bool) -> None:
             broker=broker,
             signer=firmer,
             audit_repo=audit_repo,
+            access_scope_repo=_access_scope_repo,
+            tenant_id=str(_resolve_tenant_id()),
         )
     else:
         logger.warning(
@@ -1576,6 +1601,7 @@ async def _run(*, systemd_notify: bool) -> None:
         capability_consent_ref=_capability_consent_ref,
         composio_connection_repo=_composio_connection_repo,
         capability_binding_repo=_main_capability_binding_repo,
+        access_scope_repo=_access_scope_repo,
         cerebro_browser_manager=cerebro_browser_manager,
         jailed_browser_manager=jailed_browser_manager,
     )

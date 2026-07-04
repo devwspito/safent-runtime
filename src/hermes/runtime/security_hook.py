@@ -41,6 +41,8 @@ import shlex
 import threading
 from typing import TYPE_CHECKING, Any
 
+from hermes.runtime.nous_tool_risk_map import classify_nous_tool
+
 if TYPE_CHECKING:
     from hermes.agents_os.application.audit_hash_chain import (
         AuditHashChainSigner,
@@ -131,6 +133,18 @@ _TERMINAL_TOOLS: frozenset[str] = frozenset({"run_command", "run_terminal", "ter
 # Execute-code tool names.
 _CODE_TOOLS: frozenset[str] = frozenset({"execute_code", "run_code"})
 
+# Caged-native tool aliases NOT present in nous_tool_risk_map's catalog (e.g.
+# `run_command`/`run_terminal`/`run_code` are call-site aliases for the same
+# caged exec surface as `terminal`/`execute_code`). Union'd with
+# classify_nous_tool() so the per-agent access-scope floor (Step 1.1 below)
+# recognizes a native tool call under EITHER naming convention.
+_CAGED_NATIVE_ALIASES: frozenset[str] = _TERMINAL_TOOLS | _CODE_TOOLS
+
+
+def _is_native_nous_tool(tool_name: str) -> bool:
+    """True if *tool_name* is a native Nous tool (catalog or caged alias)."""
+    return classify_nous_tool(tool_name) is not None or tool_name in _CAGED_NATIVE_ALIASES
+
 
 def _block(message: str) -> dict[str, str]:
     return {"action": "block", "message": message}
@@ -163,6 +177,77 @@ def _check_kill_switch(
             exc,
         )
         return True
+
+
+def _check_agent_access_scope(
+    tool_name: str,
+    access_scope_repo: Any,
+    tenant_id: str,
+) -> str | None:
+    """Native per-agent floor (Enterprise governance, Fase 2 Phase 1).
+
+    Blocks a native Nous tool call that falls outside the CALLING agent's
+    declared AgentAccessScope. Fail-OPEN (returns None, i.e. allow) whenever
+    the scope does not govern this call — no repo wired, no ambient agent_id,
+    no scope row for the agent, or `enforced=False` — so every existing/local
+    install is completely unaffected (zero regression). Fail-CLOSED (blocks)
+    ONLY on an unexpected repo error: this function never raises, since a
+    raise here would be swallowed by invoke_hook into ALLOW.
+
+    The CEO/Cerebro is exempt from an enforced scope UNLESS that scope
+    explicitly sets `cerebro_unrestricted=False` — mirrors
+    NousReasoningEngine._cerebro_bypasses_filtering so the same governance
+    decision applies consistently to native tools (this floor) and external
+    MCP/skill tools (the engine's per-cycle filter).
+    """
+    try:
+        from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+            get_current_cycle_agent,
+        )
+
+        agent_id = get_current_cycle_agent()
+        if not agent_id or access_scope_repo is None:
+            return None  # unscoped cycle or no repo wired — today's behaviour
+
+        if not _is_native_nous_tool(tool_name):
+            return None  # this floor only governs native Nous tools
+
+        scope = access_scope_repo.get_scope(agent_id, tenant_id)
+        if scope is None or not scope.enforced:
+            return None  # no cloud policy for this agent yet — unrestricted
+
+        from hermes.agents.domain.agent import DEFAULT_AGENT_ID  # noqa: PLC0415
+
+        if agent_id == DEFAULT_AGENT_ID and scope.cerebro_unrestricted:
+            return None  # CEO/Cerebro omnipotence — the only field that parks it
+
+        if scope.allows_native_tool(tool_name):
+            return None
+
+        # Caged-exec aliases (run_command/run_terminal/terminal/process and
+        # run_code/execute_code) are the SAME confined surface — granting ANY name in
+        # a group grants the whole group, so an owner allow-listing 'terminal' is not
+        # false-blocked when the model calls 'run_command' (review LOW: alias over-block).
+        if tool_name in _TERMINAL_TOOLS and (_TERMINAL_TOOLS & scope.native_tools):
+            return None
+        if tool_name in _CODE_TOOLS and (_CODE_TOOLS & scope.native_tools):
+            return None
+
+        return (
+            f"'{tool_name}' no está en el ámbito de acceso de este agente. "
+            "Pide al dueño que amplíe sus permisos si lo necesitas."
+        )
+    except Exception as exc:  # noqa: BLE001 — this gate NEVER raises: ANY error (a lazy
+        # import failure, a repo error, anything) fails-CLOSED to a block, never out to
+        # invoke_hook (which would swallow a raise into ALLOW). The two imports that
+        # previously sat outside the try are now inside it (review INFO).
+        logger.error(
+            "hermes.security_hook.access_scope_check_failed tool=%s error=%r"
+            " — blocking (fail-closed)",
+            tool_name,
+            exc,
+        )
+        return f"security gate error (fail-closed): {type(exc).__name__}"
 
 
 def _check_hardline_native(command_str: str) -> str | None:
@@ -1226,6 +1311,8 @@ def make_pre_tool_call_hook(
     agent_state: "AgentStatePort",
     engine_loop: "asyncio.AbstractEventLoop",
     broker: Any,
+    access_scope_repo: Any | None = None,
+    tenant_id: str = "",
 ) -> Any:
     """Build and return the pre_tool_call hook callback.
 
@@ -1238,6 +1325,11 @@ def make_pre_tool_call_hook(
         agent_state: Port for reading pause state (kill-switch).
         engine_loop: The running asyncio event loop (for async bridges).
         broker: CapabilityBroker instance (for denylist access).
+        access_scope_repo: Optional AgentAccessScope repo (Enterprise Fase 2
+            Phase 1). None => the native per-agent floor is a no-op (fail-open,
+            zero regression) — matches how composio/capability repos degrade.
+        tenant_id: The daemon's resolved tenant_id, used to look up the
+            calling agent's scope. Ignored when access_scope_repo is None.
     """
     from hermes.capabilities.tool_delicacy import hook_mfa_block  # noqa: PLC0415
     from hermes.capabilities.tool_policy import ToolPolicyStore  # noqa: PLC0415
@@ -1260,6 +1352,17 @@ def make_pre_tool_call_hook(
                     "hermes.security_hook.pre.kill_switch_blocked tool=%s", tool_name
                 )
                 return _block("agent paused — kill-switch active (CTRL-12)")
+
+            # Step 1.1: Native per-agent access-scope floor (Enterprise governance,
+            # Fase 2 Phase 1). Fail-OPEN when unscoped (no repo, no ambient
+            # agent_id, no scope row, or enforced=False) — zero regression for
+            # every existing/local install. Fail-CLOSED only on a repo error.
+            scope_block = _check_agent_access_scope(tool_name, access_scope_repo, tenant_id)
+            if scope_block is not None:
+                logger.warning(
+                    "hermes.security_hook.pre.access_scope_blocked tool=%s", tool_name
+                )
+                return _block(scope_block)
 
             # Step 1.5: Per-command policy (Security/Policies UI, P4.B). Block ONLY
             # when the owner has CONSCIOUSLY disabled the tool (explicit override=False
@@ -1641,6 +1744,8 @@ def register_security_hooks(
     broker: Any,
     signer: "AuditHashChainSigner",
     audit_repo: "SignedAuditRepositoryPort",
+    access_scope_repo: Any | None = None,
+    tenant_id: str = "",
 ) -> None:
     """Register both pre_tool_call and post_tool_call hooks on the global PluginManager.
 
@@ -1651,6 +1756,10 @@ def register_security_hooks(
     Uses get_plugin_manager()._hooks directly (same internal path as
     PluginContext.register_hook) because we are not a plugin manifest — we are
     the runtime kernel registering its own security gate.
+
+    access_scope_repo/tenant_id: optional Enterprise Fase 2 Phase 1 wiring for
+    the native per-agent access-scope floor. None/"" => fail-open, unchanged
+    from before this parameter existed.
     """
     try:
         from hermes_cli.plugins import get_plugin_manager  # noqa: PLC0415
@@ -1667,6 +1776,8 @@ def register_security_hooks(
         agent_state=agent_state,
         engine_loop=engine_loop,
         broker=broker,
+        access_scope_repo=access_scope_repo,
+        tenant_id=tenant_id,
     )
     post_hook = make_post_tool_call_hook(
         signer=signer,

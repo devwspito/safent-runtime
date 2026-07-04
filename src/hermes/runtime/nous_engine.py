@@ -1898,6 +1898,7 @@ class NousReasoningEngine:
         agent_registry: Any | None = None,
         composio_connection_repo: Any | None = None,
         capability_binding_repo: Any | None = None,
+        access_scope_repo: Any | None = None,
         cerebro_browser_manager: Any | None = None,
         jailed_browser_manager: Any | None = None,
     ) -> None:
@@ -1945,6 +1946,9 @@ class NousReasoningEngine:
         self._agent_registry = agent_registry
         self._composio_connection_repo = composio_connection_repo
         self._capability_binding_repo = capability_binding_repo
+        # Enterprise Fase 2 Phase 1: per-agent access scope (native-tool floor +
+        # CEO/Cerebro scopable bypass). None => fail-open, zero regression.
+        self._access_scope_repo = access_scope_repo
         # Dual-browser: headed Chromium for the Cerebro (default agent).
         # None = dual-browser disabled (CI, tests, configs without a display).
         self._cerebro_browser_manager = cerebro_browser_manager
@@ -2396,6 +2400,7 @@ class NousReasoningEngine:
                 stream_callback=_stream_cb,
                 conversation_id=_conv_id_for_dbus,
                 work_item_id=_work_item_id_for_dbus,
+                active_agent_id=str(active_agent_id) if active_agent_id else "",
             ),
         )
 
@@ -2575,22 +2580,53 @@ class NousReasoningEngine:
 
         tenant_id = str(self._tenant_id) if self._tenant_id else ""
 
-        # Cerebro (agente default) = OMNIPOTENTE: ve TODAS las tools externas
-        # (MCP/skill/composio) sin filtro de bindings. El fail-closed por binding
-        # aplica SOLO a agentes CUSTOM (restriccion por-agente, nunca al cerebro).
-        # Sin esto, Hermes (Cerebro) NO descubria ninguna tool MCP/skill: el
-        # fail-closed las descartaba todas por falta de binding (y el tenant del
-        # binding ni siquiera casaba con self._tenant_id). Modelo del dueno: el
-        # cerebro lo ve y puede todo; a los custom se les aprieta.
+        # Cerebro (agente default) = OMNIPOTENTE por defecto: ve TODAS las tools
+        # externas (MCP/skill/composio) sin filtro de bindings. El fail-closed por
+        # binding aplica SOLO a agentes CUSTOM (restriccion por-agente) — salvo que
+        # una AgentAccessScope explícita (cloud, Fase 2+) apague la omnipotencia del
+        # cerebro (_cerebro_bypasses_filtering). Sin repo/scope (instancia local/
+        # sin gestionar), el cerebro sigue viendo todo: zero regression. Modelo del
+        # dueno: el cerebro lo ve y puede todo salvo que se le acote explícitamente;
+        # a los custom se les aprieta siempre.
         from hermes.agents.domain.agent import DEFAULT_AGENT_ID  # noqa: PLC0415
-        if agent_id != DEFAULT_AGENT_ID:
-            # --- MCP / skill filtering (fail-CLOSED by kind) — solo agentes custom ---
+        is_cerebro = agent_id == DEFAULT_AGENT_ID
+        if not is_cerebro or not self._cerebro_bypasses_filtering(tenant_id):
+            # --- MCP / skill filtering (fail-CLOSED by kind) ---
             external = self._filter_mcp_skill(external, agent_id, tenant_id)
 
         # --- Composio: expand by assigned connections ---
         external = self._expand_composio(external, agent_id, tenant_id)
 
         return external
+
+    def _cerebro_bypasses_filtering(self, tenant_id: str) -> bool:
+        """Whether the CEO/Cerebro skips per-agent MCP/skill filtering.
+
+        True (omnipotent) unless an AgentAccessScope row exists for the CEO's
+        own agent_id with `cerebro_unrestricted=False` — the ONLY knob that
+        parks the bypass (Fase 2 Phase 1: runtime-only, no cloud policy pushes
+        this yet). No repo wired, no scope row, or a lookup error → True
+        (fail-safe: never strand the CEO without its own tools).
+        """
+        if self._access_scope_repo is None:
+            return True
+        from hermes.agents.domain.agent import DEFAULT_AGENT_ID  # noqa: PLC0415
+        try:
+            scope = self._access_scope_repo.get_scope(DEFAULT_AGENT_ID, tenant_id)
+        except Exception as exc:  # noqa: BLE001 — fail-safe: broken repo → stays omnipotent
+            logger.error(
+                "hermes.nous_engine.access_scope_lookup_failed: %s — cerebro stays omnipotent",
+                exc,
+            )
+            return True
+        # `enforced` is the master gate on BOTH governance axes — the native-tool
+        # floor (security_hook._check_agent_access_scope) and this external MCP/skill
+        # filter. enforced=False governs NOTHING → the CEO stays omnipotent (zero
+        # regression); cerebro_unrestricted only bites when enforced=True. Mirrors the
+        # hook exactly; without the `not scope.enforced` term a scope of
+        # {enforced:False, cerebro_unrestricted:False} would filter the CEO's external
+        # tools while leaving its native RCE tools wide open (false lockdown, review MEDIUM).
+        return scope is None or not scope.enforced or scope.cerebro_unrestricted
 
     def _filter_mcp_skill(
         self,
@@ -2999,6 +3035,7 @@ def _run_conversation_with_cdp(
     stream_callback: "Callable[..., None] | None" = None,
     conversation_id: str = "",
     work_item_id: "UUID | None" = None,
+    active_agent_id: str = "",
 ) -> dict[str, Any]:
     """Run agent.run_conversation in the current executor thread.
 
@@ -3040,6 +3077,8 @@ def _run_conversation_with_cdp(
         clear_current_cycle_task,
         set_work_item_for_task,
         clear_work_item_for_task,
+        set_current_cycle_agent,
+        clear_current_cycle_agent,
         reset_write_tool_failures,
     )
 
@@ -3065,6 +3104,11 @@ def _run_conversation_with_cdp(
     # write wrapper) still resolve THIS conversation → block-and-resume, not the
     # non-resuming retry queue.
     set_current_cycle_task(cycle_task_id)
+    # Enterprise Fase 2 Phase 1: stamp the active agent_id so the security
+    # hook's native per-agent access-scope floor can resolve it (the hook only
+    # receives tool_name/args/task_id — never the agent_id — from hermes-agent's
+    # plugin manager).
+    set_current_cycle_agent(active_agent_id)
     reset_write_tool_failures()  # fresh circuit-breaker counters per cycle
 
     try:
@@ -3083,6 +3127,7 @@ def _run_conversation_with_cdp(
         clear_conversation_for_task(cycle_task_id)
         clear_work_item_for_task(cycle_task_id)
         clear_current_cycle_task()
+        clear_current_cycle_agent()
         # Reap this cycle's confined-browser session (agent-browser controller
         # daemon + CDP supervisor) so the NEXT cycle attaches to a clean
         # Chromium. No-op when the cycle never touched the browser; only the
