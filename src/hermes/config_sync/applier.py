@@ -120,10 +120,12 @@ _ALLOWED_VERBS: frozenset[str] = frozenset(
         # Egress (add domain only — never mode change, never remove)
         "add_egress_domain",
         # Per-agent native-tool access scope (Enterprise Fase 2 Phase 3).
-        # clear_agent_access_scope is allow-listed for a LATER phase (reconcile
-        # is additive-only today — see _upsert_agent's access_scope handling).
+        # clear_agent_access_scope is NOT allow-listed: it has no wiring method
+        # nor D-Bus export today (reconcile is additive-only — see
+        # _upsert_agent's access_scope handling) — an allow-listed-but-
+        # unreachable verb is its own bug class (F2 review fix); add it back
+        # only alongside a real implementation on both ends.
         "set_agent_access_scope",
-        "clear_agent_access_scope",
         # NOTE: set_feature_flags is intentionally ABSENT.
         # Feature views travel in license.views (LicenseSpec) and are persisted by
         # __main__.py via store.update_license(). The feature_guard middleware reads

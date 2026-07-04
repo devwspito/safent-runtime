@@ -1236,6 +1236,33 @@ class Runtime1ServiceInterface(ServiceInterface):
         except PermissionError as exc:
             raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
 
+    @method()
+    async def SetAgentAccessScope(  # noqa: N802
+        self, agent_id: "s", scope_json: "s", tenant_id: "s"  # noqa: ARG002,F821,UP037
+    ) -> "s":  # noqa: F821,UP037
+        """Land a cloud-pushed per-agent AgentAccessScope (Enterprise Fase 2 Phase 3).
+
+        Was wired on DbusRuntimeServiceWiring.set_agent_access_scope but never
+        exported here — every config-sync bundle carrying an access_scope
+        resolved to AgentUnavailable and never advanced last_applied_version.
+
+        The *tenant_id* wire argument is accepted for call-shape parity with
+        the config-sync applier (which forwards the bundle's tenant_id), but
+        is NEVER trusted: the daemon derives its own tenant scope, mirroring
+        sender_uid/updated_by (CWE-862) — a caller-supplied tenant could
+        otherwise land a scope under a tenant the hook never queries
+        (security_hook.get_scope reads self._wiring._tenant_id downstream).
+        """
+        sender_uid = await self._resolve_current_sender_uid()
+        daemon_tenant_id = getattr(self._wiring, "_tenant_id", "")
+        result = await self._wiring.set_agent_access_scope(
+            agent_id=agent_id,
+            scope_json=scope_json,
+            tenant_id=daemon_tenant_id,
+            sender_uid=sender_uid,
+        )
+        return json.dumps(result)
+
     # ------------------------------------------------------------------
     # T017 — Desktop overlay methods (spec 014-agentic-desktop)
     # ------------------------------------------------------------------

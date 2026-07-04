@@ -251,3 +251,88 @@ class TestMalformedInputRejectedCwe20:
             sender_uid=_OPERATOR_UID,
         )
         assert result["ok"] is False
+
+
+class TestPolicyOverlayInnerShapeRejectedF3:
+    """F3 review fix: policy_overlay inner shape must be dict[str, dict[str,
+    bool]] (mirrors the cloud AccessScopeSpec.policy_overlay contract) — a
+    wrong-typed "enabled" value must be rejected AT THIS trust boundary, not
+    only fail-closed downstream in AgentToolPolicyView."""
+
+    @pytest.mark.asyncio
+    async def test_enabled_wrong_type_rejected(self, tmp_path: Path) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        result = await wiring.set_agent_access_scope(
+            agent_id="agent-a",
+            scope_json='{"policy_overlay": {"terminal": {"enabled": "yes"}}}',
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        assert result["ok"] is False
+        assert repo.get_scope("agent-a", _TENANT_ID) is None
+
+    @pytest.mark.asyncio
+    async def test_non_dict_entry_rejected(self, tmp_path: Path) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        result = await wiring.set_agent_access_scope(
+            agent_id="agent-a",
+            scope_json='{"policy_overlay": {"terminal": true}}',
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        assert result["ok"] is False
+        assert repo.get_scope("agent-a", _TENANT_ID) is None
+
+    @pytest.mark.asyncio
+    async def test_well_formed_overlay_still_accepted(self, tmp_path: Path) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        result = await wiring.set_agent_access_scope(
+            agent_id="agent-a",
+            scope_json='{"policy_overlay": {"terminal": {"enabled": false}}}',
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        assert result["ok"] is True
+        scope = repo.get_scope("agent-a", _TENANT_ID)
+        assert scope is not None
+        assert scope.policy_overlay == {"terminal": {"enabled": False}}
+
+
+class TestNativeToolsViewsStringLengthCapF3:
+    """F3 review fix: each native_tools/views entry is capped at 128 chars —
+    the list-length cap alone doesn't bound a single oversized string."""
+
+    @pytest.mark.asyncio
+    async def test_over_long_native_tool_name_rejected(self, tmp_path: Path) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        result = await wiring.set_agent_access_scope(
+            agent_id="agent-a",
+            scope_json=f'{{"native_tools": ["{"a" * 129}"]}}',
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        assert result["ok"] is False
+        assert repo.get_scope("agent-a", _TENANT_ID) is None
+
+    @pytest.mark.asyncio
+    async def test_over_long_view_name_rejected(self, tmp_path: Path) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        result = await wiring.set_agent_access_scope(
+            agent_id="agent-a",
+            scope_json=f'{{"views": ["{"b" * 129}"]}}',
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        assert result["ok"] is False
+        assert repo.get_scope("agent-a", _TENANT_ID) is None
+
+    @pytest.mark.asyncio
+    async def test_exactly_128_chars_accepted(self, tmp_path: Path) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        result = await wiring.set_agent_access_scope(
+            agent_id="agent-a",
+            scope_json=f'{{"native_tools": ["{"a" * 128}"]}}',
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        assert result["ok"] is True

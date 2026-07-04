@@ -407,13 +407,22 @@ class AgentToolPolicyView:
     """Read-only per-agent overlay on top of a global ToolPolicyStore.
 
     Shape of *overlay*: {tool_name: {"enabled": bool}} (AgentAccessScope.
-    policy_overlay). Precedence for is_enabled/is_owner_disabled: agent
-    overlay → global file → preset default. mfa_on_dangers has no per-agent
-    axis in this overlay shape (it always defers to the global decision).
+    policy_overlay).
+
+    Sovereignty invariant (RESTRICT-ONLY): the cloud-pushed overlay may only
+    NARROW the local owner's policy, never widen it. is_enabled is the
+    INTERSECTION of the global store and the overlay — overlay `True` can
+    NEVER re-enable a tool the owner disabled; overlay `False` CAN additionally
+    disable a tool the owner left enabled. is_owner_disabled mirrors this: the
+    owner's conscious disable is inviolable (an overlay can never clear it),
+    while the overlay may itself register an additional disable. mfa_on_dangers
+    has no per-agent axis in this overlay shape (always defers to the global
+    decision).
 
     Malformed overlay entries (missing/wrong-typed "enabled") fail CLOSED:
-    they are treated as an explicit DISABLE, never silently ignored into a
-    fall-through that could allow more than the global policy already does.
+    they are treated as an explicit DISABLE via the overlay — compatible with
+    restrict-only, since a corrupt cloud-pushed entry must never be silently
+    upgraded into a permissive default, and can never widen past the owner.
     """
 
     def __init__(self, base: ToolPolicyStore, agent_id: str, overlay: dict) -> None:
@@ -437,16 +446,27 @@ class AgentToolPolicyView:
         return entry["enabled"]
 
     def is_enabled(self, tool: str) -> bool:
+        """INTERSECTION of the owner's policy and the cloud overlay.
+
+        Owner disabled (base False) → always False, regardless of overlay.
+        Owner enabled (base True) → overlay `False` narrows to disabled;
+        overlay `True`/absent leaves it enabled. The overlay NEVER widens.
+        """
+        if not self._base.is_enabled(tool):
+            return False
         overlay_bit = self._overlay_enabled(tool)
-        if overlay_bit is not None:
-            return overlay_bit
-        return self._base.is_enabled(tool)
+        return True if overlay_bit is None else overlay_bit
 
     def is_owner_disabled(self, tool: str) -> bool:
+        """True if the owner disabled *tool*, OR the overlay additionally did.
+
+        The owner's conscious disable is inviolable — the overlay can never
+        clear it. An overlay `False` entry is itself a (narrowing) disable.
+        """
+        if self._base.is_owner_disabled(tool):
+            return True
         overlay_bit = self._overlay_enabled(tool)
-        if overlay_bit is not None:
-            return not overlay_bit
-        return self._base.is_owner_disabled(tool)
+        return overlay_bit is False
 
     def mfa_on_dangers(self) -> bool:
         return self._base.mfa_on_dangers()

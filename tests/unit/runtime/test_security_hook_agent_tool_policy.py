@@ -10,6 +10,9 @@ Covers the NEW Step 1.4 (_resolve_tool_policy_for_cycle) wired into Steps
   - A scope-repo error while resolving the per-agent policy -> BLOCKS, never
     raises (fail-closed, mirrors Step 1.1's own posture in
     tests/security/test_agent_access_scope_floor.py).
+  - RESTRICT-ONLY sovereignty fix: an overlay {"enabled": True} can NEVER
+    un-block a tool the OWNER consciously disabled at the global store —
+    Step 1.5 still BLOCKS (F1 regression).
 
 Uses a synthetic, non-native tool name ("custom_test_tool") so Step 1.1
 (native access-scope floor) and Step 1.6's native MFA gate never interfere:
@@ -21,11 +24,14 @@ governs native Nous tools).
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import hermes.capabilities.tool_policy as tool_policy_mod
 from hermes.capabilities.domain.agent_access_scope import AgentAccessScope
+from hermes.capabilities.tool_policy import ToolPolicyStore
 from hermes.runtime.conversation_task_registry import (
     clear_current_cycle_agent,
     set_current_cycle_agent,
@@ -67,6 +73,32 @@ def _make_hook(access_scope_repo, tenant_id: str = _TENANT_ID):
         access_scope_repo=access_scope_repo,
         tenant_id=tenant_id,
     )
+
+
+def _make_hook_with_base_store(
+    access_scope_repo, base_store: ToolPolicyStore, tenant_id: str = _TENANT_ID
+):
+    """Build the hook with a CONTROLLED global ToolPolicyStore.
+
+    make_pre_tool_call_hook() does `ToolPolicyStore()` (default owner-only
+    path) internally — patch the class it re-imports at call time so the
+    test can pin the owner's global decision (e.g. a conscious disable)
+    without touching /var/lib/hermes.
+    """
+    agent_state = MagicMock()
+    agent_state.is_paused = AsyncMock(return_value=False)
+    loop = asyncio.new_event_loop()
+    broker = MagicMock()
+    broker._os_native_dispatcher = None  # skip denylist check
+
+    with patch.object(tool_policy_mod, "ToolPolicyStore", return_value=base_store):
+        return make_pre_tool_call_hook(
+            agent_state=agent_state,
+            engine_loop=loop,
+            broker=broker,
+            access_scope_repo=access_scope_repo,
+            tenant_id=tenant_id,
+        )
 
 
 def _run_hook(hook, tool_name: str = _TOOL, args: dict | None = None):
@@ -150,3 +182,56 @@ class TestFailClosedOnResolutionError:
         assert result is not None
         assert result.get("action") == "block"
         assert "fail-closed" in result.get("message", "")
+
+
+# ---------------------------------------------------------------------------
+# F1 sovereignty fix — RESTRICT-ONLY: the cloud overlay can NEVER re-enable a
+# tool the OWNER consciously disabled at the global store. Step 1.5 must keep
+# blocking even when the overlay says {"enabled": True}.
+# ---------------------------------------------------------------------------
+
+
+class TestOverlayCannotOverrideOwnerDisableAtHookLevel:
+    def test_step_1_5_still_blocks_owner_disabled_tool_despite_overlay_enable(
+        self, tmp_path: Path
+    ) -> None:
+        base_store = ToolPolicyStore(path=tmp_path / "tool_policy.json")
+        base_store.set_tool(_TOOL, False)  # owner CONSCIOUSLY disabled it
+
+        set_current_cycle_agent("agent-a")
+        scope = AgentAccessScope.create(
+            tenant_id=_TENANT_ID, agent_id="agent-a", updated_by=1,
+            policy_overlay={_TOOL: {"enabled": True}},  # cloud tries to re-enable
+        )
+        hook = _make_hook_with_base_store(
+            _FakeAccessScopeRepo(scope=scope), base_store
+        )
+
+        result = _run_hook(hook)
+
+        assert result is not None
+        assert result.get("action") == "block"
+        assert "Seguridad/Políticas" in result.get("message", "")
+
+    def test_overlay_false_still_narrows_an_owner_enabled_tool(
+        self, tmp_path: Path
+    ) -> None:
+        """Legit narrowing case: overlay {"enabled": False} on a globally
+        ENABLED tool still blocks — confirms the fix didn't break the
+        legitimate restrict direction."""
+        base_store = ToolPolicyStore(path=tmp_path / "tool_policy.json")
+        base_store.set_tool(_TOOL, True)  # owner leaves it enabled globally
+
+        set_current_cycle_agent("agent-a")
+        scope = AgentAccessScope.create(
+            tenant_id=_TENANT_ID, agent_id="agent-a", updated_by=1,
+            policy_overlay={_TOOL: {"enabled": False}},
+        )
+        hook = _make_hook_with_base_store(
+            _FakeAccessScopeRepo(scope=scope), base_store
+        )
+
+        result = _run_hook(hook)
+
+        assert result is not None
+        assert result.get("action") == "block"

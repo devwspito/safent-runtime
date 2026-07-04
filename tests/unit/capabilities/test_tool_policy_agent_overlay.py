@@ -1,13 +1,16 @@
 """ToolPolicyStore.for_agent() / AgentToolPolicyView — Enterprise Fase 2 Phase 2.
 
-Covers the per-agent policy_overlay precedence (agent overlay -> global file ->
-preset default):
+Covers the per-agent policy_overlay precedence: RESTRICT-ONLY (sovereignty —
+the cloud overlay may only narrow the local owner's policy, never widen it).
+is_enabled is the INTERSECTION of the global store and the overlay:
 
   - No overlay entry for a tool -> falls through to the global store, unchanged.
   - An overlay entry disables a tool the global store enables -> disabled for
-    THIS view only (the global store itself is untouched).
-  - An overlay entry enables a tool the global store disables -> enabled for
-    THIS view (full precedence, either direction, per the pinned contract).
+    THIS view only (the global store itself is untouched). Legitimate narrowing.
+  - An overlay entry that tries to ENABLE a tool the global store disables ->
+    stays DISABLED for this view. The overlay can NEVER re-enable past the
+    owner's local disable (sovereignty fix: a cloud overlay must never widen
+    past the local floor).
   - A malformed overlay entry (wrong shape/type) fails CLOSED: treated as an
     explicit disable, never silently falls through into a permissive default.
   - mfa_on_dangers has no per-agent axis in this overlay shape: always defers
@@ -77,18 +80,23 @@ class TestOverlayDisablesGloballyEnabledTool:
         assert store.is_enabled("terminal") is True
 
 
-class TestOverlayEnablesGloballyDisabledTool:
-    def test_is_enabled_true_for_this_agent(self, tmp_path) -> None:
-        store = _store(tmp_path)
-        store.set_tool("delegate_task", False)  # globally disabled
-        view = store.for_agent(_AGENT_ID, {"delegate_task": {"enabled": True}})
-        assert view.is_enabled("delegate_task") is True
+class TestOverlayCannotEnableGloballyDisabledTool:
+    """Sovereignty fix: the cloud overlay is RESTRICT-ONLY — it must NEVER
+    re-enable a tool the local owner consciously disabled. Before the fix,
+    an overlay {"enabled": True} on an owner-disabled tool widened the
+    effective policy past the owner's floor; this class pins the fix."""
 
-    def test_is_owner_disabled_false_for_this_agent(self, tmp_path) -> None:
+    def test_is_enabled_stays_false_for_this_agent(self, tmp_path) -> None:
+        store = _store(tmp_path)
+        store.set_tool("delegate_task", False)  # owner disabled
+        view = store.for_agent(_AGENT_ID, {"delegate_task": {"enabled": True}})
+        assert view.is_enabled("delegate_task") is False
+
+    def test_is_owner_disabled_stays_true_for_this_agent(self, tmp_path) -> None:
         store = _store(tmp_path)
         store.set_tool("delegate_task", False)
         view = store.for_agent(_AGENT_ID, {"delegate_task": {"enabled": True}})
-        assert view.is_owner_disabled("delegate_task") is False
+        assert view.is_owner_disabled("delegate_task") is True
 
 
 class TestMalformedOverlayFailsClosed:

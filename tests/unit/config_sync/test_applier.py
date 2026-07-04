@@ -856,7 +856,17 @@ class TestAgentAccessScopeApplier:
         from hermes.config_sync.applier import _ALLOWED_VERBS
 
         assert "set_agent_access_scope" in _ALLOWED_VERBS
-        assert "clear_agent_access_scope" in _ALLOWED_VERBS
+
+    @pytest.mark.asyncio
+    async def test_clear_agent_access_scope_not_in_allowlist_until_implemented(
+        self,
+    ) -> None:
+        """F2 review fix: clear_agent_access_scope has no wiring method nor
+        D-Bus export — an allow-listed-but-unreachable verb is its own bug
+        class. Must stay OUT of the allow-list until both ends exist."""
+        from hermes.config_sync.applier import _ALLOWED_VERBS
+
+        assert "clear_agent_access_scope" not in _ALLOWED_VERBS
 
 
 # ---------------------------------------------------------------------------

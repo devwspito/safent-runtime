@@ -5148,6 +5148,35 @@ _ACCESS_SCOPE_ALLOWED_KEYS: frozenset[str] = frozenset({
     "enforced", "cerebro_unrestricted", "native_tools", "policy_overlay", "views",
 })
 _ACCESS_SCOPE_MAX_LIST_LEN = 256
+_ACCESS_SCOPE_MAX_STR_LEN = 128  # per native_tools/views entry (CWE-20 — F3 review fix)
+
+
+def _validate_bounded_str_list(values: list, *, field_name: str) -> str | None:
+    """Reject a list[str] whose entries exceed _ACCESS_SCOPE_MAX_STR_LEN.
+
+    Returns an error string, or None if every entry is within bounds.
+    """
+    for v in values:
+        if len(v) > _ACCESS_SCOPE_MAX_STR_LEN:
+            return f"{field_name}: entrada excede {_ACCESS_SCOPE_MAX_STR_LEN} caracteres"
+    return None
+
+
+def _validate_policy_overlay_shape(policy_overlay: dict) -> str | None:
+    """Reject a policy_overlay whose per-tool entries aren't dict[str, bool].
+
+    Mirrors hermes.config_sync.policy_document.AccessScopeSpec.policy_overlay
+    (dict[str, dict[str, bool]]) at THIS trust boundary too (F3 review fix) —
+    a present-but-malformed entry already fails CLOSED downstream in
+    AgentToolPolicyView, but rejecting it here is belt-and-suspenders at the
+    point untrusted D-Bus input enters the system (CWE-20).
+    """
+    for tool, entry in policy_overlay.items():
+        if not isinstance(entry, dict):
+            return f"policy_overlay[{tool!r}] debe ser un objeto {{'enabled': bool}}"
+        if not all(isinstance(v, bool) for v in entry.values()):
+            return f"policy_overlay[{tool!r}] debe tener valores bool"
+    return None
 
 
 def _parse_access_scope_json(scope_json: str) -> tuple[dict, str | None]:
@@ -5180,14 +5209,20 @@ def _parse_access_scope_json(scope_json: str) -> tuple[dict, str | None]:
         return {}, "native_tools debe ser list[str]"
     if len(native_tools) > _ACCESS_SCOPE_MAX_LIST_LEN:
         return {}, f"native_tools excede {_ACCESS_SCOPE_MAX_LIST_LEN} entradas"
+    if (err := _validate_bounded_str_list(native_tools, field_name="native_tools")) is not None:
+        return {}, err
     if not isinstance(views, list) or not all(isinstance(v, str) for v in views):
         return {}, "views debe ser list[str]"
     if len(views) > _ACCESS_SCOPE_MAX_LIST_LEN:
         return {}, f"views excede {_ACCESS_SCOPE_MAX_LIST_LEN} entradas"
+    if (err := _validate_bounded_str_list(views, field_name="views")) is not None:
+        return {}, err
     if not isinstance(policy_overlay, dict):
         return {}, "policy_overlay debe ser un objeto"
     if len(policy_overlay) > _ACCESS_SCOPE_MAX_LIST_LEN:
         return {}, f"policy_overlay excede {_ACCESS_SCOPE_MAX_LIST_LEN} entradas"
+    if (err := _validate_policy_overlay_shape(policy_overlay)) is not None:
+        return {}, err
     if not isinstance(enforced, bool):
         return {}, "enforced debe ser bool"
     if not isinstance(cerebro_unrestricted, bool):
