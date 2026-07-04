@@ -544,3 +544,42 @@ class TestApproveTocTouGuard:
         gate._minter.mint = orig_mint  # type: ignore[method-assign]
         with pytest.raises(ApprovalGateError):
             await gate.approve(proposal_id=proposal_id, approved_by=_APPROVED_BY)
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — several broker/MCP proposals PENDING at once (as when the CEO
+# delegates multiple tool-gated tasks): each must get its OWN pending row and be
+# approvable. Before the fix every broker row shared action_digest="" and
+# collided on the partial UNIQUE index (WHERE status='pending'), so the 2nd
+# INSERT OR IGNORE was silently dropped → no row → an unapprovable phantom card.
+# Regression for the exact multi-delegation scenario; only reproducible with
+# >1 pending proposal at a time (the isolated single-proposal tests miss it,
+# which is why the baked-image check caught it).
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentPendingBrokerProposals:
+    async def test_two_pending_broker_proposals_both_get_rows(self, tmp_path: Path) -> None:
+        gate = _make_gate(tmp_path)
+        p1, p2 = uuid4(), uuid4()
+        w1, w2 = uuid4(), uuid4()
+        # No action_digest passed (broker/MCP path) — both default to empty.
+        await gate.register_pending(
+            proposal_id=p1, work_item_id=w1, consent_context=_ctx(),
+            risk=RiskLevel.HIGH, justification="j", parameters_redacted={},
+            tool_name="mcp__a__x",
+        )
+        await gate.register_pending(
+            proposal_id=p2, work_item_id=w2, consent_context=_ctx(),
+            risk=RiskLevel.HIGH, justification="j", parameters_redacted={},
+            tool_name="mcp__b__y",
+        )
+        assert await gate.work_item_id_for_proposal(p1) == w1
+        assert await gate.work_item_id_for_proposal(p2) == w2, (
+            "the 2nd concurrently-pending broker proposal must get its own row — "
+            "before the fix it collided with the 1st on the empty-action_digest "
+            "partial unique index and was silently dropped (unapprovable phantom)."
+        )
+        # Both must be independently approvable.
+        await gate.approve(proposal_id=p1, approved_by=_APPROVED_BY)
+        await gate.approve(proposal_id=p2, approved_by=_APPROVED_BY)

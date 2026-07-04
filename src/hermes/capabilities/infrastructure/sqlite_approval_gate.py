@@ -209,7 +209,18 @@ class SqliteApprovalGate:
                     operator_id,
                     risk.value,
                     tool_name,
-                    action_digest,
+                    # SECURITY (2026-07, review Info): store NULL (not "") when there
+                    # is no per-action digest. The broker/MCP path never sets one, so
+                    # every broker pending row would otherwise share action_digest=""
+                    # and collide on the partial UNIQUE index
+                    # (pending_approvals_digest_pending_uidx WHERE status='pending') —
+                    # the 2nd concurrent pending proposal's INSERT OR IGNORE is
+                    # silently dropped → no row → an unapprovable phantom (exactly what
+                    # happens when the CEO delegates several tool-gated tasks at once).
+                    # SQLite treats NULLs as DISTINCT in a UNIQUE index, so broker rows
+                    # dedup purely by proposal_id (PK); the native path keeps its real
+                    # digest and still dedups identical actions.
+                    action_digest or None,
                     justification,
                     json.dumps(safe_params),
                     now,
