@@ -47,6 +47,15 @@ from hermes.shell_server.security.secrets import SecretsVault
 logger = logging.getLogger("hermes.config_sync")
 
 _DEFAULT_INTERVAL_S = 300
+# Startup race guard (clean-VM E2E, 2026-07-05): right after a fresh pair the
+# daemon's org.hermes.Runtime D-Bus name can lag its Type=notify READY signal
+# (After=hermes-runtime.service only waits for READY), so the FIRST policy apply
+# may fail with "name not provided" and — without this — the just-paired config
+# would be deferred for a full _DEFAULT_INTERVAL_S. Until the first successful
+# sync we retry a failed tick quickly, bounded to ~60s so a genuinely-down cloud
+# still falls back to the normal interval.
+_STARTUP_FAST_RETRY_S = 3
+_MAX_STARTUP_FAST_RETRIES = 20
 _MAX_JITTER_S = 30
 _HTTP_TIMEOUT_S = 20.0
 
@@ -308,11 +317,17 @@ async def _run_loop() -> None:
     interval = _interval_s()
     logger.info("hermes.config_sync.starting", extra={"interval_s": interval})
 
+    synced_ok_once = False
+    startup_fast_retries = 0
+
     while True:
         # Policy pull — fail-soft.
+        pull_ok = True
         try:
             await _sync_once(store=store, proxy=proxy)
+            synced_ok_once = True
         except Exception as exc:  # noqa: BLE001
+            pull_ok = False
             logger.error(
                 "hermes.config_sync.unhandled_error",
                 extra={"reason": str(exc)},
@@ -362,6 +377,17 @@ async def _run_loop() -> None:
                 extra={"reason": str(exc)},
                 exc_info=True,
             )
+
+        # Until the first successful sync, retry a failed tick quickly (bounded)
+        # so a fresh-pair D-Bus startup race doesn't defer the config a full interval.
+        if (
+            not synced_ok_once
+            and not pull_ok
+            and startup_fast_retries < _MAX_STARTUP_FAST_RETRIES
+        ):
+            startup_fast_retries += 1
+            await asyncio.sleep(_STARTUP_FAST_RETRY_S)
+            continue
 
         jitter = random.uniform(0, _MAX_JITTER_S)
         await asyncio.sleep(interval + jitter)
