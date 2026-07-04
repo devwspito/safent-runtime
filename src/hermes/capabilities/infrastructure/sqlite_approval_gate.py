@@ -59,6 +59,17 @@ _PII_PATTERN: re.Pattern[str] = re.compile(r"<PII:[^>]+>")
 # Longitud máxima de un valor string redactado antes de truncar.
 _MAX_VALUE_LEN: int = 64
 
+# Durable breaker (2026-07): tope de re-registros (attempt_count) de la MISMA
+# propuesta (mismo proposal_id determinista) mientras sigue 'pending' antes de
+# rechazarla terminalmente. Generoso a propósito — una fila legítima se
+# re-registra ~2 veces por ciclo (dispatch in-cycle del engine + dispatch de
+# salida del orchestrator), así que un umbral bajo cortaría una aprobación
+# lenta pero legítima tras un puñado de re-encolados/re-reclamados (lease
+# churn). Mirror del thread-local _MAX_WRITE_TOOL_FAILURES de nous_engine, pero
+# durable — ese contador se resetea en cada ciclo/hilo nuevo tras un
+# re-enqueue, así que no detiene un loop que cruza varios re-encolados.
+_MAX_DURABLE_PENDING_ATTEMPTS: int = 20
+
 
 class ApprovalGateError(RuntimeError):
     """Error irrecuperable del ApprovalGate — no degradar.
@@ -124,48 +135,76 @@ class SqliteApprovalGate:
         tool_name: str = "",
         action_digest: str = "",
         conversation_id: str = "",
-    ) -> None:
+    ) -> str:
         """Registra la propuesta HIGH como pendiente de aprobación.
 
-        Idempotente por proposal_id: INSERT OR IGNORE — si ya existe, no-op.
-        Los parámetros se redactan defensivamente (CTRL-14). `tool_name` se persiste
-        para que la capa MFA clasifique la delicadeza por tool (no por el risk genérico).
-        `action_digest` liga la aprobación a la acción exacta (chokepoint nativo).
-        `conversation_id` es el id REAL de la conversación de chat (resuelto por el
-        engine vía conversation_task_registry, NO el task_id del ciclo) — ancla la
-        tarjeta de aprobación al hilo que el dueño está mirando.
+        Idempotente por proposal_id: INSERT OR IGNORE — si ya existe, no-op de
+        inserción; si además sigue 'pending', cuenta el re-registro vía
+        attempt_count (durable breaker, ver abajo). Los parámetros se redactan
+        defensivamente (CTRL-14). `tool_name` se persiste
+        para que la capa MFA clasifique la delicadeza por tool (no por el risk
+        genérico). `action_digest` liga la aprobación a la acción exacta
+        (chokepoint nativo). `conversation_id` es el id REAL de la conversación
+        de chat (resuelto por el engine vía conversation_task_registry, NO el
+        task_id del ciclo) — ancla la tarjeta de aprobación al hilo que el dueño
+        está mirando.
+
+        Returns:
+            El status resultante de la fila: 'pending' en el caso normal, o
+            'rejected' si el durable breaker (attempt_count >
+            _MAX_DURABLE_PENDING_ATTEMPTS) la rechazó terminalmente — el broker
+            debe traducir esto a REJECTED_BY_POLICY en vez de PENDING_APPROVAL
+            (fail-closed: deja de re-aparecer como tarjeta).
         """
         operator_id = str(consent_context.operator_id) if consent_context.operator_id else ""
         now = datetime.now(tz=UTC).isoformat()
         safe_params = _redact_parameters(parameters_redacted)
+        zero_work_item = str(UUID(int=0))
+        work_item_id_str = str(work_item_id)
 
         with self._connect() as conn:
             # Re-armado: como `proposal_id` es determinista (uuid5 del digest), una fila
-            # terminal o pendiente-caduca con ese id haría que el INSERT OR IGNORE fuese
-            # un no-op para SIEMPRE (la tarjeta nunca reaparecería tras consumirse o
-            # caducar). Borramos esa fila ANTES de insertar la fresca. Nunca tocamos una
+            # terminal o pendiente-caduca con ese id haría que el INSERT fuese un no-op
+            # para SIEMPRE (la tarjeta nunca reaparecería tras consumirse o caducar).
+            # Borramos esa fila ANTES de insertar la fresca. Nunca tocamos una
             # aprobación VIVA sin consumir (status='approved' AND consumed_at IS NULL) — esa
             # ruta ni siquiera llega aquí (el caller la resuelve en approved_proposal_for_digest).
+            # attempt_count > threshold excluded from revival: a row the durable
+            # breaker rejected must STAY rejected for this exact proposal_id (the
+            # whole point of the breaker) — without this exclusion, the very next
+            # register_pending call would delete-and-recreate it fresh (attempt_count
+            # reset to 1) since 'rejected' also satisfies `status != 'pending'`,
+            # making the breaker a periodic blip instead of a durable stop. A
+            # genuine human reject/expire (attempt_count under the threshold) is
+            # still revived exactly as before — only breaker-tripped rows are exempt.
             conn.execute(
                 """
                 DELETE FROM pending_approvals
                  WHERE proposal_id = ?
                    AND NOT (status = 'approved' AND consumed_at IS NULL)
+                   AND attempt_count <= ?
                    AND (status != 'pending' OR created_at <= datetime('now', '-35 minutes'))
                 """,
-                (str(proposal_id),),
+                (str(proposal_id), _MAX_DURABLE_PENDING_ATTEMPTS),
             )
-            conn.execute(
+            # Idempotente por proposal_id: INSERT OR IGNORE (preserva EXACTAMENTE
+            # el comportamiento previo, incluida la protección de la UNIQUE parcial
+            # sobre action_digest — un ON CONFLICT(proposal_id) explícito NO cubre
+            # esa segunda constraint y rompía con IntegrityError en colisiones de
+            # digest legítimas). rowcount distingue INSERT real (1) de no-op por
+            # conflicto (0) — solo en el no-op incrementamos attempt_count abajo,
+            # así una fila recién creada no se cuenta dos veces como "reintento".
+            cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO pending_approvals (
                     proposal_id, work_item_id, tenant_id, operator_id,
                     risk, tool_name, action_digest, justification, parameters_redacted,
-                    status, created_at, conversation_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                    status, created_at, conversation_id, attempt_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 1)
                 """,
                 (
                     str(proposal_id),
-                    str(work_item_id),
+                    work_item_id_str,
                     str(consent_context.tenant_id),
                     operator_id,
                     risk.value,
@@ -177,6 +216,75 @@ class SqliteApprovalGate:
                     conversation_id or None,
                 ),
             )
+            if cursor.rowcount == 0:
+                # La fila ya existía (proposal_id determinista) — durable breaker
+                # (2026-07): cuenta el re-registro. No-op si ya no está 'pending'
+                # (approved/rejected/expired no se tocan).
+                conn.execute(
+                    """
+                    UPDATE pending_approvals
+                       SET attempt_count = attempt_count + 1
+                     WHERE proposal_id = ?
+                       AND status = 'pending'
+                    """,
+                    (str(proposal_id),),
+                )
+            # BUG FIX (2026-07): heal a stale work_item_id=0 row. Before the
+            # in-cycle WRITE dispatch threaded the real work_item_id through, the
+            # FIRST register_pending call for a delegated/autonomous proposal
+            # always persisted UUID(int=0) — and because proposal_id is
+            # deterministic, every later call (carrying the correct id) was a
+            # no-op, so the row stayed poisoned at 0 forever and approve_action
+            # could never re-enqueue the task. Once a real id arrives, adopt it —
+            # never touches a non-pending row or a row that already has a real id.
+            if work_item_id_str != zero_work_item:
+                # SECURITY (2026-07, review Medium/CWE-863): scope the heal to the
+                # SAME tenant. proposal_id is deterministic over (tool, params) and
+                # excludes tenant_id, so two tenants proposing a byte-identical action
+                # share a row; without this guard a later tenant's cycle could rebind
+                # the pending row to its own work_item_id → cross-tenant approval
+                # confusion. Only ever moves zero→real on a pending row of THIS tenant.
+                conn.execute(
+                    """
+                    UPDATE pending_approvals
+                       SET work_item_id = ?
+                     WHERE proposal_id = ?
+                       AND work_item_id = ?
+                       AND status = 'pending'
+                       AND tenant_id = ?
+                    """,
+                    (
+                        work_item_id_str,
+                        str(proposal_id),
+                        zero_work_item,
+                        str(consent_context.tenant_id),
+                    ),
+                )
+
+            row = conn.execute(
+                "SELECT status, attempt_count FROM pending_approvals WHERE proposal_id = ?",
+                (str(proposal_id),),
+            ).fetchone()
+
+        if row is None:  # pragma: no cover — defensive; the INSERT above guarantees a row
+            return "pending"
+
+        status = str(row["status"])
+        attempt_count = row["attempt_count"] if row["attempt_count"] is not None else 1
+        if status == "pending" and attempt_count > _MAX_DURABLE_PENDING_ATTEMPTS:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE pending_approvals SET status='rejected', resolved_at=? "
+                    "WHERE proposal_id=? AND status='pending'",
+                    (datetime.now(tz=UTC).isoformat(), str(proposal_id)),
+                )
+            logger.warning(
+                "hermes.approval_gate.durable_breaker_tripped: proposal=%s tool=%s "
+                "attempts=%d > %d — rechazo terminal, deja de re-aparecer como tarjeta.",
+                proposal_id, tool_name, attempt_count, _MAX_DURABLE_PENDING_ATTEMPTS,
+            )
+            return "rejected"
+        return status
 
     async def approve(
         self, *, proposal_id: UUID, approved_by: UUID, mfa_factors: Any | None = None
@@ -250,12 +358,13 @@ class SqliteApprovalGate:
         nonce = _extract_nonce_from_token(token)
 
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE pending_approvals
                 SET status='approved', approved_by=?, token_hmac=?,
                     nonce=?, expires_at=?, resolved_at=?
                 WHERE proposal_id=?
+                  AND status='pending'
                 """,
                 (
                     str(approved_by),
@@ -266,6 +375,18 @@ class SqliteApprovalGate:
                     str(proposal_id),
                 ),
             )
+            if cursor.rowcount == 0:
+                # TOCTOU (2026-07, review Info/CWE-367): the row stopped being
+                # 'pending' between the _fetch_pending read above and this UPDATE —
+                # e.g. the durable breaker flipped it to 'rejected' concurrently.
+                # Do NOT clobber a terminal state back to 'approved'; the minted
+                # token is never persisted (token_hmac stays unset) so it can't be
+                # verified. Deterministic terminal state wins; fail as "already
+                # resolved" (fail-closed).
+                raise ApprovalGateError(
+                    f"proposal_id={proposal_id} dejó de estar 'pending' "
+                    "(resuelta en paralelo) — aprobación abortada."
+                )
 
         await self._audit_hitl(
             kind=AuditKind.HITL_APPROVED,

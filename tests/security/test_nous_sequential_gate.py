@@ -158,7 +158,7 @@ class TestSequentialGate:
         broker = MagicMock()
         dispatch_calls: list[Any] = []
 
-        def _fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def _fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return _outcome_executed()
 
@@ -199,7 +199,7 @@ class TestSequentialGate:
         broker = MagicMock()
         dispatch_calls: list[Any] = []
 
-        def _fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def _fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return _outcome_executed()
 
@@ -223,7 +223,7 @@ class TestSequentialGate:
         broker = MagicMock()
         dispatch_calls: list[Any] = []
 
-        def _fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def _fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return _outcome_executed()
 
@@ -273,7 +273,7 @@ class TestSequentialGate:
         broker = MagicMock()
         dispatch_calls: list[Any] = []
 
-        def _fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def _fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return _outcome_executed()
 
@@ -304,7 +304,7 @@ class TestConcurrentNoDoubleGate:
         broker = MagicMock()
         dispatch_calls: list[Any] = []
 
-        def _fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def _fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return _outcome_executed()
 
@@ -340,7 +340,7 @@ class TestConcurrentNoDoubleGate:
         broker = MagicMock()
         dispatch_calls: list[Any] = []
 
-        def _fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def _fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return _outcome_executed()
 

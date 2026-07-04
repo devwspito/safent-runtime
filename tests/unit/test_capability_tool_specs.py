@@ -397,7 +397,7 @@ class TestBrokerGateWrite:
         dispatch_calls: list[Any] = []
         pending_outcome = _outcome(ExecutionStatus.PENDING_APPROVAL)
 
-        def fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return pending_outcome
 
@@ -465,7 +465,7 @@ class TestBrokerGateWrite:
         loop = asyncio.new_event_loop()
         pending = _outcome(ExecutionStatus.PENDING_APPROVAL)
 
-        def fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             return pending
 
         fake_inner = MagicMock()

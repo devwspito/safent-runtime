@@ -239,9 +239,11 @@ class CapabilityBroker:
             )
             if not token_ok:
                 # Registrar en el buzón durable y devolver PENDING_APPROVAL.
-                # work_item_id propagado desde el orquestador para trazabilidad.
+                # work_item_id propagado desde el orquestador para trazabilidad —
+                # y para que approve_action pueda re-encolar la tarea REAL tras la
+                # aprobación (bug fix 2026-07: antes se perdía y quedaba en 0).
                 resolved_work_item_id = work_item_id if work_item_id is not None else UUID(int=0)
-                await self._approval_gate.register_pending(
+                pending_status = await self._approval_gate.register_pending(
                     proposal_id=proposal.proposal_id,
                     work_item_id=resolved_work_item_id,
                     consent_context=consent_context,
@@ -251,6 +253,19 @@ class CapabilityBroker:
                     tool_name=proposal.tool_name,
                     conversation_id=conversation_id,
                 )
+                # Durable breaker (2026-07): register_pending devuelve un status
+                # distinto de 'pending' cuando la MISMA propuesta se re-registró
+                # demasiadas veces sin resolución (re-encolados/re-reclamos en
+                # bucle) — terminal, fail-closed. No re-anunciar como pendiente.
+                if pending_status != "pending":
+                    return await self._reject_by_policy(
+                        proposal,
+                        reason=(
+                            f"'{proposal.tool_name}' bloqueado tras demasiados "
+                            "reintentos sin aprobación del dueño (breaker durable) "
+                            "— no se re-propone."
+                        ),
+                    )
                 return ExecutionOutcome(
                     proposal_id=proposal.proposal_id,
                     status=ExecutionStatus.PENDING_APPROVAL,

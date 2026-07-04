@@ -18,12 +18,36 @@ controlado por el repo (T041).
 
 Tipos coherentes con el resto del store: timestamps TEXT ISO-8601 UTC, UUIDs
 TEXT, JSON TEXT.
+
+──────────────────────────────────────────────────────────────────────────────
+Migración status→'expired' (2026-07) — cierra el loop de tarjetas fantasma:
+
+  `expire()` del gate escribe status='expired' cuando la espera del dueño caduca
+  (para sacar la fila de list_hitl_pending, que filtra status='pending'). El
+  CHECK original SOLO admitía ('pending','approved','rejected'), así que cada
+  expire() lanzaba sqlite3.IntegrityError — tragado por el caller (except: pass).
+  Efecto: la fila caducada NUNCA cambiaba de estado, se quedaba 'pending' y
+  RE-APARECÍA como tarjeta fantasma. Este es el último eslabón del fix del loop
+  de tarjetas (P0). El durable breaker (register_pending) usa 'rejected', que YA
+  estaba en el CHECK — no lo rompía.
+
+  SQLite no permite ALTER ... DROP/MODIFY CONSTRAINT: para ampliar el CHECK se
+  recrea la tabla con el patrón oficial (CREATE new → INSERT SELECT → DROP old →
+  RENAME) dentro de UNA transacción, preservando TODAS las filas. Guard de
+  idempotencia = INSPECCIÓN DEL PROPIO CHECK en sqlite_master (si ya contiene
+  'expired', no-op). NO se usa `PRAGMA user_version`: shell-state.db lo COMPARTE
+  con el esquema `tasks`, que ya lo posee (valores 1→4) — un guard por
+  user_version colisionaría con esa numeración.
 """
 
 from __future__ import annotations
 
 import sqlite3
 
+# DDL de CREACIÓN sobre una DB virgen. El CHECK de `status` YA admite 'expired'
+# (así una DB nueva nace correcta y la migración de abajo es no-op para ella).
+# Las columnas conversation_id/attempt_count NO se declaran aquí: llegan por
+# ALTER (histórico) — `_add_pending_approvals_columns` las añade idempotentemente.
 _DDL_PENDING_APPROVALS = """
 CREATE TABLE IF NOT EXISTS pending_approvals (
     -- Identidad: una fila por propuesta HIGH (idempotente por proposal_id).
@@ -56,9 +80,12 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
     -- Parámetros REDACTADOS (sin PII en claro — constitución III). JSON.
     parameters_redacted  TEXT NOT NULL DEFAULT '{}',
 
-    -- Ciclo de vida de la aprobación.
+    -- Ciclo de vida de la aprobación. 'expired' lo escribe expire() cuando la
+    -- espera del dueño caduca sin decisión — la saca de list_hitl_pending para
+    -- que no quede como tarjeta fantasma. Sin 'expired' en el CHECK, expire()
+    -- lanzaba IntegrityError y la fila se quedaba 'pending' para siempre.
     status               TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending','approved','rejected')),
+        CHECK (status IN ('pending','approved','rejected','expired')),
 
     -- Quién aprobó (autenticado, no del body del cliente — SC-004).
     approved_by          TEXT,
@@ -74,56 +101,166 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
     created_at           TEXT NOT NULL,
     resolved_at          TEXT
 );
+"""
 
+# Índices de `pending_approvals`. Idempotentes (IF NOT EXISTS). Se (re)crean al
+# FINAL de ensure_*: la recreación de la tabla (migración de status) hace DROP
+# TABLE, que borra sus índices — este bloque los repuebla siempre.
+_DDL_PENDING_APPROVALS_INDEXES = """
 -- Buscar aprobaciones por la tarea que las originó (re-encolar / observabilidad).
 CREATE INDEX IF NOT EXISTS pending_approvals_work_item_idx
     ON pending_approvals (work_item_id);
+
+-- Chokepoint nativo: aprobado+no-consumido por digest.
+CREATE INDEX IF NOT EXISTS pending_approvals_action_digest_idx
+    ON pending_approvals (action_digest);
+
+-- UNIQUE parcial: garantiza que solo exista UNA fila 'pending' por action_digest.
+-- Segunda red para deduplicar tarjetas de aprobación (proposal_id ya es uuid5
+-- determinista; esto blinda además DBs antiguas con pendientes preexistentes).
+CREATE UNIQUE INDEX IF NOT EXISTS pending_approvals_digest_pending_uidx
+    ON pending_approvals(action_digest) WHERE status='pending';
 """
+
+# ── ALTER ADD COLUMN idempotentes (EXPAND histórico) ────────────────────────
+# tool_name/action_digest ya están en el CREATE de arriba (DBs nuevas), pero un
+# ALTER en try/except es no-op idempotente si la columna ya existe; conservado
+# por si una DB muy antigua nació sin ellas. conversation_id/attempt_count SOLO
+# existen vía ALTER. Debe correr ANTES de la recreación de status: garantiza que
+# la tabla vieja tiene TODAS las columnas que el INSERT SELECT va a copiar.
+_PENDING_APPROVALS_ADD_COLUMNS: tuple[str, ...] = (
+    # tool_name (2026-06-19): clasifica el tier MFA por tool.
+    "ALTER TABLE pending_approvals ADD COLUMN tool_name TEXT",
+    # action_digest (2026-06-19): native per-action approval.
+    "ALTER TABLE pending_approvals ADD COLUMN action_digest TEXT",
+    # conversation_id (2026-06-23): ancla la tarjeta al hilo del chat.
+    "ALTER TABLE pending_approvals ADD COLUMN conversation_id TEXT",
+    # attempt_count (2026-07): durable breaker anti-loop de tarjetas.
+    "ALTER TABLE pending_approvals ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1",
+)
+
+# 🔒 RECREACIÓN — `pending_approvals` con el CHECK de `status` ampliado a
+# 'expired'. Mismas columnas que la tabla viva tras el EXPAND (incluidas
+# conversation_id/attempt_count, aquí declaradas de primera clase). El resto de
+# CHECK (risk) se replica TEXTUALMENTE. UN solo statement CREATE TABLE
+# (se ejecuta con `execute`, no `executescript`, para no romper la transacción).
+_DDL_PENDING_APPROVALS_NEW = """
+CREATE TABLE pending_approvals_new (
+    proposal_id          TEXT PRIMARY KEY,
+    work_item_id         TEXT NOT NULL,
+    tenant_id            TEXT,
+    operator_id          TEXT NOT NULL,
+    risk                 TEXT NOT NULL
+        CHECK (risk IN ('low','high')),
+    tool_name            TEXT,
+    action_digest        TEXT,
+    justification        TEXT,
+    parameters_redacted  TEXT NOT NULL DEFAULT '{}',
+    status               TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','approved','rejected','expired')),
+    approved_by          TEXT,
+    token_hmac           TEXT,
+    nonce                TEXT,
+    expires_at           TEXT,
+    consumed_at          TEXT,
+    created_at           TEXT NOT NULL,
+    resolved_at          TEXT,
+    conversation_id      TEXT,
+    attempt_count        INTEGER NOT NULL DEFAULT 1
+);
+"""
+
+# Copia explícita POR NOMBRE: el orden físico de columnas difiere entre DBs
+# viejas (tool_name/action_digest/conversation_id/attempt_count llegan por ALTER,
+# al final) y nuevas (nacen en el CREATE) — el SELECT nombrado mapea correcto sin
+# depender de posiciones.
+_PENDING_APPROVALS_COLUMNS = (
+    "proposal_id, work_item_id, tenant_id, operator_id, risk, tool_name, "
+    "action_digest, justification, parameters_redacted, status, approved_by, "
+    "token_hmac, nonce, expires_at, consumed_at, created_at, resolved_at, "
+    "conversation_id, attempt_count"
+)
+
+
+def _add_pending_approvals_columns(conn: sqlite3.Connection) -> None:
+    """EXPAND aditivo idempotente. Cada ALTER en try/except OperationalError
+    ("duplicate column name") — sqlite no tiene IF NOT EXISTS para columnas.
+
+    Debe correr ANTES de `_recreate_pending_approvals_status_check_if_needed`:
+    garantiza que la tabla vieja expone TODAS las columnas que el INSERT SELECT
+    de la recreación va a copiar.
+    """
+    for stmt in _PENDING_APPROVALS_ADD_COLUMNS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass  # columna ya existe — idempotente
+
+
+def _recreate_pending_approvals_status_check_if_needed(
+    conn: sqlite3.Connection,
+) -> None:
+    """🔒 Recreación controlada del CHECK de `status` → admite 'expired'.
+
+    SQLite no permite ALTER ... DROP/MODIFY CONSTRAINT: se recrea la tabla con el
+    patrón oficial (CREATE new → INSERT SELECT → DROP old → RENAME) dentro de UNA
+    transacción. Preserva TODAS las filas (INSERT SELECT explícito por nombre) y
+    recrea los índices (el DROP TABLE los borra) en el bloque de índices de
+    ensure_*.
+
+    Idempotencia por INSPECCIÓN DEL PROPIO CHECK: si el DDL de la tabla en
+    sqlite_master ya contiene 'expired', no-op. NO usa `PRAGMA user_version`
+    (shell-state.db lo comparte con el esquema `tasks`, que ya lo posee 1→4).
+
+    `PRAGMA foreign_keys` se pone OFF durante el RENAME (defensivo, mismo patrón
+    que la recreación de `agent_tasks`) y se restaura al valor previo al terminar.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type='table' AND name='pending_approvals'"
+    ).fetchone()
+    if row is None or row[0] is None:
+        return  # la tabla aún no existe (el CREATE corre antes → no debería pasar)
+    if "'expired'" in row[0]:
+        return  # ya migrada: el CHECK ya admite 'expired' — no-op idempotente
+
+    fk_prev = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DROP TABLE IF EXISTS pending_approvals_new")
+            # `execute` (no `executescript`): executescript haría COMMIT implícito
+            # y cerraría la transacción. Es UN solo statement CREATE TABLE.
+            conn.execute(_DDL_PENDING_APPROVALS_NEW)
+            conn.execute(
+                f"INSERT INTO pending_approvals_new ({_PENDING_APPROVALS_COLUMNS}) "
+                f"SELECT {_PENDING_APPROVALS_COLUMNS} FROM pending_approvals"
+            )
+            conn.execute("DROP TABLE pending_approvals")
+            conn.execute(
+                "ALTER TABLE pending_approvals_new RENAME TO pending_approvals"
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.execute(f"PRAGMA foreign_keys = {'ON' if fk_prev else 'OFF'}")
 
 
 def ensure_capabilities_schema(conn: sqlite3.Connection) -> None:
     """Aplica el DDL de `pending_approvals` sobre una conexión abierta.
 
-    Idempotente: `CREATE TABLE/INDEX IF NOT EXISTS`. Re-ejecutar no destruye
-    datos ni lanza.
+    Idempotente: CREATE TABLE/INDEX IF NOT EXISTS + ALTER en try/except + una
+    recreación controlada del CHECK de `status` bajo guard por inspección del
+    propio CHECK. Forward-only; re-ejecutar no destruye datos ni lanza.
     """
     conn.executescript(_DDL_PENDING_APPROVALS)
-    # Migración para DBs creadas antes de la columna tool_name (2026-06-19):
-    # ADD COLUMN es idempotente vía try/except (sqlite no tiene IF NOT EXISTS
-    # para columnas). Sin esto, las DBs existentes no clasifican el MFA por tool.
-    try:
-        conn.execute("ALTER TABLE pending_approvals ADD COLUMN tool_name TEXT")
-    except sqlite3.OperationalError:
-        pass  # la columna ya existe
-    # Migración action_digest (native per-action approval, 2026-06-19).
-    try:
-        conn.execute("ALTER TABLE pending_approvals ADD COLUMN action_digest TEXT")
-    except sqlite3.OperationalError:
-        pass  # la columna ya existe
-    # Índice para la consulta del chokepoint nativo: aprobado+no-consumido por digest.
-    try:
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS pending_approvals_action_digest_idx "
-            "ON pending_approvals (action_digest)"
-        )
-    except sqlite3.OperationalError:
-        pass
-    # Índice UNIQUE parcial: garantiza que solo puede existir UNA fila 'pending' por
-    # action_digest. Segunda red de seguridad para deduplicar tarjetas de aprobación:
-    # aunque proposal_id sea determinista (uuid5), una DB antigua con filas ya pendientes
-    # queda también protegida. WHERE status='pending' limita la unicidad a pendientes.
-    try:
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS pending_approvals_digest_pending_uidx "
-            "ON pending_approvals(action_digest) WHERE status='pending'"
-        )
-    except sqlite3.OperationalError:
-        pass
-    # Migración conversation_id (C — anclar tarjeta al hilo del chat, 2026-06-23).
-    # Guarda el id REAL de la conversación de chat (resuelto por el engine vía
-    # conversation_task_registry) para que el FE ancle la tarjeta de aprobación al
-    # hilo correcto. (Antes se guardaba el task_id aleatorio del ciclo → no casaba.)
-    try:
-        conn.execute("ALTER TABLE pending_approvals ADD COLUMN conversation_id TEXT")
-    except sqlite3.OperationalError:
-        pass
+    # EXPAND aditivo (columnas ALTER) — ANTES de la recreación de status.
+    _add_pending_approvals_columns(conn)
+    # Recreación del CHECK de status para admitir 'expired' (DBs con CHECK viejo).
+    # El DROP TABLE interno borra los índices → se recrean en el bloque de abajo.
+    _recreate_pending_approvals_status_check_if_needed(conn)
+    # (Re)crea todos los índices: idempotente + repuebla tras la recreación.
+    conn.executescript(_DDL_PENDING_APPROVALS_INDEXES)

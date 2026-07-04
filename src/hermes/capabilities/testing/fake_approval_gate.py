@@ -41,7 +41,7 @@ class FakeApprovalGate:
         tool_name: str = "",
         action_digest: str = "",  # noqa: ARG002
         conversation_id: str = "",
-    ) -> None:
+    ) -> str:
         self.register_calls.append(proposal_id)
         self._pending[proposal_id] = {
             "work_item_id": work_item_id,
@@ -53,6 +53,7 @@ class FakeApprovalGate:
         if self._auto_approve:
             token = str(uuid4())
             self._approved[proposal_id] = token
+        return "pending"
 
     async def verify_token(self, *, proposal_id: UUID, token: str) -> bool:
         return self._approved.get(proposal_id) == token

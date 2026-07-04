@@ -109,7 +109,7 @@ class TestWritePathDispatchesToBroker:
         # Ejecutar el puente sync: simular que broker.dispatch retorna el outcome.
         dispatch_calls: list[ToolCallProposal] = []
 
-        def fake_dispatch_bridge(*, proposal, broker, consent_context, engine_loop):
+        def fake_dispatch_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return broker_outcome
 

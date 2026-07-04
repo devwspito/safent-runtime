@@ -101,6 +101,7 @@ from hermes.tasks.domain.task_cancel_registry import (
 from hermes.runtime.conversation_task_registry import (
     bump_write_tool_failure,
     resolve_conversation,
+    resolve_work_item,
     write_tool_failure_count,
 )
 
@@ -1362,19 +1363,27 @@ class GovernedAIAgent:
             return self._blocked(function_name, "broker no configurado — fail-closed")
 
         conversation_id = resolve_conversation(effective_task_id)
+        # BUG FIX: thread the REAL WorkQueue work_item_id through (was always
+        # None here, so register_pending persisted UUID(int=0) for every
+        # delegated/autonomous WRITE — approve_action then couldn't find a
+        # queue task to re-enqueue and the task stayed pending_approval forever).
+        work_item_id = resolve_work_item(effective_task_id)
         outcome = _dispatch_via_bridge(
             proposal=proposal,
             broker=self._broker,
             consent_context=self._consent_context,
             engine_loop=self._engine_loop,
             conversation_id=conversation_id,
+            work_item_id=work_item_id,
         )
         # Same block-and-resume as the native write path: external (Composio/MCP)
         # writes pending approval in an active chat hold the thread and re-dispatch
         # on approval, instead of the non-resuming retry queue.
         from hermes.capabilities.domain.ports import ExecutionStatus  # noqa: PLC0415
         if outcome.status is ExecutionStatus.PENDING_APPROVAL and conversation_id:
-            result = self._await_owner_and_resume(proposal, conversation_id)
+            result = self._await_owner_and_resume(
+                proposal, conversation_id, work_item_id=work_item_id
+            )
         else:
             result = self._handle_outcome(proposal, outcome)
         if _write_result_is_failure(result):
@@ -1622,12 +1631,17 @@ class GovernedAIAgent:
             return self._blocked(function_name, "broker no configurado — fail-closed")
 
         conversation_id = resolve_conversation(effective_task_id)
+        # BUG FIX: same as the external-write path — thread the REAL work_item_id
+        # so register_pending never falls back to UUID(int=0) for delegated/
+        # autonomous cycles (see conversation_task_registry.resolve_work_item docstring).
+        work_item_id = resolve_work_item(effective_task_id)
         outcome = _dispatch_via_bridge(
             proposal=proposal,
             broker=self._broker,
             consent_context=self._consent_context,
             engine_loop=self._engine_loop,
             conversation_id=conversation_id,
+            work_item_id=work_item_id,
         )
 
         # Block-and-resume (Mandato 1): si quedó pendiente de aprobación Y hay una
@@ -1637,7 +1651,9 @@ class GovernedAIAgent:
         # scheduled (sin conversation_id) se mantiene el modelo de cola no-bloqueante.
         from hermes.capabilities.domain.ports import ExecutionStatus  # noqa: PLC0415
         if outcome.status is ExecutionStatus.PENDING_APPROVAL and conversation_id:
-            result = self._await_owner_and_resume(proposal, conversation_id)
+            result = self._await_owner_and_resume(
+                proposal, conversation_id, work_item_id=work_item_id
+            )
         else:
             result = self._handle_outcome(proposal, outcome)
         if _write_result_is_failure(result):
@@ -1645,7 +1661,11 @@ class GovernedAIAgent:
         return result
 
     def _await_owner_and_resume(
-        self, proposal: ToolCallProposal, conversation_id: str
+        self,
+        proposal: ToolCallProposal,
+        conversation_id: str,
+        *,
+        work_item_id: "UUID | None" = None,
     ) -> str:
         """Bloquea el hilo de la conversación hasta la decisión del dueño y reanuda.
 
@@ -1736,6 +1756,7 @@ class GovernedAIAgent:
             engine_loop=engine_loop,
             conversation_id=conversation_id,
             hitl_approval_token=token,
+            work_item_id=work_item_id,
         )
         return self._handle_outcome(proposal, outcome)
 
@@ -2266,6 +2287,12 @@ class NousReasoningEngine:
         _chunk_sink = _meta.get("chunk_sink")
         _task_id_for_stream = _meta.get("task_id_for_stream")
         _conv_id_for_dbus: str = (_meta.get("conversation_id") or "").strip()
+        # BUG FIX: the orchestrator injects the REAL WorkQueue work_item_id here
+        # (item.id) for EVERY cycle, chat or delegated/autonomous. Threaded through
+        # to _run_conversation_with_cdp below so in-cycle WRITE dispatch can resolve
+        # it (conversation_task_registry.resolve_work_item) instead of always
+        # persisting UUID(int=0) in pending_approvals.
+        _work_item_id_for_dbus = _meta.get("work_item_id")
         _emit_counter: list[int] = [0]  # local counter — harmless, unused by orchestrator
         # Per-cycle accumulator of tool-call descriptors (same shape as the live
         # TOOL_CALL frame), filled by the emitter and surfaced on CycleOutput.tool_steps
@@ -2368,6 +2395,7 @@ class NousReasoningEngine:
                 agent, user_message, _history, cerebro_cdp_provider,
                 stream_callback=_stream_cb,
                 conversation_id=_conv_id_for_dbus,
+                work_item_id=_work_item_id_for_dbus,
             ),
         )
 
@@ -2970,6 +2998,7 @@ def _run_conversation_with_cdp(
     cdp_provider: Any,
     stream_callback: "Callable[..., None] | None" = None,
     conversation_id: str = "",
+    work_item_id: "UUID | None" = None,
 ) -> dict[str, Any]:
     """Run agent.run_conversation in the current executor thread.
 
@@ -3009,6 +3038,8 @@ def _run_conversation_with_cdp(
         clear_conversation_for_task,
         set_current_cycle_task,
         clear_current_cycle_task,
+        set_work_item_for_task,
+        clear_work_item_for_task,
         reset_write_tool_failures,
     )
 
@@ -3025,6 +3056,11 @@ def _run_conversation_with_cdp(
     # can register HITL approvals against the thread the owner is looking at
     # (the hook only receives this random task_id, not the conversation_id).
     set_conversation_for_task(cycle_task_id, conversation_id)
+    # Anchor this cycle's task_id to the REAL WorkQueue work_item_id (bug fix
+    # 2026-07): lets in-cycle WRITE dispatch resolve it via resolve_work_item so
+    # register_pending never falls back to UUID(int=0) for delegated/autonomous
+    # cycles (which have no conversation_id to anchor on above).
+    set_work_item_for_task(cycle_task_id, work_item_id)
     # Ambient stamp so broker-routed writes that get no task_id (the sequential
     # write wrapper) still resolve THIS conversation → block-and-resume, not the
     # non-resuming retry queue.
@@ -3045,6 +3081,7 @@ def _run_conversation_with_cdp(
     finally:
         clear_session_key_for_thread()
         clear_conversation_for_task(cycle_task_id)
+        clear_work_item_for_task(cycle_task_id)
         clear_current_cycle_task()
         # Reap this cycle's confined-browser session (agent-browser controller
         # daemon + CDP supervisor) so the NEXT cycle attaches to a clean
@@ -3165,6 +3202,7 @@ def _dispatch_via_bridge(
     engine_loop: asyncio.AbstractEventLoop,
     conversation_id: str = "",
     hitl_approval_token: str | None = None,
+    work_item_id: "UUID | None" = None,
 ) -> Any:
     """Puente async → sync thread-safe para llamar broker.dispatch desde el executor.
 
@@ -3175,6 +3213,12 @@ def _dispatch_via_bridge(
 
     Si el broker tarda más de _BROKER_DISPATCH_TIMEOUT_S → devuelve REJECTED_BY_POLICY
     (fail-closed). No lanza al caller: el gate siempre devuelve una string.
+
+    `work_item_id`: la tarea REAL de la WorkQueue que originó este ciclo (resuelta
+    vía conversation_task_registry.resolve_work_item). None solo cuando el ciclo
+    genuinamente no tiene un work_item asociado (p.ej. una llamada de test directa).
+    Sin esto el broker persistía UUID(int=0) en pending_approvals y approve_action
+    no podía re-encolar la tarea tras la aprobación del dueño (bug 2026-07).
     """
     from hermes.capabilities.domain.ports import ExecutionOutcome, ExecutionStatus  # noqa: PLC0415
     from uuid import uuid4 as _uuid4  # noqa: PLC0415
@@ -3186,6 +3230,7 @@ def _dispatch_via_bridge(
                 consent_context,
                 conversation_id=conversation_id,
                 hitl_approval_token=hitl_approval_token,
+                work_item_id=work_item_id,
             ),
             engine_loop,
         )

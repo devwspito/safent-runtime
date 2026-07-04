@@ -492,23 +492,66 @@ export interface RuntimeSnapshot {
   stats: AgentStatsResponse
 }
 
+const RUNTIME_STREAM_RECONNECT_MIN_MS = 1_000
+const RUNTIME_STREAM_RECONNECT_MAX_MS = 15_000
+
 /**
  * Subscribe to the live Office floor via SSE (runtime status + agent stats).
  * Replaces the old 4 s poll: one connection, the server pushes on change.
- * EventSource auto-reconnects on a dropped connection. Returns a disposer.
+ *
+ * EventSource auto-reconnects by itself on most transient drops (readyState
+ * goes back to CONNECTING), but a permanently CLOSED source (e.g. a fatal
+ * network error, or the browser giving up) otherwise leaves both Office tabs
+ * silently stale forever since this is their only path to `runtimeStatus`/
+ * `agentStats`. So: on CLOSED we resubscribe ourselves with exponential
+ * backoff (1s → 2s → … capped at 15s), reset to 1s once a connection opens.
+ * Returns a disposer that stops both the stream and any pending reconnect.
  */
 export function openRuntimeStream(
   onSnapshot: (snap: RuntimeSnapshot) => void,
 ): () => void {
-  const es = new EventSource('/api/v1/runtime/agent-stream')
-  es.onmessage = (event: MessageEvent) => {
-    try {
-      onSnapshot(JSON.parse(event.data as string) as RuntimeSnapshot)
-    } catch {
-      /* ignore a malformed frame — the next tick supersedes it */
+  let es: EventSource | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectDelayMs = RUNTIME_STREAM_RECONNECT_MIN_MS
+  let disposed = false
+
+  function scheduleReconnect() {
+    if (disposed) return
+    const delay = reconnectDelayMs
+    reconnectDelayMs = Math.min(reconnectDelayMs * 2, RUNTIME_STREAM_RECONNECT_MAX_MS)
+    reconnectTimer = setTimeout(connect, delay)
+  }
+
+  function connect() {
+    const source = new EventSource('/api/v1/runtime/agent-stream')
+    es = source
+
+    source.onopen = () => {
+      reconnectDelayMs = RUNTIME_STREAM_RECONNECT_MIN_MS
+    }
+
+    source.onmessage = (event: MessageEvent) => {
+      try {
+        onSnapshot(JSON.parse(event.data as string) as RuntimeSnapshot)
+      } catch {
+        /* ignore a malformed frame — the next tick supersedes it */
+      }
+    }
+
+    source.onerror = () => {
+      if (disposed || source.readyState !== EventSource.CLOSED) return
+      source.close()
+      scheduleReconnect()
     }
   }
-  return () => es.close()
+
+  connect()
+
+  return () => {
+    disposed = true
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    es?.close()
+  }
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────

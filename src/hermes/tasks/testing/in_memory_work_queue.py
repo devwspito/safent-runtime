@@ -183,6 +183,33 @@ class InMemoryWorkQueue:
         )
         self._items[item_id] = updated
 
+    async def mark_cancelled(
+        self,
+        item_id: UUID,
+        *,
+        claim_token: UUID,
+        reason: str,  # noqa: ARG002
+    ) -> None:
+        """CANCELLED terminal (operador detuvo la tarea, sin retry).
+
+        PRE-EXISTING GAP (found while adding P0 regression tests, unrelated to
+        the HITL work_item_id fix): WorkQueuePort added mark_cancelled but this
+        fake never implemented it, so `isinstance(InMemoryWorkQueue(), WorkQueuePort)`
+        failed at import time (module-level assert) — breaking EVERY test that
+        imports this fake, including pre-existing ones. Mirrors mark_rejected.
+        """
+        item = self._get_or_raise(item_id)
+        _assert_in_progress_with_token(item, claim_token, "mark_cancelled")
+
+        updated = _replace(
+            item,
+            status=TaskStatus.CANCELLED,
+            claim_token=None,
+            claimed_at=None,
+            lease_expires_at=None,
+        )
+        self._items[item_id] = updated
+
     async def reconcile_stale(self) -> int:
         """Re-encola IN_PROGRESS con lease vencido (SC-003/FR-007)."""
         now = datetime.now(tz=UTC)

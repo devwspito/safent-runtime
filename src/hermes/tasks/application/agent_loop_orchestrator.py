@@ -242,6 +242,16 @@ class AgentLoopOrchestrator:
         effective_sink = counting_sink if counting_sink is not None else chunk_sink
 
         ctx = build_decision_context(item)
+        # BUG FIX (P0 — HITL approval "caducó antes de aprobarla" loop): the
+        # engine's in-cycle WRITE dispatch previously called broker.dispatch()
+        # WITHOUT a work_item_id (nous_engine only carried conversation_id, which
+        # is injected below ONLY for chat). Delegated/autonomous/scheduled items
+        # (is_chat=False) have no conversation_id, so register_pending always
+        # persisted UUID(int=0) and approve_action could never find a real queue
+        # task to re-enqueue after the owner approved. Inject the REAL work_item_id
+        # (server-side, item.id) into metadata for EVERY cycle — chat or not — so
+        # the engine can thread it through to the broker (mirrors conversation_id).
+        ctx = _inject_work_item_id(ctx, item.id)
         if is_chat and chunk_sink is not None:
             # Inyecta el sink + task_id + conversation_id en metadata
             # (Constitución I: NO toca run_cycle). task_id_for_stream permite
@@ -1033,6 +1043,38 @@ def _inject_chunk_sink(
         new_meta["task_id_for_stream"] = task_id
     if conversation_id:
         new_meta["conversation_id"] = conversation_id
+    return DecisionContext(
+        tenant_id=ctx.tenant_id,
+        cycle_id=ctx.cycle_id,
+        trigger=ctx.trigger,
+        subjects=ctx.subjects,
+        constraints=ctx.constraints,
+        operator_instruction=ctx.operator_instruction,
+        agent_id=ctx.agent_id,
+        domain_payload=ctx.domain_payload,
+        metadata=new_meta,
+    )
+
+
+def _inject_work_item_id(
+    ctx: "Any",  # DecisionContext
+    work_item_id: "Any",  # UUID
+) -> "Any":
+    """Devuelve un DecisionContext con el work_item_id REAL en metadata.
+
+    Bug fix (2026-07 / HITL approval loop): sin esto, el engine no tiene forma
+    de saber qué WorkItem originó el ciclo salvo cuando hay conversation_id
+    (solo chat) — un WRITE propuesto in-cycle en una tarea delegada/autónoma
+    pasaba work_item_id=None al broker, que persistía UUID(int=0) en
+    pending_approvals. approve_action leía ese cero, lo trataba como
+    "no es una tarea de cola" y NUNCA re-encolaba tras la aprobación del dueño:
+    la tarjeta expiraba silenciosamente y la tarea quedaba atascada en
+    pending_approval para siempre. Se inyecta SIEMPRE (chat y no-chat) — campo
+    opaco en metadata, NO toca la firma de run_cycle (Constitución I).
+    """
+    from hermes.domain.decision_context import DecisionContext  # noqa: PLC0415
+
+    new_meta = {**ctx.metadata, "work_item_id": work_item_id}
     return DecisionContext(
         tenant_id=ctx.tenant_id,
         cycle_id=ctx.cycle_id,

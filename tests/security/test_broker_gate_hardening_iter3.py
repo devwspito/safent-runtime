@@ -232,7 +232,7 @@ class TestExternalComposioSequentialPath:
 
         dispatch_calls: list[Any] = []
 
-        def _fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def _fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return _outcome_executed({"sent": True})
 
@@ -348,7 +348,7 @@ class TestExternalMcpSequentialPath:
         spec = _make_write_mcp_spec("filesystem", "create_file")
         dispatch_calls: list[Any] = []
 
-        def _fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def _fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return _outcome_executed({"created": True})
 
@@ -459,7 +459,7 @@ class TestMemoryToolGated:
 
         dispatch_calls: list[Any] = []
 
-        def _fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def _fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return _outcome_executed({"written": True})
 
@@ -512,7 +512,7 @@ class TestMemoryToolGated:
 
         dispatch_calls: list[Any] = []
 
-        def _fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def _fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return _outcome_executed()
 
@@ -564,7 +564,7 @@ class TestClarifyToolGated:
 
         dispatch_calls: list[Any] = []
 
-        def _fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def _fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return _outcome_pending()
 

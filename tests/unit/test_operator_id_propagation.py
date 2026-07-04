@@ -250,7 +250,7 @@ class TestWritePathOperatorIdPropagation:
 
         dispatched_consent_contexts: list[ConsentContext] = []
 
-        def fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatched_consent_contexts.append(consent_context)
             return _outcome(ExecutionStatus.PENDING_APPROVAL)
 

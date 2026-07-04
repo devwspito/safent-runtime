@@ -317,7 +317,7 @@ class TestComposioWriteRoutesToBroker:
         mock_broker = MagicMock()
         dispatch_calls: list[Any] = []
 
-        def fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return broker_outcome
 
@@ -411,7 +411,7 @@ class TestMcpRouting:
         broker_outcome = _outcome(ExecutionStatus.PENDING_APPROVAL)
         dispatch_calls: list[Any] = []
 
-        def fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return broker_outcome
 

@@ -350,7 +350,7 @@ class TestWriteRoutesThroughBroker:
         )
         dispatch_calls: list[Any] = []
 
-        def fake_bridge(*, proposal, broker, consent_context, engine_loop):
+        def fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
             dispatch_calls.append(proposal)
             return write_outcome
 

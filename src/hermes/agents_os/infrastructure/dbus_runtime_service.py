@@ -2983,6 +2983,16 @@ class DbusRuntimeServiceWiring:
         # FR-015: re-encolar la tarea para que el loop la procese con el token.
         # Solo si la queue está inyectada (degradación honesta: sin queue, solo
         # se emite el evento de aprobación).
+        #
+        # BUG FIX (2026-07 — "caducó antes de aprobarla" toast on a live=false
+        # response): `requeued` tracks whether re_enqueue_after_approval ACTUALLY
+        # put the task back to work, so `thread_resumed` below reports the truth
+        # for the broker/MCP path (no native-danger thread ever blocks there —
+        # signalled is always False for it). Before this fix the response only
+        # ever looked at `signalled`, so a successfully re-enqueued delegated/
+        # autonomous MCP approval was misreported as live=false even though the
+        # task WILL execute on the next drain.
+        requeued = False
         if self._queue is not None:
             work_item_id = await self._gate.work_item_id_for_proposal(proposal_id)
             # work_item_id == UUID(int=0) ⇒ chat / native-danger (NO es una tarea de la
@@ -2992,6 +3002,7 @@ class DbusRuntimeServiceWiring:
             if work_item_id is not None and work_item_id != UUID(int=0):
                 try:
                     await self._queue.re_enqueue_after_approval(work_item_id)
+                    requeued = True
                     logger.info(
                         "hermes.dbus.hitl_requeued",
                         extra={
@@ -3025,7 +3036,9 @@ class DbusRuntimeServiceWiring:
         # registered under this proposal_id. Signal it now so the EXACT same tool
         # call is resumed (approved) without any re-prompt or re-attempt.
         # signalled=True  → LIVE: thread was waiting, will execute the exact call.
-        # signalled=False → POST: no thread waiting (timed out or turn ended).
+        # signalled=False → the chat thread wasn't blocked (broker/MCP path, or
+        #   timed out / turn already ended) — NOT necessarily "nothing will happen":
+        #   `requeued` above covers the re-enqueue path.
         from hermes.runtime.security_hook import signal_native_danger_approval  # noqa: PLC0415
         signalled = signal_native_danger_approval(str(proposal_id), "approved")
         logger.info(
@@ -3037,7 +3050,7 @@ class DbusRuntimeServiceWiring:
         return HitlApprovalResult(
             approval_token=token,
             approved_by=approved_by,
-            thread_resumed=signalled,
+            thread_resumed=signalled or requeued,
         )
 
     async def reject_action(

@@ -163,11 +163,17 @@ class ApprovalGatePort(Protocol):
         tool_name: str = "",
         action_digest: str = "",
         conversation_id: str = "",
-    ) -> None:
+    ) -> str:
         """Crea/actualiza la fila pending (idempotente por proposal_id).
 
         `conversation_id` ancla la tarjeta al hilo de chat para que el widget
         in-chat la muestre; `tool_name`/`action_digest` dan contexto y dedup.
+
+        Returns:
+            'pending' en el caso normal. Un valor distinto (p.ej. 'rejected')
+            señala que un breaker durable (demasiados re-registros de la MISMA
+            propuesta sin resolución) la bloqueó terminalmente — el caller debe
+            tratarlo como REJECTED_BY_POLICY, no como PENDING_APPROVAL.
         """
         ...
 

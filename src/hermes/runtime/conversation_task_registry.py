@@ -111,6 +111,66 @@ def resolve_conversation(effective_task_id: str) -> str:
     )
 
 
+# Process-global map: per-cycle Nous task_id -> the REAL WorkQueue work_item_id
+# (a UUID, or "" when the cycle has none — e.g. a synthetic/legacy call site).
+#
+# BUG FIX (2026-07): the in-cycle WRITE dispatch (_dispatch_write_proposal /
+# _dispatch_external_write) called broker.dispatch() WITHOUT a work_item_id, so
+# register_pending always persisted UUID(int=0) for delegated/autonomous cycles
+# (no chat conversation_id to fall back on). approve_action then read back
+# work_item_id=0, treated it as "no queue task" (native-danger path), and never
+# re-enqueued the work item — the task stayed stuck in pending_approval forever
+# (the owner's approval had no effect: "caducó antes de aprobarla"). Mirrors the
+# conversation_id registry above so the SAME task_id resolves BOTH.
+_work_item_by_task: dict[str, str] = {}
+
+
+def set_work_item_for_task(task_id: str, work_item_id: "Any") -> None:
+    """Bind a cycle's task_id to its real WorkQueue work_item_id. No-op if either empty."""
+    if not task_id or work_item_id is None:
+        return
+    with _lock:
+        _work_item_by_task[task_id] = str(work_item_id)
+
+
+def get_work_item_for_task(task_id: str) -> str:
+    """Resolve the work_item_id for a cycle's task_id, or "" if unknown."""
+    if not task_id:
+        return ""
+    with _lock:
+        return _work_item_by_task.get(task_id, "")
+
+
+def clear_work_item_for_task(task_id: str) -> None:
+    """Drop the binding once the cycle ends (called from the engine's finally)."""
+    if not task_id:
+        return
+    with _lock:
+        _work_item_by_task.pop(task_id, None)
+
+
+def resolve_work_item(effective_task_id: str) -> "UUID | None":
+    """work_item_id for a write proposal: by its own task_id, else the ambient cycle.
+
+    Mirrors resolve_conversation() so every in-cycle WRITE dispatch threads the
+    REAL work_item_id into broker.dispatch() instead of leaving it None (which
+    register_pending would otherwise persist as UUID(int=0) — see module docstring
+    above). Returns None if no binding exists (fail-safe: broker treats None as
+    "no queue task", same as before this fix for genuinely task-less calls).
+    """
+    from uuid import UUID as _UUID  # noqa: PLC0415
+
+    raw = get_work_item_for_task(effective_task_id) or get_work_item_for_task(
+        get_current_cycle_task()
+    )
+    if not raw:
+        return None
+    try:
+        return _UUID(raw)
+    except (ValueError, AttributeError):
+        return None
+
+
 # Per-cycle circuit breaker for the WRITE-PROPOSAL path. Nous's tool_loop_guardrails
 # do not see broker-routed gated tools (install_mcp/skill_manage go through
 # block-and-resume, bypassing the standard tool loop), so a tool that keeps failing
