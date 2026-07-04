@@ -37,7 +37,7 @@ const translations = {
     'nav.envivo':         'En vivo',
     'nav.section.capabilities': 'Capacidades',
     'nav.section.system':       'Sistema',
-    'nav.pending_aria':   '{count} aprobaciones pendientes',
+    'nav.pending_aria':   '{count} solicitudes pendientes',
 
     // Language selector
     'settings.language':  'Idioma',
@@ -88,6 +88,21 @@ const translations = {
     'approval.enroll.prompt':    'Esta acción necesita verificación en dos pasos. Actívala para autorizarla.',
     'approval.enroll.cta':       'Activar verificación en dos pasos',
     'approval.enroll.later':     'Ahora no',
+
+    // Inbound cross-human delegation card (FASE 3 A2A) — a colleague's
+    // assistant asking THIS owner's agent to pick up work. Distinct from the
+    // agent's own HITL approval cards above.
+    'delegation.badge':           'Delegación de otro compañero',
+    'delegation.title':           'El asistente de {employee} te pide:',
+    'delegation.actions_aria':    'Aprobar o rechazar esta delegación',
+    'delegation.btn.approve':     'Aprobar',
+    'delegation.btn.reject':      'Rechazar',
+    'delegation.btn.approving':   'Aprobando…',
+    'delegation.btn.rejecting':   'Rechazando…',
+    'delegation.toast.approved':  'Delegación aprobada. El agente empieza a trabajar en ello.',
+    'delegation.toast.rejected':  'Delegación rechazada.',
+    'delegation.err.approve':     'No se pudo aprobar la delegación. Inténtalo de nuevo.',
+    'delegation.err.reject':      'No se pudo rechazar la delegación. Inténtalo de nuevo.',
 
     // MFA modal
     'mfa.title.code':        'Código de verificación',
@@ -191,6 +206,8 @@ const translations = {
     // Seguridad view
     'seg.approvals.label':        'Acciones pendientes de aprobación',
     'seg.approvals.empty':        'Ninguna acción pendiente de tu aprobación.',
+    'seg.delegations.label':      'Delegaciones de otros compañeros',
+    'seg.delegations.empty':      'Ningún compañero te ha pedido ayuda con una tarea.',
     'seg.mfa.label':              'Verificación de dos pasos',
     'seg.mfa.enrolled':           'Verificación de dos pasos activa. Aprobar acciones sensibles y cambiar permisos requiere tu código.',
     'seg.mfa.not_enrolled':       'Sin verificación de dos pasos no puedes autorizar acciones sensibles del agente. Actívala en menos de un minuto con tu app de códigos.',
@@ -926,7 +943,7 @@ const translations = {
     'nav.envivo':         'Live',
     'nav.section.capabilities': 'Capabilities',
     'nav.section.system':       'System',
-    'nav.pending_aria':   '{count} pending approvals',
+    'nav.pending_aria':   '{count} pending requests',
 
     // Language selector
     'settings.language':  'Language',
@@ -977,6 +994,19 @@ const translations = {
     'approval.enroll.prompt':    'This action requires two-step verification. Enable it to authorize.',
     'approval.enroll.cta':       'Enable two-step verification',
     'approval.enroll.later':     'Not now',
+
+    // Inbound cross-human delegation card (FASE 3 A2A)
+    'delegation.badge':           'Delegation from a colleague',
+    'delegation.title':           '{employee}\'s assistant is asking you:',
+    'delegation.actions_aria':    'Approve or reject this delegation',
+    'delegation.btn.approve':     'Approve',
+    'delegation.btn.reject':      'Reject',
+    'delegation.btn.approving':   'Approving…',
+    'delegation.btn.rejecting':   'Rejecting…',
+    'delegation.toast.approved':  'Delegation approved. The agent starts working on it.',
+    'delegation.toast.rejected':  'Delegation rejected.',
+    'delegation.err.approve':     'Could not approve the delegation. Please try again.',
+    'delegation.err.reject':      'Could not reject the delegation. Please try again.',
 
     // MFA modal
     'mfa.title.code':        'Verification code',
@@ -1080,6 +1110,8 @@ const translations = {
     // Seguridad view
     'seg.approvals.label':        'Actions awaiting your approval',
     'seg.approvals.empty':        'No actions pending your approval.',
+    'seg.delegations.label':      'Delegations from colleagues',
+    'seg.delegations.empty':      'No colleague has asked for help with a task.',
     'seg.mfa.label':              'Two-step verification',
     'seg.mfa.enrolled':           'Two-step verification active. Authorizing sensitive actions and changing permissions requires your code.',
     'seg.mfa.not_enrolled':       'Without two-step verification you cannot authorize sensitive agent actions. Set it up in under a minute with your authenticator app.',

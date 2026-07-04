@@ -10,6 +10,7 @@ import {
 import { useChat } from '../hooks/useChat'
 import { useFeatures } from '../hooks/useFeatures'
 import { usePendingApprovals } from '../hooks/usePendingApprovals'
+import { usePendingInboundDelegations } from '../hooks/usePendingInboundDelegations'
 import type { ConversationSummary } from '../api/types'
 import NotificationsPanel from './NotificationsPanel'
 import { useConfirmDialog } from './ConfirmDialog'
@@ -371,7 +372,12 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
   // don't anchor to a chat thread, so without this they'd be invisible outside
   // the Security view. Shares the exact freshness rule with SeguridadView — a
   // stale approval must never produce a phantom badge.
-  const pendingCount = usePendingApprovals(6000, approvalRefreshTick).length
+  // Inbound cross-human delegations (FASE 3 A2A) share the same badge — a
+  // colleague's assistant asking for help is just as "needs your attention"
+  // as the agent's own HITL approvals.
+  const pendingCount =
+    usePendingApprovals(6000, approvalRefreshTick).length +
+    usePendingInboundDelegations(6000, approvalRefreshTick).length
 
   async function handleSendMessage(text: string) {
     await chat.sendMessage(text)

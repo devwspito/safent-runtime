@@ -32,6 +32,7 @@ import type {
   EgressMode,
   EgressModeResponse,
   PendingApproval,
+  InboundDelegation,
   MfaStatus,
   PoliciesResponse,
   InstallDecisionPayload,
@@ -721,6 +722,22 @@ export function resolveApproval(
     method: 'POST',
     body: JSON.stringify({ decision, totp: factors.totp ?? null }),
   })
+}
+
+// ── Inbound cross-human delegations (FASE 3 A2A) ─────────────────────────────
+
+export function listInboundDelegations(): Promise<InboundDelegation[]> {
+  return request<InboundDelegation[]>('/inbound-delegations').catch(() => [])
+}
+
+export function resolveInboundDelegation(
+  messageId: string,
+  decision: 'approve' | 'reject',
+): Promise<{ ok: boolean; task_id?: string | null }> {
+  return request<{ ok: boolean; task_id?: string | null }>(
+    `/inbound-delegations/${encodeURIComponent(messageId)}`,
+    { method: 'POST', body: JSON.stringify({ decision }) },
+  )
 }
 
 // ── MFA enrollment ────────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ import { useT } from '../lib/i18n'
 import { isApprovalFresh } from '../hooks/usePendingApprovals'
 import {
   listPendingApprovals,
+  listInboundDelegations,
   mfaStatus,
   getPolicies,
   setPolicyPreset,
@@ -31,12 +32,14 @@ import {
 import type { EgressMode, EgressModeResponse } from '../api/types'
 import type {
   PendingApproval,
+  InboundDelegation,
   MfaStatus,
   PoliciesResponse,
   PolicyCatalogEntry,
   SecurityScan,
 } from '../api/types'
 import ApprovalCard from '../components/ApprovalCard'
+import InboundDelegationCard from '../components/InboundDelegationCard'
 import MfaEnroll from '../components/MfaEnroll'
 import MfaModal from '../components/MfaModal'
 import type { MfaFactors } from '../components/MfaModal'
@@ -135,6 +138,55 @@ function ApprovalsSkeletonBlock() {
         />
       ))}
     </div>
+  )
+}
+
+// ── Inbound cross-human delegations section (FASE 3 A2A) ─────────────────────
+
+function InboundDelegationsSection() {
+  const t = useT()
+  const [delegations, setDelegations] = useState<InboundDelegation[]>([])
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async () => {
+    const data = await listInboundDelegations()
+    setDelegations(Array.isArray(data) ? data : [])
+    setLoading(false)
+  }, [])
+
+  useEffect(() => {
+    load()
+    const timer = setInterval(load, POLL_INTERVAL_MS)
+    return () => clearInterval(timer)
+  }, [load])
+
+  return (
+    <section className="cv-section">
+      <div className={s.sectionLabel}>
+        <span>{t('seg.delegations.label')}</span>
+        {!loading && delegations.length > 0 && (
+          <span className={s.sectionLabelCount}>{delegations.length}</span>
+        )}
+      </div>
+      {loading ? (
+        <ApprovalsSkeletonBlock />
+      ) : delegations.length === 0 ? (
+        <div className={s.approvalsEmptyRow} role="status">
+          <CheckCircle size={15} aria-hidden="true" />
+          {t('seg.delegations.empty')}
+        </div>
+      ) : (
+        <ul className="cv-list" aria-label={t('seg.delegations.label')}>
+          <AnimatePresence initial={false}>
+            {delegations.map(d => (
+              <AnimatedListItem key={d.message_id}>
+                <InboundDelegationCard delegation={d} onResolved={load} />
+              </AnimatedListItem>
+            ))}
+          </AnimatePresence>
+        </ul>
+      )}
+    </section>
   )
 }
 
@@ -1426,6 +1478,7 @@ export default function SeguridadView() {
 
       <div className="view-body cv-view-body">
         <ApprovalsSection mfaDisabled={mfaDisabled} />
+        <InboundDelegationsSection />
         <GovernanceSection />
         <EgressSection />
         <SecurityCenterSection />

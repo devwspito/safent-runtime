@@ -12,6 +12,7 @@ import { Navigate, useSearchParams } from 'react-router-dom'
 import { Tabs, type Tab } from '../components/ui/Tabs'
 import { useFeatures } from '../hooks/useFeatures'
 import { usePendingApprovals } from '../hooks/usePendingApprovals'
+import { usePendingInboundDelegations } from '../hooks/usePendingInboundDelegations'
 import { useT, type TranslationKey } from '../lib/i18n'
 import SkillsView from './SkillsView'
 import IntegrationsView from './IntegrationsView'
@@ -119,8 +120,9 @@ export function CapacidadesView() {
 }
 
 export function SistemaView() {
-  // Same fresh-approvals source as the sidebar badge — the red count on the
-  // Seguridad tab always matches what the Seguridad list actually shows.
-  const pending = usePendingApprovals().length
+  // Same fresh-approvals + inbound-delegations sources as the sidebar badge —
+  // the red count on the Seguridad tab always matches what the Seguridad list
+  // actually shows (approvals section + inbound-delegations section combined).
+  const pending = usePendingApprovals().length + usePendingInboundDelegations().length
   return <Hub tabs={SISTEMA_TABS} ariaLabelKey="nav.section.system" tabAlerts={{ seguridad: pending }} />
 }

@@ -371,6 +371,22 @@ export interface PendingApproval {
   created_at?: string | null
 }
 
+/**
+ * Inbound cross-human delegation card (FASE 3 A2A) — a colleague's assistant
+ * asking THIS owner's agent to pick up work. Mirrors the exact shape returned
+ * by GET /api/v1/inbound-delegations (DelegationApprovalService.list_pending):
+ * message_id, from_employee_id, body, issued_at, created_at only — no
+ * from_agent_id/correlation_id (those stay server-side, CTRL-P1-5: no
+ * secrets/signature reach the web surface).
+ */
+export interface InboundDelegation {
+  message_id: string
+  from_employee_id: string
+  body: string
+  issued_at: string
+  created_at: string
+}
+
 export interface MfaStatus {
   enrolled: boolean
 }
