@@ -108,7 +108,14 @@ _VNC_PORT_BASE = 5950
 # C1, since the pre-C1 code hardcoded them globally regardless of session).
 _LEGACY_SESSIONS = frozenset({"exec-browse", "teaching-chromium"})
 
-_MAX_EXEC_SESSIONS_DEFAULT = 3
+# SECURITY (review of 555fe22, HIGH): concurrent exec sessions share the single
+# browser netns, so session A's Chromium could reach session B's CDP/RFB (no auth
+# on those internal listeners). That isolation gap is CLOSED only once each session
+# gets its own netns. Until then the default cap is 1 — the infra exists (ports
+# derive per session) but real per-task concurrency stays OFF by default. Raising
+# HERMES_MAX_EXEC_SESSIONS re-opens the gap and must NOT be done before per-session
+# netns lands. See tests/unit/hardening/test_browser_session_ports.py.
+_MAX_EXEC_SESSIONS_DEFAULT = 1
 _EXEC_UNIT_GLOB = "hermes-browser-exec-*.service"
 
 
@@ -722,8 +729,11 @@ def _active_exec_unit_names(exclude: str) -> list[str]:
             capture_output=True, text=True, timeout=5, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning("launcher.exec_session_cap_check_failed error=%s — fail-open", exc)
-        return []
+        # FAIL-CLOSED (security review MED): if we cannot enumerate active units we
+        # cannot prove the cap is respected — refuse rather than admit. A sentinel
+        # forces _check_exec_session_cap to reject (an unknown-but-nonempty state).
+        logger.warning("launcher.exec_session_cap_check_failed error=%s — fail-closed", exc)
+        return ["<cap-check-unavailable>"] * max(1, _max_exec_sessions())
     names = []
     for line in proc.stdout.splitlines():
         parts = line.split()

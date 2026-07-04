@@ -32,7 +32,11 @@ _CHUNK = 65536
 # uppercase, unknown "teaching-*" variant, ...) is REJECTED outright (the
 # connection is closed) rather than silently substituted with the default —
 # default-deny, not default-fallback.
-_SESSION_PARAM_RE = re.compile(r"^[a-z0-9-]{1,64}$")
+# SAME allowlist shape as the launcher (hermes-browser-launcher) so the two
+# boundaries can't drift (security review LOW): rejects "exec-" (empty id),
+# "exec--a", uppercase, traversal — anything the launcher refuses is default-denied
+# here instead of attempting a doomed RFB connection.
+_SESSION_PARAM_RE = re.compile(r"^(?:exec|teaching)-[a-z0-9]{1,64}$")
 _DEFAULT_SESSION = "exec-browse"
 _TEACHING_SESSION_NAME = "teaching-chromium"
 
