@@ -128,6 +128,19 @@ _DESTRUCTIVE: frozenset[str] = frozenset({
     # Future: "delete_file", "drop_table", "purge_records"
 })
 
+
+def is_destructive(tool: str) -> bool:
+    """True if *tool*'s PRIMARY registered contract is PERMANENT DATA LOSS.
+
+    Single query point over the curated `_DESTRUCTIVE` overlay above — consumed
+    by approval_router.route()'s `irreversible` input (Enterprise governance,
+    Fase 2 Phase 4a). Currently empty (see _DESTRUCTIVE docstring); destructive
+    native tools land here as they're added to the catalog. No re-listing: one
+    edit to `_DESTRUCTIVE` re-aligns both is_mfa_required() and this query.
+    """
+    return tool in _DESTRUCTIVE
+
+
 # Tools in _MOST_DELICATE that are SIMPLE tier for per-action HITL approvals.
 # The cage + broker enforcement still applies; TOTP is not required to approve.
 _MOST_DELICATE_SIMPLE_HITL: frozenset[str] = frozenset({"cronjob"})

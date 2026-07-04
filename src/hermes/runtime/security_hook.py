@@ -15,6 +15,12 @@ Gate order (fail-closed — a single BLOCK from any step short-circuits):
   5. Native code guard   — check_execute_code_guard() for execute_code.
   6. Denylist gate       — broker._check_denylist() for os_native service ops.
 
+Between steps 1.5 and 1.6 (Enterprise governance, Fase 2 Phase 4a): an
+OBSERVABILITY-ONLY consult of approval_router.route() logs WHERE this action's
+approval would be resolved (LOCAL vs ENTERPRISE). It never blocks/allows and
+never changes gate order — see _log_approval_route()'s docstring and the
+TODO(enterprise-remote-approver) marker where the later phase attaches.
+
 Post-execution audit:
   post_tool_call hook signs every outcome (allowed or denied) into the
   AuditHashChainSigner + audit repo that the engine was configured with.
@@ -293,6 +299,103 @@ def _resolve_tool_policy_for_cycle(
             exc,
         )
         return base_store, f"security gate error (fail-closed): {type(exc).__name__}"
+
+
+def _resolve_agent_managed_by(access_scope_repo: Any, tenant_id: str) -> str | None:
+    """Best-effort `managed_by` ("cloud" | None) for the ambient cycle agent.
+
+    Enterprise governance, Fase 2 Phase 4a — feeds approval_router.route()'s
+    tenant-gate check. Fails soft to None (=> never cloud-gated => LOCAL) on
+    any error: no repo wired, no ambient agent, no scope row, or a lookup
+    failure all degrade to "not cloud-managed". Mirrors the fail-open posture
+    of _check_agent_access_scope's own scope lookup (Step 1.1) — this is an
+    observability consult, not an enforcement gate, so it must never raise.
+    """
+    try:
+        if access_scope_repo is None:
+            return None
+
+        from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+            get_current_cycle_agent,
+        )
+
+        agent_id = get_current_cycle_agent()
+        if not agent_id:
+            return None
+
+        scope = access_scope_repo.get_scope(agent_id, tenant_id)
+        return scope.managed_by if scope is not None else None
+    except Exception:  # noqa: BLE001 — fail-soft: unknown managed_by => not cloud-gated
+        return None
+
+
+def _tenant_remote_approval_enabled() -> bool:
+    """Stub accessor for the tenant's remote-approval flag (Fase 2 Phase 4a).
+
+    ALWAYS False today: no tenant config wires this yet — the remote-approver
+    consult (config_sync push, cloud approver) is a LATER phase, out of scope
+    here. Every call site already consults this single accessor instead of
+    inlining a literal, so wiring the real per-tenant read later is a
+    one-function edit.
+    """
+    return False
+
+
+def _log_approval_route(
+    tool_name: str,
+    args: dict[str, Any],
+    access_scope_repo: Any,
+    tenant_id: str,
+) -> None:
+    """Compute + log the Enterprise approval route — OBSERVABILITY ONLY.
+
+    Enterprise governance, Fase 2 Phase 4a: wired but INERT. The computed
+    route is NEVER consulted to gate/allow/block anything in this phase —
+    hook_mfa_block (Step 1.6, called unconditionally right after this) remains
+    the sole native-danger enforcement point, and _resolve_native_danger_approval
+    is the sole approval-collection path. An ENTERPRISE route here behaves
+    EXACTLY like LOCAL today.
+
+    TODO(enterprise-remote-approver): a LATER phase attaches the actual
+    ENTERPRISE branch (post to the remote approver, await its resolution)
+    HERE instead of just logging.
+
+    Never raises: any error is logged and swallowed. A bug in this NEW,
+    still-inert consult must never turn an existing ALLOW into a BLOCK — which
+    is exactly what would happen if it escaped to the outer fail-closed
+    handler in _pre_tool_call_hook.
+    """
+    try:
+        from hermes.capabilities.approval_router import route  # noqa: PLC0415
+        from hermes.capabilities.tool_delicacy import delicacy, is_destructive  # noqa: PLC0415
+        from hermes.capabilities.tool_sensitivity import sensitivity  # noqa: PLC0415
+
+        # egress_allowlist intentionally EMPTY: this phase does not thread the
+        # owner's real egress grants through (that lives in the shell_server
+        # egress-plane, a different bounded context) — since this consult is
+        # observability-only, the conservative default (nothing granted, so any
+        # egress-capable tool call surfaces as NEW_EGRESS in the log) is safe.
+        # TODO(enterprise-remote-approver): wire the real per-tenant allowlist
+        # accessor once NEW_EGRESS starts gating anything for real.
+        resolved_route = route(
+            tool=tool_name,
+            delicacy=delicacy(tool_name),
+            sensitivity_categories=sensitivity(tool_name, args),
+            irreversible=is_destructive(tool_name),
+            agent_managed_by=_resolve_agent_managed_by(access_scope_repo, tenant_id),
+            tenant_remote_approval_enabled=_tenant_remote_approval_enabled(),
+        )
+        logger.info(
+            "hermes.security_hook.approval_route route=%s tool=%s",
+            resolved_route,
+            tool_name,
+        )
+    except Exception as exc:  # noqa: BLE001 — inert consult: NEVER affects gating either way
+        logger.warning(
+            "hermes.security_hook.approval_route_consult_failed tool=%s error=%r",
+            tool_name,
+            exc,
+        )
 
 
 def _check_hardline_native(command_str: str) -> str | None:
@@ -1440,6 +1543,15 @@ def make_pre_tool_call_hook(
                     )
             except Exception:  # noqa: BLE001 — policy is a usability layer, not the floor
                 pass
+
+            # Step 1.6a: Enterprise approval-routing CONSULT (Fase 2 Phase 4a) —
+            # WIRED BUT INERT. Logs WHERE this action's approval would be resolved
+            # (LOCAL vs ENTERPRISE); the result is NOT consulted below and does NOT
+            # change control flow — see _log_approval_route()'s docstring and the
+            # TODO(enterprise-remote-approver) marker for where the later phase
+            # attaches. Never raises (self-contained fail-soft).
+            if tool_name:
+                _log_approval_route(tool_name, safe_args, access_scope_repo, tenant_id)
 
             # Step 1.6: MFA-on-dangers (owner decision 2026-06-19; coherence audit fix).
             # Gates NATIVE dangers that bypass the broker. hook_mfa_block encapsulates the
