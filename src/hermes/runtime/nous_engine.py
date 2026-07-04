@@ -2307,6 +2307,21 @@ class NousReasoningEngine:
             consent_context=per_cycle_consent,
             active_agent_id=str(active_agent_id) if active_agent_id else "",
             pii_mapping=mapping,
+            # BUG FIX (chat streaming freeze investigation): hermes-agent (Nous
+            # v0.15.1) never routes reasoning/CoT text through the run_conversation
+            # stream_callback — it fires the AIAgent CONSTRUCTOR-time
+            # `reasoning_callback` kwarg instead (agent._fire_reasoning_delta, see
+            # chat_completion_helpers.py: delta.reasoning_content -> reasoning_callback,
+            # never stream_callback). Without this, reasoning models (Qwen3.x,
+            # DeepSeek-R1, etc.) never streamed a single thinking_delta frame — the
+            # THINKING_DELTA branch in _build_stream_callback was dead code. Reuse
+            # the SAME chunk_sink emit path (_stream_cb) with kind forced to
+            # "thinking_delta" so reasoning text reaches the SSE stream exactly like
+            # narrative deltas do.
+            reasoning_callback=(
+                (lambda text: _stream_cb(text, "thinking_delta"))
+                if _stream_cb is not None else None
+            ),
         )
         _register_external_specs_in_nous(external_specs, agent)
         # COLD-CYCLE FIX: agent_init captured agent.tools + agent.valid_tool_names
@@ -2744,6 +2759,7 @@ class NousReasoningEngine:
         consent_context: "ConsentContext | None" = None,
         active_agent_id: str = "",
         pii_mapping: dict[str, str] | None = None,
+        reasoning_callback: "Callable[[str], None] | None" = None,
     ) -> GovernedAIAgent:
         """Construye GovernedAIAgent headless con broker, gate y catálogo externo.
 
@@ -2831,6 +2847,7 @@ class NousReasoningEngine:
             tool_call_emitter=self._chunk_sink_emitter,
             active_agent_id=active_agent_id,
             pii_mapping=pii_mapping,
+            reasoning_callback=reasoning_callback,
             **_extra_knobs,
         )
         return agent
