@@ -898,6 +898,9 @@ export function useChat(): UseChatReturn {
         const name = (d.tool as string | undefined) ?? (d.tool_name as string | undefined) ?? 'herramienta'
         const label = (d.label as string | undefined) ?? String(name).replace(/_/g, ' ')
         const target = String((d.target as string | undefined) ?? '').slice(0, 80)
+        // A browser tool → the jailed browser is live: turn on "Ver en vivo".
+        // (Must be here in the sendMessage path too, not only the reattach path.)
+        if (String(name).startsWith('browser')) setLiveBrowserActive(true)
         const step: ToolStep = { name, label, target }
         // Flush any accumulated text before the tool step so the segment boundary
         // is clean (matches vanilla segmentStart behaviour — activityText resets on TOOL_CALL).
