@@ -256,12 +256,37 @@ class FeaturesSpec(BaseModel):
 
 
 class LicenseSpec(BaseModel):
-    """License entitlements (stored in association_store.license_json)."""
+    """License entitlements (stored in association_store.license_json).
+
+    `remote_approval_enabled` (Fase 2 Phase 4b): tenant-level gate for the
+    Enterprise remote-approval feature — `security_hook._tenant_remote_approval_
+    enabled()` reads it back from `association_store.license_json` (the SAME
+    field this model serializes into, via `store.update_license()`; no new
+    D-Bus verb, mirrors how `views` already travels — see applier.py's NOTE).
+    Default False is BACK-COMPAT: dropped from the dump when False (see
+    `_serialize_license` below) so a bundle from a cloud that predates this
+    field signs BYTE-IDENTICALLY to before it existed — mirrors
+    AgentSpec.access_scope's drop-when-absent pattern.
+    """
 
     plan: str = Field(default="starter", max_length=64)
     max_agents: int = Field(default=5, ge=0)
     expires_at: str = Field(default="", max_length=32)  # ISO-8601 date or ""
     views: list[str] = Field(default_factory=list)
+    remote_approval_enabled: bool = False
+
+    @model_serializer(mode="wrap")
+    def _serialize_license(self, handler: Any) -> dict[str, Any]:
+        """Drop remote_approval_enabled from the dump when False (back-compat bytes).
+
+        LicenseSpec predates this field: a bundle that never sets it must sign/
+        serialize BYTE-IDENTICALLY to before the field existed, so
+        `"remote_approval_enabled":false` must never appear when it is unset/False.
+        """
+        data = handler(self)
+        if self.remote_approval_enabled is False:
+            data.pop("remote_approval_enabled", None)
+        return data
 
 
 # ---------------------------------------------------------------------------

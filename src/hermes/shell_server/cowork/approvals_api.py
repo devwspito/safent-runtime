@@ -156,8 +156,7 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
             return {"ok": True, "decision": body.decision, "live": live}
         except ApprovalGateError as exc:
             gate_reason = getattr(exc, "reason", "approval_failed")
-            status = 401 if gate_reason in {"mfa_required", "invalid_totp",
-                                             "mfa_not_enrolled"} else 400
+            status = _status_for_gate_reason(gate_reason)
             raise HTTPException(status_code=status, detail={"code": gate_reason,
                 "message": _mfa_reason_message(gate_reason)}) from exc
         except AgentUnavailable as exc:
@@ -176,7 +175,20 @@ _MFA_REASON_MESSAGES: dict[str, str] = {
     "mfa_required": "Se requiere MFA para aprobar esta acción.",
     "proposal_invalid": "Esta aprobación ya no es válida (puede haber expirado o ya fue "
                         "resuelta). Refresca el panel.",
+    # Fase 2 Phase 4b: this row is routed to Enterprise — only a signed cloud
+    # decision can approve it. The owner can still Deny (I-2); Approve here is
+    # rejected fail-closed by the gate (sqlite_approval_gate.approve()).
+    "enterprise_route_requires_cloud_decision": (
+        "Esta acción está pendiente de aprobación de tu empresa (Enterprise). "
+        "No puedes aprobarla localmente, pero sí puedes rechazarla."
+    ),
 }
+
+# Reasons that must surface as 403 Forbidden (the caller is not authorized to
+# perform THIS specific resolution, as opposed to bad/missing MFA which is 401).
+_FORBIDDEN_REASONS: frozenset[str] = frozenset({
+    "enterprise_route_requires_cloud_decision",
+})
 
 
 def _mfa_reason_message(reason: str) -> str:
@@ -185,6 +197,14 @@ def _mfa_reason_message(reason: str) -> str:
         "Verificación MFA fallida: código o respuesta del acertijo incorrectos, "
         "o falta un factor para esta acción.",
     )
+
+
+def _status_for_gate_reason(reason: str) -> int:
+    if reason in {"mfa_required", "invalid_totp", "mfa_not_enrolled"}:
+        return 401
+    if reason in _FORBIDDEN_REASONS:
+        return 403
+    return 400
 
 
 def _unavailable(proposal_id: str, exc: Exception) -> HTTPException:
@@ -228,4 +248,8 @@ def _to_frontend(row: dict, store: MfaStore) -> dict:
         # Escalated MFA model: mfa-tier tools require TOTP; simple-tier do not.
         "required_level": _LEVEL_MFA if is_mfa_required(tool_name) else _LEVEL_SIMPLE,
         "mfa_enrolled": mfa_state.enrolled,
+        # Fase 2 Phase 4b: "enterprise" when only a signed cloud decision can
+        # approve this row (Approve here fails with enterprise_route_requires_
+        # cloud_decision — see resolve_approval); Deny always still works (I-2).
+        "route": row.get("route") or "local",
     }

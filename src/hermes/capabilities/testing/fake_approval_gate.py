@@ -41,6 +41,9 @@ class FakeApprovalGate:
         tool_name: str = "",
         action_digest: str = "",  # noqa: ARG002
         conversation_id: str = "",
+        route: str = "",
+        sensitivity_categories: frozenset[str] = frozenset(),
+        agent_id: str = "",
     ) -> str:
         self.register_calls.append(proposal_id)
         self._pending[proposal_id] = {
@@ -49,6 +52,9 @@ class FakeApprovalGate:
             "justification": justification,
             "tool_name": tool_name,
             "conversation_id": conversation_id,
+            "route": route,
+            "sensitivity_categories": sensitivity_categories,
+            "agent_id": agent_id,
         }
         if self._auto_approve:
             token = str(uuid4())

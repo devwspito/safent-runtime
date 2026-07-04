@@ -11,11 +11,16 @@ deny-for-everyone, including Enterprise-managed agents. `route()` is only ever
 consulted for actions that already passed that floor (i.e. actions that ARE
 approvable — the only open question is BY WHOM).
 
-Runtime-only, INERT in this phase: `hermes.runtime.security_hook` currently
-consults `route()` for observability only and treats ENTERPRISE identically to
-LOCAL (falls through to the existing local native-danger approval path). The
-remote-approver consult (posting to a cloud approver, awaiting its resolution)
-is a LATER phase.
+LIVE as of Fase 2 Phase 4b: `hermes.runtime.security_hook` (`_compute_danger_
+route`) consults `route()` to decide who actually resolves a native-danger
+approval. ENTERPRISE diverts the approval to a remote Enterprise approver —
+the row is registered with `route="enterprise"` and can ONLY be resolved by a
+verified, signed decision applied via `hermes.config_sync.remote_approvals`
+(the local owner can still DENY it directly, never approve it locally — see
+that module's I-1/I-2/I-3). LOCAL keeps today's D-Bus approve/deny path
+unchanged. `route()` itself remains pure/inert: it never blocks/allows and
+never substitutes the floor above — it only ever runs for an action that was
+ALREADY going to require (and receive) an approval seam.
 
 Pure, no I/O, zero framework deps.
 """

@@ -1,18 +1,22 @@
-"""security_hook approval-route CONSULT — Enterprise Fase 2 Phase 4a.
+"""security_hook Enterprise approval routing — Fase 2 Phase 4b (REAL routing).
 
-Covers the NEW Step 1.6a (_log_approval_route), wired between Step 1.5
-(policy) and Step 1.6 (hook_mfa_block):
+Supersedes Phase 4a's inert Step 1.6a (which logged approval_router.route()
+for EVERY native tool call, purely for observability). Phase 4b moves the
+consult INSIDE the native-danger gate (Step 1.6) — it is now computed ONLY for
+an action that ALREADY needs owner approval (hook_mfa_block fired), and its
+result decides WHO resolves that SAME approval:
 
-  - The consult NEVER changes what blocks/allows/cards today: with the
-    tenant-remote-approval flag at its default (False), behaviour is
-    byte-identical whether or not the consult runs (A/B against the same
-    hook calls).
-  - The route log line is emitted for every native tool call.
-  - An ENTERPRISE-eligible action (MOST_DELICATE tool, cloud-managed agent)
-    still takes the LOCAL path — the flag defaults False, so ENTERPRISE is
-    never even reachable in this phase.
-  - A failure inside the consult (e.g. a raising access-scope repo) is
-    logged and swallowed — it must never turn an ALLOW into a BLOCK.
+  - flag OFF (default) → LOCAL, byte-identical to today's native-danger path.
+  - flag ON + eligible (MOST_DELICATE/sensitive/irreversible) + cloud-managed
+    agent → ENTERPRISE: `_resolve_native_danger_approval` is called with
+    route=ApprovalRoute.ENTERPRISE (persists route='enterprise' + sensitivity
+    + agent_id on the pending row — verified in
+    test_hitl_enterprise_route_block_and_resume.py's end-to-end coverage).
+  - A tool that never reaches the native-danger gate (NORMAL delicacy, no MFA
+    required) never triggers the routing consult at all.
+  - A raising router fails SOFT to LOCAL — the existing, proven native-danger
+    gate keeps blocking exactly as before; a bug in the NEW routing consult
+    can never widen who approves nor skip the gate (I-3).
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from hermes.capabilities.approval_router import ApprovalRoute
 from hermes.capabilities.domain.agent_access_scope import AgentAccessScope
 from hermes.runtime.conversation_task_registry import (
     clear_current_cycle_agent,
@@ -33,7 +38,7 @@ from hermes.runtime.security_hook import make_pre_tool_call_hook
 pytestmark = pytest.mark.unit
 
 _TENANT_ID = "tenant-x"
-_NORMAL_TOOL = "read_file"  # NORMAL delicacy, native, never blocks on its own
+_NORMAL_TOOL = "read_file"  # NORMAL delicacy, native, never needs owner MFA
 _MOST_DELICATE_TOOL = "cronjob"  # MOST_DELICATE — Enterprise-eligible by delicacy
 
 
@@ -71,6 +76,12 @@ def _run_hook(hook, tool_name: str, args: dict | None = None):
         return hook(tool_name=tool_name, args=args or {})
 
 
+def _cloud_scope() -> AgentAccessScope:
+    return AgentAccessScope.create(
+        tenant_id=_TENANT_ID, agent_id="agent-a", updated_by=1, managed_by="cloud",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _clean_ambient_agent():
     clear_current_cycle_agent()
@@ -79,38 +90,43 @@ def _clean_ambient_agent():
 
 
 # ---------------------------------------------------------------------------
-# Byte-identical behaviour: the consult never changes the outcome
+# The routing consult only fires at the native-danger gate
 # ---------------------------------------------------------------------------
 
 
-class TestConsultIsInert:
-    def test_normal_tool_still_allowed(self) -> None:
+class TestRoutingOnlyAtDangerGate:
+    def test_normal_tool_still_allowed_and_never_routed(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A NORMAL-delicacy tool never needs owner MFA, so the routing consult
+        is never even invoked for it — no danger_route log line, no block."""
         hook = _make_hook()
-        assert _run_hook(hook, _NORMAL_TOOL, {"path": "/tmp/x.txt"}) is None
+        with caplog.at_level(logging.INFO, logger="hermes.runtime.security_hook"):
+            result = _run_hook(hook, _NORMAL_TOOL, {"path": "/tmp/x.txt"})
 
-    def test_outcome_identical_with_and_without_the_consult_wired(self) -> None:
-        """A/B: patch _log_approval_route to a no-op and confirm the result
-        is unchanged — the consult contributes ZERO to the decision."""
-        hook = _make_hook()
-        baseline = _run_hook(hook, _NORMAL_TOOL, {"path": "/tmp/x.txt"})
+        assert result is None
+        route_logs = [
+            r for r in caplog.records
+            if r.message.startswith("hermes.security_hook.pre.danger_route")
+        ]
+        assert route_logs == []
 
-        with patch("hermes.runtime.security_hook._log_approval_route", return_value=None):
-            with_noop_consult = _run_hook(hook, _NORMAL_TOOL, {"path": "/tmp/x.txt"})
 
-        assert baseline == with_noop_consult
+# ---------------------------------------------------------------------------
+# flag OFF (default) — LOCAL, byte-identical to Phase 4a's native-danger path
+# ---------------------------------------------------------------------------
 
+
+class TestFlagOffStaysLocal:
     def test_enterprise_eligible_action_still_takes_local_path(self) -> None:
         """cronjob is MOST_DELICATE (Enterprise-eligible by delicacy) on an
         agent whose scope reports managed_by='cloud' — but
-        _tenant_remote_approval_enabled() defaults False, so ENTERPRISE is
-        never reachable: this must behave EXACTLY like today's MOST_DELICATE
-        MFA-block path (hook_mfa_block), not some new remote-approval path."""
+        _tenant_remote_approval_enabled() defaults False (unpaired/no license
+        flag), so ENTERPRISE is never reachable: this must behave EXACTLY like
+        today's MOST_DELICATE MFA-block path (hook_mfa_block), not some new
+        remote-approval path."""
         set_current_cycle_agent("agent-a")
-        scope = AgentAccessScope.create(
-            tenant_id=_TENANT_ID, agent_id="agent-a", updated_by=1,
-            managed_by="cloud",
-        )
-        hook = _make_hook(_FakeAccessScopeRepo(scope=scope))
+        hook = _make_hook(_FakeAccessScopeRepo(scope=_cloud_scope()))
 
         with patch(
             "hermes.runtime.security_hook._resolve_native_danger_approval",
@@ -118,40 +134,16 @@ class TestConsultIsInert:
         ) as mock_native_danger:
             result = _run_hook(hook, _MOST_DELICATE_TOOL, {})
 
-        # Reaches the LOCAL native-danger approval path (block-and-resume) —
-        # exactly like today, never a remote/Enterprise branch.
         mock_native_danger.assert_called_once()
+        assert mock_native_danger.call_args.kwargs["route"] is ApprovalRoute.LOCAL
         assert result is not None
         assert result.get("action") == "block"
-
-
-# ---------------------------------------------------------------------------
-# Observability: the route is logged
-# ---------------------------------------------------------------------------
-
-
-class TestRouteIsLogged:
-    def test_route_log_line_emitted_for_native_tool(self, caplog: pytest.LogCaptureFixture) -> None:
-        hook = _make_hook()
-        with caplog.at_level(logging.INFO, logger="hermes.runtime.security_hook"):
-            _run_hook(hook, _NORMAL_TOOL, {"path": "/tmp/x.txt"})
-
-        route_logs = [
-            r for r in caplog.records
-            if r.message.startswith("hermes.security_hook.approval_route route=")
-        ]
-        assert len(route_logs) == 1
-        assert f"tool={_NORMAL_TOOL}" in route_logs[0].message
 
     def test_route_is_local_when_flag_defaults_false(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         set_current_cycle_agent("agent-a")
-        scope = AgentAccessScope.create(
-            tenant_id=_TENANT_ID, agent_id="agent-a", updated_by=1,
-            managed_by="cloud",
-        )
-        hook = _make_hook(_FakeAccessScopeRepo(scope=scope))
+        hook = _make_hook(_FakeAccessScopeRepo(scope=_cloud_scope()))
 
         with (
             caplog.at_level(logging.INFO, logger="hermes.runtime.security_hook"),
@@ -160,39 +152,89 @@ class TestRouteIsLogged:
                 return_value=None,
             ),
         ):
-            _run_hook(hook, _NORMAL_TOOL, {"path": "/tmp/x.txt"})
+            _run_hook(hook, _MOST_DELICATE_TOOL, {})
 
         route_logs = [
             r for r in caplog.records
-            if r.message.startswith("hermes.security_hook.approval_route route=")
+            if r.message.startswith("hermes.security_hook.pre.danger_route")
         ]
         assert len(route_logs) == 1
         assert "route=local" in route_logs[0].message
 
 
 # ---------------------------------------------------------------------------
-# Fail-soft: a consult error never turns ALLOW into BLOCK
+# flag ON + eligible + cloud-managed — ENTERPRISE
 # ---------------------------------------------------------------------------
 
 
-class TestConsultFailsSoft:
+class TestFlagOnRoutesEnterprise:
+    def test_eligible_cloud_managed_action_routes_enterprise(self) -> None:
+        set_current_cycle_agent("agent-a")
+        hook = _make_hook(_FakeAccessScopeRepo(scope=_cloud_scope()))
+
+        with (
+            patch(
+                "hermes.runtime.security_hook._tenant_remote_approval_enabled",
+                return_value=True,
+            ),
+            patch(
+                "hermes.runtime.security_hook._resolve_native_danger_approval",
+                return_value="pending Enterprise approval",
+            ) as mock_native_danger,
+        ):
+            result = _run_hook(hook, _MOST_DELICATE_TOOL, {})
+
+        mock_native_danger.assert_called_once()
+        assert mock_native_danger.call_args.kwargs["route"] is ApprovalRoute.ENTERPRISE
+        assert mock_native_danger.call_args.kwargs["agent_id"] == "agent-a"
+        # STILL blocks on the SAME local Event path — routing never bypasses HITL.
+        assert result is not None
+        assert result.get("action") == "block"
+
+    def test_flag_on_but_not_cloud_managed_stays_local(self) -> None:
+        """Tenant gate requires BOTH agent_managed_by=='cloud' AND the flag —
+        a local (non-cloud) agent stays LOCAL even with the flag ON."""
+        set_current_cycle_agent("agent-a")
+        hook = _make_hook(access_scope_repo=None)  # no scope => managed_by=None
+
+        with (
+            patch(
+                "hermes.runtime.security_hook._tenant_remote_approval_enabled",
+                return_value=True,
+            ),
+            patch(
+                "hermes.runtime.security_hook._resolve_native_danger_approval",
+                return_value=None,
+            ) as mock_native_danger,
+        ):
+            _run_hook(hook, _MOST_DELICATE_TOOL, {})
+
+        assert mock_native_danger.call_args.kwargs["route"] is ApprovalRoute.LOCAL
+
+
+# ---------------------------------------------------------------------------
+# Fail-soft: a routing bug degrades to LOCAL, never widens/skips the gate
+# ---------------------------------------------------------------------------
+
+
+class TestRoutingFailsSoftToLocal:
     def test_resolve_agent_managed_by_fails_soft_on_raising_repo(self) -> None:
-        """Direct unit test of the new helper in isolation — a raising repo
-        must degrade to None (=> never cloud-gated), never raise. Exercised
-        directly because Steps 1.1/1.4 (pre-existing, untouched) ALSO call
-        access_scope_repo.get_scope and already fail-closed on any repo error
-        before Step 1.6a is ever reached — so a full-hook run cannot isolate
-        THIS function's own fail-soft behaviour."""
+        """Direct unit test of the existing helper in isolation — a raising
+        repo must degrade to None (=> never cloud-gated), never raise."""
         from hermes.runtime.security_hook import _resolve_agent_managed_by
 
         set_current_cycle_agent("agent-a")
         result = _resolve_agent_managed_by(_RaisingAccessScopeRepo(), _TENANT_ID)
         assert result is None
 
-    def test_router_raising_is_logged_and_swallowed(
+    def test_router_raising_falls_back_to_local_and_gate_still_blocks(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        hook = _make_hook()
+        """A raising approval_router.route() must NEVER turn into an ALLOW —
+        the existing native-danger gate keeps blocking exactly as before,
+        just with route defaulted to LOCAL."""
+        set_current_cycle_agent("agent-a")
+        hook = _make_hook(_FakeAccessScopeRepo(scope=_cloud_scope()))
 
         with (
             caplog.at_level(logging.WARNING, logger="hermes.runtime.security_hook"),
@@ -200,14 +242,19 @@ class TestConsultFailsSoft:
                 "hermes.capabilities.approval_router.route",
                 side_effect=RuntimeError("boom"),
             ),
+            patch(
+                "hermes.runtime.security_hook._resolve_native_danger_approval",
+                return_value="still pending owner approval",
+            ) as mock_native_danger,
         ):
-            result = _run_hook(hook, _NORMAL_TOOL, {"path": "/tmp/x.txt"})
+            result = _run_hook(hook, _MOST_DELICATE_TOOL, {})
 
-        assert result is None  # never blocks because of the consult
+        assert mock_native_danger.call_args.kwargs["route"] is ApprovalRoute.LOCAL
+        assert result is not None and result.get("action") == "block"
         failure_logs = [
             r for r in caplog.records
             if r.message.startswith(
-                "hermes.security_hook.approval_route_consult_failed"
+                "hermes.security_hook.pre.danger_route_consult_failed"
             )
         ]
         assert len(failure_logs) == 1

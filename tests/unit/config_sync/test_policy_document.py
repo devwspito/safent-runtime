@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from hermes.config_sync.policy_document import (
     AccessScopeSpec,
     AgentSpec,
+    LicenseSpec,
     PolicyBundle,
     PolicyPayload,
     canonical_bytes,
@@ -547,3 +548,65 @@ class TestAccessScopeSigningVector:
             "policy_overlay": {"send_message": {"enabled": False}},
             "views": ["calendar"],
         }
+
+
+# ---------------------------------------------------------------------------
+# LicenseSpec.remote_approval_enabled — Fase 2 Phase 4b (Enterprise remote
+# approval tenant gate). Mirrors AgentSpec.access_scope's drop-when-default
+# back-compat pattern exactly.
+# ---------------------------------------------------------------------------
+
+
+class TestLicenseSpecRemoteApprovalEnabledRoundTrip:
+    def test_true_round_trips_through_signing_bytes(self) -> None:
+        license_spec = LicenseSpec(plan="enterprise", remote_approval_enabled=True)
+        payload = PolicyPayload(license=license_spec)
+
+        b = signing_bytes(
+            version=1, tenant_id="test-tenant", issued_at="2026-06-26T10:00:00Z", payload=payload
+        )
+        parsed_payload = PolicyPayload.model_validate(json.loads(b)["payload"])
+
+        assert parsed_payload.license.remote_approval_enabled is True
+
+    def test_default_false_parses_false(self) -> None:
+        license_spec = LicenseSpec.model_validate({"plan": "starter"})
+        assert license_spec.remote_approval_enabled is False
+
+    def test_explicit_false_parses_false(self) -> None:
+        license_spec = LicenseSpec.model_validate(
+            {"plan": "starter", "remote_approval_enabled": False}
+        )
+        assert license_spec.remote_approval_enabled is False
+
+
+class TestLicenseSpecRemoteApprovalEnabledBackCompat:
+    """A bundle without remote_approval_enabled must parse + sign BYTE-
+    IDENTICALLY to before this field existed — it must never appear (not even
+    as false) in the serialized dict when it is unset/False."""
+
+    def test_key_absent_from_dump_when_false(self) -> None:
+        license_spec = LicenseSpec(plan="starter")
+        payload = PolicyPayload(license=license_spec)
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-06-26T10:00:00Z", payload=payload)
+        parsed_license = json.loads(b)["payload"]["license"]
+        assert "remote_approval_enabled" not in parsed_license
+
+    def test_key_present_and_true_when_enabled(self) -> None:
+        license_spec = LicenseSpec(plan="enterprise", remote_approval_enabled=True)
+        payload = PolicyPayload(license=license_spec)
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-06-26T10:00:00Z", payload=payload)
+        parsed_license = json.loads(b)["payload"]["license"]
+        assert parsed_license["remote_approval_enabled"] is True
+
+    def test_signing_bytes_unaffected_by_the_new_field_existing(self) -> None:
+        """Same license dict (no remote_approval_enabled key), signed before/
+        after the field was added, must produce the exact same bytes."""
+        payload = PolicyPayload.model_validate(
+            {"license": {"plan": "starter", "max_agents": 3}}
+        )
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-06-26T10:00:00Z", payload=payload)
+        parsed_license = json.loads(b)["payload"]["license"]
+        assert "remote_approval_enabled" not in parsed_license
+        assert parsed_license["plan"] == "starter"
+        assert parsed_license["max_agents"] == 3

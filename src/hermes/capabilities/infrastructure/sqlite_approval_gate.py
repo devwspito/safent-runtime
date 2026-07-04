@@ -135,6 +135,9 @@ class SqliteApprovalGate:
         tool_name: str = "",
         action_digest: str = "",
         conversation_id: str = "",
+        route: str = "",
+        sensitivity_categories: frozenset[str] = frozenset(),
+        agent_id: str = "",
     ) -> str:
         """Registra la propuesta HIGH como pendiente de aprobación.
 
@@ -149,6 +152,13 @@ class SqliteApprovalGate:
         task_id del ciclo) — ancla la tarjeta de aprobación al hilo que el dueño
         está mirando.
 
+        `route`/`sensitivity_categories`/`agent_id` (Fase 2 Phase 4b): cuando
+        `route == "enterprise"` la fila queda enrutada a un aprobador remoto de
+        Enterprise — `approve()` rechaza (fail-closed) cualquier intento LOCAL
+        de aprobarla; `sensitivity_categories`/`agent_id` viajan como contexto
+        para el push loop de `hermes.config_sync.remote_approvals`. `route=""`
+        (default) es LOCAL — comportamiento de hoy, sin cambio.
+
         Returns:
             El status resultante de la fila: 'pending' en el caso normal, o
             'rejected' si el durable breaker (attempt_count >
@@ -161,6 +171,11 @@ class SqliteApprovalGate:
         safe_params = _redact_parameters(parameters_redacted)
         zero_work_item = str(UUID(int=0))
         work_item_id_str = str(work_item_id)
+        sensitivity_json = (
+            json.dumps(sorted(str(c) for c in sensitivity_categories))
+            if route == "enterprise" and sensitivity_categories
+            else None
+        )
 
         with self._connect() as conn:
             # Re-armado: como `proposal_id` es determinista (uuid5 del digest), una fila
@@ -199,8 +214,9 @@ class SqliteApprovalGate:
                 INSERT OR IGNORE INTO pending_approvals (
                     proposal_id, work_item_id, tenant_id, operator_id,
                     risk, tool_name, action_digest, justification, parameters_redacted,
-                    status, created_at, conversation_id, attempt_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 1)
+                    status, created_at, conversation_id, attempt_count,
+                    route, sensitivity, agent_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 1, ?, ?, ?)
                 """,
                 (
                     str(proposal_id),
@@ -225,6 +241,9 @@ class SqliteApprovalGate:
                     json.dumps(safe_params),
                     now,
                     conversation_id or None,
+                    route or None,
+                    sensitivity_json,
+                    agent_id or None,
                 ),
             )
             if cursor.rowcount == 0:
@@ -330,6 +349,24 @@ class SqliteApprovalGate:
             raise ApprovalGateError(
                 f"proposal_id={proposal_id} ya tiene status={row['status']!r}. "
                 "Solo se puede aprobar una propuesta en estado 'pending'."
+            )
+
+        # I-1/I-3 (Fase 2 Phase 4b): una fila enrutada a Enterprise SOLO la puede
+        # aprobar una decisión firmada de la nube (hermes.config_sync.
+        # remote_approvals, vía signal_native_danger_approval) — el dueño LOCAL
+        # nunca la mintea directamente, ni siquiera con MFA válida. Fail-closed:
+        # el caller (D-Bus approve_action / approvals_api) debe surfacear esto
+        # como "pendiente de aprobación de tu empresa", NO como un approve normal.
+        # reject() (denegar) NO tiene este guard — el dueño local SIEMPRE puede
+        # denegar (invariante I-2).
+        _row_route = row["route"] if "route" in row.keys() else ""
+        if _row_route == "enterprise":
+            raise ApprovalGateError(
+                f"proposal_id={proposal_id} está enrutada a aprobación de "
+                "Enterprise — solo una decisión firmada de tu empresa puede "
+                "aprobarla; el dueño local puede denegarla pero no aprobarla "
+                "directamente.",
+                reason="enterprise_route_requires_cloud_decision",
             )
 
         _row_tool = row["tool_name"] if "tool_name" in row.keys() else ""

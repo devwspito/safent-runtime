@@ -163,11 +163,21 @@ class ApprovalGatePort(Protocol):
         tool_name: str = "",
         action_digest: str = "",
         conversation_id: str = "",
+        route: str = "",
+        sensitivity_categories: frozenset[str] = frozenset(),
+        agent_id: str = "",
     ) -> str:
         """Crea/actualiza la fila pending (idempotente por proposal_id).
 
         `conversation_id` ancla la tarjeta al hilo de chat para que el widget
         in-chat la muestre; `tool_name`/`action_digest` dan contexto y dedup.
+
+        `route` (Fase 2 Phase 4b): "enterprise" cuando
+        `capabilities.approval_router.route()` enrutó ESTA acción a un
+        aprobador remoto de Enterprise; "" (default) = LOCAL, sin cambio de
+        comportamiento. `sensitivity_categories`/`agent_id` acompañan una fila
+        "enterprise" (contexto para el aprobador remoto + el push loop de
+        `hermes.config_sync.remote_approvals`); ignorados para LOCAL.
 
         Returns:
             'pending' en el caso normal. Un valor distinto (p.ej. 'rejected')

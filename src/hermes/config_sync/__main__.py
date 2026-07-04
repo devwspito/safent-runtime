@@ -329,6 +329,23 @@ async def _run_loop() -> None:
                 exc_info=True,
             )
 
+        # Enterprise remote-approval push/poll (Fase 2 Phase 4b) — independent;
+        # already fail-soft internally (run_remote_approvals_once never raises),
+        # this try/except is defense-in-depth so a bug there can never take down
+        # the policy-pull/usage-upload tick.
+        try:
+            from hermes.config_sync.remote_approvals import (  # noqa: PLC0415
+                run_remote_approvals_once,
+            )
+
+            run_remote_approvals_once(store=store)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "hermes.config_sync.remote_approvals.unhandled_error",
+                extra={"reason": str(exc)},
+                exc_info=True,
+            )
+
         jitter = random.uniform(0, _MAX_JITTER_S)
         await asyncio.sleep(interval + jitter)
 

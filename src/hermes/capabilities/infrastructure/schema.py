@@ -38,6 +38,36 @@ Migración status→'expired' (2026-07) — cierra el loop de tarjetas fantasma:
   'expired', no-op). NO se usa `PRAGMA user_version`: shell-state.db lo COMPARTE
   con el esquema `tasks`, que ya lo posee (valores 1→4) — un guard por
   user_version colisionaría con esa numeración.
+
+──────────────────────────────────────────────────────────────────────────────
+Columnas route/sensitivity/agent_id (Fase 2 Phase 4b) — Enterprise remote
+approval (runtime/associate side):
+
+  `route` persiste el veredicto de `capabilities.approval_router.route()` para
+  ESTA fila: 'enterprise' cuando el dueño-empresa (no el dueño local) resuelve
+  la aprobación; NULL/'' para LOCAL (comportamiento de hoy, sin cambio — el
+  99% de las filas nunca escriben esta columna). NUNCA 'hardblock' — route()
+  no lo produce jamás (ver approval_router.py). Fuentes de verdad:
+    - `sqlite_approval_gate.approve()` rechaza (fail-closed, ApprovalGateError
+      reason='enterprise_route_requires_cloud_decision') un intento de
+      aprobación LOCAL sobre una fila route='enterprise' — SOLO una decisión
+      firmada de la nube (hermes.config_sync.remote_approvals) puede aprobarla.
+      `reject()` (denegar) NUNCA se gatea por route — el dueño local SIEMPRE
+      puede denegar (invariante I-2).
+    - `hermes.config_sync.remote_approvals` empuja a la nube únicamente las
+      filas `route='enterprise'` AND `status='pending'`.
+
+  `sensitivity` es el JSON de la lista de `SensitivityCategory` (pii_read/
+  new_egress/spend) que aportó la elegibilidad ENTERPRISE — contexto para el
+  aprobador remoto; solo se persiste junto a route='enterprise'.
+
+  `agent_id` es el agente del roster (ciclo ambiente) que propuso la acción —
+  necesario para el body PINNED que el push loop de remote_approvals envía a
+  la nube (el hilo que registra la fila SÍ tiene el agente ambiente; el push
+  loop, en un hilo/tick posterior, no).
+
+  Todas nullable, EXPAND puro vía ALTER (sin CHECK — el valor lo controla
+  exclusivamente el código server-side, nunca el LLM ni el cliente HTTP).
 """
 
 from __future__ import annotations
@@ -137,6 +167,25 @@ _PENDING_APPROVALS_ADD_COLUMNS: tuple[str, ...] = (
     "ALTER TABLE pending_approvals ADD COLUMN conversation_id TEXT",
     # attempt_count (2026-07): durable breaker anti-loop de tarjetas.
     "ALTER TABLE pending_approvals ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1",
+    # route (Fase 2 Phase 4b): 'enterprise' cuando approval_router.route() enrutó
+    # ESTA fila a un aprobador remoto de Enterprise; NULL/'' = LOCAL (hoy, sin
+    # cambio). Nunca 'hardblock' (approval_router.route() nunca lo produce — ver
+    # capabilities/approval_router.py). Fuente única para: (a) el push loop de
+    # remote_approvals (solo empuja filas route='enterprise'), (b) el gate
+    # rechazando un approve LOCAL sobre una fila enrutada a Enterprise (solo una
+    # decisión firmada de la nube puede aprobarla — I-1/I-3).
+    "ALTER TABLE pending_approvals ADD COLUMN route TEXT",
+    # sensitivity (Fase 2 Phase 4b): JSON de la lista de SensitivityCategory (p.ej.
+    # '["pii_read"]') que aportó la elegibilidad ENTERPRISE de esta fila. Solo se
+    # persiste cuando route='enterprise' (contexto para el aprobador remoto);
+    # NULL para filas LOCAL (comportamiento de hoy sin cambio).
+    "ALTER TABLE pending_approvals ADD COLUMN sensitivity TEXT",
+    # agent_id (Fase 2 Phase 4b): agente del roster que propuso la acción (ciclo
+    # ambiente, conversation_task_registry.get_current_cycle_agent()). Necesario
+    # para el body PINNED que remote_approvals empuja a la nube ({..., "agent_id",
+    # ...}) — sin persistirlo en el registro no sobrevive al push loop asíncrono
+    # (que corre en un hilo/tick distinto al que bloqueó la conversación).
+    "ALTER TABLE pending_approvals ADD COLUMN agent_id TEXT",
 )
 
 # 🔒 RECREACIÓN — `pending_approvals` con el CHECK de `status` ampliado a
@@ -166,19 +215,22 @@ CREATE TABLE pending_approvals_new (
     created_at           TEXT NOT NULL,
     resolved_at          TEXT,
     conversation_id      TEXT,
-    attempt_count        INTEGER NOT NULL DEFAULT 1
+    attempt_count        INTEGER NOT NULL DEFAULT 1,
+    route                TEXT,
+    sensitivity          TEXT,
+    agent_id             TEXT
 );
 """
 
 # Copia explícita POR NOMBRE: el orden físico de columnas difiere entre DBs
-# viejas (tool_name/action_digest/conversation_id/attempt_count llegan por ALTER,
-# al final) y nuevas (nacen en el CREATE) — el SELECT nombrado mapea correcto sin
-# depender de posiciones.
+# viejas (tool_name/action_digest/conversation_id/attempt_count/route/
+# sensitivity/agent_id llegan por ALTER, al final) y nuevas (nacen en el
+# CREATE) — el SELECT nombrado mapea correcto sin depender de posiciones.
 _PENDING_APPROVALS_COLUMNS = (
     "proposal_id, work_item_id, tenant_id, operator_id, risk, tool_name, "
     "action_digest, justification, parameters_redacted, status, approved_by, "
     "token_hmac, nonce, expires_at, consumed_at, created_at, resolved_at, "
-    "conversation_id, attempt_count"
+    "conversation_id, attempt_count, route, sensitivity, agent_id"
 )
 
 

@@ -15,11 +15,15 @@ Gate order (fail-closed — a single BLOCK from any step short-circuits):
   5. Native code guard   — check_execute_code_guard() for execute_code.
   6. Denylist gate       — broker._check_denylist() for os_native service ops.
 
-Between steps 1.5 and 1.6 (Enterprise governance, Fase 2 Phase 4a): an
-OBSERVABILITY-ONLY consult of approval_router.route() logs WHERE this action's
-approval would be resolved (LOCAL vs ENTERPRISE). It never blocks/allows and
-never changes gate order — see _log_approval_route()'s docstring and the
-TODO(enterprise-remote-approver) marker where the later phase attaches.
+Step 1.6 (Enterprise governance, Fase 2 Phase 4b): when a native danger needs
+owner approval (hook_mfa_block fired), `_compute_danger_route()` consults
+approval_router.route() to decide WHO resolves it — LOCAL (today's D-Bus
+approve/deny) or ENTERPRISE (a remote Enterprise approver, via
+hermes.config_sync.remote_approvals). Routing NEVER creates a new approval
+surface and NEVER substitutes the floor (Steps 2/3/6 below still run
+unconditionally for every tool call, native-danger or not) — it only decides
+who resolves the SAME block-and-resume Event that Step 1.6 was always going to
+register (see `_resolve_native_danger_approval`'s docstring).
 
 Post-execution audit:
   post_tool_call hook signs every outcome (allowed or denied) into the
@@ -329,73 +333,132 @@ def _resolve_agent_managed_by(access_scope_repo: Any, tenant_id: str) -> str | N
         return None
 
 
+_REMOTE_APPROVAL_FLAG_TTL_S: float = 10.0
+# TTL cache for the tenant remote-approval flag. _tenant_remote_approval_enabled
+# sits on the native-danger gate's hot path (evaluated for every danger-gated
+# tool call) — caching avoids a fresh SQLite connection per call. A read that is
+# stale by up to the TTL is safe: this flag only ever decides WHO resolves an
+# approval that was ALREADY going to block (LOCAL vs ENTERPRISE); it can never
+# skip the gate itself (I-3).
+_remote_approval_flag_cache: dict[str, Any] = {"value": False, "expires_at": 0.0}
+
+
 def _tenant_remote_approval_enabled() -> bool:
-    """Stub accessor for the tenant's remote-approval flag (Fase 2 Phase 4a).
+    """Real accessor for the tenant's remote-approval flag (Fase 2 Phase 4b).
 
-    ALWAYS False today: no tenant config wires this yet — the remote-approver
-    consult (config_sync push, cloud approver) is a LATER phase, out of scope
-    here. Every call site already consults this single accessor instead of
-    inlining a literal, so wiring the real per-tenant read later is a
-    one-function edit.
+    True ONLY when this instance is paired/associated (Enterprise edition) AND
+    the tenant's currently-applied license carries
+    `remote_approval_enabled=True` — pushed by the cloud via
+    `config_sync.policy_document.LicenseSpec` and persisted in
+    `association_store.license_json` (the SAME store `feature_guard.py` reads
+    for view entitlements; see `config_sync/applier.py`'s NOTE on
+    `store.update_license()`). Fail-safe False on ANY error: unpaired instance,
+    missing store, corrupt license, DB unavailable — a read failure NEVER
+    widens who can approve, it only ever falls back to today's LOCAL path.
     """
-    return False
+    import time  # noqa: PLC0415
+
+    now = time.monotonic()
+    if now < _remote_approval_flag_cache["expires_at"]:
+        return bool(_remote_approval_flag_cache["value"])
+
+    value = _read_tenant_remote_approval_flag()
+    _remote_approval_flag_cache["value"] = value
+    _remote_approval_flag_cache["expires_at"] = now + _REMOTE_APPROVAL_FLAG_TTL_S
+    return value
 
 
-def _log_approval_route(
+def _read_tenant_remote_approval_flag() -> bool:
+    """Uncached read of the association store's license.remote_approval_enabled.
+
+    Never raises — any failure degrades to False (fail-safe: LOCAL stays the
+    only reachable route for every tool call until this explicitly returns True).
+    """
+    try:
+        import os  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        from hermes.instance.association_store import SQLiteAssociationStore  # noqa: PLC0415
+        from hermes.shell_server.security.secrets import SecretsVault  # noqa: PLC0415
+
+        db_path = Path(
+            os.environ.get(
+                "HERMES_SHELL_DB",
+                os.environ.get("HERMES_STATE_DB", "/var/lib/hermes/shell-state.db"),
+            )
+        )
+        store = SQLiteAssociationStore(db_path=db_path, vault=SecretsVault())
+        if not store.is_associated():
+            return False
+        assoc = store.get()
+        if assoc is None:
+            return False
+        return bool(assoc.license.get("remote_approval_enabled", False))
+    except Exception as exc:  # noqa: BLE001 — fail-safe: any error => False
+        logger.warning(
+            "hermes.security_hook.tenant_remote_approval_flag_read_failed error=%r"
+            " — defaulting False (LOCAL)",
+            exc,
+        )
+        return False
+
+
+def _compute_danger_route(
     tool_name: str,
     args: dict[str, Any],
     access_scope_repo: Any,
     tenant_id: str,
-) -> None:
-    """Compute + log the Enterprise approval route — OBSERVABILITY ONLY.
+) -> tuple[Any, frozenset]:
+    """Compute the Enterprise approval route for a danger-gated action.
 
-    Enterprise governance, Fase 2 Phase 4a: wired but INERT. The computed
-    route is NEVER consulted to gate/allow/block anything in this phase —
-    hook_mfa_block (Step 1.6, called unconditionally right after this) remains
-    the sole native-danger enforcement point, and _resolve_native_danger_approval
-    is the sole approval-collection path. An ENTERPRISE route here behaves
-    EXACTLY like LOCAL today.
+    Enterprise governance, Fase 2 Phase 4b — REAL routing (supersedes Phase
+    4a's inert Step 1.6a observability-only consult). Consulted ONLY here, at
+    the native-danger gate, for an action that ALREADY requires owner approval
+    (hook_mfa_block fired) — this NEVER creates a new approval surface, it only
+    decides WHO resolves the SAME approval that was always going to block
+    (I-3: substitutes ONLY the owner-MFA gate, never the hardline/self-
+    jailbreak/denylist floor, which runs later in Steps 2/3/6 regardless).
 
-    TODO(enterprise-remote-approver): a LATER phase attaches the actual
-    ENTERPRISE branch (post to the remote approver, await its resolution)
-    HERE instead of just logging.
+    Fail-soft to (LOCAL, frozenset()) on ANY error: a bug in this NEW routing
+    consult must never widen who can approve nor skip the existing, proven
+    native-danger gate — worst case, the LOCAL path runs exactly as it does
+    today.
 
-    Never raises: any error is logged and swallowed. A bug in this NEW,
-    still-inert consult must never turn an existing ALLOW into a BLOCK — which
-    is exactly what would happen if it escaped to the outer fail-closed
-    handler in _pre_tool_call_hook.
+    Returns (route, sensitivity_categories) — the categories are returned
+    alongside the route so the caller can persist them on an ENTERPRISE row
+    without re-classifying the same call twice.
     """
+    from hermes.capabilities.approval_router import ApprovalRoute  # noqa: PLC0415
+
     try:
-        from hermes.capabilities.approval_router import route  # noqa: PLC0415
+        from hermes.capabilities.approval_router import route as _route  # noqa: PLC0415
         from hermes.capabilities.tool_delicacy import delicacy, is_destructive  # noqa: PLC0415
         from hermes.capabilities.tool_sensitivity import sensitivity  # noqa: PLC0415
 
-        # egress_allowlist intentionally EMPTY: this phase does not thread the
-        # owner's real egress grants through (that lives in the shell_server
-        # egress-plane, a different bounded context) — since this consult is
-        # observability-only, the conservative default (nothing granted, so any
-        # egress-capable tool call surfaces as NEW_EGRESS in the log) is safe.
-        # TODO(enterprise-remote-approver): wire the real per-tenant allowlist
-        # accessor once NEW_EGRESS starts gating anything for real.
-        resolved_route = route(
+        # egress_allowlist intentionally EMPTY: the owner's real per-tenant egress
+        # grants live in the shell_server egress-plane (a different bounded
+        # context) and are not threaded through here yet — the conservative
+        # default (nothing granted) only ever makes NEW_EGRESS classification
+        # MORE likely, never less, so this cannot under-route an eligible action
+        # to LOCAL when it should have gone to ENTERPRISE.
+        categories = sensitivity(tool_name, args)
+        resolved_route = _route(
             tool=tool_name,
             delicacy=delicacy(tool_name),
-            sensitivity_categories=sensitivity(tool_name, args),
+            sensitivity_categories=categories,
             irreversible=is_destructive(tool_name),
             agent_managed_by=_resolve_agent_managed_by(access_scope_repo, tenant_id),
             tenant_remote_approval_enabled=_tenant_remote_approval_enabled(),
         )
-        logger.info(
-            "hermes.security_hook.approval_route route=%s tool=%s",
-            resolved_route,
-            tool_name,
-        )
-    except Exception as exc:  # noqa: BLE001 — inert consult: NEVER affects gating either way
+        return resolved_route, categories
+    except Exception as exc:  # noqa: BLE001 — fail-soft: never widen/skip the gate
         logger.warning(
-            "hermes.security_hook.approval_route_consult_failed tool=%s error=%r",
+            "hermes.security_hook.pre.danger_route_consult_failed tool=%s error=%r"
+            " — falling back to LOCAL",
             tool_name,
             exc,
         )
+        return ApprovalRoute.LOCAL, frozenset()
 
 
 def _check_hardline_native(command_str: str) -> str | None:
@@ -1544,15 +1607,6 @@ def make_pre_tool_call_hook(
             except Exception:  # noqa: BLE001 — policy is a usability layer, not the floor
                 pass
 
-            # Step 1.6a: Enterprise approval-routing CONSULT (Fase 2 Phase 4a) —
-            # WIRED BUT INERT. Logs WHERE this action's approval would be resolved
-            # (LOCAL vs ENTERPRISE); the result is NOT consulted below and does NOT
-            # change control flow — see _log_approval_route()'s docstring and the
-            # TODO(enterprise-remote-approver) marker for where the later phase
-            # attaches. Never raises (self-contained fail-soft).
-            if tool_name:
-                _log_approval_route(tool_name, safe_args, access_scope_repo, tenant_id)
-
             # Step 1.6: MFA-on-dangers (owner decision 2026-06-19; coherence audit fix).
             # Gates NATIVE dangers that bypass the broker. hook_mfa_block encapsulates the
             # full decision (single source in tool_delicacy): MOST_DELICATE native
@@ -1598,11 +1652,28 @@ def make_pre_tool_call_hook(
                 # the in-chat widget never matched it → no card ever appeared.
                 from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
                     get_conversation_for_task,
+                    get_current_cycle_agent,
                 )
                 real_conv_id = get_conversation_for_task(task_id)
+
+                # Enterprise approval-routing (Fase 2 Phase 4b) — REAL routing at the
+                # danger step (supersedes Phase 4a's inert Step 1.6a observability
+                # consult). Decides WHO resolves THIS SAME approval (LOCAL vs
+                # ENTERPRISE); never a new approval surface, never a floor bypass (I-3).
+                resolved_route, sensitivity_categories = _compute_danger_route(
+                    tool_name, safe_args, access_scope_repo, tenant_id
+                )
+                logger.info(
+                    "hermes.security_hook.pre.danger_route route=%s tool=%s",
+                    resolved_route,
+                    tool_name,
+                )
                 block_msg = _resolve_native_danger_approval(
                     tool_name, safe_args, broker, engine_loop,
                     conversation_id=real_conv_id,
+                    route=resolved_route,
+                    sensitivity_categories=sensitivity_categories,
+                    agent_id=get_current_cycle_agent(),
                 )
                 if block_msg is not None:
                     logger.info(
@@ -1686,6 +1757,9 @@ _NATIVE_DANGER_GATE_TIMEOUT_S: float = 30.0
 def _resolve_native_danger_approval(
     tool_name: str, args: dict[str, Any], broker: Any, engine_loop: Any,
     conversation_id: str = "",
+    route: Any = None,
+    sensitivity_categories: frozenset = frozenset(),  # noqa: B008 — frozenset() is immutable
+    agent_id: str = "",
 ) -> str | None:
     """Per-action owner approval for a cage-escaping NATIVE danger.
 
@@ -1698,6 +1772,17 @@ def _resolve_native_danger_approval(
       returns None (approved → ALLOW the EXACT same call) or a block message.
     - No re-attempt, no digest-based re-try, no LLM re-prompt: the SAME
       blocked tool call is either allowed or denied in-place.
+
+    `route` (Fase 2 Phase 4b): the `ApprovalRoute` computed by
+    `_compute_danger_route` for THIS call. When `ApprovalRoute.ENTERPRISE`, the
+    pending row is registered with `route="enterprise"` + the sensitivity
+    categories + the proposing agent_id — a LATER decision, either the local
+    D-Bus DENY (I-2, always works) or a verified cloud DecisionEnvelope applied
+    by `hermes.config_sync.remote_approvals` (approve or deny — NEVER a local
+    approve; see `sqlite_approval_gate.approve()`'s enterprise-route guard),
+    signals the SAME `threading.Event` below to resume. `route=None`/LOCAL (the
+    default) registers the row exactly as before this phase — zero behaviour
+    change for the common case.
 
     FAIL-CLOSED: gate/loop missing or ANY error → block message (never raises;
     a raise is swallowed by invoke_hook into ALLOW — red-team finding 2).
@@ -1731,8 +1816,10 @@ def _resolve_native_danger_approval(
         # Register a pending row (web UI shows it) + register a blocking Event slot.
         from hermes.capabilities.domain.ports import ConsentContext, RiskLevel  # noqa: PLC0415
 
+        from hermes.capabilities.approval_router import ApprovalRoute  # noqa: PLC0415
         from hermes.capabilities.proposal_summary import human_summary  # noqa: PLC0415
 
+        is_enterprise = route is ApprovalRoute.ENTERPRISE
         _await(gate.register_pending(
             proposal_id=proposal_id,
             work_item_id=UUID(int=0),
@@ -1743,6 +1830,11 @@ def _resolve_native_danger_approval(
             tool_name=tool_name,
             action_digest=digest,
             conversation_id=conversation_id,
+            # Enterprise routing (Fase 2 Phase 4b): "" for LOCAL (default, zero
+            # behaviour change) — only "enterprise" rows carry sensitivity/agent_id.
+            route="enterprise" if is_enterprise else "",
+            sensitivity_categories=sensitivity_categories if is_enterprise else frozenset(),
+            agent_id=agent_id if is_enterprise else "",
         ))
 
         # Register the Event AFTER the row exists so approve_action can find it.

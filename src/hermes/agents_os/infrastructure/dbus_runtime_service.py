@@ -3112,7 +3112,7 @@ class DbusRuntimeServiceWiring:
             rows = conn.execute(
                 """
                 SELECT proposal_id, risk, tool_name, justification,
-                       created_at, conversation_id, parameters_redacted
+                       created_at, conversation_id, parameters_redacted, route
                 FROM pending_approvals
                 WHERE status = 'pending'
                 ORDER BY created_at ASC
@@ -3142,6 +3142,12 @@ class DbusRuntimeServiceWiring:
                 "parameters_redacted": _parse_redacted_params(
                     row["parameters_redacted"]
                 ),
+                # Enterprise approval routing (Fase 2 Phase 4b): "enterprise" when
+                # only a signed cloud decision can resolve this row (local APPROVE
+                # is rejected by the gate — local DENY always still works, I-2);
+                # "local" (default) for every row registered before this phase or
+                # never routed to Enterprise.
+                "route": row["route"] or "local",
             }
             for row in rows
         ]
