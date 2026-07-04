@@ -81,6 +81,17 @@ class SurfaceKind(StrEnum):
     pueden ser lanzados — fail-closed ante cualquier nombre desconocido.
     """
 
+    PEER_DELEGATION = "peer_delegation"
+    """FASE 3 (A2A cross-human) — `delegate_to_colleague`: pide ayuda al
+    asistente de OTRO humano de la misma organización, vía el relay de la
+    nube (POST /v1/outbox, notariado con la firma del tenant).
+
+    SIEMPRE HIGH + no auto_executable (gate como send_message, NO fluido como
+    el delegate_task in-process — ver capabilities/application/capability_
+    registry.py): sale de la organización del agente hacia OTRO ser humano,
+    a diferencia de delegate_task (sub-agente en la MISMA jaula/broker).
+    """
+
 
 _REQUIRES_CONSENT_IN_PERSONAL_DESKTOP: frozenset[SurfaceKind] = frozenset(
     {
@@ -92,6 +103,7 @@ _REQUIRES_CONSENT_IN_PERSONAL_DESKTOP: frozenset[SurfaceKind] = frozenset(
         SurfaceKind.PACKAGE_MANAGER,
         SurfaceKind.API_CALL,
         SurfaceKind.MCP_CALL,
+        SurfaceKind.PEER_DELEGATION,
         # BROWSER queda fuera porque el browser context del agente ES suyo;
         # NO toca el navegador personal del humano (esos son procesos
         # distintos).

@@ -55,6 +55,12 @@ _SCHEMA_VERSION_P0: int = 1
 _SCHEMA_VERSION_P1: int = 2
 _SCHEMA_VERSION_P2: int = 3
 _SCHEMA_VERSION_P3: int = 4
+# P4 (FASE 3 A2A cross-human) — 'external_delegation' como trigger_kind/tipo
+# autorizado. _SCHEMA_VERSION_P3 quedó SIN USO (P3 fue aditivo puro — ALTER
+# ADD COLUMN, sin recreación de tabla, así que ninguna DB llegó a fijar
+# user_version=4). P4 es la PRIMERA migración que realmente recrea tablas
+# desde P2, así que avanza a la 5 para no pisar el hueco de P3.
+_SCHEMA_VERSION_P4: int = 5
 
 # Pragmas de conexión — afectan a TODOS los procesos que abren el fichero
 # (firma del usuario, data-model §"Decisiones irreversibles" punto 8).
@@ -651,6 +657,241 @@ def _expand_authorized_triggers_p3(conn: sqlite3.Connection) -> None:
             pass  # columna ya presente — idempotente
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# Migración P4 (FASE 3 A2A cross-human) — 'external_delegation' como origen
+# autorizado + trigger_kind de agent_tasks.
+#
+# Un mensaje entrante de OTRO humano de la misma organización (verificado por
+# firma del tenant, aprobado por el humano LOCAL — ver DelegationApprovalService)
+# encola una tarea vía TriggerGate exactamente como timer/system_event/
+# self_enqueue. Requiere:
+#   1. 'external_delegation' en el CHECK de `authorized_trigger_types.trigger_type`
+#      (RECREACIÓN — SQLite no permite ALTER de un CHECK) + fila de catálogo
+#      (enabled_by_default SIGUE fijo a 0 — sembrar el TIPO no habilita nada).
+#   2. 'external_delegation' en el CHECK de `agent_tasks.trigger_kind` + I10
+#      extendido (un disparo external_delegation también exige
+#      trigger_instance_id NOT NULL, igual que los otros 3 tipos auto).
+#
+# Ambas recreaciones (mismo patrón CREATE new → INSERT SELECT → DROP → RENAME,
+# UNA transacción, guard por user_version) preservan TEXTUALMENTE todo lo
+# firmado en P0-P2. `kind`/`worker_id`/`conversation_id` (P1) y
+# `trigger_instance_id` (P2) NO cambian de forma — solo se recrean para poder
+# ampliar los CHECK.
+# ════════════════════════════════════════════════════════════════════════════
+
+# DDL FIRMADO P4 — authorized_trigger_types con 'external_delegation' admitido.
+# Mismas columnas que P2 (ninguna nueva); solo se amplían los dos CHECK.
+_DDL_AUTHORIZED_TRIGGER_TYPES_NEW_P4 = """
+CREATE TABLE authorized_trigger_types_new (
+    trigger_type        TEXT PRIMARY KEY
+        CHECK (trigger_type IN (
+            'timer', 'system_event', 'self_enqueue', 'external_delegation'
+        )),
+
+    scope_validation    TEXT NOT NULL
+        CHECK (scope_validation IN (
+            'cron_expression', 'event_class', 'parent_task_kind',
+            'peer_employee_id'
+        )),
+
+    max_risk_level      TEXT NOT NULL
+        CHECK (max_risk_level IN ('low', 'high')),
+
+    enabled_by_default  INTEGER NOT NULL DEFAULT 0
+        CHECK (enabled_by_default = 0),
+
+    description         TEXT NOT NULL DEFAULT '',
+
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL
+);
+"""
+
+_TRIGGER_TYPES_COLUMNS = (
+    "trigger_type, scope_validation, max_risk_level, enabled_by_default, "
+    "description, created_at, updated_at"
+)
+
+# Siembra idempotente del nuevo tipo de catálogo. Sembrar el TIPO no habilita
+# nada — la allow-list de INSTANCIAS (authorized_trigger_instances) sigue
+# vacía hasta que un humano apruebe una delegación concreta (ver
+# DelegationApprovalService, que mintea una instancia one-shot POR aprobación).
+_DDL_SEED_EXTERNAL_DELEGATION_TYPE = """
+INSERT OR IGNORE INTO authorized_trigger_types
+    (trigger_type, scope_validation, max_risk_level, description,
+     created_at, updated_at)
+VALUES
+    ('external_delegation', 'peer_employee_id', 'high',
+     'Delegacion entrante de OTRO humano (A2A) - exige HITL en cada activacion',
+        strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+"""
+
+# DDL FIRMADO P4 — agent_tasks con 'external_delegation' admitido en
+# trigger_kind + I10 extendido. Idéntica a _DDL_AGENT_TASKS_NEW_P2 salvo los
+# dos puntos señalados abajo.
+_DDL_AGENT_TASKS_NEW_P4 = """
+CREATE TABLE agent_tasks_new (
+    task_id                  TEXT PRIMARY KEY,
+
+    -- Origen del disparo (FR-002) — P4 añade 'external_delegation' (A2A)
+    trigger_kind             TEXT NOT NULL
+        CHECK (trigger_kind IN (
+            'manual_enqueue', 'chat_message',
+            'timer', 'system_event', 'self_enqueue', 'external_delegation'
+        )),
+
+    enqueued_by              TEXT NOT NULL,
+    payload_signature        TEXT,
+
+    tenant_id                TEXT,
+    operator_id              TEXT NOT NULL,
+
+    instruction              TEXT NOT NULL,
+    payload_json             TEXT NOT NULL DEFAULT '{}',
+
+    status                   TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN (
+            'pending', 'in_progress', 'completed',
+            'failed', 'pending_approval', 'rejected'
+        )),
+
+    dedup_key                TEXT,
+    priority                 INTEGER NOT NULL DEFAULT 0,
+
+    claim_token              TEXT,
+    claimed_at               TEXT,
+    lease_expires_at         TEXT,
+    heartbeat_at             TEXT,
+
+    idempotency_key          TEXT,
+
+    retry_count              INTEGER NOT NULL DEFAULT 0,
+    max_retries              INTEGER NOT NULL DEFAULT 5,
+    next_attempt_at          TEXT,
+    last_error               TEXT,
+
+    execution_audit_entry_id TEXT,
+    execution_head_hash      TEXT,
+
+    kind                     TEXT NOT NULL DEFAULT 'autonomous'
+        CHECK (kind IN ('autonomous', 'chat_message')),
+    worker_id                TEXT,
+    conversation_id          TEXT,
+
+    trigger_instance_id      TEXT
+        REFERENCES authorized_trigger_instances(instance_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+
+    created_at               TEXT NOT NULL,
+    updated_at               TEXT NOT NULL,
+
+    CHECK (
+        status <> 'completed'
+        OR (execution_audit_entry_id IS NOT NULL
+            AND execution_head_hash   IS NOT NULL)
+    ),
+    CHECK (
+        status NOT IN ('completed','failed','rejected')
+        OR (claim_token IS NULL AND lease_expires_at IS NULL)
+    ),
+    CHECK (
+        status <> 'in_progress'
+        OR (claim_token IS NOT NULL AND claimed_at IS NOT NULL
+            AND lease_expires_at IS NOT NULL)
+    ),
+    CHECK (retry_count >= 0 AND max_retries >= 0 AND retry_count <= max_retries),
+
+    CHECK (
+        kind <> 'chat_message'
+        OR conversation_id IS NOT NULL
+    ),
+    CHECK (
+        status <> 'in_progress'
+        OR worker_id IS NOT NULL
+    ),
+
+    -- I10 (P2, EXTENDIDA en P4): un disparo automático SIEMPRE tiene un origen
+    -- autorizado; 'external_delegation' se une a timer/system_event/
+    -- self_enqueue en el mismo bucket (exige trigger_instance_id NOT NULL —
+    -- ver DelegationApprovalService, que mintea/reusa la instancia ANTES de
+    -- llamar a TriggerGate.enqueue_from_trigger).
+    CHECK (
+        (trigger_kind IN (
+            'timer', 'system_event', 'self_enqueue', 'external_delegation'
+         )
+            AND trigger_instance_id IS NOT NULL)
+        OR
+        (trigger_kind IN ('manual_enqueue','chat_message')
+            AND trigger_instance_id IS NULL)
+    )
+);
+"""
+
+# Índice adicional (P4): hot-path del PUSH de resultados de delegación
+# (config_sync busca tareas 'external_delegation' completadas aún no
+# reportadas — ver config_sync/delegation_inbox.py:push_pending_delegation_
+# results_once). Parcial: solo filas de este trigger_kind.
+_DDL_AGENT_TASKS_EXTERNAL_DELEGATION_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_external_delegation_completed
+    ON agent_tasks (trigger_kind, status)
+    WHERE trigger_kind = 'external_delegation';
+"""
+
+
+def _recreate_p4_external_delegation_if_needed(conn: sqlite3.Connection) -> None:
+    """🔒 RECREACIÓN FIRMADA P4 — admite 'external_delegation' (A2A cross-human).
+
+    Recrea `authorized_trigger_types` (CHECK trigger_type/scope_validation
+    ampliados + siembra del catálogo) y `agent_tasks` (CHECK trigger_kind + I10
+    ampliados) en UNA transacción, con el patrón oficial (CREATE new → INSERT
+    SELECT → DROP old → RENAME). Preserva TEXTUALMENTE I1-I6/I10 firmados en
+    P0-P2. Guard: sólo corre si `user_version < _SCHEMA_VERSION_P4`. Idempotente
+    — re-ejecutar es no-op (versión ya >= P4).
+    """
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current >= _SCHEMA_VERSION_P4:
+        return
+
+    fk_prev = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # 1) authorized_trigger_types — ANTES de agent_tasks: agent_tasks_new
+            #    no depende de esta tabla, pero authorized_trigger_instances SÍ
+            #    (FK ON UPDATE/DELETE RESTRICT) y debe seguir resolviendo el tipo
+            #    'external_delegation' antes de que cualquier instancia lo use.
+            conn.execute("DROP TABLE IF EXISTS authorized_trigger_types_new")
+            conn.execute(_DDL_AUTHORIZED_TRIGGER_TYPES_NEW_P4)
+            conn.execute(
+                f"INSERT INTO authorized_trigger_types_new ({_TRIGGER_TYPES_COLUMNS}) "
+                f"SELECT {_TRIGGER_TYPES_COLUMNS} FROM authorized_trigger_types"
+            )
+            conn.execute("DROP TABLE authorized_trigger_types")
+            conn.execute(
+                "ALTER TABLE authorized_trigger_types_new RENAME TO authorized_trigger_types"
+            )
+            conn.execute(_DDL_SEED_EXTERNAL_DELEGATION_TYPE)
+
+            # 2) agent_tasks — CHECK trigger_kind + I10 ampliados.
+            conn.execute("DROP TABLE IF EXISTS agent_tasks_new")
+            conn.execute(_DDL_AGENT_TASKS_NEW_P4)
+            conn.execute(
+                f"INSERT INTO agent_tasks_new ({_P2_COLUMNS}) "
+                f"SELECT {_P2_COLUMNS} FROM agent_tasks"
+            )
+            conn.execute("DROP TABLE agent_tasks")
+            conn.execute("ALTER TABLE agent_tasks_new RENAME TO agent_tasks")
+
+            conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION_P4}")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.execute(f"PRAGMA foreign_keys = {'ON' if fk_prev else 'OFF'}")
+
+
 def ensure_tasks_schema(conn: sqlite3.Connection) -> None:
     """Aplica PRAGMAs + DDL FIRMADO de `tasks` + migración 006 (P1).
 
@@ -676,15 +917,24 @@ def ensure_tasks_schema(conn: sqlite3.Connection) -> None:
     _expand_agent_tasks_p2(conn)
     _recreate_agent_tasks_check_p2_if_needed(conn)
 
-    # Los índices (P0 + P1 + P2) se (re)crean al final: la recreación de la tabla
-    # borra los índices al hacer DROP; este executescript los repuebla siempre.
-    conn.executescript(_DDL_AGENT_TASKS_INDEXES)
-    conn.executescript(_DDL_AGENT_TASKS_TRIGGER_INDEX)
-
     # P3 EXPAND sobre authorized_trigger_instances: target_agent_id/task_instruction/
     # one_shot/title. ADITIVO, no necesita guard de versión (no hay recreación de
     # tabla; ALTER ADD COLUMN es idempotente por try/except).
     _expand_authorized_triggers_p3(conn)
+
+    # P4 (FASE 3 A2A cross-human) — recreación guardada por versión: admite
+    # 'external_delegation' en authorized_trigger_types + agent_tasks.trigger_kind/I10.
+    # DEBE correr ANTES del bloque de índices de abajo: también recrea (DROP+
+    # RENAME) agent_tasks, lo que borraría cualquier índice creado antes de este
+    # punto (bug real detectado en test: los índices P0/P1/P2 desaparecían).
+    _recreate_p4_external_delegation_if_needed(conn)
+
+    # Los índices (P0 + P1 + P2 + P4) se (re)crean al final: CUALQUIER recreación
+    # de tabla de arriba borra los índices al hacer DROP; este bloque los repuebla
+    # siempre, en el ÚLTIMO paso, tras la ÚLTIMA recreación posible.
+    conn.executescript(_DDL_AGENT_TASKS_INDEXES)
+    conn.executescript(_DDL_AGENT_TASKS_TRIGGER_INDEX)
+    conn.executescript(_DDL_AGENT_TASKS_EXTERNAL_DELEGATION_INDEX)
 
 
 def _expand_agent_tasks_p1(conn: sqlite3.Connection) -> None:

@@ -346,6 +346,23 @@ async def _run_loop() -> None:
                 exc_info=True,
             )
 
+        # FASE 3 (A2A cross-human) — delegation inbox push/poll: independent;
+        # already fail-soft internally (run_delegation_inbox_once never
+        # raises), this try/except is defense-in-depth so a bug there can
+        # never take down the policy-pull/usage-upload/remote-approvals tick.
+        try:
+            from hermes.config_sync.delegation_inbox import (  # noqa: PLC0415
+                run_delegation_inbox_once,
+            )
+
+            await run_delegation_inbox_once(store=store, proxy=proxy)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "hermes.config_sync.delegation_inbox.unhandled_error",
+                extra={"reason": str(exc)},
+                exc_info=True,
+            )
+
         jitter = random.uniform(0, _MAX_JITTER_S)
         await asyncio.sleep(interval + jitter)
 

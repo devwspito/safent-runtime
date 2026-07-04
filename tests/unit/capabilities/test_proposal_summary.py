@@ -99,6 +99,28 @@ class TestHumanSummaryDelegate:
         assert "agente" in result.lower()
 
 
+class TestHumanSummaryDelegateToColleague:
+    """FASE 3 (A2A cross-human) — distinct from in-process delegate_task."""
+
+    def test_includes_employee_id(self) -> None:
+        result = human_summary("delegate_to_colleague", {"employee_id": "bob@org.example"})
+        assert "bob@org.example" in result
+
+    def test_generic_fallback_without_employee_id(self) -> None:
+        result = human_summary("delegate_to_colleague", {})
+        assert "compañero" in result.lower() or "colega" in result.lower()
+
+    def test_not_confused_with_in_process_delegate_task(self) -> None:
+        """'delegate' is a substring of 'delegate_to_colleague' — must NOT
+        fall through to the generic in-process delegate_task phrasing."""
+        result = human_summary("delegate_to_colleague", {"employee_id": "bob@org.example"})
+        assert result != "El agente quiere pedir ayuda a otro agente."
+
+    def test_body_mentions_leaving_the_organization(self) -> None:
+        body = human_body("delegate_to_colleague", {"employee_id": "bob@org.example"})
+        assert "organización" in body.lower()
+
+
 class TestHumanSummaryCronjob:
     def test_cronjob(self) -> None:
         result = human_summary("cronjob", {})

@@ -30,6 +30,7 @@ _CAPABILITY_TOOLS: frozenset[str] = frozenset({
     "connect_integration", "install_mcp", "search_mcp", "install_skill", "search_skills",
     "get_service_status", "list_services", "start_service", "stop_service", "restart_service",
     "lo_open_document", "lo_save_document", "lo_write_text",
+    "delegate_to_colleague",
 })
 
 # Full catalog the Policies UI lists. CAGED_NATIVE_TOOLS comes from the single source
@@ -152,6 +153,8 @@ _CAPABILITY_CATEGORY_MAP: dict[str, str] = {
     "lo_open_document": "Ficheros y documentos",
     "lo_save_document": "Ficheros y documentos",
     "lo_write_text": "Ficheros y documentos",
+    # FASE 3 (A2A cross-human) — pide ayuda al asistente de OTRO humano
+    "delegate_to_colleague": "Comunicación",
 }
 
 # Caged native exec/file tools category

@@ -379,6 +379,12 @@ class DbusRuntimeServiceWiring:
         # SkillStoreAdapter — único escritor autorizado de SKILL.md firmados.
         # None → create_skill_from_text devuelve error (degradación honesta).
         self._skill_store_adapter = skill_store_adapter  # SkillStoreAdapter | None
+        # FASE 3 (A2A cross-human) — DelegationApprovalService, singleton
+        # perezoso (mismo patrón que _trigger_repo). Construido on-demand por
+        # _require_delegation_approval_service, no inyectado por constructor:
+        # depende de self._conversation_repo/_trigger_repo/_queue/_state, ya
+        # todos presentes en self tras __init__.
+        self._delegation_approval_service: Any | None = None
 
     # ------------------------------------------------------------------
     # Kill-switch (CTRL-12 / KILL-1)
@@ -3088,6 +3094,191 @@ class DbusRuntimeServiceWiring:
         # to the agent immediately (block-and-resume, Mandato 1 / 2026-06-25).
         from hermes.runtime.security_hook import signal_native_danger_approval  # noqa: PLC0415
         signal_native_danger_approval(str(proposal_id), "denied")
+
+    # ------------------------------------------------------------------
+    # FASE 3 (A2A cross-human) — inbound delegation inbox verbs.
+    #
+    # submit_inbound_delegation: SINGLE WRITER of `pending_delegations` — the
+    # ONLY caller is config_sync.delegation_inbox (same service uid "hermes",
+    # already VERIFIED the DelegationEnvelope signature/anti-replay/freshness
+    # before calling here; see org.hermes.Runtime1.conf's `<policy user=
+    # "hermes">` allow-list for this verb). LOW fix (defense-in-depth): since
+    # ANY hermes-uid process is allow-listed for this verb (not just
+    # config_sync specifically), this method RE-VERIFIES the Ed25519 tenant
+    # signature itself before registering the card — it does not blindly
+    # trust the caller's prior verification.
+    #
+    # resolve_inbound_delegation: the LOCAL human's Aprobar/Rechazar. approved_
+    # by/rejected_by is ALWAYS derived from the authenticated D-Bus channel
+    # (direct uid or verified operator_token) — NEVER from the envelope/
+    # payload (CWE-862 / provenance guarantee, see DelegationApprovalService).
+    # ------------------------------------------------------------------
+
+    async def submit_inbound_delegation(
+        self, *, envelope_json: str, sender_uid: int,
+    ) -> dict:
+        """Registra una DelegationEnvelope kind=request YA VERIFICADA.
+
+        Raises:
+            DbusAuthorizationError: UID del sender no está autorizado.
+        """
+        self._authorize_and_resolve(sender_uid, operation="submit_inbound_delegation")
+        try:
+            envelope = json.loads(envelope_json)
+        except (json.JSONDecodeError, TypeError) as exc:
+            return {"ok": False, "error": f"envelope_json inválido: {exc}"}
+        if not isinstance(envelope, dict):
+            return {"ok": False, "error": "envelope_json debe ser un objeto"}
+
+        verify_error = self._reverify_delegation_signature(envelope)
+        if verify_error is not None:
+            logger.warning(
+                "hermes.dbus.delegation_signature_reverify_failed",
+                extra={
+                    "message_id": envelope.get("message_id"), "reason": verify_error,
+                },
+            )
+            return {"ok": False, "error": verify_error}
+
+        service = self._require_delegation_approval_service()
+        if service is None:
+            return {"ok": False, "error": "delegation_service_not_configured"}
+        status = await service.submit(envelope=envelope)
+        logger.info(
+            "hermes.dbus.delegation_submitted",
+            extra={"message_id": envelope.get("message_id"), "status": status},
+        )
+        return {"ok": True, "status": status}
+
+    def _reverify_delegation_signature(self, envelope: dict) -> str | None:
+        """Re-verify the Ed25519 tenant signature over *envelope* (LOW fix,
+        defense-in-depth). `envelope` carries the 12 pinned DelegationEnvelope
+        keys PLUS `signature_hex` (added by config_sync.delegation_inbox
+        specifically for this re-check).
+
+        Returns None on success (signature valid), or a short error code on
+        ANY failure — fail-closed: no association/pubkey/signature_hex means
+        the card is NOT registered.
+        """
+        from hermes.config_sync.delegation_inbox import (  # noqa: PLC0415
+            delegation_signing_bytes,
+        )
+        from hermes.config_sync.signature import verify_bundle  # noqa: PLC0415
+
+        signature_hex = envelope.get("signature_hex")
+        if not isinstance(signature_hex, str) or not signature_hex:
+            return "missing_signature"
+
+        if self._association_store is None or not self._association_store.is_associated():
+            return "not_associated"
+        assoc = self._association_store.get()
+        if assoc is None or not assoc.signing_pubkey_hex:
+            return "no_tenant_pubkey"
+
+        plain_envelope = {
+            k: v for k, v in envelope.items() if k != "signature_hex"
+        }
+        if not all(isinstance(v, str) for v in plain_envelope.values()):
+            return "invalid_envelope_shape"
+
+        payload = delegation_signing_bytes(plain_envelope)
+        if not verify_bundle(
+            payload_canonical=payload,
+            signature_hex=signature_hex,
+            pubkey_hex=assoc.signing_pubkey_hex,
+        ):
+            return "bad_signature"
+        return None
+
+    async def resolve_inbound_delegation(
+        self,
+        *,
+        message_id: str,
+        decision: str,
+        sender_uid: int,
+        operator_token: str | None = None,
+    ) -> dict:
+        """Aprueba/rechaza una tarjeta de delegación entrante pendiente.
+
+        Raises:
+            DbusAuthorizationError: UID del sender no está autorizado o token inválido.
+        """
+        resolver = self._authorize_and_resolve(
+            sender_uid, operation="resolve_inbound_delegation", operator_token=operator_token,
+        )
+        service = self._require_delegation_approval_service()
+        if service is None:
+            return {"ok": False, "error": "delegation_service_not_configured"}
+
+        if decision == "approve":
+            task_id = await service.approve(message_id=message_id, approved_by=resolver)
+            logger.info(
+                "hermes.dbus.delegation_resolved",
+                extra={
+                    "message_id": message_id, "decision": "approve",
+                    "task_id": str(task_id) if task_id else None, "by_uid": sender_uid,
+                },
+            )
+            return {"ok": task_id is not None, "task_id": str(task_id) if task_id else None}
+        if decision == "reject":
+            resolved = await service.reject(message_id=message_id, rejected_by=resolver)
+            logger.info(
+                "hermes.dbus.delegation_resolved",
+                extra={
+                    "message_id": message_id, "decision": "reject",
+                    "resolved": resolved, "by_uid": sender_uid,
+                },
+            )
+            return {"ok": resolved}
+        return {"ok": False, "error": f"decision inválida: {decision!r} (usa 'approve'|'reject')"}
+
+    async def list_pending_delegations(self) -> list[dict]:
+        """Tarjetas de delegación entrante pendientes de HITL (CTRL-P1-5:
+        solo metadatos, sin secretos ni firma)."""
+        service = self._require_delegation_approval_service()
+        if service is None:
+            return []
+        return service.list_pending()
+
+    def _require_delegation_approval_service(self):
+        """DelegationApprovalService, AUTO-CONSTRUIDO lazy (mismo patrón que
+        _require_trigger_repo): singleton perezoso por instancia, sobre el
+        MISMO shell-state.db que el resto de repos daemon-owned.
+
+        None si conversation_repo no fue inyectado (degradación honesta —
+        el verbo devuelve un error explícito en vez de lanzar AttributeError).
+        """
+        if self._delegation_approval_service is not None:
+            return self._delegation_approval_service
+        if self._conversation_repo is None:
+            logger.warning("hermes.dbus.delegation_service_no_conversation_repo")
+            return None
+
+        from hermes.tasks.infrastructure.sqlite_pending_delegations import (  # noqa: PLC0415
+            SqlitePendingDelegationRepository,
+        )
+        from hermes.tasks.triggers.application.delegation_approval_service import (  # noqa: PLC0415
+            DelegationApprovalService,
+        )
+        from hermes.tasks.triggers.application.trigger_gate import TriggerGate  # noqa: PLC0415
+
+        trigger_repo = self._require_trigger_repo()
+        db_path = self._composio_db_path()
+        pending_repo = SqlitePendingDelegationRepository(db_path)
+        gate = TriggerGate(
+            trigger_repo=trigger_repo,
+            queue=self._queue,
+            agent_state=self._state,
+            tenant_id=_resolve_tenant_id_from_wiring(self._tenant_id),
+            audit_signer=self._audit_signer,
+        )
+        self._delegation_approval_service = DelegationApprovalService(
+            pending_repo=pending_repo,
+            trigger_repo=trigger_repo,
+            gate=gate,
+            conversation_repo=self._conversation_repo,
+        )
+        return self._delegation_approval_service
 
     async def list_hitl_pending(self, *, limit: int = 50) -> list[dict]:
         """Propuestas HITL pendientes de aprobación humana (CTRL-P1-5).

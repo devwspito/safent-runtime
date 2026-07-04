@@ -60,19 +60,36 @@ _MOST_DELICATE: frozenset[str] = frozenset({
 # si un agente intenta un comando peligroso".)
 _ORCHESTRATION: frozenset[str] = frozenset({"delegate_task", "mixture_of_agents"})
 
+# Non-native capability tools that escape the cage via outbound comms to a
+# THIRD PARTY (LOW fix — align with the "gate like send_message" intent).
+# `delegate_to_colleague` is a cage-ESCAPING outbound action (it reaches
+# another human's assistant, outside this agent's org — see the
+# PEER_DELEGATION binding comment in capability_registry.py: "gate como
+# send_message"), the SAME class as send_message's native WRITE
+# classification. But it is NOT a native Nous tool — it dispatches through the
+# capability broker/surface_adapter, never through nous_engine — so
+# classify_nous_tool() can never derive it automatically. Hand-listed here so
+# `delicacy()` doesn't drift from that intent. Defense-in-depth only: the
+# REAL HITL gate for this tool is ExtendedCapabilityBinding.auto_executable=
+# False (capability_registry.py), enforced independently of this
+# classification.
+_DELICATE_NON_NATIVE: frozenset[str] = frozenset({"delegate_to_colleague"})
+
 
 def delicacy(tool: str) -> Delicacy:
     """Classify a tool's owner-approval delicacy.
 
     DELICATE is DERIVED PURELY from the native nous_tool_risk_map (any WRITE tool) — no
     re-listed/invented tool names here, so it can never drift from the native source of
-    truth. The only hand-list is the _MOST_DELICATE governance overlay (non-native
-    capability/conceptual actions). Unknown tools → NORMAL (the cage confines them
-    regardless of this tier)."""
+    truth. The only hand-lists are the _MOST_DELICATE and _DELICATE_NON_NATIVE governance
+    overlays (non-native capability/conceptual actions). Unknown tools → NORMAL (the cage
+    confines them regardless of this tier)."""
     if tool in _ORCHESTRATION:
         return Delicacy.NORMAL  # delegación fluida; la jaula gatea lo que el sub-agente HACE
     if tool in _MOST_DELICATE:
         return Delicacy.MOST_DELICATE
+    if tool in _DELICATE_NON_NATIVE:
+        return Delicacy.DELICATE
     if classify_nous_tool(tool) is NousRisk.WRITE:
         return Delicacy.DELICATE
     return Delicacy.NORMAL

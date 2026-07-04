@@ -1353,6 +1353,9 @@ def create_app() -> FastAPI:
     from hermes.shell_server.cowork.notifications_api import (  # noqa: PLC0415
         create_notifications_router,
     )
+    from hermes.shell_server.cowork.inbound_delegations_api import (  # noqa: PLC0415
+        create_inbound_delegations_router,
+    )
 
     app.include_router(create_providers_router())
     # Roster must be registered BEFORE agents_router to avoid FastAPI resolving
@@ -1371,6 +1374,8 @@ def create_app() -> FastAPI:
     # notification_id="read-all".  The router factory registers them in this
     # order internally; include_router preserves it.
     app.include_router(create_notifications_router())
+    # FASE 3 (A2A cross-human) — inbound delegation HITL card (Cowork web UI).
+    app.include_router(create_inbound_delegations_router())
 
     # ------------------------------------------------------------------
     # Enterprise pairing — instance association (Fase 2).

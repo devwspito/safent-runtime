@@ -114,13 +114,37 @@ class TriggerGate:
         derived_from_untrusted_content: bool = False,
         parent_work_item_id: UUID | None = None,
         target_agent_id: str | None = None,
+        kind: WorkItemKind = WorkItemKind.AUTONOMOUS,
+        conversation_id: str | None = None,
+        delegation_correlation_id: str | None = None,
     ) -> UUID | None:
         """Flujo fail-closed (FR-015). Devuelve task_id o None si rechazado.
 
         target_agent_id (opcional): agente destino de una tarea programada del
         calendario. Si está, viaja en el payload del WorkItem y el consumidor de
         la cola lo ejecuta con ESE agente (routing per-agent).
+
+        kind/conversation_id (FASE 3 A2A cross-human, EXTERNAL_DELEGATION): un
+        origen puede pedir kind=WorkItemKind.CHAT_MESSAGE para que la tarea entre
+        por el mismo carril de respuesta que un chat normal (I5 del esquema exige
+        conversation_id NOT NULL para chat_message — fail-closed aquí ANTES de
+        tocar la cola, en vez de dejar que el CHECK de SQLite lo descubra tarde).
+        Por defecto kind=AUTONOMOUS/conversation_id=None — CERO cambio de
+        comportamiento para timer/system_event/self_enqueue.
+
+        delegation_correlation_id (EXTERNAL_DELEGATION): correlation_id de la
+        DelegationEnvelope que originó esta tarea — viaja en el payload para que,
+        al completarse, el pusher de resultados (config_sync.delegation_inbox)
+        sepa a qué correlation_id devolver el resultado (POST /v1/outbox/result).
         """
+        if kind is WorkItemKind.CHAT_MESSAGE and not conversation_id:
+            logger.warning(
+                "hermes.triggers.gate.chat_message_missing_conversation_id",
+                extra={"trigger_type": str(trigger_type)},
+            )
+            await self._emit_denied(trigger_type=trigger_type, scope_value=scope_value)
+            return None
+
         # Paso 1 — consulta la allow-list (NO cacheada, CTRL-P2-15)
         trigger = await self._repo.is_authorized(
             trigger_type=trigger_type,
@@ -164,6 +188,9 @@ class TriggerGate:
             derived_from_untrusted_content=derived_from_untrusted_content,
             parent_work_item_id=parent_work_item_id,
             target_agent_id=target_agent_id,
+            kind=kind,
+            conversation_id=conversation_id,
+            delegation_correlation_id=delegation_correlation_id,
         )
 
         # Paso 5 — encola (idempotente por dedup_key)
@@ -293,6 +320,9 @@ class TriggerGate:
         derived_from_untrusted_content: bool,
         parent_work_item_id: UUID | None,
         target_agent_id: str | None = None,
+        kind: WorkItemKind = WorkItemKind.AUTONOMOUS,
+        conversation_id: str | None = None,
+        delegation_correlation_id: str | None = None,
     ) -> WorkItem:
         """Construye el WorkItem con atribución completa (FR-016/CTRL-P2-8)."""
         cascade_depth = 1 if trigger_type is AuthorizedTriggerType.SELF_ENQUEUE else 0
@@ -313,12 +343,23 @@ class TriggerGate:
         # el momento del disparo.
         if target_agent_id:
             payload["agent_id"] = target_agent_id
+        # kind=CHAT_MESSAGE (EXTERNAL_DELEGATION): mismas claves que
+        # ControlPlaneService._build_work_item para que el motor/engine encuentre
+        # el turno de chat igual que uno manual (I5 ya validada por el caller).
+        if kind is WorkItemKind.CHAT_MESSAGE:
+            payload["conversation_id"] = conversation_id
+            payload["chat_text"] = instruction
+        # correlation_id de la DelegationEnvelope — leído por config_sync.
+        # delegation_inbox.push_pending_delegation_results_once al completarse la
+        # tarea, para devolver el resultado a A vía POST /v1/outbox/result.
+        if delegation_correlation_id:
+            payload["delegation_correlation_id"] = delegation_correlation_id
 
         return WorkItem.new(
             tenant_id=self._tenant_id,
             trigger_kind=str(trigger_type),
             payload=payload,
-            kind=WorkItemKind.AUTONOMOUS,
+            kind=kind,
             priority=priority,
             dedup_key=dedup_key,
         )

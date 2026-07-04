@@ -462,6 +462,30 @@ _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ["url"],
     },
     # ------------------------------------------------------------------
+    # PEER_DELEGATION — FASE 3 (A2A cross-human). Asks a COLLEAGUE's assistant
+    # (a DIFFERENT human's agent, same org) for help — NOT the in-process
+    # delegate_task (which spawns a sub-agent in the SAME cage/broker). Routed
+    # through the cloud relay, notarised with the tenant signature; the target
+    # human must approve before anything runs on their side.
+    # ------------------------------------------------------------------
+    "delegate_to_colleague": {
+        "type": "object",
+        "properties": {
+            "employee_id": {
+                "type": "string",
+                "description": (
+                    "Identifier of the COLLEAGUE (a different human in this "
+                    "organization) whose assistant should receive the request."
+                ),
+            },
+            "task": {
+                "type": "string",
+                "description": "What you are asking the colleague's assistant to do.",
+            },
+        },
+        "required": ["employee_id", "task"],
+    },
+    # ------------------------------------------------------------------
     # FILESYSTEM READ (not Nous-native: list_dir differs from search_files)
     # ------------------------------------------------------------------
     "list_dir": {
@@ -852,6 +876,12 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "http_request": (
         "Make an HTTP request. HIGH risk — external network call."
+    ),
+    "delegate_to_colleague": (
+        "Ask a COLLEAGUE's assistant (a different human's agent, same org) for "
+        "help — NOT the in-process delegate_task (same-cage sub-agent). "
+        "HIGH risk — leaves the organization boundary; the colleague must "
+        "approve before anything runs on their side. HITL approval required."
     ),
     "list_dir": (
         "List the contents of a directory. LOW risk — read-only observation."

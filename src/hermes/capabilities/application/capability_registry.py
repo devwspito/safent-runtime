@@ -449,6 +449,24 @@ _REGISTRY_TABLE: Final[dict[str, ExtendedCapabilityBinding]] = {
         persistent_forbidden=False,
     ),
     # ------------------------------------------------------------------
+    # PEER_DELEGATION — FASE 3 (A2A cross-human). Siempre HIGH + no
+    # auto_executable: gate como send_message (owner decision — "orquestación
+    # INTERNA" delegate_task es NORMAL/fluida porque el sub-agente corre en la
+    # MISMA jaula/broker; esto sale a OTRO ser humano fuera de la organización
+    # del agente, así que exige el MISMO Aprobar/Rechazar que cualquier
+    # comunicación saliente). persistent_forbidden=True: cada delegación es
+    # una decisión nueva, nunca "recordar para siempre".
+    # ------------------------------------------------------------------
+    "delegate_to_colleague": ExtendedCapabilityBinding(
+        tool_name="delegate_to_colleague",
+        surface_kind=SurfaceKind.PEER_DELEGATION,
+        required_capability=Capability.NETWORK_LOCAL.value,
+        risk=RiskLevel.HIGH,
+        auto_executable=False,
+        executor="surface_adapter",
+        persistent_forbidden=True,
+    ),
+    # ------------------------------------------------------------------
     # PACKAGE_MANAGER — siempre HIGH, prohibido PERSISTENT (CTRL-3)
     # ------------------------------------------------------------------
     "install_package": ExtendedCapabilityBinding(

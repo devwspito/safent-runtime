@@ -44,6 +44,8 @@ def human_summary(tool_name: str, args: dict[str, Any] | None = None) -> str:
         return _send_message_summary(safe_args)
     if _is_browser_navigate(t):
         return _browser_navigate_summary(safe_args)
+    if _is_delegate_to_colleague(t):
+        return _delegate_to_colleague_summary(safe_args)
     if _is_delegate(t):
         return "El agente quiere pedir ayuda a otro agente."
     if _is_cronjob(t):
@@ -76,6 +78,11 @@ def human_body(tool_name: str, args: dict[str, Any] | None = None) -> str:
         path = str(safe_args.get("path") or safe_args.get("filename") or "").strip()
         if path:
             return f"Ruta: {path}"
+    if _is_delegate_to_colleague(t):
+        return (
+            "Esto sale de la organización del agente — el asistente de tu "
+            "colega recibirá la petición y SU dueño deberá aprobarla."
+        )
     return ""
 
 
@@ -119,6 +126,14 @@ def _is_delegate(t: str) -> bool:
     return "delegate" in t or "spawn" in t or t == "mixture_of_agents"
 
 
+def _is_delegate_to_colleague(t: str) -> bool:
+    """FASE 3 (A2A cross-human) — distinct from `_is_delegate` (in-process
+    sub-agent): this one leaves the organization to ask ANOTHER human's
+    assistant. Checked BEFORE `_is_delegate` in human_summary's if-chain
+    since "delegate" is a substring of this tool's name too."""
+    return t == "delegate_to_colleague"
+
+
 def _is_cronjob(t: str) -> bool:
     return t == "cronjob"
 
@@ -160,6 +175,13 @@ def _send_message_summary(args: dict[str, Any]) -> str:
     if dest:
         return f"El agente quiere enviar un mensaje a «{dest}»."
     return "El agente quiere enviar un mensaje."
+
+
+def _delegate_to_colleague_summary(args: dict[str, Any]) -> str:
+    employee_id = str(args.get("employee_id") or "").strip()
+    if employee_id:
+        return f"El agente quiere pedir ayuda al asistente de «{employee_id}»."
+    return "El agente quiere pedir ayuda al asistente de un compañero."
 
 
 def _browser_navigate_summary(args: dict[str, Any]) -> str:

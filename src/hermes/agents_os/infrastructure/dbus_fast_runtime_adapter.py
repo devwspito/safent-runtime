@@ -296,6 +296,66 @@ class Runtime1ServiceInterface(ServiceInterface):
         return True
 
     # ------------------------------------------------------------------
+    # FASE 3 (A2A cross-human) — buzón de delegación entrante (MEDIUM-1 fix).
+    #
+    # DbusRuntimeServiceWiring.submit_inbound_delegation/resolve_inbound_
+    # delegation/list_pending_delegations existed and were allow-listed in
+    # org.hermes.Runtime1.conf, but had NO matching @method() here — the same
+    # "wired but not exported" bug class as the earlier F2 fix
+    # (set_agent_access_scope). A proxy call resolved `call_submit_inbound_
+    # delegation` to None -> AgentUnavailable -> every inbound delegation
+    # returned 'daemon_unavailable' forever. See
+    # tests/unit/agents_os/test_dbus_verb_export_completeness.py for the
+    # introspection guard against this WHOLE bug class.
+    # ------------------------------------------------------------------
+
+    @method()
+    async def SubmitInboundDelegation(self, envelope_json: "s") -> "s":  # noqa: N802,F821,UP037
+        """Registra una DelegationEnvelope kind=request YA VERIFICADA.
+
+        Llamado por config_sync.delegation_inbox (mismo user=hermes; ver el
+        bloque `<policy user="hermes">` de org.hermes.Runtime1.conf) tras
+        verificar firma/anti-replay/freshness — este verbo SOLO registra la
+        tarjeta (idempotente por message_id), nunca re-verifica ni encola.
+        Devuelve JSON {"ok": true, "status": ...} o {"ok": false, "error": ...}.
+        """
+        sender_uid = await self._resolve_current_sender_uid()
+        result = await self._wiring.submit_inbound_delegation(
+            envelope_json=envelope_json, sender_uid=sender_uid,
+        )
+        return json.dumps(result)
+
+    @method()
+    async def ResolveInboundDelegation(  # noqa: N802
+        self, message_id: "s", decision: "s", operator_token: "s"  # noqa: F821,UP037
+    ) -> "s":  # noqa: F821,UP037
+        """Aprueba/rechaza una tarjeta de delegación entrante pendiente.
+
+        approved_by/rejected_by se deriva SIEMPRE del canal D-Bus autenticado
+        (sender_uid directo, o operator_token verificado del proxy del
+        shell-server) — EXACTAMENTE igual que Approve/Reject — NUNCA de la
+        envelope/payload (CWE-862).
+        operator_token: "" para llamadas directas de un operador autorizado;
+        firmado y obligatorio para el proxy del shell-server.
+        Devuelve JSON {"ok": bool, "task_id": str|None} o {"ok": false, "error"}.
+        """
+        sender_uid = await self._resolve_current_sender_uid()
+        result = await self._wiring.resolve_inbound_delegation(
+            message_id=message_id,
+            decision=decision,
+            sender_uid=sender_uid,
+            operator_token=operator_token or None,
+        )
+        return json.dumps(result)
+
+    @method()
+    async def ListPendingDelegations(self) -> "s":  # noqa: N802,F821,UP037
+        """Tarjetas de delegación entrante pendientes de HITL (CTRL-P1-5:
+        solo metadatos, sin secretos ni firma). JSON → el cliente json.loads."""
+        rows = await self._wiring.list_pending_delegations()
+        return json.dumps(rows)
+
+    # ------------------------------------------------------------------
     # Métodos read-only (supervisión, CTRL-P1-5: solo metadatos)
     # ------------------------------------------------------------------
 

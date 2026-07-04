@@ -27,6 +27,13 @@ class AuthorizedTriggerType(StrEnum):
     TIMER = "timer"
     SYSTEM_EVENT = "system_event"
     SELF_ENQUEUE = "self_enqueue"
+    # FASE 3 (A2A cross-human): origen = un mensaje DELEGADO por el asistente de
+    # OTRO humano de la misma organización, verificado por firma del tenant y
+    # aprobado por el humano LOCAL antes de encolar (NUNCA auto-disparado — a
+    # diferencia de timer/system_event/self_enqueue, este tipo exige HITL en
+    # CADA activación; ver DelegationApprovalService). enabled_by_default=0
+    # (DEFAULT-DENY, igual que los demás tipos — ver authorized_trigger_types).
+    EXTERNAL_DELEGATION = "external_delegation"
 
 
 class RiskCeiling(StrEnum):

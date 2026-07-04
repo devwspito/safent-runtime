@@ -129,6 +129,16 @@ class SqliteAuthorizedTriggerRepository:
         La consulta NO está cacheada — cada llamada lee de SQLite para que
         la revocación sea inmediata (CTRL-P2-15). Scope: coincidencia exacta
         o scope_value='*' para wilcard de admin (timer).
+
+        LOW fix (one-shot trigger provenance, FASE 3 A2A): si MÁS DE UNA fila
+        enabled=1 cubre (tipo, scope) — p.ej. una autorización previa para el
+        mismo from_employee_id aún no revocada por una carrera/fallo — el
+        orden SIN `ORDER BY` era ARBITRARIO (rowid de SQLite), pudiendo
+        devolver una fila VIEJA en vez de la recién minteada por la aprobación
+        EN CURSO; `created_by_admin_uuid` de esa fila vieja se filtraría como
+        `enqueued_by`, rompiendo la garantía "enqueued_by = el aprobador
+        actual". `ORDER BY authorized_at DESC` hace la elección determinista:
+        siempre gana la autorización MÁS RECIENTE.
         """
         try:
             row = self._conn.execute(
@@ -137,6 +147,7 @@ class SqliteAuthorizedTriggerRepository:
                 f"SELECT {_SELECT_INSTANCE} FROM authorized_trigger_instances "  # noqa: S608
                 "WHERE trigger_type = ? AND (scope_value = ? OR scope_value = '*') "
                 "AND enabled = 1 "
+                "ORDER BY authorized_at DESC "
                 "LIMIT 1",
                 (str(trigger_type), scope_value),
             ).fetchone()

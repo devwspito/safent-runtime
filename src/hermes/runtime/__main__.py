@@ -936,6 +936,34 @@ def _build_memory_surface_adapter():
     return adapter
 
 
+def _build_delegation_surface_adapter(db_path: Path):
+    """Construye DelegationSurfaceAdapter para SurfaceKind.PEER_DELEGATION
+    (FASE 3 A2A cross-human). Fail-soft: None si el association_store no es
+    resoluble (p.ej. master.key ausente) — delegate_to_colleague queda
+    indisponible (SurfaceAdapterNotFound) en vez de romper el arranque.
+    """
+    try:
+        from hermes.agents_os.infrastructure.delegation_surface_adapter import (  # noqa: PLC0415
+            DelegationSurfaceAdapter,
+        )
+        from hermes.instance.association_store import SQLiteAssociationStore  # noqa: PLC0415
+        from hermes.shell_server.security.secrets import SecretsVault  # noqa: PLC0415
+
+        association_store = SQLiteAssociationStore(db_path=db_path, vault=SecretsVault())
+        adapter = DelegationSurfaceAdapter(
+            association_store=association_store, db_path=db_path,
+        )
+        logger.info("hermes.runtime.delegation_surface_adapter.ready")
+        return adapter
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "hermes.runtime.delegation_surface_adapter.init_failed: %s — "
+            "delegate_to_colleague will be unavailable (SurfaceAdapterNotFound)",
+            exc,
+        )
+        return None
+
+
 def _build_real_broker(
     *,
     db_path: Path,
@@ -1063,6 +1091,15 @@ def _build_real_broker(
     # LOW + auto_executable in CapabilityRegistry: no HITL required.
     # Registered unconditionally — no external dependencies.
     adapters[SurfaceKind.MEMORY] = _build_memory_surface_adapter()
+
+    # FASE 3 (A2A cross-human) — DelegationSurfaceAdapter: delegate_to_colleague's
+    # execution (POST /v1/outbox). Registered unconditionally — a non-paired
+    # (Community Edition) instance's association_store.is_associated() is
+    # False, so replay() fails honestly ("instance_not_associated") instead of
+    # SurfaceAdapterNotFound; no separate CE/EE branch needed here.
+    delegation_adapter = _build_delegation_surface_adapter(db_path)
+    if delegation_adapter is not None:
+        adapters[SurfaceKind.PEER_DELEGATION] = delegation_adapter
 
     dispatcher = SurfaceAdapterDispatcher(adapters=adapters)
 
