@@ -250,6 +250,51 @@ def _check_agent_access_scope(
         return f"security gate error (fail-closed): {type(exc).__name__}"
 
 
+def _resolve_tool_policy_for_cycle(
+    base_store: Any,
+    access_scope_repo: Any,
+    tenant_id: str,
+) -> tuple[Any, str | None]:
+    """Resolve the effective (possibly per-agent) tool-policy view for THIS call.
+
+    Enterprise governance, Fase 2 Phase 2. Returns (policy, None) on success:
+    an agent-scoped VIEW (overlay -> global -> preset, see
+    ToolPolicyStore.for_agent) when the ambient cycle agent has an
+    AgentAccessScope on file, else *base_store* UNCHANGED — no ambient agent,
+    no repo wired, or no scope row all fall through to today's global-only
+    behaviour (zero regression).
+
+    Returns (base_store, error_message) on ANY resolution error — fail-CLOSED:
+    mirrors _check_agent_access_scope's own posture (Step 1.1) so a scope-repo
+    fault is never silently swallowed into "no overlay applies".
+    """
+    if access_scope_repo is None:
+        return base_store, None
+    try:
+        from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+            get_current_cycle_agent,
+        )
+
+        agent_id = get_current_cycle_agent()
+        if not agent_id:
+            return base_store, None
+
+        scope = access_scope_repo.get_scope(agent_id, tenant_id)
+        if scope is None:
+            return base_store, None
+
+        return base_store.for_agent(agent_id, scope.policy_overlay), None
+    except Exception as exc:  # noqa: BLE001 — never raises out to invoke_hook
+        # (which would swallow a raise into ALLOW); fails CLOSED via the
+        # returned error message instead.
+        logger.error(
+            "hermes.security_hook.pre.agent_tool_policy_resolve_failed error=%r"
+            " — blocking (fail-closed)",
+            exc,
+        )
+        return base_store, f"security gate error (fail-closed): {type(exc).__name__}"
+
+
 def _check_hardline_native(command_str: str) -> str | None:
     """Check detect_hardline_command (native hermes-agent floor). Returns block msg or None."""
     try:
@@ -1364,6 +1409,19 @@ def make_pre_tool_call_hook(
                 )
                 return _block(scope_block)
 
+            # Step 1.4: Resolve the effective (per-agent, if scoped) tool policy for
+            # Steps 1.5/1.6 below (Enterprise governance, Fase 2 Phase 2). No ambient
+            # agent / no scope → _tool_policy unchanged (zero regression). Fail-CLOSED
+            # on any resolution error.
+            _effective_policy, _policy_resolve_error = _resolve_tool_policy_for_cycle(
+                _tool_policy, access_scope_repo, tenant_id
+            )
+            if _policy_resolve_error is not None:
+                logger.warning(
+                    "hermes.security_hook.pre.agent_tool_policy_blocked tool=%s", tool_name
+                )
+                return _block(_policy_resolve_error)
+
             # Step 1.5: Per-command policy (Security/Policies UI, P4.B). Block ONLY
             # when the owner has CONSCIOUSLY disabled the tool (explicit override=False
             # or BLOQUEADO preset). Tools that are merely off-by-default in Equilibrado
@@ -1372,7 +1430,7 @@ def make_pre_tool_call_hook(
             # here dead-ends the approval flow and makes the model report "no puedo".
             # Fail-open ONLY on store error (cage/denylist/MFA gates are the real floor).
             try:
-                if tool_name and _tool_policy.is_owner_disabled(tool_name):
+                if tool_name and _effective_policy.is_owner_disabled(tool_name):
                     logger.info(
                         "hermes.security_hook.pre.policy_disabled tool=%s", tool_name
                     )
@@ -1393,7 +1451,7 @@ def make_pre_tool_call_hook(
             # broker HITL). SECURITY gate → not swallowed: errors fail-CLOSED via the
             # outer handler; the flag accessor itself fails-safe to ON.
             _needs_owner_mfa = bool(tool_name) and hook_mfa_block(
-                tool_name, mfa_on_dangers=_tool_policy.mfa_on_dangers()
+                tool_name, mfa_on_dangers=_effective_policy.mfa_on_dangers()
             )
             if _needs_owner_mfa:
                 # Owner pre-approval — the Seguridad checkbox has REAL impact: a capability
@@ -1407,7 +1465,7 @@ def make_pre_tool_call_hook(
                 from hermes.capabilities.tool_delicacy import Delicacy, delicacy  # noqa: PLC0415
                 if (
                     delicacy(tool_name) is not Delicacy.MOST_DELICATE
-                    and _tool_policy.is_enabled(tool_name)
+                    and _effective_policy.is_enabled(tool_name)
                 ):
                     logger.info(
                         "hermes.security_hook.pre.owner_preapproved tool=%s", tool_name

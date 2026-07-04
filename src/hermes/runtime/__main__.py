@@ -1747,6 +1747,9 @@ async def _run(*, systemd_notify: bool) -> None:
         # SkillStoreAdapter — único escritor de SKILL.md firmados (construido en
         # _build_real_broker para que use el mismo db_path que el SurfaceAdapterDispatcher).
         skill_store_adapter=_skill_store_adapter_ref,
+        # Fase 2 Phase 3: same singleton the security hook + Nous engine use
+        # (built once above, before register_security_hooks).
+        access_scope_repo=_access_scope_repo,
     )
 
     # JailedBrowser eager start: pre-warm the confined headless Chromium so the
@@ -1950,6 +1953,7 @@ def _start_dbus_adapter_if_available(
     worker_count_fn=None,  # Callable[[], int] | None — live in-flight count
     notification_store=None,  # SqliteNotificationStore | None — bell feature
     skill_store_adapter=None,  # SkillStoreAdapter | None — único escritor firmado
+    access_scope_repo=None,  # SqliteAgentAccessScopeRepo (Fase 2 Phase 3)
 ) -> "tuple[object | None, asyncio.Task | None]":
     """Arranca el adapter D-Bus si dbus-fast está instalado y hay bus de sistema.
 
@@ -2100,6 +2104,7 @@ def _start_dbus_adapter_if_available(
             skill_governance=skill_governance,
             platform_model_registry=_platform_registry,
             capability_binding_repo=_capability_binding_repo,
+            access_scope_repo=access_scope_repo,
             provider_repo=_provider_repo,
             conversation_repo=_conversation_repo,
             tenant_id=str(_resolve_tenant_id()),

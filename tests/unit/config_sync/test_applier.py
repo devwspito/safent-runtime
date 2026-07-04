@@ -775,6 +775,91 @@ class TestProviderBaseUrlSsrfCheck:
 
 
 # ---------------------------------------------------------------------------
+# Enterprise Fase 2 Phase 3: agent.access_scope -> set_agent_access_scope
+# ---------------------------------------------------------------------------
+
+
+class TestAgentAccessScopeApplier:
+    @pytest.mark.asyncio
+    async def test_access_scope_calls_set_agent_access_scope_with_json_and_tenant(self) -> None:
+        import json  # noqa: PLC0415
+
+        proxy = FakeDbusProxy(existing_agents=[])
+        payload = _empty_payload(
+            agents=[
+                {
+                    "agent_id": "a1",
+                    "name": "Sales",
+                    "access_scope": {
+                        "enforced": True,
+                        "native_tools": ["terminal"],
+                        "policy_overlay": {"send_message": {"enabled": False}},
+                    },
+                }
+            ]
+        )
+
+        await PolicyApplier(proxy).apply(payload, current_agents=[], tenant_id="tenant-xyz")
+
+        calls = [(v, args) for v, args in proxy.calls if v == "set_agent_access_scope"]
+        assert len(calls) == 1
+        agent_id, scope_json, tenant_id = calls[0][1]
+        assert agent_id == "a1"
+        assert tenant_id == "tenant-xyz"
+        scope = json.loads(scope_json)
+        assert scope["enforced"] is True
+        assert scope["native_tools"] == ["terminal"]
+        assert scope["policy_overlay"] == {"send_message": {"enabled": False}}
+
+    @pytest.mark.asyncio
+    async def test_no_access_scope_does_not_call_the_verb(self) -> None:
+        proxy = FakeDbusProxy(existing_agents=[])
+        payload = _empty_payload(agents=[{"agent_id": "a1", "name": "Sales"}])
+
+        await PolicyApplier(proxy).apply(payload, current_agents=[], tenant_id="tenant-xyz")
+
+        assert "set_agent_access_scope" not in proxy.called_verbs()
+
+    @pytest.mark.asyncio
+    async def test_access_scope_call_happens_after_capability_binding(self) -> None:
+        proxy = FakeDbusProxy(existing_agents=[])
+        payload = _empty_payload(
+            agents=[
+                {
+                    "agent_id": "a1",
+                    "name": "Sales",
+                    "capabilities": [{"kind": "skill", "id": "web-search", "version": "1"}],
+                    "access_scope": {"enforced": True},
+                }
+            ]
+        )
+
+        await PolicyApplier(proxy).apply(payload, current_agents=[], tenant_id="t")
+
+        verbs = proxy.called_verbs()
+        assert verbs.index("bind_capability_to_agent") < verbs.index("set_agent_access_scope")
+
+    @pytest.mark.asyncio
+    async def test_set_agent_access_scope_failure_marks_agent_failed(self) -> None:
+        proxy = FakeDbusProxy(existing_agents=[])
+        proxy.fail_verb("set_agent_access_scope")
+        payload = _empty_payload(
+            agents=[{"agent_id": "a1", "name": "Sales", "access_scope": {"enforced": True}}]
+        )
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[], tenant_id="t")
+
+        assert any("agent:a1" in f for f in result.failed)
+
+    @pytest.mark.asyncio
+    async def test_set_agent_access_scope_in_allowlist(self) -> None:
+        from hermes.config_sync.applier import _ALLOWED_VERBS
+
+        assert "set_agent_access_scope" in _ALLOWED_VERBS
+        assert "clear_agent_access_scope" in _ALLOWED_VERBS
+
+
+# ---------------------------------------------------------------------------
 # ApplyResult
 # ---------------------------------------------------------------------------
 

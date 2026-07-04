@@ -13,6 +13,8 @@ import pytest
 from pydantic import ValidationError
 
 from hermes.config_sync.policy_document import (
+    AccessScopeSpec,
+    AgentSpec,
     PolicyBundle,
     PolicyPayload,
     canonical_bytes,
@@ -380,3 +382,168 @@ class TestSigningBytes:
         assert parsed["payload"]["providers"] == []
         assert parsed["payload"]["license"]["plan"] == "starter"
         assert parsed["payload"]["license"]["max_agents"] == 5
+
+
+# ---------------------------------------------------------------------------
+# AccessScopeSpec — Enterprise Fase 2 Phase 3 (per-agent access scope on AgentSpec)
+# ---------------------------------------------------------------------------
+
+
+class TestAccessScopeSpecDefaults:
+    def test_defaults(self) -> None:
+        scope = AccessScopeSpec()
+        assert scope.enforced is False
+        assert scope.cerebro_unrestricted is True
+        assert scope.native_tools == []
+        assert scope.policy_overlay == {}
+        assert scope.views == []
+
+
+class TestAccessScopeSpecCardinalityCaps:
+    def test_native_tools_over_256_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AccessScopeSpec(native_tools=[f"tool{i}" for i in range(257)])
+
+    def test_native_tools_exactly_256_accepted(self) -> None:
+        scope = AccessScopeSpec(native_tools=[f"tool{i}" for i in range(256)])
+        assert len(scope.native_tools) == 256
+
+    def test_views_over_256_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AccessScopeSpec(views=[f"view{i}" for i in range(257)])
+
+    def test_policy_overlay_over_256_keys_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AccessScopeSpec(
+                policy_overlay={f"tool{i}": {"enabled": True} for i in range(257)}
+            )
+
+    def test_policy_overlay_exactly_256_keys_accepted(self) -> None:
+        scope = AccessScopeSpec(
+            policy_overlay={f"tool{i}": {"enabled": True} for i in range(256)}
+        )
+        assert len(scope.policy_overlay) == 256
+
+    def test_policy_overlay_non_bool_enabled_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AccessScopeSpec(policy_overlay={"terminal": {"enabled": ["not", "a", "bool"]}})
+
+
+class TestAgentSpecAccessScopeRoundTrip:
+    def _scope(self) -> AccessScopeSpec:
+        return AccessScopeSpec(
+            enforced=True,
+            cerebro_unrestricted=False,
+            native_tools=["execute_code", "terminal"],
+            policy_overlay={"send_message": {"enabled": False}},
+            views=["calendar"],
+        )
+
+    def test_build_signing_bytes_parse_round_trips(self) -> None:
+        agent = AgentSpec(agent_id="cloud-agent-1", name="Support", access_scope=self._scope())
+        payload = PolicyPayload(agents=[agent])
+
+        b = signing_bytes(
+            version=1, tenant_id="test-tenant", issued_at="2026-06-26T10:00:00Z", payload=payload
+        )
+        parsed_payload = PolicyPayload.model_validate(json.loads(b)["payload"])
+
+        assert parsed_payload.agents[0].access_scope is not None
+        assert parsed_payload.agents[0].access_scope.model_dump() == self._scope().model_dump()
+
+    def test_agent_with_access_scope_none_explicit_parses_none(self) -> None:
+        agent = AgentSpec.model_validate({"agent_id": "a1", "name": "X", "access_scope": None})
+        assert agent.access_scope is None
+
+
+class TestAgentSpecAccessScopeBackCompat:
+    """A bundle without access_scope must parse + sign BYTE-IDENTICALLY to
+    before this field existed — `access_scope` must never appear (not even as
+    null) in the serialized dict when it is unset."""
+
+    def test_agent_without_access_scope_parses_to_none(self) -> None:
+        agent = AgentSpec.model_validate({"agent_id": "a1", "name": "X"})
+        assert agent.access_scope is None
+
+    def test_access_scope_key_absent_from_dump_when_none(self) -> None:
+        agent = AgentSpec(agent_id="a1", name="X")
+        payload = PolicyPayload(agents=[agent])
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-06-26T10:00:00Z", payload=payload)
+        parsed_agent = json.loads(b)["payload"]["agents"][0]
+        assert "access_scope" not in parsed_agent
+
+    def test_signing_bytes_unaffected_by_the_new_field_existing(self) -> None:
+        """Same agent dict (no access_scope key), signed before/after the field
+        was added, must produce the exact same bytes — the model addition is
+        purely additive for callers that never populate it."""
+        agent_dict = {"agent_id": "a1", "name": "Support", "provider_alias": "gpt4"}
+        payload = PolicyPayload.model_validate({"agents": [agent_dict]})
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-06-26T10:00:00Z", payload=payload)
+        parsed_agent = json.loads(b)["payload"]["agents"][0]
+        assert "access_scope" not in parsed_agent
+        assert parsed_agent["provider_alias"] == "gpt4"
+
+
+# ---------------------------------------------------------------------------
+# Committed test vector — AgentSpec.access_scope signing bytes (Fase 2 Phase 3)
+# ---------------------------------------------------------------------------
+#
+# This vector pins the exact AccessScopeSpec wire shape so the cloud signing
+# implementation and the associate verifier cannot drift independently.
+#
+# To regenerate:
+#   PYTHONPATH=src python3 -c "
+#   from hermes.config_sync.policy_document import (
+#       AccessScopeSpec, AgentSpec, PolicyPayload, signing_bytes)
+#   scope = AccessScopeSpec(
+#       enforced=True, cerebro_unrestricted=False,
+#       native_tools=['execute_code', 'terminal'],
+#       policy_overlay={'send_message': {'enabled': False}},
+#       views=['calendar'])
+#   agent = AgentSpec(agent_id='cloud-agent-1', name='Support', access_scope=scope)
+#   payload = PolicyPayload(agents=[agent])
+#   b = signing_bytes(version=1, tenant_id='test-tenant',
+#                      issued_at='2026-06-26T10:00:00Z', payload=payload)
+#   print(b.decode())
+#   "
+
+
+class TestAccessScopeSigningVector:
+    _VECTOR_VERSION = 1
+    _VECTOR_TENANT = "test-tenant"
+    _VECTOR_ISSUED_AT = "2026-06-26T10:00:00Z"
+
+    def _vector_payload(self) -> PolicyPayload:
+        scope = AccessScopeSpec(
+            enforced=True,
+            cerebro_unrestricted=False,
+            native_tools=["execute_code", "terminal"],
+            policy_overlay={"send_message": {"enabled": False}},
+            views=["calendar"],
+        )
+        agent = AgentSpec(agent_id="cloud-agent-1", name="Support", access_scope=scope)
+        return PolicyPayload(agents=[agent])
+
+    def _vector_bytes(self) -> bytes:
+        return signing_bytes(
+            version=self._VECTOR_VERSION,
+            tenant_id=self._VECTOR_TENANT,
+            issued_at=self._VECTOR_ISSUED_AT,
+            payload=self._vector_payload(),
+        )
+
+    def test_vector_is_deterministic(self) -> None:
+        assert self._vector_bytes() == self._vector_bytes()
+
+    def test_vector_expected_access_scope_shape(self) -> None:
+        parsed = json.loads(self._vector_bytes())
+        agent = parsed["payload"]["agents"][0]
+
+        assert list(agent.keys()) == sorted(agent.keys())
+        assert agent["access_scope"] == {
+            "cerebro_unrestricted": False,
+            "enforced": True,
+            "native_tools": ["execute_code", "terminal"],
+            "policy_overlay": {"send_message": {"enabled": False}},
+            "views": ["calendar"],
+        }

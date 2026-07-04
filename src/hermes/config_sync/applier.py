@@ -119,6 +119,11 @@ _ALLOWED_VERBS: frozenset[str] = frozenset(
         "grant_consent",
         # Egress (add domain only — never mode change, never remove)
         "add_egress_domain",
+        # Per-agent native-tool access scope (Enterprise Fase 2 Phase 3).
+        # clear_agent_access_scope is allow-listed for a LATER phase (reconcile
+        # is additive-only today — see _upsert_agent's access_scope handling).
+        "set_agent_access_scope",
+        "clear_agent_access_scope",
         # NOTE: set_feature_flags is intentionally ABSENT.
         # Feature views travel in license.views (LicenseSpec) and are persisted by
         # __main__.py via store.update_license(). The feature_guard middleware reads
@@ -246,8 +251,14 @@ class PolicyApplier:
         payload: PolicyPayload,
         *,
         current_agents: list[dict] | None = None,
+        tenant_id: str = "",
     ) -> ApplyResult:
-        """Reconcile all sections in dependency order (P1-4: deletes at end)."""
+        """Reconcile all sections in dependency order (P1-4: deletes at end).
+
+        tenant_id: the bundle envelope's tenant_id (PolicyBundle.tenant_id),
+        forwarded to set_agent_access_scope (Enterprise Fase 2 Phase 3). Default
+        "" preserves existing callers that don't scope agent access yet.
+        """
         result = ApplyResult()
 
         # Phase 1: upsert everything
@@ -260,7 +271,7 @@ class PolicyApplier:
         if live_agents is None:
             live_agents = await self._fetch_agents()
         cloud_managed = _cloud_managed_index(live_agents)
-        await self._upsert_agents(payload.agents, cloud_managed, result)
+        await self._upsert_agents(payload.agents, cloud_managed, result, tenant_id)
 
         await self._apply_consents(payload.consents, result)
         await self._apply_egress(payload.egress, result)
@@ -440,10 +451,11 @@ class PolicyApplier:
         specs: list[AgentSpec],
         cloud_managed: dict[str, dict],
         result: ApplyResult,
+        tenant_id: str,
     ) -> None:
         """Upsert-only phase.  Deletes happen separately after all upserts (P1-4)."""
         for spec in specs:
-            ok = await self._upsert_agent(spec, cloud_managed)
+            ok = await self._upsert_agent(spec, cloud_managed, tenant_id)
             if ok:
                 result.applied += 1
             else:
@@ -546,7 +558,7 @@ class PolicyApplier:
     # ------------------------------------------------------------------
 
     async def _upsert_agent(
-        self, spec: AgentSpec, cloud_managed: dict[str, dict]
+        self, spec: AgentSpec, cloud_managed: dict[str, dict], tenant_id: str
     ) -> bool:
         draft = _agent_draft(spec)
         if spec.agent_id in cloud_managed:
@@ -579,6 +591,19 @@ class PolicyApplier:
             )
             if not _is_ok_lenient(resp_bind):
                 bind_ok = False
+
+        # Enterprise Fase 2 Phase 3: land the cloud-pushed AgentAccessScope, if
+        # the bundle carries one. Reconcile is ADDITIVE ONLY in this phase — a
+        # bundle with no access_scope for a cloud-managed agent leaves any
+        # existing local scope untouched (no clear_agent_access_scope call here).
+        if spec.access_scope is not None:
+            scope_json = json.dumps(spec.access_scope.model_dump())
+            resp_scope = await self._call_mutator(
+                "set_agent_access_scope", created_id, scope_json, tenant_id
+            )
+            if not _is_ok_lenient(resp_scope):
+                bind_ok = False
+
         return bind_ok
 
     async def _delete_agent(self, agent_id: str) -> bool:

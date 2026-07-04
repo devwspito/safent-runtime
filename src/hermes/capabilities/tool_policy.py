@@ -390,3 +390,63 @@ class ToolPolicyStore:
     def apply_preset(self, preset: Preset) -> None:
         # A preset is a clean slate: drop per-tool overrides.
         self._save({"preset": preset.value, "overrides": {}})
+
+    def for_agent(self, agent_id: str, overlay: dict) -> "AgentToolPolicyView":
+        """Return a per-agent VIEW with a cloud-pushed policy_overlay on top.
+
+        Precedence: agent overlay → global file (this store) → preset default.
+        *overlay* is the AgentAccessScope.policy_overlay dict — only ever
+        non-empty when a cloud scope set it (Enterprise Fase 2 Phase 2/3);
+        an agent with no overlay behaves EXACTLY like calling this store
+        directly (zero regression).
+        """
+        return AgentToolPolicyView(self, agent_id, overlay)
+
+
+class AgentToolPolicyView:
+    """Read-only per-agent overlay on top of a global ToolPolicyStore.
+
+    Shape of *overlay*: {tool_name: {"enabled": bool}} (AgentAccessScope.
+    policy_overlay). Precedence for is_enabled/is_owner_disabled: agent
+    overlay → global file → preset default. mfa_on_dangers has no per-agent
+    axis in this overlay shape (it always defers to the global decision).
+
+    Malformed overlay entries (missing/wrong-typed "enabled") fail CLOSED:
+    they are treated as an explicit DISABLE, never silently ignored into a
+    fall-through that could allow more than the global policy already does.
+    """
+
+    def __init__(self, base: ToolPolicyStore, agent_id: str, overlay: dict) -> None:
+        self._base = base
+        self._agent_id = agent_id
+        self._overlay = overlay if isinstance(overlay, dict) else {}
+
+    def _overlay_enabled(self, tool: str) -> bool | None:
+        """Return the overlay's enabled bit for *tool*, or None if absent.
+
+        A PRESENT but malformed entry (not a dict, or "enabled" not a bool)
+        fails CLOSED to False (disabled) rather than falling through to the
+        global store — an unenforceable/corrupt cloud-pushed entry must never
+        be silently upgraded into a permissive default.
+        """
+        if tool not in self._overlay:
+            return None
+        entry = self._overlay[tool]
+        if not isinstance(entry, dict) or not isinstance(entry.get("enabled"), bool):
+            return False
+        return entry["enabled"]
+
+    def is_enabled(self, tool: str) -> bool:
+        overlay_bit = self._overlay_enabled(tool)
+        if overlay_bit is not None:
+            return overlay_bit
+        return self._base.is_enabled(tool)
+
+    def is_owner_disabled(self, tool: str) -> bool:
+        overlay_bit = self._overlay_enabled(tool)
+        if overlay_bit is not None:
+            return not overlay_bit
+        return self._base.is_owner_disabled(tool)
+
+    def mfa_on_dangers(self) -> bool:
+        return self._base.mfa_on_dangers()

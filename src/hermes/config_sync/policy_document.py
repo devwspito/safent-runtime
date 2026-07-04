@@ -28,7 +28,8 @@ SIGNING FORMAT (P0-1):
 
 CARDINALIY CAPS (P1-3, enforced at Pydantic parse time):
   agents ≤ 200, providers ≤ 50, mcp ≤ 100, skills ≤ 200, consents ≤ 200,
-  egress.allow_domains ≤ 500, mcp.env ≤ 100 keys.
+  egress.allow_domains ≤ 500, mcp.env ≤ 100 keys, access_scope.native_tools/
+  views ≤ 256 each, access_scope.policy_overlay ≤ 256 keys.
 """
 
 from __future__ import annotations
@@ -36,7 +37,53 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer
+
+
+# ---------------------------------------------------------------------------
+# Access scope spec (Enterprise Fase 2 Phase 3)
+# ---------------------------------------------------------------------------
+
+
+class AccessScopeSpec(BaseModel):
+    """Per-agent native-tool access scope pushed by the cloud.
+
+    Wire shape is PINNED — the cloud mirror signs/serializes this exact
+    shape; do not add/rename/reorder fields without a coordinated cloud-side
+    change. Lands into hermes.capabilities.domain.agent_access_scope.
+    AgentAccessScope via the set_agent_access_scope D-Bus verb (see
+    hermes/config_sync/applier.py and
+    hermes/agents_os/infrastructure/dbus_runtime_service.py).
+
+      enforced:              bool  — default False (governs nothing until True)
+      cerebro_unrestricted:  bool  — default True (only bites when enforced +
+                                     the agent is the CEO/Cerebro)
+      native_tools:          list[str] — allow-set of native tool names, SORTED
+      policy_overlay:        dict  — {tool_name: {"enabled": bool}}
+      views:                 list[str] — carried; enforcement is a later phase
+    """
+
+    enforced: bool = False
+    cerebro_unrestricted: bool = True
+    native_tools: list[str] = Field(default_factory=list, max_length=256)
+    policy_overlay: dict[str, dict[str, bool]] = Field(default_factory=dict)
+    views: list[str] = Field(default_factory=list, max_length=256)
+
+    @field_validator("native_tools")
+    @classmethod
+    def _sorted_unique_native_tools(cls, v: list[str]) -> list[str]:
+        """Canonicalise the allow-set: sorted + de-duplicated (it is a set on the
+        wire). MUST match the cloud mirror's _sorted_unique_native_tools so
+        signing_bytes are byte-identical regardless of the authoring order — the
+        byte-mirror must not depend on the signer happening to pre-sort."""
+        return sorted(set(v))
+
+    @field_validator("policy_overlay")
+    @classmethod
+    def _cap_policy_overlay(cls, v: dict) -> dict:
+        if len(v) > 256:
+            raise ValueError(f"policy_overlay exceeds 256 keys (got {len(v)})")
+        return v
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +113,22 @@ class AgentSpec(BaseModel):
     provider_alias: str | None = Field(default=None, max_length=120)
     # Capability bindings: {"kind": "skill"|"mcp", "id": "...", "version": ""}
     capabilities: list[dict[str, str]] = Field(default_factory=list)
+    # Enterprise Fase 2 Phase 3: per-agent native-tool access scope. None/absent
+    # -> agent unscoped (today's behaviour, zero regression).
+    access_scope: AccessScopeSpec | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_agent(self, handler: Any) -> dict[str, Any]:
+        """Drop access_scope from the dump when unset (back-compat bytes).
+
+        AgentSpec predates access_scope (Fase 2 Phase 3): a bundle without it
+        must sign/serialize BYTE-IDENTICALLY to before this field existed, so
+        `"access_scope":null` must never appear when it is None.
+        """
+        data = handler(self)
+        if self.access_scope is None:
+            data.pop("access_scope", None)
+        return data
 
 
 # ---------------------------------------------------------------------------

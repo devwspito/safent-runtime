@@ -271,6 +271,7 @@ class DbusRuntimeServiceWiring:
         platform_model_registry: Any | None = None,  # SqlitePlatformModelRegistry (F010)
         platform_model_signer: Any | None = None,   # PlatformModelSigner (security hardening)
         capability_binding_repo: Any | None = None,   # SqliteCapabilityBindingRepo (F010)
+        access_scope_repo: Any | None = None,   # SqliteAgentAccessScopeRepo (Fase 2 Phase 3)
         provider_repo: Any | None = None,   # SQLiteProviderRepository (GATE 0 / M1: providers OS-nativos)
         conversation_repo: Any | None = None,  # SQLiteConversationRepository (GATE 0 / M2: chat OS-nativo)
         tenant_id: str = "",  # tenant scope for platform reads (F010)
@@ -342,6 +343,7 @@ class DbusRuntimeServiceWiring:
         self._platform_model_registry = platform_model_registry  # gobernanza plataformas (F010)
         self._platform_model_signer = platform_model_signer  # firma/verificación modelos (hardening)
         self._capability_binding_repo = capability_binding_repo  # asignación capacidades (F010)
+        self._access_scope_repo = access_scope_repo  # per-agent native-tool scope (Fase 2 Phase 3)
         self._provider_repo = provider_repo  # GATE 0 / M1: providers OS-nativos (D-Bus, no HTTP)
         self._conversation_repo = conversation_repo  # GATE 0 / M2: chat OS-nativo (D-Bus, no HTTP)
         self._tenant_id = tenant_id  # tenant scope para lecturas de plataforma (F010)
@@ -3741,6 +3743,11 @@ class DbusRuntimeServiceWiring:
             raise RuntimeError("capability_binding_repo no inyectado en el wiring")
         return self._capability_binding_repo
 
+    def _require_access_scope_repo(self):
+        if self._access_scope_repo is None:
+            raise RuntimeError("access_scope_repo no inyectado en el wiring")
+        return self._access_scope_repo
+
     # --- Read-only platform supervision (no authZ) ---
 
     def list_platform_models(self, tenant_id: str) -> list[dict]:
@@ -4002,6 +4009,53 @@ class DbusRuntimeServiceWiring:
             },
         )
         return changed
+
+    async def set_agent_access_scope(
+        self,
+        *,
+        agent_id: str,
+        scope_json: str,
+        tenant_id: str,
+        sender_uid: int,
+    ) -> dict:
+        """Land a cloud-pushed AgentAccessScope for *agent_id* (Fase 2 Phase 3).
+
+        Authorized EXACTLY like bind_capability_to_agent (self._authorize).
+        updated_by is ALWAYS sender_uid (D-Bus peer cred), NEVER from the
+        payload (CWE-862). managed_by is always "cloud" — config-sync is the
+        only caller of this verb today (a future local/owner-authored scope
+        would use a different verb).
+        """
+        self._authorize(sender_uid, operation="set_agent_access_scope")
+        repo = self._require_access_scope_repo()
+
+        fields, error = _parse_access_scope_json(scope_json)
+        if error is not None:
+            logger.warning(
+                "hermes.dbus.agent_access_scope_rejected",
+                extra={"agent_id": agent_id, "reason": error},
+            )
+            return {"ok": False, "error": error}
+
+        from hermes.capabilities.domain.agent_access_scope import AgentAccessScope  # noqa: PLC0415
+
+        scope = AgentAccessScope.create(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            updated_by=sender_uid,
+            native_tools=frozenset(fields["native_tools"]),
+            policy_overlay=fields["policy_overlay"],
+            views=tuple(fields["views"]),
+            cerebro_unrestricted=fields["cerebro_unrestricted"],
+            enforced=fields["enforced"],
+            managed_by="cloud",
+        )
+        repo.upsert(scope)
+        logger.info(
+            "hermes.dbus.agent_access_scope_set",
+            extra={"agent_id": agent_id, "tenant_id": tenant_id, "by_uid": sender_uid},
+        )
+        return {"ok": True, "scope_id": scope.scope_id}
 
     async def set_agent_house_rule(
         self,
@@ -5086,6 +5140,66 @@ async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[
 def _uid_to_uuid(uid: int) -> UUID:
     """Convierte un UID POSIX a UUID determinista para usarlo como operator_id."""
     return UUID(int=uid)
+
+
+# AccessScopeSpec wire shape (Fase 2 Phase 3) — mirrors
+# hermes.config_sync.policy_document.AccessScopeSpec exactly.
+_ACCESS_SCOPE_ALLOWED_KEYS: frozenset[str] = frozenset({
+    "enforced", "cerebro_unrestricted", "native_tools", "policy_overlay", "views",
+})
+_ACCESS_SCOPE_MAX_LIST_LEN = 256
+
+
+def _parse_access_scope_json(scope_json: str) -> tuple[dict, str | None]:
+    """Parse+validate a cloud-pushed AccessScopeSpec JSON string.
+
+    D-Bus trust boundary (CWE-20, untrusted input): returns (fields, None) on
+    success — fields has every AgentAccessScope.create() kwarg filled with a
+    validated/defaulted value. Returns ({}, error) on ANY validation failure
+    (bad JSON, unknown keys, wrong types, length caps exceeded). NEVER raises.
+    """
+    try:
+        raw = json.loads(scope_json)
+    except (ValueError, TypeError) as exc:
+        return {}, f"scope_json inválido: {exc}"
+
+    if not isinstance(raw, dict):
+        return {}, "scope_json debe ser un objeto JSON"
+
+    unknown = set(raw) - _ACCESS_SCOPE_ALLOWED_KEYS
+    if unknown:
+        return {}, f"claves desconocidas: {sorted(unknown)}"
+
+    native_tools = raw.get("native_tools", [])
+    views = raw.get("views", [])
+    policy_overlay = raw.get("policy_overlay", {})
+    enforced = raw.get("enforced", False)
+    cerebro_unrestricted = raw.get("cerebro_unrestricted", True)
+
+    if not isinstance(native_tools, list) or not all(isinstance(t, str) for t in native_tools):
+        return {}, "native_tools debe ser list[str]"
+    if len(native_tools) > _ACCESS_SCOPE_MAX_LIST_LEN:
+        return {}, f"native_tools excede {_ACCESS_SCOPE_MAX_LIST_LEN} entradas"
+    if not isinstance(views, list) or not all(isinstance(v, str) for v in views):
+        return {}, "views debe ser list[str]"
+    if len(views) > _ACCESS_SCOPE_MAX_LIST_LEN:
+        return {}, f"views excede {_ACCESS_SCOPE_MAX_LIST_LEN} entradas"
+    if not isinstance(policy_overlay, dict):
+        return {}, "policy_overlay debe ser un objeto"
+    if len(policy_overlay) > _ACCESS_SCOPE_MAX_LIST_LEN:
+        return {}, f"policy_overlay excede {_ACCESS_SCOPE_MAX_LIST_LEN} entradas"
+    if not isinstance(enforced, bool):
+        return {}, "enforced debe ser bool"
+    if not isinstance(cerebro_unrestricted, bool):
+        return {}, "cerebro_unrestricted debe ser bool"
+
+    return {
+        "native_tools": native_tools,
+        "views": views,
+        "policy_overlay": policy_overlay,
+        "enforced": enforced,
+        "cerebro_unrestricted": cerebro_unrestricted,
+    }, None
 
 
 def _resolve_tenant_id_from_wiring(tenant_id_str: str) -> UUID:
