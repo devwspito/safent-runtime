@@ -54,17 +54,29 @@ table inet hermes_browser_local {
         # Only the hermes daemon (host netns, veth peer) reaches the CDP port;
         # no WAN traffic can source from 10.200.0.1 (it is the veth host-side IP).
         # CDP responses are covered by the output chain's ct established,related rule.
+        # PINNED port for the exec-browse / teaching-chromium sessions (back-compat).
         ip saddr 10.200.0.1 tcp dport 9333 accept comment "daemon→CDP control (jailed browser)"
 
         # Daemon → x11vnc (RFB) serving the jailed browser's Xvfb display on 5900.
         # Same trust model as CDP: only the veth host-side peer can connect; the
         # shell-server proxies it to the web UI behind the webui bearer token.
+        # PINNED port for the exec-browse / teaching-chromium sessions (back-compat).
         ip saddr 10.200.0.1 tcp dport 5900 accept comment "daemon→VNC live-view (jailed browser display)"
 
         # Daemon → hermes-clipboard-server (xclip) on 7519 — clipboard sync for the web UI.
         # Same trust model as CDP/VNC: only the veth host-side peer connects; proxied by
         # the shell-server behind the webui bearer token.
         ip saddr 10.200.0.1 tcp dport 7519 accept comment "daemon→clipboard bridge (jailed browser)"
+
+        # C1 (concurrent isolated exec-* sessions): each additional exec-<id> session
+        # gets its OWN CDP/RFB port, derived as 9400+slot / 5950+slot (slot = sum of
+        # the session name's bytes mod 40 — see hermes.security.browser_session_ports
+        # / hermes-browser-launcher's _session_slot(), mirrored identically). Bounded
+        # ranges, SAME source-IP trust model as the pinned rules above (only the
+        # daemon's veth peer, 10.200.0.1, is accepted) — this is the same single-peer
+        # rule instantiated per session slot, not a broadened allow.
+        ip saddr 10.200.0.1 tcp dport 9400-9439 accept comment "daemon→CDP control (per-session exec browsers)"
+        ip saddr 10.200.0.1 tcp dport 5950-5989 accept comment "daemon→VNC live-view (per-session exec browsers)"
 
         log prefix "hbr NS IN DROP: " level warn drop
     }

@@ -43,6 +43,40 @@ log_err() {
     echo "$LOG_TAG: ERROR: $*" >&2
 }
 
+# ── Per-session Xvfb display number (C1: concurrent isolated sessions) ───────
+# SINGLE SOURCE OF TRUTH mirrored EXACTLY in hermes-browser-launcher's
+# _session_slot() / hermes.security.browser_session_ports (daemon package):
+# slot = sum(bytes(session_name)) % 40. Session names are ASCII-only (the
+# launcher's server-side regex is ^(exec|teaching)-[a-z0-9]{1,64}$), so this
+# bash byte-sum always agrees with Python's sum(name.encode()).
+#
+# exec-browse / teaching-chromium stay PINNED to the legacy display :99
+# (back-compat: behavior with no session parameter anywhere must remain
+# byte-identical to today — teaching-chromium already shared :99 with
+# exec-browse before C1, since this hardcoded ":99" applied regardless of
+# session name).
+readonly HERMES_SESSION_SLOT_COUNT=40
+
+_session_display_num() {
+    local name="${1:-}"
+    case "$name" in
+        exec-browse|teaching-chromium|"")
+            printf '99'
+            return
+            ;;
+    esac
+    local sum=0 i c ord
+    for (( i=0; i<${#name}; i++ )); do
+        c="${name:i:1}"
+        printf -v ord '%d' "'$c"
+        sum=$(( (sum + ord) % HERMES_SESSION_SLOT_COUNT ))
+    done
+    printf '%d' $(( 100 + sum ))
+}
+
+readonly HERMES_JAIL_SESSION_NAME="${HERMES_BROWSER_SESSION:-exec-browse}"
+readonly HERMES_XDISPLAY_NUM="$(_session_display_num "$HERMES_JAIL_SESSION_NAME")"
+
 # ── 1. Verificar que el netns existe ─────────────────────────────────────────
 # Si hermes-browser-netns.service falló o no se ejecutó, el browser no debe
 # lanzarse (fail-closed: sin netns el browser tendría red del host completa).
@@ -137,26 +171,27 @@ fi
 # Xvfb y x11vnc quedan en el cgroup del servicio → mueren con el navegador.
 if [[ -n "${HERMES_BROWSER_DISPLAY:-}" ]]; then
     display_res="${HERMES_BROWSER_DISPLAY}"
+    xdisplay="${HERMES_XDISPLAY_NUM}"
     if command -v Xvfb >/dev/null 2>&1; then
-        log "display: Xvfb :99 ${display_res}x24"
-        Xvfb :99 -screen 0 "${display_res}x24" -nolisten tcp &
+        log "display: Xvfb :${xdisplay} (session=${HERMES_JAIL_SESSION_NAME}) ${display_res}x24"
+        Xvfb ":${xdisplay}" -screen 0 "${display_res}x24" -nolisten tcp &
         # Wait for the X socket (Xvfb is fast; bounded wait, fail-soft to headless).
         for _i in $(seq 1 50); do
-            [[ -e /tmp/.X11-unix/X99 ]] && break
+            [[ -e "/tmp/.X11-unix/X${xdisplay}" ]] && break
             sleep 0.1
         done
-        if [[ -e /tmp/.X11-unix/X99 ]]; then
-            export DISPLAY=:99
+        if [[ -e "/tmp/.X11-unix/X${xdisplay}" ]]; then
+            export DISPLAY=":${xdisplay}"
             if [[ -n "${HERMES_VNC_RELAY:-}" ]] && command -v x11vnc >/dev/null 2>&1; then
                 vnc_addr="${HERMES_VNC_RELAY%%:*}"
                 vnc_port="${HERMES_VNC_RELAY##*:}"
-                log "vnc: x11vnc :99 → ${vnc_addr}:${vnc_port}"
+                log "vnc: x11vnc :${xdisplay} → ${vnc_addr}:${vnc_port}"
                 # x11vnc stays fully OUT of the X selections (-noprimary -noclipboard
                 # -nosetprimary -nosetclipboard): its own selection owner does not answer
                 # Chromium's TARGETS request (paste hangs) and it never emits ServerCutText.
                 # The clipboard is handled by hermes-clipboard-server (xclip, a proper owner)
                 # + a real Ctrl+V injected over RFB by the web UI. x11vnc still forwards keys.
-                x11vnc -display :99 -listen "${vnc_addr}" -rfbport "${vnc_port}" \
+                x11vnc -display ":${xdisplay}" -listen "${vnc_addr}" -rfbport "${vnc_port}" \
                        -nopw -forever -shared -quiet \
                        -noprimary -noclipboard -nosetprimary -nosetclipboard >/dev/null 2>&1 &
             else
@@ -168,13 +203,13 @@ if [[ -n "${HERMES_BROWSER_DISPLAY:-}" ]]; then
             if [[ -n "${HERMES_CLIP_RELAY:-}" ]] && command -v xclip >/dev/null 2>&1 \
                     && [[ -x /usr/libexec/hermes/hermes-clipboard-server ]]; then
                 log "clipboard: hermes-clipboard-server (xclip) → ${HERMES_CLIP_RELAY}"
-                HERMES_CLIP_RELAY="${HERMES_CLIP_RELAY}" DISPLAY=:99 \
+                HERMES_CLIP_RELAY="${HERMES_CLIP_RELAY}" DISPLAY=":${xdisplay}" \
                     python3 /usr/libexec/hermes/hermes-clipboard-server >/dev/null 2>&1 &
             else
                 log_warn "clipboard: xclip/servidor ausente o HERMES_CLIP_RELAY vacío — copiar/pegar degradado"
             fi
         else
-            log_warn "display: Xvfb no levantó /tmp/.X11-unix/X99 — el navegador seguirá headless"
+            log_warn "display: Xvfb no levantó /tmp/.X11-unix/X${xdisplay} — el navegador seguirá headless"
         fi
     else
         log_warn "display: Xvfb no disponible — el navegador seguirá headless"

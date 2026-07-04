@@ -82,6 +82,62 @@ _CLIP_PORT = 7519                       # hermes-clipboard-server (xclip) on the
 # live view. x11vnc streams these real display pixels (region updates, fluid).
 _DISPLAY_RES = "3200x1800"
 
+# ── Per-session port/display derivation (C1: concurrent isolated sessions) ────
+# SINGLE SOURCE OF TRUTH mirrored EXACTLY in:
+#   - hermes-browser-jail (bash `_session_display_num()`) — Xvfb display number,
+#     derived from $HERMES_BROWSER_SESSION (set via --setenv below).
+#   - hermes.security.browser_session_ports (daemon package) — the port
+#     JailedBrowserManager/vnc_proxy poll or connect to for a given session.
+# Formula: sum(UTF-8 bytes of session_name) % _SLOT_COUNT. Session names are
+# ASCII-only (_SESSION_RE above), so this always agrees with a bash byte-sum
+# and with Python's sum(name.encode()) in the daemon package.
+#
+# DELIBERATELY INLINED (not `from hermes.security.browser_session_ports import
+# ...`): this launcher is the root privilege boundary and, like the Landlock/
+# seccomp shim above, stays self-contained rather than importing the (daemon-
+# writable-adjacent) installed package tree into the root process itself. The
+# daemon-side module is imported freely by the UNprivileged daemon package
+# (jailed_browser_manager.py / vnc_proxy.py) — only this root script avoids it.
+_SLOT_COUNT = 40
+_DISPLAY_BASE = 100
+_CDP_PORT_BASE = 9400
+_VNC_PORT_BASE = 5950
+# exec-browse / teaching-chromium are PINNED to the legacy ports (back-compat:
+# behavior with no session parameter anywhere must stay byte-identical to
+# today; teaching-chromium already shared these ports with exec-browse before
+# C1, since the pre-C1 code hardcoded them globally regardless of session).
+_LEGACY_SESSIONS = frozenset({"exec-browse", "teaching-chromium"})
+
+_MAX_EXEC_SESSIONS_DEFAULT = 3
+_EXEC_UNIT_GLOB = "hermes-browser-exec-*.service"
+
+
+def _session_slot(session_name: str) -> int:
+    return sum(session_name.encode("utf-8")) % _SLOT_COUNT
+
+
+def _session_cdp_port(session_name: str) -> int:
+    if session_name in _LEGACY_SESSIONS:
+        return _CDP_PORT
+    return _CDP_PORT_BASE + _session_slot(session_name)
+
+
+def _session_vnc_port(session_name: str) -> int:
+    if session_name in _LEGACY_SESSIONS:
+        return _VNC_PORT
+    return _VNC_PORT_BASE + _session_slot(session_name)
+
+
+def _session_clip_port(session_name: str) -> int | None:
+    """Clipboard bridge stays on the legacy port for PINNED sessions only.
+
+    The web UI's clipboard_bridge.py hits a fixed path (10.200.0.2:7519, no
+    session parameter — frontend is out of scope for C1). Starting a
+    clipboard bridge for a non-pinned session would be unreachable dead
+    code, so those sessions simply get none (documented C1 deviation).
+    """
+    return _CLIP_PORT if session_name in _LEGACY_SESSIONS else None
+
 # ── Landlock self-apply exec shim (security review HIGH: FS jail was a no-op) ──
 # THE BUG: hermes-browser-jail ran `python3 -m hermes.security.landlock_loader
 # BROWSER` as a SEPARATE CHILD process. A Landlock ruleset only governs the
@@ -426,6 +482,7 @@ def _build_browser_argv(session_name: str) -> list[str]:
     no-op where Chromium ran outside Landlock entirely.
     """
     user_data_dir = f"{_BROWSER_SESSIONS_BASE}/{session_name}"
+    cdp_port = _session_cdp_port(session_name)
     return [
         "python3",
         "-c",
@@ -463,7 +520,7 @@ def _build_browser_argv(session_name: str) -> list[str]:
         "--no-first-run",
         "--no-default-browser-check",
         f"--user-data-dir={user_data_dir}",
-        f"--remote-debugging-port={_CDP_PORT}",
+        f"--remote-debugging-port={cdp_port}",
         f"--remote-debugging-address={_CDP_BIND_ADDR}",
         # Chromium 111+ rejects CDP WebSocket connections whose Origin/host isn't
         # localhost (DNS-rebinding CVE mitigation) → the daemon's attach hangs on
@@ -549,6 +606,9 @@ def _launch(session_name: str, domains_whitelist: list[str]) -> None:
     _ensure_session_dir(rw_path)
     unit_name = f"hermes-browser-{session_name}.service"
     browser_argv = _build_browser_argv(session_name)
+    cdp_port = _session_cdp_port(session_name)
+    vnc_port = _session_vnc_port(session_name)
+    clip_port = _session_clip_port(session_name)
 
     cmd = [
         "systemd-run",
@@ -585,16 +645,26 @@ def _launch(session_name: str, domains_whitelist: list[str]) -> None:
         f"--setenv=HERMES_BROWSER_SESSION={session_name}",
         f"--setenv=HERMES_JAIL_SESSION={session_name}",
         # Chromium binds CDP to 127.0.0.1 only; the jail starts a socat relay so the
-        # daemon reaches it on the veth IP (see hermes-browser-jail).
-        f"--setenv=HERMES_CDP_RELAY={_CDP_BIND_ADDR}:{_CDP_PORT}",
+        # daemon reaches it on the veth IP (see hermes-browser-jail). Port is derived
+        # per-session (C1: concurrent isolated sessions) — pinned to the legacy 9333
+        # for exec-browse/teaching-chromium, 9400+slot for every other exec-* session.
+        f"--setenv=HERMES_CDP_RELAY={_CDP_BIND_ADDR}:{cdp_port}",
         # Headful on a real Xvfb display + x11vnc live-view (sharp+fluid). The jail
-        # script starts Xvfb :99 at this resolution and x11vnc bound to the veth IP,
-        # reachable only by the daemon (nft 5900) and proxied to the web UI.
+        # script derives ITS OWN display number from HERMES_BROWSER_SESSION (mirrors
+        # _session_slot() above) and starts Xvfb at that display + this resolution,
+        # with x11vnc bound to the veth IP at the port below (reachable only by the
+        # daemon, nft-gated, and proxied to the web UI).
         f"--setenv=HERMES_BROWSER_DISPLAY={_DISPLAY_RES}",
-        f"--setenv=HERMES_VNC_RELAY={_CDP_BIND_ADDR}:{_VNC_PORT}",
+        f"--setenv=HERMES_VNC_RELAY={_CDP_BIND_ADDR}:{vnc_port}",
+    ]
+    if clip_port is not None:
         # hermes-clipboard-server (xclip) so the web UI can copy/paste with the jailed
-        # browser (UTF-8). Bound to the veth IP, daemon-only (nft 7519), proxied same-origin.
-        f"--setenv=HERMES_CLIP_RELAY={_CDP_BIND_ADDR}:{_CLIP_PORT}",
+        # browser (UTF-8). Bound to the veth IP, daemon-only (nft 7519), proxied
+        # same-origin. PINNED sessions only (see _session_clip_port docstring) — the
+        # web UI's clipboard bridge has no session parameter yet (frontend out of
+        # scope for C1), so a per-session clipboard port would be unreachable.
+        cmd.append(f"--setenv=HERMES_CLIP_RELAY={_CDP_BIND_ADDR}:{clip_port}")
+    cmd += [
         "--",
         _JAIL_SCRIPT,
         *browser_argv,
@@ -603,14 +673,82 @@ def _launch(session_name: str, domains_whitelist: list[str]) -> None:
     env = dict(os.environ)
 
     logger.info(
-        "launcher.exec unit=%s rw_path=%s domains=%d browser_binary=%s landlock_shim=%s",
+        "launcher.exec unit=%s rw_path=%s domains=%d browser_binary=%s landlock_shim=%s "
+        "cdp_port=%d vnc_port=%d",
         unit_name,
         rw_path,
         len(domains_whitelist),
         _CHROMIUM_BIN,
         browser_argv[0],
+        cdp_port,
+        vnc_port,
     )
     os.execvpe(cmd[0], cmd, env)
+
+
+# ── Concurrent exec-* session cap ───────────────────────────────────────────────
+
+
+class ExecSessionCapExceeded(RuntimeError):
+    """Refused to launch: too many concurrent exec-* sessions are already active."""
+
+
+def _max_exec_sessions() -> int:
+    raw = os.environ.get("HERMES_MAX_EXEC_SESSIONS", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            logger.warning(
+                "launcher.invalid_max_exec_sessions raw=%r — using default %d",
+                raw, _MAX_EXEC_SESSIONS_DEFAULT,
+            )
+    return _MAX_EXEC_SESSIONS_DEFAULT
+
+
+def _active_exec_unit_names(exclude: str) -> list[str]:
+    """Return active hermes-browser-exec-*.service unit names, excluding *exclude*.
+
+    Fail-open on a systemctl error: this cap is an operational resource-exhaustion
+    guard, not a confinement boundary (the jail/netns/Landlock/seccomp stack is
+    unaffected either way), so an inability to query systemd must not block a
+    legitimate launch.
+    """
+    exclude_unit = f"hermes-browser-{exclude}.service"
+    try:
+        proc = subprocess.run(  # noqa: S603
+            ["systemctl", "list-units", "--type=service", "--state=active",
+             "--no-legend", "--plain", _EXEC_UNIT_GLOB],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("launcher.exec_session_cap_check_failed error=%s — fail-open", exc)
+        return []
+    names = []
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if parts and parts[0] != exclude_unit:
+            names.append(parts[0])
+    return names
+
+
+def _check_exec_session_cap(session_name: str) -> None:
+    """Raise ExecSessionCapExceeded if launching *session_name* would exceed
+    HERMES_MAX_EXEC_SESSIONS concurrent exec-* sessions (default 3).
+
+    teaching-* sessions are never capped (single owner session, not per-task).
+    Re-launching an ALREADY-active session (e.g. crash-restart of exec-browse)
+    never counts against itself — only OTHER active sessions count.
+    """
+    if not session_name.startswith("exec-"):
+        return
+    limit = _max_exec_sessions()
+    active = _active_exec_unit_names(exclude=session_name)
+    if len(active) >= limit:
+        raise ExecSessionCapExceeded(
+            f"exec session cap reached ({len(active)}/{limit} active) — "
+            "stop an existing exec-* session before starting a new one"
+        )
 
 
 # ── Connection handler ─────────────────────────────────────────────────────────
@@ -633,6 +771,16 @@ def _handle_connection(conn: socket.socket, hermes_gid: int) -> None:
             session_name, domains = _validate_request(req)
         except (ValueError, json.JSONDecodeError, EOFError, OSError) as exc:
             logger.warning("launcher.request_invalid pid=%d error=%s", pid, exc)
+            _send_frame(conn, {"ok": False, "error": str(exc)})
+            return
+
+        try:
+            _check_exec_session_cap(session_name)
+        except ExecSessionCapExceeded as exc:
+            logger.warning(
+                "launcher.exec_session_cap_exceeded session=%s error=%s",
+                session_name, exc,
+            )
             _send_frame(conn, {"ok": False, "error": str(exc)})
             return
 

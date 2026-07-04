@@ -254,14 +254,18 @@ async def _setup_browser_session():
     return pw, ctx, page, screen_src, input_adapter
 
 
-async def _try_ensure_browser_running() -> None:
-    """Call JailedBrowserManager.ensure_running() best-effort; never raises."""
+async def _try_ensure_browser_running(session_name: str = "exec-browse") -> None:
+    """Call JailedBrowserManager.ensure_running() best-effort; never raises.
+
+    session_name defaults to the shared agent-execution session (today's only
+    caller behavior); vnc_proxy passes the session it was asked to view.
+    """
     try:
         from hermes.runtime.jailed_browser_manager import (  # noqa: PLC0415
             JailedBrowserManager,
         )
 
-        mgr = JailedBrowserManager()
+        mgr = JailedBrowserManager(session_name=session_name)
         await asyncio.wait_for(mgr.ensure_running(), timeout=30.0)
     except Exception:  # noqa: BLE001
         logger.debug(

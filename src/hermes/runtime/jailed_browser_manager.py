@@ -24,18 +24,20 @@ import asyncio
 import logging
 import os
 
+from hermes.security.browser_session_ports import session_ports
+
 logger = logging.getLogger("hermes.jailed_browser")
 
 # ── Constants (all literals — no caller/LLM input) ────────────────────────────
 # NOTE: the actual Chromium argv (headless, CDP addr/port, proxy, user-data-dir)
 # is built SERVER-SIDE by hermes-browser-launcher (the privilege boundary), NOT
 # here — this manager only requests a launch by session_name and then polls the
-# CDP port. _CDP_BIND_HOST/_CDP_PORT_DEFAULT MUST match the launcher constants
-# (_CDP_BIND_ADDR / _CDP_PORT in hermes-browser-launcher).
+# CDP port. _CDP_BIND_HOST MUST match the launcher constant (_CDP_BIND_ADDR in
+# hermes-browser-launcher); the port itself is derived per-session (see
+# hermes.security.browser_session_ports — mirrored in the launcher and jail
+# script so every component agrees on which port a given session listens on).
 
 _CDP_BIND_HOST = "10.200.0.2"
-
-_CDP_PORT_DEFAULT = 9333
 
 _SESSION_NAME = "exec-browse"
 
@@ -44,19 +46,25 @@ _POLL_TIMEOUT_S = 25.0
 _CDP_CHECK_TIMEOUT_S = 2.0
 
 
-def _resolve_cdp_port() -> int:
-    raw = os.environ.get("HERMES_JAILED_CDP_PORT", "").strip()
-    if raw:
-        try:
-            return int(raw)
-        except ValueError:
-            logger.warning(
-                "hermes.jailed_browser.invalid_cdp_port HERMES_JAILED_CDP_PORT=%r "
-                "— falling back to default %d",
-                raw,
-                _CDP_PORT_DEFAULT,
-            )
-    return _CDP_PORT_DEFAULT
+def _resolve_cdp_port(session_name: str) -> int:
+    """Resolve the CDP port for *session_name*.
+
+    HERMES_JAILED_CDP_PORT is a back-compat escape hatch that only ever
+    targeted the single (pre-C1) global browser — it overrides the port ONLY
+    for the default session, never for another session's derived port.
+    """
+    if session_name == _SESSION_NAME:
+        raw = os.environ.get("HERMES_JAILED_CDP_PORT", "").strip()
+        if raw:
+            try:
+                return int(raw)
+            except ValueError:
+                logger.warning(
+                    "hermes.jailed_browser.invalid_cdp_port HERMES_JAILED_CDP_PORT=%r "
+                    "— falling back to the session's derived port",
+                    raw,
+                )
+    return session_ports(session_name).cdp_port
 
 
 def _cdp_port_accepting(port: int) -> bool:
@@ -110,7 +118,8 @@ class JailedBrowserManager:
     mutation).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, session_name: str = _SESSION_NAME) -> None:
+        self._session_name: str = session_name
         self._started: bool = False
         self._lock: asyncio.Lock = asyncio.Lock()
 
@@ -136,7 +145,7 @@ class JailedBrowserManager:
             JailedBrowserUnavailable: if the launcher fails or the port does
                 not accept within the timeout. Fail-closed — NO host fallback.
         """
-        port = _resolve_cdp_port()
+        port = _resolve_cdp_port(self._session_name)
 
         # Fast path: the port is live — a browser is already running, launched
         # by this instance, another instance, or the boot-time eager start.
@@ -159,7 +168,7 @@ class JailedBrowserManager:
 
         Fail-soft: returns None on any socket error. Does not raise.
         """
-        port = _resolve_cdp_port()
+        port = _resolve_cdp_port(self._session_name)
         try:
             if _cdp_port_accepting(port):
                 return f"http://{_CDP_BIND_HOST}:{port}"
@@ -174,7 +183,7 @@ class JailedBrowserManager:
     async def _launch(self, port: int) -> None:
         logger.info(
             "hermes.jailed_browser.launching session=%s port=%d",
-            _SESSION_NAME,
+            self._session_name,
             port,
         )
 
@@ -192,7 +201,7 @@ class JailedBrowserManager:
         logger.info(
             "hermes.jailed_browser.ready cdp_port=%d session=%s",
             port,
-            _SESSION_NAME,
+            self._session_name,
         )
 
     async def _call_launcher(self) -> None:
@@ -208,7 +217,7 @@ class JailedBrowserManager:
             # session_name (security HIGH-1); we pass no argv. domains empty →
             # the egress proxy runs open-logged (autonomous discovery posture).
             await client.launch(
-                session_name=_SESSION_NAME,
+                session_name=self._session_name,
                 domains_whitelist=(),
             )
         except BrowserLauncherUnavailable as exc:

@@ -67,3 +67,55 @@ async def test_ensure_running_still_launches_when_port_is_down() -> None:
             with pytest.raises(JailedBrowserUnavailable):
                 await mgr.ensure_running()
             mock_launch.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# C1: per-session CDP port resolution (concurrent jailed-browser sessions)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionNameParametrization:
+    """JailedBrowserManager(session_name=...) resolves a DIFFERENT CDP port
+    per session, mirroring hermes.security.browser_session_ports."""
+
+    def test_default_constructor_uses_exec_browse(self) -> None:
+        mgr = JailedBrowserManager()
+        assert mgr._session_name == "exec-browse"
+
+    def test_default_session_cdp_url_uses_legacy_port(self) -> None:
+        mod = "hermes.runtime.jailed_browser_manager"
+        with patch(f"{mod}._cdp_port_accepting", return_value=True):
+            mgr = JailedBrowserManager()
+            assert mgr.cdp_url == "http://10.200.0.2:9333"
+
+    def test_other_session_cdp_url_uses_derived_port(self) -> None:
+        mod = "hermes.runtime.jailed_browser_manager"
+        with patch(f"{mod}._cdp_port_accepting", return_value=True):
+            mgr = JailedBrowserManager(session_name="exec-abc123")
+            from hermes.security.browser_session_ports import session_ports
+
+            expected_port = session_ports("exec-abc123").cdp_port
+            assert mgr.cdp_url == f"http://10.200.0.2:{expected_port}"
+            assert expected_port != 9333
+
+    @pytest.mark.asyncio
+    async def test_launch_passes_session_name_to_launcher_client(self) -> None:
+        mod = "hermes.runtime.jailed_browser_manager"
+        captured: dict = {}
+
+        async def _fake_launch(self, **kwargs):  # noqa: ANN001 — patches an unbound method
+            captured.update(kwargs)
+
+        from hermes.security.browser_launcher_client import BrowserLauncherClient
+
+        with patch(f"{mod}._cdp_port_accepting", return_value=False), patch.object(
+            BrowserLauncherClient, "launch", new=_fake_launch
+        ):
+            mgr = JailedBrowserManager(session_name="exec-xyz789")
+            with patch.object(
+                mgr, "_poll_until_accepting", new_callable=AsyncMock
+            ) as mock_poll:
+                mock_poll.return_value = True
+                await mgr.ensure_running()
+
+        assert captured.get("session_name") == "exec-xyz789"

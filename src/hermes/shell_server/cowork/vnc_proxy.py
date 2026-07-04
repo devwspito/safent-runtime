@@ -14,14 +14,43 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from hermes.security.browser_session_ports import session_ports
 
 logger = logging.getLogger("hermes.shell_server.cowork.vnc_proxy")
 
 _VNC_HOST = os.environ.get("BROWSER_VNC_HOST", "10.200.0.2")
-_VNC_PORT = int(os.environ.get("BROWSER_VNC_PORT", "5900"))
 _CHUNK = 65536
+
+# ── ?session= query param validation (default-deny) ───────────────────────────
+# Mirrors the launcher's own session_name allowlist — this endpoint must never
+# be able to reach a port the launcher itself would not have started a browser
+# on. A PRESENT-but-invalid value (empty, path-traversal, wrong prefix,
+# uppercase, unknown "teaching-*" variant, ...) is REJECTED outright (the
+# connection is closed) rather than silently substituted with the default —
+# default-deny, not default-fallback.
+_SESSION_PARAM_RE = re.compile(r"^[a-z0-9-]{1,64}$")
+_DEFAULT_SESSION = "exec-browse"
+_TEACHING_SESSION_NAME = "teaching-chromium"
+
+
+def _resolve_session_name(raw: str | None) -> str | None:
+    """Return the session to connect to, or None if *raw* is invalid.
+
+    raw is None (query param absent) → the default session (today's
+    exec-browse, back-compat: no param anywhere means byte-identical
+    behavior). raw present but invalid → None (caller closes the socket).
+    """
+    if raw is None:
+        return _DEFAULT_SESSION
+    if not _SESSION_PARAM_RE.match(raw):
+        return None
+    if raw == _TEACHING_SESSION_NAME or raw.startswith("exec-"):
+        return raw
+    return None
 
 
 def create_vnc_proxy_router() -> APIRouter:
@@ -38,26 +67,37 @@ def create_vnc_proxy_router() -> APIRouter:
         if not _verify_token(websocket.query_params.get("token", ""), webui_token):
             await websocket.close(code=1008, reason="unauthorized")
             return
+
+        session_name = _resolve_session_name(websocket.query_params.get("session"))
+        if session_name is None:
+            await websocket.close(code=1008, reason="invalid session")
+            return
+
         # noVNC negotiates the 'binary' subprotocol; echo it back if offered.
         subs = websocket.scope.get("subprotocols") or []
         sub = "binary" if "binary" in subs else None
         await websocket.accept(subprotocol=sub)
 
-        await _try_ensure_browser_running()  # bring the jailed headful browser up
+        await _try_ensure_browser_running(session_name)  # bring this session's headful browser up
 
+        rfb_port = session_ports(session_name).rfb_port
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(_VNC_HOST, _VNC_PORT), timeout=20
+                asyncio.open_connection(_VNC_HOST, rfb_port), timeout=20
             )
         except Exception:  # noqa: BLE001
-            logger.warning("hermes.vnc_proxy.rfb_unreachable %s:%s", _VNC_HOST, _VNC_PORT)
+            logger.warning("hermes.vnc_proxy.rfb_unreachable %s:%s", _VNC_HOST, rfb_port)
             try:
                 await websocket.close(code=1011, reason="vnc unreachable")
             except Exception:  # noqa: BLE001
                 pass
             return
 
-        logger.info("hermes.vnc_proxy.session.start remote=%s", websocket.client)
+        logger.info(
+            "hermes.vnc_proxy.session.start remote=%s session=%s",
+            websocket.client,
+            session_name,
+        )
 
         async def ws_to_tcp() -> None:
             try:
