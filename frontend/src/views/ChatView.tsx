@@ -351,6 +351,17 @@ const AssistantMessage = memo(function AssistantMessage({
     toolSteps.length > 0 &&
     DELEGATION_NAMES.has(toolSteps[toolSteps.length - 1]!.name)
 
+  // Auto-scroll the live activity block to its tail as new text streams in —
+  // without this the growing answer scrolls out of view above the fold and
+  // the user only ever sees whatever happened to be at the bottom on the last
+  // render (see ChatView.module.css .agentActivity for the scrollable box).
+  const activityRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (isStreaming && activityRef.current) {
+      activityRef.current.scrollTop = activityRef.current.scrollHeight
+    }
+  }, [activityText, isStreaming])
+
   return (
     <div
       className={styles.messageRow}
@@ -362,10 +373,13 @@ const AssistantMessage = memo(function AssistantMessage({
         <ThinkingBlock text={thinkingText} done={thinkingDone} />
         <ToolSummary steps={toolSteps} isStreaming={isStreaming} />
 
-        {/* Live activity excerpt while streaming */}
+        {/* Live activity — the FULL text streamed so far for this segment (not
+            just the last line), auto-scrolled to the tail as it grows. Showing
+            only the last line hid every paragraph/step before it, making a
+            fluid multi-paragraph answer look like it "freezes" until done. */}
         {isStreaming && activityText && (
-          <div className={styles.agentActivity} aria-live="polite" aria-atomic="false">
-            {lastLine(activityText)}
+          <div ref={activityRef} className={styles.agentActivity} aria-live="polite" aria-atomic="false">
+            {activityText}
           </div>
         )}
 
@@ -389,11 +403,6 @@ const AssistantMessage = memo(function AssistantMessage({
     </div>
   )
 })
-
-function lastLine(text: string): string {
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
-  return lines.length ? `· ${lines[lines.length - 1]}` : ''
-}
 
 // ── Status bar ─────────────────────────────────────────────────────────────
 
@@ -995,6 +1004,7 @@ function SpinnerIcon() {
  */
 function LiveBrowserPanel() {
   const t = useT()
+  const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
 
@@ -1007,20 +1017,33 @@ function LiveBrowserPanel() {
 
   return (
     <div className={styles.liveBrowserWrap}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className={styles.liveBrowserChip}
-      >
+      {/* Prominent live CARD (owner ask): says what's happening and jumps to the
+          En vivo tab on click; the chevron side still expands the inline frame. */}
+      <div className={styles.liveCard}>
         <span className={styles.liveBrowserDot} aria-hidden="true" />
-        <span>{t('chat.live.watch')}</span>
-        <ChevronDown
-          size={14}
-          aria-hidden="true"
-          className={[styles.liveBrowserChevron, open ? styles.liveBrowserChevronOpen : ''].join(' ')}
-        />
-      </button>
+        <span className={styles.liveCardText}>{t('chat.live.card')}</span>
+        <button
+          type="button"
+          className={styles.liveCardGo}
+          onClick={() => navigate('/capacidades?tab=en-vivo')}
+        >
+          {t('chat.live.open')} →
+        </button>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-label={t('chat.live.watch')}
+          title={t('chat.live.watch')}
+          className={styles.liveBrowserChip}
+        >
+          <ChevronDown
+            size={14}
+            aria-hidden="true"
+            className={[styles.liveBrowserChevron, open ? styles.liveBrowserChevronOpen : ''].join(' ')}
+          />
+        </button>
+      </div>
       {open && (
         <div ref={wrapRef} className={styles.liveBrowserFrame}>
           <button
@@ -1209,7 +1232,7 @@ export default function ChatView() {
           />
         </div>
 
-        {panelOpen && <ContextPanel onClose={() => setPanelOpen(false)} />}
+        {panelOpen && <ContextPanel onClose={() => setPanelOpen(false)} busy={status.phase === 'streaming'} />}
       </div>
     </>
   )

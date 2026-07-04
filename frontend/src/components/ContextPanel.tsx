@@ -5,7 +5,7 @@
  * 503 from Composio (not yet configured) never blanks the other sections.
  */
 
-import { useCallback, useEffect, useId, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { ChevronDown, X, File, Download, Zap, Globe } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import {
@@ -183,9 +183,12 @@ function ConnectorsList({ connected, loading }: ConnectorsListProps) {
 
 interface ContextPanelProps {
   onClose: () => void
+  /** True while the agent is working — the workspace list then auto-refreshes
+   *  so files the agent creates appear without reopening the panel. */
+  busy?: boolean
 }
 
-export default function ContextPanel({ onClose }: ContextPanelProps) {
+export default function ContextPanel({ onClose, busy = false }: ContextPanelProps) {
   const t = useT()
   const [files, setFiles] = useState<WorkspaceFile[]>([])
   const [skills, setSkills] = useState<Skill[]>([])
@@ -216,6 +219,29 @@ export default function ContextPanel({ onClose }: ContextPanelProps) {
   }, [])
 
   useEffect(() => { loadAll() }, [loadAll])
+
+  // While the agent works, poll the WORKSPACE list (files only — skills and
+  // connectors don't change mid-task) every 5 s, plus one final refresh when
+  // the turn ends, so agent-produced files show up without reopening the panel.
+  const refreshFiles = useCallback(() => {
+    listWorkspaceFiles()
+      .then(data => setFiles(Array.isArray(data) ? data : []))
+      .catch(() => { /* transient — keep last list */ })
+  }, [])
+
+  const wasBusy = useRef(busy)
+  useEffect(() => {
+    if (busy) {
+      const id = setInterval(refreshFiles, 5000)
+      wasBusy.current = true
+      return () => clearInterval(id)
+    }
+    if (wasBusy.current) {
+      wasBusy.current = false
+      refreshFiles() // one last sweep when the turn finishes
+    }
+    return undefined
+  }, [busy, refreshFiles])
 
   return (
     <aside className="ctx-panel" aria-label={t('ctx.panel.aria')}>

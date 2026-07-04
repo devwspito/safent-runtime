@@ -198,8 +198,9 @@ function reducer(state: ChatState, action: Action): ChatState {
         ...state,
         messages: updateAssistant(state.messages, action.id, m => ({
           ...m,
-          // activityText is NOT capped — the full text is needed for renderMarkdown on STREAM_DONE.
-          // The live display reads only lastLine(), which is cheap regardless of length.
+          // activityText is NOT capped — the full text is needed for renderMarkdown on STREAM_DONE
+          // AND the live display now renders the full growing text (scrollable box), not just
+          // the last line.
           activityText: m.activityText + action.chunk,
         })),
       }
@@ -293,8 +294,9 @@ function reducer(state: ChatState, action: Action): ChatState {
             next = { ...next, thinkingText: (next.thinkingText + thinkingChunk).slice(-LIVE_TEXT_CAP) }
           }
           if (deltaChunk) {
-            // activityText is NOT capped — the full text is needed for renderMarkdown on STREAM_DONE.
-            // The live display reads only lastLine(), which is cheap regardless of length.
+            // activityText is NOT capped — the full text is needed for renderMarkdown on STREAM_DONE
+            // AND the live display now renders the full growing text (scrollable box), not just
+            // the last line.
             next = { ...next, activityText: next.activityText + deltaChunk }
           }
           if (thinkingDone && !next.thinkingDone) {
