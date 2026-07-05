@@ -61,7 +61,29 @@ class _NullApprovalGate:
         return None
 
 
-def _real_iface(tmp_path: Path) -> tuple[Runtime1ServiceInterface, SqliteAgentAccessScopeRepo]:
+class _FakeAssociationStore:
+    """Minimal associate association store: enterprise-associated with a license.
+
+    Lets the create_agent license check (_assert_license_not_expired) run against a
+    real license dict — the only way to exercise the naive-date crasher, since the
+    check reads assoc.license from THIS store (set by config-sync's update_license),
+    not from the bundle's LicenseSpec."""
+
+    def __init__(self, license_dict: dict) -> None:
+        self._license = license_dict
+
+    def is_associated(self) -> bool:
+        return True
+
+    def get(self):  # noqa: ANN201
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        return SimpleNamespace(license=self._license)
+
+
+def _real_iface(
+    tmp_path: Path, association_store: Any | None = None
+) -> tuple[Runtime1ServiceInterface, SqliteAgentAccessScopeRepo]:
     """Build the REAL ServiceInterface + wiring + sqlite repos (no mocks)."""
     access_scope_repo = SqliteAgentAccessScopeRepo(db_path=tmp_path / "shell-state.db")
     agent_registry = SqliteAgentRegistry(db_path=tmp_path / "shell-state.db")
@@ -71,6 +93,7 @@ def _real_iface(tmp_path: Path) -> tuple[Runtime1ServiceInterface, SqliteAgentAc
         authorized_uids=frozenset({_OPERATOR_UID}),
         agent_registry=agent_registry,
         access_scope_repo=access_scope_repo,
+        association_store=association_store,
         # tenant_id is the DAEMON's own resolved tenant — never the applier's.
         tenant_id=_DAEMON_TENANT_ID,
     )
@@ -133,7 +156,7 @@ class _InProcessDbusProxy:
         return bool(await self._invoke(member, *args))
 
 
-def _payload_with_scoped_agent() -> PolicyPayload:
+def _payload_with_scoped_agent(expires_at: str = "") -> PolicyPayload:
     data = {
         "agents": [
             {
@@ -153,7 +176,7 @@ def _payload_with_scoped_agent() -> PolicyPayload:
         "egress": {"allow_domains": []},
         "consents": [],
         "features": {"views": []},
-        "license": {"plan": "starter", "max_agents": 5, "expires_at": "", "views": []},
+        "license": {"plan": "starter", "max_agents": 5, "expires_at": expires_at, "views": []},
     }
     return PolicyPayload.model_validate(data)
 
@@ -176,6 +199,40 @@ class TestApplyScopedAgentAgainstRealServiceInterface:
 
         assert result.ok is True
         assert not result.failed
+
+    async def test_apply_with_naive_date_only_license_still_lands_scope(
+        self, mock_uid, tmp_path: Path
+    ) -> None:
+        """The full provision→apply→agent+access_scope path with a REAL license
+        date. The cloud console's ordinary expires_at is a date-only, tz-naive
+        string ("2027-12-31"); create_agent's license check compared it to an
+        aware `now` and raised `TypeError: can't compare offset-naive and
+        offset-aware datetimes`, so NO cloud agent and NO access_scope ever landed.
+        The prior integration coverage used expires_at="" (the check short-circuits
+        on empty), so it never exercised a real date — this is exactly how the bug
+        reached production and was only found by the 20-employee live test
+        (2026-07-05). This test drives the REAL create_agent path end-to-end."""
+        mock_uid.return_value = _OPERATOR_UID
+        # Enterprise-associated with a date-only license in the association store —
+        # exactly what config-sync's update_license lands from the bundle. This is
+        # what create_agent's license check reads (and crashed on before the fix).
+        store = _FakeAssociationStore({"plan": "business", "max_agents": 5, "expires_at": "2027-12-31"})
+        iface, repo = _real_iface(tmp_path, association_store=store)
+        proxy = _InProcessDbusProxy(iface)
+        payload = _payload_with_scoped_agent(expires_at="2027-12-31")
+
+        result = await PolicyApplier(proxy).apply(
+            payload, current_agents=[], tenant_id="t"
+        )
+
+        assert result.ok is True, f"apply failed with a naive license date: {result.failed}"
+        assert not result.failed
+        # The agent AND its scope must have actually landed (not silently skipped).
+        agents = await proxy.call_list("list_agents")
+        assert any(a.get("agent_id") == "sales-agent" for a in agents)
+        scope = repo.get_scope("sales-agent", _DAEMON_TENANT_ID)
+        assert scope is not None and scope.enforced is True
+        assert scope.native_tools == frozenset({"terminal"})
 
     async def test_row_lands_managed_by_cloud_with_daemon_tenant(
         self, mock_uid, tmp_path: Path
