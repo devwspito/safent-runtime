@@ -1,0 +1,27 @@
+# gitleaks config for lumen-runtime — secret-scan gate (CI + local).
+#
+# Verified 2026-07-05: full history (269 commits / 58 branches) + working tree are
+# CLEAN of real credentials. The only matches are 4 obvious TEST FIXTURES, allow-
+# listed BELOW BY EXACT VALUE (never by a broad `tests/**` path) — so a NEW real
+# secret committed into a test file is still caught.
+#
+# Run locally:  gitleaks detect --source . --config .gitleaks.toml
+title = "lumen-runtime"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known fake test fixtures (asserted-not-real by their own names)."
+regexes = [
+  # tests/unit/instance/test_association_store.py — fake instance secret
+  '''sk-test-instance-secret-12345''',
+  # tests/unit/browser/testing/test_in_memory_live_view_authz.py — fake live-view token
+  '''tok_valid_abc123''',
+  # redaction/logging tests — fixtures whose VALUE asserts they must not leak
+  '''sk-supersecret-api-key-12345''',
+  '''super-secret-bearer-token-DO-NOT-LOG''',
+  # tests/integration/test_self_enqueue_depth_cap.py — dedup_key strings (not secrets)
+  '''followup-mother-1''',
+  '''grandchild-dedup-1''',
+]
