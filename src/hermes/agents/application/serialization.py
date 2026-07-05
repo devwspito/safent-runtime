@@ -72,9 +72,16 @@ def draft_from_dict(data: dict[str, Any]) -> AgentDraft:
         instructions=str(data.get("instructions", "")),
         color=str(data.get("color", "")) or "#6366f1",
         language=str(data.get("language", "")) or "es-ES",
-        golden_rules=tuple(str(r) for r in data.get("golden_rules", []) if str(r).strip()),
+        # `... or []` (NOT `.get(k, [])`): a present-but-None value — which the
+        # Enterprise policy bundle emits for a template that never set
+        # golden_rules/forbidden_phrases — must degrade to empty, not raise
+        # `TypeError: 'NoneType' object is not iterable`. Before this, the
+        # config-sync applier's create_agent failed on EVERY cloud agent whose
+        # template left these unset, so no agent (and no per-agent access_scope)
+        # ever landed (2026-07-05, caught by the 20-employee Enterprise live test).
+        golden_rules=tuple(str(r) for r in (data.get("golden_rules") or []) if str(r).strip()),
         forbidden_phrases=tuple(
-            str(p) for p in data.get("forbidden_phrases", []) if str(p).strip()
+            str(p) for p in (data.get("forbidden_phrases") or []) if str(p).strip()
         ),
         autonomy_level=autonomy,
         department=department,

@@ -558,6 +558,13 @@ class DbusRuntimeServiceWiring:
                 extra={"value": str(expires_at)[:80]},
             )
             return
+        # A date-only / naive expires_at (e.g. "2027-12-31", the common console
+        # value) parses tz-naive; comparing it against an aware `now` raises
+        # `TypeError: can't compare offset-naive and offset-aware datetimes` and
+        # broke create_agent for EVERY cloud agent (2026-07-05, caught by the
+        # 20-employee Enterprise live test). Assume UTC when no tz is given.
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=UTC)
         if datetime.now(tz=UTC) > expiry:
             logger.warning(
                 "hermes.dbus.license_expired",

@@ -160,6 +160,19 @@ class TestCreateAgentAssociateWithinLicense:
         asyncio.run(w.create_agent(draft=_draft("Epsilon"), sender_uid=_OPERATOR_UID))
         assert len(registry.list_agents()) == initial + 1
 
+    def test_creates_when_naive_date_only_future_expiry(
+        self, registry: SqliteAgentRegistry
+    ) -> None:
+        """A date-only / tz-naive expires_at (e.g. "2027-12-31", the common
+        console value) must NOT raise `TypeError: can't compare offset-naive and
+        offset-aware datetimes` — it broke create_agent for EVERY cloud agent
+        (2026-07-05, caught by the 20-employee Enterprise live test)."""
+        store = _make_store(expires_at="2027-12-31")  # naive, no tz, date-only
+        w = _wiring(registry, association_store=store)
+        initial = len(registry.list_agents())
+        asyncio.run(w.create_agent(draft=_draft("EpsilonNaive"), sender_uid=_OPERATOR_UID))
+        assert len(registry.list_agents()) == initial + 1
+
 
 # ---------------------------------------------------------------------------
 # create_agent — associate, limit exceeded

@@ -648,3 +648,21 @@ class TestC4HighAlwaysHitlInvariant:
             f"Invariante rota con taint: binding '{tool_name}' (HIGH) + AUTONOMOUS "
             f"devolvió needs_hitl=False. HIGH → HITL es inapelable incluso con taint (F-1/CTRL-5)."
         )
+
+
+def test_draft_from_dict_tolerates_none_golden_rules_and_forbidden_phrases() -> None:
+    """A present-but-None golden_rules/forbidden_phrases (the Enterprise policy
+    bundle emits None for a template that never set them) must degrade to empty,
+    NOT raise `TypeError: 'NoneType' object is not iterable`. This broke the
+    config-sync applier's create_agent for EVERY cloud agent whose template left
+    these unset (2026-07-05, caught by the 20-employee Enterprise live test)."""
+    from hermes.agents.application.serialization import draft_from_dict
+
+    d = draft_from_dict(
+        {"name": "X", "golden_rules": None, "forbidden_phrases": None, "autonomy_level": "autonomous"}
+    )
+    assert d.golden_rules == ()
+    assert d.forbidden_phrases == ()
+    # real values still parse (and blanks are stripped)
+    d2 = draft_from_dict({"name": "Y", "golden_rules": ["r1", "  ", "r2"]})
+    assert d2.golden_rules == ("r1", "r2")
