@@ -199,10 +199,17 @@ COPY ops/agents-os-edition/scripts/hermes-exec-launcher   /usr/libexec/hermes/he
 COPY ops/agents-os-edition/scripts/hermes-browser-jail    /usr/libexec/hermes/browser-jail
 COPY ops/agents-os-edition/scripts/hermes-clipboard-server /usr/libexec/hermes/hermes-clipboard-server
 COPY ops/agents-os-edition/scripts/hermes-landlock-assert /usr/bin/hermes-landlock-assert
+# CDP-controller confinement shim (2026-07-05 audit): replaces the /usr/bin/agent-browser
+# npm symlink so EVERY runtime agent-browser invocation applies the BROWSER_CONTROLLER
+# Landlock ruleset (denies the daemon's keystore to the controller) before execing the
+# real node CLI. See project_lumen_agent_browser_go_nogo_fase4.
+COPY ops/agents-os-edition/scripts/hermes-agent-browser-shim /usr/libexec/hermes/hermes-agent-browser-shim
 # container-specific drop-ins (override ONLY the OS-coupling: bind host)
 COPY ops/container/dropins/ /usr/lib/systemd/system/
 RUN chmod 0755 /usr/libexec/hermes/* /usr/bin/hermes-landlock-assert && \
-    chown root:root /usr/libexec/hermes/*
+    chown root:root /usr/libexec/hermes/* && \
+    rm -f /usr/bin/agent-browser && \
+    ln -s /usr/libexec/hermes/hermes-agent-browser-shim /usr/bin/agent-browser
 
 # ── OpenShell confinement substrate (the cage shield) — P2 ────────────────────
 # The agent's "terminal" routes through OpenShell ExecSandbox (uid 999, landlock

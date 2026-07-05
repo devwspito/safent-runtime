@@ -150,3 +150,36 @@ class TestSerialize:
     def test_serialize_deny_all_network_default_true(self) -> None:
         spec = LandlockRulesetBuilder().build(Capability.DOCUMENTS)
         assert serialize_for_audit(spec)["deny_all_network"] is True
+
+
+class TestBrowserControllerConfinement:
+    """BROWSER_CONTROLLER (2026-07-05 audit): the agent-browser CDP controller shim
+    applies this ruleset so the controller loses READ of the daemon's keystore
+    while keeping what a --cdp attach needs. Landlock stacks with the daemon's
+    RUNTIME ruleset (effective = intersection), so OMITTING /var here denies
+    master.key."""
+
+    def _paths(self) -> list[str]:
+        spec = LandlockRulesetBuilder().build(Capability.BROWSER_CONTROLLER)
+        assert spec.capability == Capability.BROWSER_CONTROLLER
+        return [r.path for r in spec.rules]
+
+    def test_denies_the_keystore(self) -> None:
+        paths = self._paths()
+        # The two grants that would leak master.key/keys/shell-state.db MUST be absent.
+        assert "/var" not in paths, "/var RX would grant READ of master.key"
+        assert "/var/lib/hermes" not in paths, "/var/lib/hermes RW would grant master.key"
+        # No granted path may be a prefix of the keystore files.
+        keystore = "/var/lib/hermes/master.key"
+        for p in paths:
+            assert not keystore.startswith(p.rstrip("/") + "/") and p != keystore, (
+                f"path {p!r} would grant access to the keystore"
+            )
+
+    def test_grants_what_the_controller_needs(self) -> None:
+        paths = self._paths()
+        # libs/node/binary, certs, /proc, and a writable socket dir (/tmp) + /dev.
+        for needed in ("/usr", "/etc", "/lib", "/proc", "/tmp", "/dev", "/run"):
+            assert needed in paths, f"controller needs {needed}"
+        # Its own session subtree is granted narrowly (NOT the keystore root).
+        assert "/var/lib/hermes/browser-sessions" in paths

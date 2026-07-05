@@ -56,6 +56,14 @@ class Capability(StrEnum):
     SCHEDULER = "scheduler"               # crear/borrar entradas allow-list timer
     # --- feature 009: browser confinement (append-only, default-deny) ---
     BROWSER = "browser"                   # proceso agent-browser confinado en netns + Landlock
+    # --- 2026-07-05 audit: confinar el CONTROLLER CDP de agent-browser ---
+    # El controller (agent-browser --cdp) es HIJO del daemon (uid 880) y hereda el
+    # ruleset RUNTIME AMPLIO (que da READ a master.key vía `/var` RX). Este perfil
+    # MÁS ESTRECHO se aplica al binario agent-browser vía shim antes de execv: da lo
+    # que el controller necesita (usr/lib/proc/tmp/dev + browser-sessions) pero NIEGA
+    # el keystore (`/var/lib/hermes/master.key`, shell-state.db, keys). NO grantable
+    # al agente — es el perfil del propio controller. Ver project_lumen_agent_browser_go_nogo_fase4.
+    BROWSER_CONTROLLER = "browser_controller"
     # --- host-operation MVP: pointer + keyboard input injection ---
     INPUT_CONTROL = "input_control"       # mover/clicar ratón + teclear en el compositor
     # --- P0-2: confinamiento Landlock del PROPIO daemon (defense-in-depth) ---

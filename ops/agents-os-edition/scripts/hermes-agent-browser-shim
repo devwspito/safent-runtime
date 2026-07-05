@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""hermes-agent-browser-shim — confine the agent-browser CDP controller (2026-07-05 audit).
+
+Installed at /usr/bin/agent-browser (replacing the npm node-CLI symlink). EVERY
+runtime `agent-browser` invocation therefore goes through this shim, which:
+
+  1. Applies the BROWSER_CONTROLLER Landlock ruleset to its own process. The
+     agent-browser CDP controller is spawned as a CHILD of the daemon (uid 880) and
+     would otherwise inherit the daemon's broad RUNTIME ruleset — which grants `/var`
+     RX (READ of master.key) + `/var/lib/hermes` RW. Landlock STACKS (effective access
+     = intersection of all applied rulesets), so applying the narrower
+     BROWSER_CONTROLLER here strips the controller's access to the keystore
+     (master.key / shell-state.db / keys) while leaving the daemon itself untouched.
+     A CDP-client 0-day pivoted from a popped (--no-sandbox) browser can no longer
+     read crown-jewel secrets from the controller process.
+  2. execs the real agent-browser node CLI. Landlock is inherited across execv, so
+     the restriction binds the real agent-browser + its native binary process image.
+
+FAIL-CLOSED: a non-zero Landlock apply (hard syscall error, or seccomp blocking
+landlock_*) exits non-zero rather than run the controller unconfined. When Landlock
+is genuinely absent (old kernel / CI), load_and_apply returns 0 (degrade) — the same
+posture as the browser jail's own Chromium shim.
+
+The confinement is NETWORK-agnostic (Landlock does not cover sockets); the controller
+still reaches the jailed Chromium's CDP over the veth, exactly as before. Its session
+socket dir lives in /tmp (AGENT_BROWSER_SOCKET_DIR, set by the caller), which the
+ruleset grants. Verified live: attach + open + snapshot succeed under the ruleset while
+master.key/shell-state.db reads return EACCES.
+"""
+import os
+import sys
+
+# The real npm-installed agent-browser CLI (a node shim → native Rust binary).
+_REAL = "/usr/lib/node_modules/agent-browser/bin/agent-browser.js"
+_NODE = "/usr/bin/node"
+
+
+def main() -> int:
+    try:
+        from hermes.security.landlock_loader import load_and_apply
+    except Exception as exc:  # noqa: BLE001 — fail-closed if the loader is unavailable
+        sys.stderr.write(
+            f"hermes-agent-browser-shim: landlock_loader unavailable ({exc!r}) "
+            "— fail-closed (refusing to run agent-browser unconfined)\n"
+        )
+        return 3
+    rc = load_and_apply("BROWSER_CONTROLLER")
+    if rc:
+        sys.stderr.write(
+            f"hermes-agent-browser-shim: Landlock apply failed rc={rc} — fail-closed\n"
+        )
+        return rc
+    # Landlock domain is inherited across execv → binds the real agent-browser image.
+    os.execv(_NODE, [_NODE, _REAL, *sys.argv[1:]])
+    return 127  # unreachable unless execv fails
+
+
+if __name__ == "__main__":
+    sys.exit(main())

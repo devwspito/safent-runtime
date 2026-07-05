@@ -387,6 +387,25 @@ _CAPABILITY_PATHS: dict[Capability, tuple[tuple[str, frozenset[AccessRight]], ..
         ("/var/lib/hermes", _RUNTIME_RW), ("/run", _RUNTIME_RW),
         ("/tmp", _RUNTIME_RW), ("/dev", _RUNTIME_RW),
     ),
+    # 2026-07-05 audit: the agent-browser CDP CONTROLLER runs as a child of the
+    # daemon (uid 880) and would otherwise inherit RUNTIME above — which grants
+    # `/var` RX (READ of master.key) + `/var/lib/hermes` RW. This tighter profile
+    # is applied to the agent-browser binary via a shim before execv; Landlock
+    # stacks (effective = intersection with RUNTIME), so OMITTING `/var`/keystore
+    # here DENIES master.key/shell-state.db/keys to the controller while the daemon
+    # itself keeps them. Grants exactly what a `--cdp` attach controller needs
+    # (its socket dir lives in /tmp via AGENT_BROWSER_SOCKET_DIR; libs/node in /usr;
+    # certs in /etc) plus the browser-sessions subtree, and NOTHING under
+    # /var/lib/hermes root. A CDP-client 0-day from a popped browser can no longer
+    # read the keystore. See project_lumen_agent_browser_go_nogo_fase4.
+    Capability.BROWSER_CONTROLLER: (
+        ("/usr", _RUNTIME_RX), ("/etc", _RUNTIME_RX), ("/bin", _RUNTIME_RX),
+        ("/sbin", _RUNTIME_RX), ("/lib", _RUNTIME_RX), ("/lib64", _RUNTIME_RX),
+        ("/proc", _RUNTIME_RX), ("/sys", _RUNTIME_RX),
+        ("/run", _RUNTIME_RW), ("/tmp", _RUNTIME_RW), ("/dev", _RUNTIME_RW),
+        # narrow: the controller's own session data, NOT the keystore root.
+        ("/var/lib/hermes/browser-sessions", _RUNTIME_RW),
+    ),
 }
 
 
