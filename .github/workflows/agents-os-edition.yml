@@ -5,9 +5,17 @@ on:
     branches: [main]
     paths:
       - 'src/hermes/agents_os/**'
+      - 'src/hermes/config_sync/**'
+      - 'src/hermes/instance/**'
+      - 'src/hermes/capabilities/**'
+      - 'src/hermes/agents/**'
       - 'ops/agents-os-edition/**'
       - 'specs/003-agents-os-edition/**'
       - 'tests/unit/agents_os/**'
+      - 'tests/unit/config_sync/**'
+      - 'tests/unit/instance/**'
+      - 'tests/unit/capabilities/**'
+      - 'tests/unit/hardening/**'
       - 'tests/integration/agents_os/**'
       - 'apps/**'
       - 'pyproject.toml'
@@ -54,7 +62,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e . pytest pytest-asyncio cryptography
-      - run: pytest tests/unit/agents_os/ tests/unit/cli/ tests/unit/apps/ -q
+        # Enterprise paths (config_sync applier/delegation/remote-approval, pairing/
+        # association/license, capabilities/access_scope, jail hardening) were NOT in
+        # the gate — that gap let a batch of enterprise crashers ship (2026-07-05,
+        # 20-employee live test). They are now first-class CI.
+      - run: >
+          pytest -q
+          tests/unit/agents_os/ tests/unit/cli/ tests/unit/apps/
+          tests/unit/config_sync/ tests/unit/instance/
+          tests/unit/capabilities/ tests/unit/hardening/
 
   integration-tests:
     name: Integration E2E
