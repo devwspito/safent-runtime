@@ -22,7 +22,7 @@ from uuid import UUID
 from .catalog import OS_NATIVE_SKILLS, OsNativeSkill, SkillRisk
 
 # Skills de control GUI que el toolset NATIVO `computer_use` de Hermes (backend
-# Wayland lumen-cua-driver) reemplaza → NO se exponen al LLM (que use la nativa).
+# Wayland safent-cua-driver) reemplaza → NO se exponen al LLM (que use la nativa).
 _COMPUTER_USE_NATIVE_REPLACED: frozenset[str] = frozenset(
     {"mouse_click", "type_text", "begin_computer_use"}
 )
@@ -223,7 +223,7 @@ def build_os_native_tool_specs(
     specs = []
     for skill in OS_NATIVE_SKILLS:
         # GUI-control reinventado → reemplazado por el toolset NATIVO computer_use
-        # de Hermes (backend Wayland lumen-cua-driver). No registrar al LLM para
+        # de Hermes (backend Wayland safent-cua-driver). No registrar al LLM para
         # que use la tool nativa, no la custom (Hermes nativo sin más).
         if skill.name in _COMPUTER_USE_NATIVE_REPLACED:
             continue

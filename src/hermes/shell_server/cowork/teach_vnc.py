@@ -27,8 +27,8 @@ logger = logging.getLogger("hermes.shell_server.cowork.teach_vnc")
 
 OBSERVER_JS: str = r"""
 (() => {
-  if (window.__lumenObserverInstalled) return;
-  window.__lumenObserverInstalled = true;
+  if (window.__safentObserverInstalled) return;
+  window.__safentObserverInstalled = true;
   function esc(s){ try { return CSS.escape(s); } catch(_) { return s; } }
   function sel(el){
     if(!el||el.nodeType!==1) return null;
@@ -52,7 +52,7 @@ OBSERVER_JS: str = r"""
       text: ((el.innerText||el.value||el.getAttribute&&el.getAttribute('aria-label')||'')+'').trim().slice(0,80),
       id: el.id||null, name: (el.getAttribute && el.getAttribute('name'))||null, selector: sel(el) };
   }
-  function rec(o){ try { window.__lumenRec(JSON.stringify(o)); } catch(_){} }
+  function rec(o){ try { window.__safentRec(JSON.stringify(o)); } catch(_){} }
   document.addEventListener('click', e => rec({type:'click', element:desc(e.target)}), true);
   document.addEventListener('change', e => rec({type:'input',
     value:((e.target&&e.target.value)||'').slice(0,500), element:desc(e.target)}), true);
@@ -185,7 +185,7 @@ class _Recorder:
         try:
             s = await page.context.new_cdp_session(page)
             await s.send("Runtime.enable")
-            await s.send("Runtime.addBinding", {"name": "__lumenRec"})
+            await s.send("Runtime.addBinding", {"name": "__safentRec"})
             await s.send("Page.enable")
             await s.send("Page.addScriptToEvaluateOnNewDocument", {"source": OBSERVER_JS})
             s.on("Runtime.bindingCalled", self._on_binding)
@@ -210,7 +210,7 @@ class _Recorder:
         self._capture({"type": "navigate", "url": url})
 
     def _on_binding(self, params):
-        if params.get("name") != "__lumenRec":
+        if params.get("name") != "__safentRec":
             return
         try:
             self._capture(json.loads(params.get("payload", "{}")))

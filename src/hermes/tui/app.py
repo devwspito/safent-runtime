@@ -1,4 +1,4 @@
-"""LumenTerminal — the Textual application shell.
+"""SafentTerminal — the Textual application shell.
 
 Header (StatusBar) + left Sidebar + ContentSwitcher of panes + Footer, with a
 command palette and global actions (kill-switch, new chat, auto-mode). Owns the
@@ -35,14 +35,14 @@ from hermes.tui.screens.scheduler import SchedulerPane
 from hermes.tui.screens.security import SecurityPane
 from hermes.tui.screens.skills import SkillsPane
 from hermes.tui.screens.tasks import TasksPane
-from hermes.tui.theme import LUMEN_THEME
+from hermes.tui.theme import SAFENT_THEME
 from hermes.tui.widgets.sidebar import NAV, Sidebar
 from hermes.tui.widgets.statusbar import StatusBar
 
 logger = logging.getLogger("hermes.tui.app")
 
 
-class LumenCommands(Provider):
+class SafentCommands(Provider):
     """Command palette: jump to any pane + run global actions.
 
     Bound to Ctrl+K. Every pane — including the Avanzado ones — is reachable
@@ -50,7 +50,7 @@ class LumenCommands(Provider):
     """
 
     async def search(self, query: str) -> Hits:
-        app: LumenTerminal = self.app  # type: ignore[assignment]
+        app: SafentTerminal = self.app  # type: ignore[assignment]
         matcher = self.matcher(query)
         commands: list[tuple[str, str, object]] = []
         for e in NAV:
@@ -65,10 +65,10 @@ class LumenCommands(Provider):
                 yield Hit(score, matcher.highlight(title), cb, help=help_text)
 
 
-class LumenTerminal(App):
-    CSS_PATH = "lumen.tcss"
-    TITLE = "Lumen Terminal"
-    COMMANDS = {LumenCommands}
+class SafentTerminal(App):
+    CSS_PATH = "safent.tcss"
+    TITLE = "Safent Terminal"
+    COMMANDS = {SafentCommands}
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "Salir"),
@@ -121,8 +121,8 @@ class LumenTerminal(App):
         yield Footer()
 
     async def on_mount(self) -> None:
-        self.register_theme(LUMEN_THEME)
-        self.theme = "lumen"
+        self.register_theme(SAFENT_THEME)
+        self.theme = "safent"
         # Chat is primary — select it and give it focus immediately.
         self.query_one(Sidebar).select_pane("chat")
         self._refresh_header()
@@ -176,14 +176,14 @@ class LumenTerminal(App):
             agents = await self.bridge.list_agents()
             active = await self.bridge.get_active_agent()
             name = next(
-                (a.get("name", "Lumen") for a in agents if str(a.get("id")) == active),
+                (a.get("name", "Safent") for a in agents if str(a.get("id")) == active),
                 None,
             )
             if not name:
-                name = next((a.get("name") for a in agents if a.get("is_default")), "Lumen")
-            bar.agent_name = name or "Lumen"
+                name = next((a.get("name") for a in agents if a.get("is_default")), "Safent")
+            bar.agent_name = name or "Safent"
         except Exception:  # noqa: BLE001
-            bar.agent_name = "Lumen"
+            bar.agent_name = "Safent"
         try:
             prov = await self.bridge.get_active_provider()
             model = prov.get("model") or prov.get("name") or ""

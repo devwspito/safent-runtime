@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# run-lumen.sh — canonical HARDENED launch for the Lumen standard container.
+# run-safent.sh — canonical HARDENED launch for the Safent standard container.
 #
 # This is the secure-by-default posture validated by the red-team (penetrate +
 # escape). The desktop wrapper / OSS users should launch with THESE flags — not a
 # bare `docker run`. See SECURITY.md for what each flag enforces and the host
 # requirements (a Landlock-capable kernel).
 #
-#   ./run-lumen.sh [IMAGE] [HOST_PORT]
+#   ./run-safent.sh [IMAGE] [HOST_PORT]
 #
 set -euo pipefail
 
-IMAGE="${1:-ghcr.io/devwspito/lumen:latest}"
+IMAGE="${1:-ghcr.io/devwspito/safent:latest}"
 HOST_PORT="${2:-17517}"
-NAME="${LUMEN_NAME:-lumen}"
+NAME="${SAFENT_NAME:-safent}"
 RUNTIME="$(command -v podman || command -v docker)"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SECCOMP="${LUMEN_SECCOMP:-$HERE/seccomp/lumen.json}"
+SECCOMP="${SAFENT_SECCOMP:-$HERE/seccomp/safent.json}"
 
 [ -n "$RUNTIME" ] || { echo "need podman or docker"; exit 1; }
 [ -f "$SECCOMP" ] || { echo "seccomp profile not found: $SECCOMP"; exit 1; }
@@ -25,11 +25,11 @@ SECCOMP="${LUMEN_SECCOMP:-$HERE/seccomp/lumen.json}"
 # Timezone: the container must reason/schedule in the SAME wall-clock as the host
 # that runs it — otherwise it defaults to UTC and the agent tells you the wrong
 # time (e.g. "it's 11 PM" when your clock says 1 AM). Resolve the host IANA zone:
-#   1. an explicit LUMEN_TZ / TZ wins (override for remote/headless installs),
+#   1. an explicit SAFENT_TZ / TZ wins (override for remote/headless installs),
 #   2. else read the /etc/localtime symlink (works on macOS and Linux),
 #   3. else fall back to UTC.
 host_tz() {
-  if [ -n "${LUMEN_TZ:-}" ]; then printf '%s' "$LUMEN_TZ"; return; fi
+  if [ -n "${SAFENT_TZ:-}" ]; then printf '%s' "$SAFENT_TZ"; return; fi
   if [ -n "${TZ:-}" ]; then printf '%s' "$TZ"; return; fi
   local link
   link="$(readlink /etc/localtime 2>/dev/null || true)"
@@ -38,7 +38,7 @@ host_tz() {
     *) printf 'UTC' ;;
   esac
 }
-LUMEN_TZ_VALUE="$(host_tz)"
+SAFENT_TZ_VALUE="$(host_tz)"
 
 # WHY each flag (see SECURITY.md):
 #   -p 127.0.0.1:...    publish on host LOOPBACK only — the control plane never
@@ -68,18 +68,18 @@ LUMEN_TZ_VALUE="$(host_tz)"
 #                       confinement is Landlock/seccomp/netns/uid inside, not the outer
 #                       SELinux label). No-op on AppArmor/no-LSM hosts.
 #   --shm-size=1g       Chromium needs a real /dev/shm.
-#   -v lumen-data       persist /var/lib/hermes (keystore, audit, config) across
+#   -v safent-data       persist /var/lib/hermes (keystore, audit, config) across
 #                       image updates (so master.key / provider keys survive pull).
 # NOTE: NoNewPrivileges is set PER-UNIT (the hardened units), NOT container-wide —
 # a container-level no-new-privileges breaks dbus/login setuid and the boot fails.
 exec "$RUNTIME" run -d --name "$NAME" --systemd=always \
   -p "127.0.0.1:${HOST_PORT}:7517" \
-  -e "TZ=${LUMEN_TZ_VALUE}" -e "HERMES_TZ=${LUMEN_TZ_VALUE}" \
+  -e "TZ=${SAFENT_TZ_VALUE}" -e "HERMES_TZ=${SAFENT_TZ_VALUE}" \
   --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
   --security-opt "seccomp=${SECCOMP}" \
   --security-opt unmask=/sys/kernel/security \
   --security-opt label=disable \
   -v /sys/kernel/security:/sys/kernel/security:ro \
-  -v lumen-data:/var/lib/hermes \
+  -v safent-data:/var/lib/hermes \
   --shm-size=1g \
   "$IMAGE"

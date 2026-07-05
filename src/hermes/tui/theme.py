@@ -1,7 +1,7 @@
-"""hermes.tui.theme — the "Sereno" design system for Lumen Terminal.
+"""hermes.tui.theme — the "Sereno" design system for Safent Terminal.
 
 One source of truth for color. The Textual Theme drives all `$variables` used
-in lumen.tcss; PALETTE exposes the same hex values for Rich renderables (badges,
+in safent.tcss; PALETTE exposes the same hex values for Rich renderables (badges,
 markdown rules) so the TUI and the QML desktop read as the same product:
 warm near-black canvas, amber (#F0A85A) accent, calm off-white text.
 """
@@ -31,8 +31,8 @@ PALETTE = {
     "low": "#8FB36B",
 }
 
-LUMEN_THEME = Theme(
-    name="lumen",
+SAFENT_THEME = Theme(
+    name="safent",
     primary=PALETTE["amber"],
     secondary=PALETTE["teal"],
     accent=PALETTE["amber"],

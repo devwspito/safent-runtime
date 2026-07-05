@@ -173,7 +173,7 @@ export default function McpView() {
   function load() {
     dispatch({ type: 'LOADING' })
     listMcpServers()
-      // Ruflo is a first-class Lumen integration, not a user-managed tool set.
+      // Ruflo is a first-class Safent integration, not a user-managed tool set.
       // The backend already hides it but we filter defensively client-side too.
       .then(servers => dispatch({ type: 'LOADED', servers: servers.filter(s => s.slug !== 'ruflo') }))
       .catch((e: unknown) => dispatch({

@@ -18,4 +18,4 @@ build/
 *.iso
 node_modules/
 frontend/dist/
-.lumen-seed.env
+.safent-seed.env

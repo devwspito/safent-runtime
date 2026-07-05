@@ -2,7 +2,7 @@
 
 Invariants pinned:
   1. list_configured_tasks reads from cron.jobs (Neus), NOT from trigger_repo.
-     A job present ONLY in cron.jobs (no Lumen trigger row) appears in the list.
+     A job present ONLY in cron.jobs (no Safent trigger row) appears in the list.
      This is the BUG-7 repro: agent writes to jobs.json, dashboard showed 0 rows.
 
   2. list_configured_tasks returns [] when cron.jobs is unavailable (ImportError).

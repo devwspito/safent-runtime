@@ -138,7 +138,7 @@ def resolve_model_config(db_path: Path) -> ModelConfig | None:  # noqa: ARG001
 
     Esta es la fuente que el engine consulta POR CICLO. El path NATIVO
     (hermes_cli config.yaml + HERMES_HOME/.env) es la ÚNICA fuente de
-    resolución desde R5 Stage C. El path SQL (Lumen store) fue retirado del
+    resolución desde R5 Stage C. El path SQL (Safent store) fue retirado del
     cascade: al arrancar, `migrate_active_provider_to_native` lo sincroniza al
     nativo UNA SOLA VEZ de forma idempotente.
 

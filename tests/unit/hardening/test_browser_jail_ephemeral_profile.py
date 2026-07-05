@@ -1,7 +1,7 @@
 """Regression test: hermes-browser-jail wipes exec-* profiles before launch.
 
 Bug: a `exec-browse` profile that had accumulated state across many container
-lifetimes (the volume is a durable `lumen-data` named volume) crash-looped the
+lifetimes (the volume is a durable `safent-data` named volume) crash-looped the
 confined Chromium — status=5/TRAP ~0.6s after EVERY launch, under the FULL
 systemd confinement (netns + Landlock BROWSER ruleset + the PASS-3 seccomp shim
 + ProtectSystem=strict). Repro on a clean image (aarch64): restoring the EXACT

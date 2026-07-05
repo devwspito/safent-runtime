@@ -85,7 +85,7 @@
   --ease-hover:  var(--dur-base) var(--ease);  /* 160ms cubic(0.2,0,0,1) */
 }
 
-/* Light theme intentionally removed — Lumen Community is dark-first.     */
+/* Light theme intentionally removed — Safent Community is dark-first.     */
 /* If a light mode is added in future, it should extend tokens.css.        */
 
 /* ── Reset & base ─────────────────────────────────────────────────────────── */
@@ -5922,7 +5922,7 @@ details[open] .cv-teach-chevron {
 
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   Lumen premium 2026 facelift — glass surfaces + interaction glow
+   Safent premium 2026 facelift — glass surfaces + interaction glow
    Cascade-final overrides; colors derive from tokens via color-mix only.
    Note: no backdrop-filter on anything overlaying <canvas>/VNC frames.
    ═══════════════════════════════════════════════════════════════════════════ */

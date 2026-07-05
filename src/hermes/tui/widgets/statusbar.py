@@ -16,7 +16,7 @@ from hermes.tui.theme import PALETTE
 
 
 class StatusBar(Horizontal):
-    agent_name: reactive[str] = reactive("Lumen")
+    agent_name: reactive[str] = reactive("Safent")
     model_name: reactive[str] = reactive("—")
     auto_mode: reactive[bool] = reactive(False)
     paused: reactive[bool] = reactive(False)
@@ -60,9 +60,9 @@ class StatusBar(Horizontal):
             return
 
         brand = Text()
-        brand.append("◆ LUMEN", style=f"bold {PALETTE['amber']}")
+        brand.append("◆ SAFENT", style=f"bold {PALETTE['amber']}")
         brand.append("  ·  ", style=PALETTE["text_faint"])
-        crown = "♛ " if self.agent_name.lower() in ("lumen", "hermes", "cerebro") else ""
+        crown = "♛ " if self.agent_name.lower() in ("safent", "hermes", "cerebro") else ""
         brand.append(f"{crown}{self.agent_name}", style=PALETTE["text"])
         if crown:
             brand.append("  Cerebro · omnipotente", style=PALETTE["text_faint"])

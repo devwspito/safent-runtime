@@ -1,5 +1,5 @@
-/* Lumen Terminal — Sereno stylesheet.
-   Colors come from the registered "lumen" Theme ($primary/$surface/$panel...).
+/* Safent Terminal — Sereno stylesheet.
+   Colors come from the registered "safent" Theme ($primary/$surface/$panel...).
    Layout is a 3-row grid: header band / body (sidebar + content) / footer. */
 
 Screen {

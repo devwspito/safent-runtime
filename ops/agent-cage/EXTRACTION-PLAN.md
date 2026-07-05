@@ -76,7 +76,7 @@ needs an abstraction (`GovernancePort`) but not a rewrite.
 5. **Package + smoke matrix** — `agent-cage` as an installable unit; a smoke suite that
    boots it with (a) `HermesGovernance`, (b) `PermissiveGovernance`, (c) an openclaw
    adapter, and runs the red-team battery (the one in
-   `[[project_lumen_container_egress_elevation]]`) against each.
+   `[[project_safent_container_egress_elevation]]`) against each.
 
 ## Invariants the extraction must preserve (verified this session)
 

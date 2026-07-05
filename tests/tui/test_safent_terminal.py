@@ -1,4 +1,4 @@
-"""Lumen Terminal (hermes.tui) — unit + Pilot smoke tests.
+"""Safent Terminal (hermes.tui) — unit + Pilot smoke tests.
 
 Pure/offline: drives the app with OfflineRuntimeBridge via Textual's headless
 Pilot. Skipped automatically if textual isn't installed (it's a [tui] extra).
@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from hermes.tui.app import LumenTerminal  # noqa: E402
+from hermes.tui.app import SafentTerminal  # noqa: E402
 from hermes.tui.bridge import OfflineRuntimeBridge, new_conversation_id  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -43,7 +43,7 @@ def test_new_conversation_id_is_unique() -> None:
 
 
 async def test_app_boots_and_navigates_all_panes() -> None:
-    app = LumenTerminal(bridge=OfflineRuntimeBridge())
+    app = SafentTerminal(bridge=OfflineRuntimeBridge())
     async with app.run_test(size=(120, 36)) as pilot:
         await pilot.pause()
         from textual.widgets import ContentSwitcher
@@ -58,7 +58,7 @@ async def test_app_boots_and_navigates_all_panes() -> None:
 async def test_chat_streams_offline() -> None:
     from hermes.tui.screens.chat import ChatMessage, ChatPane
 
-    app = LumenTerminal(bridge=OfflineRuntimeBridge())
+    app = SafentTerminal(bridge=OfflineRuntimeBridge())
     async with app.run_test(size=(120, 36)) as pilot:
         await pilot.pause()
         chat = app.query_one(ChatPane)
@@ -76,7 +76,7 @@ async def test_chat_streams_offline() -> None:
 async def test_provider_add_form_opens() -> None:
     from hermes.tui.modals.common import FormModal
 
-    app = LumenTerminal(bridge=OfflineRuntimeBridge())
+    app = SafentTerminal(bridge=OfflineRuntimeBridge())
     async with app.run_test(size=(120, 36)) as pilot:
         await pilot.pause()
         app.go_to("providers")
@@ -91,7 +91,7 @@ async def test_approval_modal_opens_on_signal() -> None:
     from hermes.tui import messages as M
     from hermes.tui.modals.approval import ApprovalModal
 
-    app = LumenTerminal(bridge=OfflineRuntimeBridge())
+    app = SafentTerminal(bridge=OfflineRuntimeBridge())
     async with app.run_test(size=(120, 36)) as pilot:
         await pilot.pause()
         app.post_message(
@@ -105,7 +105,7 @@ async def test_approval_modal_opens_on_signal() -> None:
 
 
 async def test_kill_switch_toggles_pause() -> None:
-    app = LumenTerminal(bridge=OfflineRuntimeBridge())
+    app = SafentTerminal(bridge=OfflineRuntimeBridge())
     async with app.run_test(size=(120, 36)) as pilot:
         await pilot.pause()
         assert app._paused is False
@@ -118,7 +118,7 @@ async def test_kill_switch_toggles_pause() -> None:
 async def test_slash_commands_render_listings() -> None:
     from hermes.tui.screens.chat import ChatMessage, ChatPane
 
-    app = LumenTerminal(bridge=OfflineRuntimeBridge())
+    app = SafentTerminal(bridge=OfflineRuntimeBridge())
     async with app.run_test(size=(120, 36)) as pilot:
         await pilot.pause()
         chat = app.query_one(ChatPane)
@@ -134,7 +134,7 @@ async def test_security_review_modal_on_signal() -> None:
     from hermes.tui import messages as M
     from hermes.tui.modals.security_review import SecurityReviewModal
 
-    app = LumenTerminal(bridge=OfflineRuntimeBridge())
+    app = SafentTerminal(bridge=OfflineRuntimeBridge())
     async with app.run_test(size=(120, 36)) as pilot:
         await pilot.pause()
         app.post_message(
@@ -152,7 +152,7 @@ async def test_security_review_modal_on_signal() -> None:
 async def test_skills_hub_modal_opens() -> None:
     from hermes.tui.modals.search_install import SearchInstallModal
 
-    app = LumenTerminal(bridge=OfflineRuntimeBridge())
+    app = SafentTerminal(bridge=OfflineRuntimeBridge())
     async with app.run_test(size=(120, 36)) as pilot:
         await pilot.pause()
         app.go_to("skills")
@@ -166,7 +166,7 @@ async def test_skills_hub_modal_opens() -> None:
 async def test_packages_search_modal_opens() -> None:
     from hermes.tui.modals.search_install import SearchInstallModal
 
-    app = LumenTerminal(bridge=OfflineRuntimeBridge())
+    app = SafentTerminal(bridge=OfflineRuntimeBridge())
     async with app.run_test(size=(120, 36)) as pilot:
         await pilot.pause()
         app.go_to("packages")

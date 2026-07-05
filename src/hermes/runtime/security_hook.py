@@ -1499,7 +1499,7 @@ _SELF_JAILBREAK_MSG: str = (
     "mismo manualmente fuera del agente."
 )
 
-# Honest framing for native command/code guard blocks. In Lumen a guarded
+# Honest framing for native command/code guard blocks. In Safent a guarded
 # terminal command or code snippet is HARD-BLOCKED — there is NO command/code
 # approval card (cards exist only for skill_manage/install/cronjob). The native
 # hermes-agent guard message is written for hermes' own HITL ("requires approval")

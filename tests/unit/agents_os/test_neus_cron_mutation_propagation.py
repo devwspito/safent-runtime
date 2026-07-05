@@ -90,7 +90,7 @@ def _make_job(job_id: str, trigger_id: str, **overrides: Any) -> dict:
         "enabled": True,
         "origin": {
             "trigger_instance_id": trigger_id,
-            "source": "lumen_scheduled_task",
+            "source": "safent_scheduled_task",
         },
     }
     base.update(overrides)
@@ -335,7 +335,7 @@ class TestNeusCronCreateJobOrigin:
             created.append(kw)
             return {"id": "new-id"}
 
-        origin = {"trigger_instance_id": "uuid-abc", "source": "lumen_scheduled_task"}
+        origin = {"trigger_instance_id": "uuid-abc", "source": "safent_scheduled_task"}
         with patch("cron.jobs.create_job", side_effect=fake_create):
             _neus_cron_create_job(
                 prompt="p", schedule="0 9 * * *", name="n", one_shot=False, origin=origin
@@ -422,7 +422,7 @@ class TestWiringMutationPropagation:
         assert result["ok"] is True
         assert len(created) == 1
         assert created[0]["origin"]["trigger_instance_id"] == tid
-        assert created[0]["origin"]["source"] == "lumen_scheduled_task"
+        assert created[0]["origin"]["source"] == "safent_scheduled_task"
 
     @pytest.mark.asyncio
     async def test_r6_18_delete_calls_neus_remove_after_revoke(self):

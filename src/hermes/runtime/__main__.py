@@ -1067,7 +1067,7 @@ def _build_real_broker(
     # APP_LAUNCH — bridge daemon→compositor para lanzar apps VISIBLES nativas.
     # El daemon (hermes, sin display) nunca puede lanzar apps directamente.
     # Este adapter emite AppLaunchRequested(cmd) al system bus; el compositor
-    # (lumenso-shell / hermes-user) ejecuta sysManager.launchNativeApp(cmd).
+    # (safentso-shell / hermes-user) ejecuta sysManager.launchNativeApp(cmd).
     # launch_emitter=None hasta que DbusRuntimeAdapter.start() inyecte el
     # emitter real (mismo patrón que _scan_signal_emitter).
     #
@@ -2228,7 +2228,7 @@ def _start_model_health_monitor(
         )
         return None
 
-    # In Lumen the model lives EXTERNAL (cloud, or a user-provided endpoint resolved
+    # In Safent the model lives EXTERNAL (cloud, or a user-provided endpoint resolved
     # per-provider). There is no local inference server to poll, so probing a guessed
     # localhost:8000 only spams false "offline". Run the monitor ONLY when an explicit
     # local endpoint is configured. (We must never append paths like /v1/models onto a

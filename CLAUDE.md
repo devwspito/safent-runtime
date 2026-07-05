@@ -1,4 +1,4 @@
-# Lumen runtime — instructions for AI assistants
+# Safent runtime — instructions for AI assistants
 
 ## THE PRODUCT IS A PLAYWRIGHT DOCKER CONTAINER. Read this before doing anything.
 
@@ -12,24 +12,24 @@
 # wheel (the daemon source → src/hermes)
 python3 -m pip wheel . --no-deps -w dist/
 # the container
-podman build -f ops/container/Containerfile -t lumen-runtime:clean .
+podman build -f ops/container/Containerfile -t safent-runtime:clean .
 # run it (canonical launcher — correct caps + seccomp + securityfs)
-NAME=lumen HOST_PORT=17517 ./ops/container/run-lumen.sh
+NAME=safent HOST_PORT=17517 ./ops/container/run-safent.sh
 ```
 
 **Run flags — critical:** do NOT `--cap-drop ALL` and do NOT use container-wide
 `--security-opt no-new-privileges`. systemd PID1 needs SETUID/SETGID to start the
 per-unit services (else every service dies with exit 216/GROUP); the hardened units
-set NoNewPrivileges PER-UNIT. Use `ops/container/run-lumen.sh` (or replicate its flags:
-`--cap-add NET_ADMIN,SYS_ADMIN,AUDIT_READ` + `seccomp=ops/container/seccomp/lumen.json`
+set NoNewPrivileges PER-UNIT. Use `ops/container/run-safent.sh` (or replicate its flags:
+`--cap-add NET_ADMIN,SYS_ADMIN,AUDIT_READ` + `seccomp=ops/container/seccomp/safent.json`
 + `unmask=/sys/kernel/security` + `-v /sys/kernel/security:ro` + `--shm-size=1g`).
 
 ## What's where
 
 - `src/hermes/` — the entire product (one Python package, `hermes`):
   - daemon + **Nous** reasoning engine (`runtime/`),
-  - **Lumen UI** (`lumen/` — QML compositor + apps),
-  - **React web app** (`frontend/` → built to `/opt/lumen-webapp`, served at `/app/`): chat, Office "agent floor" (`frontend/src/views/OfficeView.tsx`), security, skills, MCP, providers, memory. The single official UI (the legacy vanilla `shell_server/webui/` was removed),
+  - **Safent UI** (`safent/` — QML compositor + apps),
+  - **React web app** (`frontend/` → built to `/opt/safent-webapp`, served at `/app/`): chat, Office "agent floor" (`frontend/src/views/OfficeView.tsx`), security, skills, MCP, providers, memory. The single official UI (the legacy vanilla `shell_server/webui/` was removed),
   - MCP / skills / composio (`tool_search`/`tool_call`, **ruflo** swarm).
 - `ops/container/` — the Playwright Containerfile (the delivery).
 - `ops/agent-cage/` — OpenShell cage (binary + systemd drop-in).
@@ -43,5 +43,5 @@ set NoNewPrivileges PER-UNIT. Use `ops/container/run-lumen.sh` (or replicate its
 
 ## Conventions
 
-- Python package name stays `hermes` (repo name `lumen-runtime` ≠ package name). The wheel is `hermes-runtime`.
+- Python package name stays `hermes` (repo name `safent-runtime` ≠ package name). The wheel is `hermes-runtime`.
 - The terminal cage: in CI / unprivileged dev, terminal runs raw (`HERMES_TERMINAL_SCOPE=0`); the real hardening is the exec-launcher / OpenShell inside the container.

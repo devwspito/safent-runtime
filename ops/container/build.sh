@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build.sh — the ONE way to build (and optionally push) the Lumen runtime image.
+# build.sh — the ONE way to build (and optionally push) the Safent runtime image.
 #
 # Usage:
 #   ./ops/container/build.sh            # sync version, build wheel + image
@@ -27,7 +27,7 @@ cd "$HERE"
 VERSION="$(tr -d ' \t\n\r' < VERSION)"
 [ -n "$VERSION" ] || { echo "[x] VERSION file is empty"; exit 1; }
 
-REGISTRY="${REGISTRY:-ghcr.io/devwspito/lumen}"
+REGISTRY="${REGISTRY:-ghcr.io/devwspito/safent}"
 IMAGE_VERSIONED="${REGISTRY}:${VERSION}"
 IMAGE_LATEST="${REGISTRY}:latest"
 FE_CACHEBUST="${FE_CACHEBUST:-$(date +%s)}"
@@ -59,8 +59,8 @@ echo "[ok] wheel: ${WHEELS[0]}"
 # 3) Build the image, tagged BOTH :<VERSION> and :latest.
 echo "[*] Building → ${IMAGE_VERSIONED} (+ :latest)"
 "$RUNTIME" build \
-  --build-arg LUMEN_EDITION=community \
-  --build-arg LUMEN_VERSION="${VERSION}" \
+  --build-arg SAFENT_EDITION=community \
+  --build-arg SAFENT_VERSION="${VERSION}" \
   --build-arg FE_CACHEBUST="${FE_CACHEBUST}" \
   --build-arg APP_CACHEBUST="${FE_CACHEBUST}" \
   --build-arg GIT_SHA="${GIT_SHA}" \

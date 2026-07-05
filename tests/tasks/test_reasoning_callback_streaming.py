@@ -46,7 +46,7 @@ _TASK_ID = UUID("22222222-2222-2222-2222-222222222222")
 
 def _persona() -> PersonaSpec:
     return PersonaSpec(
-        name="Lumen",
+        name="Safent",
         role="asistente",
         language="es-ES",
         register="",

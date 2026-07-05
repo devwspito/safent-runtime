@@ -1,6 +1,6 @@
-"""Mapping ProviderKind (Lumen store) → hermes_cli PROVIDER_REGISTRY id.
+"""Mapping ProviderKind (Safent store) → hermes_cli PROVIDER_REGISTRY id.
 
-This module is the single source of truth for translating a Lumen ProviderKind
+This module is the single source of truth for translating a Safent ProviderKind
 into the native provider_id that hermes_cli expects in config.yaml + .env.
 All functions are pure and have no side effects.
 

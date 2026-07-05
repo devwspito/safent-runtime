@@ -1,10 +1,10 @@
-"""system_update — let the user update Lumen FROM THE UI (no terminal).
+"""system_update — let the user update Safent FROM THE UI (no terminal).
 
 The container is sandboxed and cannot recreate itself (touching the host podman would
 defeat the cage). So the flow is: the UI calls POST /api/v1/system/update, which drops
 an "update requested" marker into the daemon-owned instance dir; a host-side agent
-(`lumen agent`, installed once by get-lumen.sh as a launchd/systemd unit) watches for
-that marker and runs the same `lumen update` (prune-before-pull + recreate). GET reports
+(`safent agent`, installed once by get-safent.sh as a launchd/systemd unit) watches for
+that marker and runs the same `safent update` (prune-before-pull + recreate). GET reports
 the current version and, best-effort, the latest published version so the UI can show an
 "update available" hint.
 """
@@ -23,7 +23,7 @@ import hermes
 logger = logging.getLogger("hermes.shell_server.system_update")
 
 # Daemon-owned dir (uid 880 can write here; the parent /var/lib/hermes is root:root
-# 0755). The host `lumen agent` watches this exact path.
+# 0755). The host `safent agent` watches this exact path.
 _INSTANCE_DIR = "/var/lib/hermes/instance"
 _UPDATE_FLAG = os.path.join(_INSTANCE_DIR, ".update-requested")
 
@@ -49,8 +49,8 @@ def _updating() -> bool:
 
 # Source of truth for "what's the latest version" — the repo VERSION file on main.
 _LATEST_URL = os.environ.get(
-    "LUMEN_VERSION_URL",
-    "https://raw.githubusercontent.com/devwspito/lumen-runtime/main/VERSION",
+    "SAFENT_VERSION_URL",
+    "https://raw.githubusercontent.com/devwspito/safent-runtime/main/VERSION",
 )
 
 

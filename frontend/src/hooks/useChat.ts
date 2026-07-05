@@ -30,9 +30,9 @@ const LIVE_TEXT_CAP = 8_000
 /** Flush interval in ms — limits React re-renders to ~8/sec regardless of frame rate. */
 const FLUSH_INTERVAL_MS = 120
 
-const SS_CONV_ID = 'lumen:convId'
-const SS_TASK_ID = 'lumen:taskId'
-const SS_AGENT_ID = 'lumen:agentId'
+const SS_CONV_ID = 'safent:convId'
+const SS_TASK_ID = 'safent:taskId'
+const SS_AGENT_ID = 'safent:agentId'
 
 function genUUID(): string {
   try {

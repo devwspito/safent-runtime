@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { useT } from '../../lib/i18n'
-import type { LumenAgent, LumenRuntimeStatus } from './engine/office-state'
+import type { SafentAgent, SafentRuntimeStatus } from './engine/office-state'
 import { OfficeState } from './engine/office-state'
 import { animateCamera, createCamera, fitZoomForMap, handleMouseDown, handleMouseMove, handleMouseUp, panToAll } from './engine/camera'
 import { startGameLoop } from './engine/game-loop'
@@ -9,8 +9,8 @@ import { loadCharacterSprites, loadWallSprites } from './engine/sprites'
 import type { AgentStatsResponse } from '../../api/types'
 
 interface Props {
-  agents: LumenAgent[]
-  runtimeStatus: LumenRuntimeStatus
+  agents: SafentAgent[]
+  runtimeStatus: SafentRuntimeStatus
   onAgentClick?: (agentId: string, agentName: string) => void
   /** Optional live stats from /runtime/agent-stats — rendered as a HUD overlay.
    *  If absent, the canvas behaves exactly as before. */
@@ -30,7 +30,7 @@ export function OfficeCanvas({ agents, runtimeStatus, onAgentClick, agentStats }
   const cameraRef = useRef((() => {
     const cam = createCamera()
     try {
-      const raw = localStorage.getItem('lumen:office:camera')
+      const raw = localStorage.getItem('safent:office:camera')
       if (raw) {
         const saved = JSON.parse(raw) as { panX: number; panY: number }
         cam.panX = saved.panX
@@ -89,7 +89,7 @@ export function OfficeCanvas({ agents, runtimeStatus, onAgentClick, agentStats }
           if (cameraSaveTimer > 2) {
             cameraSaveTimer = 0
             try {
-              localStorage.setItem('lumen:office:camera', JSON.stringify({ panX: camera.panX, panY: camera.panY }))
+              localStorage.setItem('safent:office:camera', JSON.stringify({ panX: camera.panX, panY: camera.panY }))
             } catch { /* ignore */ }
           }
         },

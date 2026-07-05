@@ -1,6 +1,6 @@
 [project]
 name = "hermes-runtime"
-version = "0.8.20"
+version = "0.8.21"
 description = "Hermes: runtime agentico LLM reutilizable. ReasoningEngine + CapturingToolHost + PII tokenization + policy layer. Reemplaza dependencia de hermes-agent NousResearch por loop propio sobre LiteLLM."
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
@@ -77,7 +77,7 @@ shell = [
 evolution = [
     "dspy-ai>=2.5,<4",
 ]
-# Lumen Terminal — la UI de consola del SO (variante terminal-only + "corre en
+# Safent Terminal — la UI de consola del SO (variante terminal-only + "corre en
 # cualquier máquina"). Reusa el cliente D-Bus headless; sin GTK/Qt. Textual es
 # el framework TUI (streaming-markdown nativo, command palette, temas).
 tui = [
@@ -113,12 +113,12 @@ where = ["src"]
 "hermes.lumen.apps.integrations" = ["*.qml"]
 "hermes.lumen.apps.memory" = ["*.qml"]
 "hermes.lumen.compositor" = ["qml/*.qml", "qml/qmldir"]
-# Lumen Terminal stylesheet — debe ir en el wheel o Textual no encuentra el TCSS
+# Safent Terminal stylesheet — debe ir en el wheel o Textual no encuentra el TCSS
 # (CSS_PATH relativo al módulo app.py).
 "hermes.tui" = ["*.tcss"]
 "hermes.shell_server.mirror" = ["static/*.html"]
 # The React web app is the single official UI; the Containerfile builds it into
-# /opt/lumen-webapp (it is not shipped inside the wheel). The legacy vanilla
+# /opt/safent-webapp (it is not shipped inside the wheel). The legacy vanilla
 # shell_server/webui/ was removed, so there is no package-data to declare here.
 # Cert CA de freeTSA bakeado en el paquete (no por ruta de repo — se rompía
 # instalado en /usr/lib, ver tsa_external_anchor._load_bundled_cert).

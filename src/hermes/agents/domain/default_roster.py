@@ -1,4 +1,4 @@
-"""default_roster — the specialist team shipped with Lumen out of the box.
+"""default_roster — the specialist team shipped with Safent out of the box.
 
 These are REAL registered agents (not an external catalogue): the Cerebro
 delegates to them and Hermes executes them with its full tool suite (browser,

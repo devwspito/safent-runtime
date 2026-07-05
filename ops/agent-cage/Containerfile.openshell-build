@@ -1,6 +1,6 @@
 # FASE 0/1 — build OpenShell (the confinement substrate) for ARM64.
 # Validates the build with system z3 (apt, no source-build) + produces the binaries
-# we will COPY into the lumen image (multi-stage). Pinned-clone for reproducibility.
+# we will COPY into the safent image (multi-stage). Pinned-clone for reproducibility.
 #
 # Build:  podman build -f ops/agent-cage/Containerfile.openshell-build -t openshell-build:dev .
 # Extract: podman create + cp the /out binaries.

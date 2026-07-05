@@ -124,7 +124,7 @@ _NOUS_NATIVE_DUPLICATES: frozenset[str] = frozenset({
     "list_devices",
     "list_audio_devices",
     # CONTROL GUI de elementos — Hermes-native: toolset `computer_use` (backend
-    # Wayland lumen-cua-driver: click/type por coordenadas v1, AT-SPI v2).
+    # Wayland safent-cua-driver: click/type por coordenadas v1, AT-SPI v2).
     "click_app_element",
     "type_in_app",
 })

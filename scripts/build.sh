@@ -1,11 +1,11 @@
 #!/bin/sh
-# Build the Lumen runtime container (Playwright/Ubuntu + systemd PID1).
+# Build the Safent runtime container (Playwright/Ubuntu + systemd PID1).
 # NOT a VM image — this produces a Docker/OCI container.
 set -eu
 
 cd "$(dirname "$0")/.."
 
-IMAGE="${IMAGE:-lumen-runtime:clean}"
+IMAGE="${IMAGE:-safent-runtime:clean}"
 
 echo "==> Cleaning stale build artifacts (avoid stale .pyc in the wheel)"
 rm -rf build dist src/*.egg-info
@@ -19,6 +19,6 @@ podman build -f ops/container/Containerfile -t "${IMAGE}" .
 
 echo ""
 echo "==> Done: ${IMAGE}"
-echo "    Run: NAME=lumen HOST_PORT=17517 IMAGE=${IMAGE} ./ops/container/run-lumen.sh"
+echo "    Run: NAME=safent HOST_PORT=17517 IMAGE=${IMAGE} ./ops/container/run-safent.sh"
 echo "    (do NOT --cap-drop ALL / no container-wide no-new-privileges — breaks systemd PID1)"
 echo "    UI:  http://localhost:17517"

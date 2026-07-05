@@ -32,14 +32,14 @@ def test_reattach_replays_deltas() -> None:
         tid = uuid4()
         # Simula el ciclo de chat completo ANTES de que nadie se suscriba.
         broker.publish(status_frame(task_id=tid, status="in_progress"))
-        broker.publish(delta_frame(task_id=tid, delta="Hola, soy Lumen."))
+        broker.publish(delta_frame(task_id=tid, delta="Hola, soy Safent."))
         broker.close_task(task_id=tid, outcome="completed")
         # Suscriptor TARDÍO (re-attach): debe recibir status + delta + done.
         frames = await asyncio.wait_for(_collect(broker, tid), timeout=2)
         kinds = [f.kind.value for f in frames]
         assert "delta" in kinds, f"re-attach debe incluir delta; got {kinds}"
         deltas = [f.payload.get("delta") for f in frames if f.kind.value == "delta"]
-        assert "Hola, soy Lumen." in deltas
+        assert "Hola, soy Safent." in deltas
         assert kinds[-1] == "done"
 
     asyncio.run(run())

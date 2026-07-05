@@ -1,1 +1,1 @@
-"""Lumen Terminal modal screens (HITL approval, confirms, forms)."""
+"""Safent Terminal modal screens (HITL approval, confirms, forms)."""

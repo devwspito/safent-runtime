@@ -325,7 +325,7 @@ _REGISTRY_TABLE: Final[dict[str, ExtendedCapabilityBinding]] = {
     # ------------------------------------------------------------------
     # COMPUTER USE — autonomous GUI loop (begin_computer_use)
     #
-    # HIGH / no-auto: the HITL amber card "¿Dejas que Lumen controle
+    # HIGH / no-auto: the HITL amber card "¿Dejas que Safent controle
     # ratón/teclado para: <goal>?" fires before ANY screen interaction.
     # After approval the executor mints a SESSION-scoped INPUT_CONTROL
     # consent grant and runs the screenshot→vision→dispatch loop.
@@ -687,7 +687,7 @@ _REGISTRY_TABLE: Final[dict[str, ExtendedCapabilityBinding]] = {
     # activate_app: lanza o trae al frente una app instalada = LOW (no muta datos).
     # Rutas al surface_kind APP_LAUNCH (no DESKTOP_APP) porque el daemon (hermes,
     # sin display) no puede lanzar apps directamente — emite AppLaunchRequested(cmd)
-    # al compositor (lumenso-shell) via D-Bus. El adapter AppLaunchSurfaceAdapter
+    # al compositor (safentso-shell) via D-Bus. El adapter AppLaunchSurfaceAdapter
     # resuelve app_name → binario y llama al launch_emitter.
     "activate_app": ExtendedCapabilityBinding(
         tool_name="activate_app",

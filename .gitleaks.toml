@@ -1,4 +1,4 @@
-# gitleaks config for lumen-runtime — secret-scan gate (CI + local).
+# gitleaks config for safent-runtime — secret-scan gate (CI + local).
 #
 # Verified 2026-07-05: full history (269 commits / 58 branches) + working tree are
 # CLEAN of real credentials. The only matches are 4 obvious TEST FIXTURES, allow-
@@ -6,7 +6,7 @@
 # secret committed into a test file is still caught.
 #
 # Run locally:  gitleaks detect --source . --config .gitleaks.toml
-title = "lumen-runtime"
+title = "safent-runtime"
 
 [extend]
 useDefault = true

@@ -1,15 +1,15 @@
-// The shell-server injects window.__LUMEN_TOKEN__ into the served index.html on
+// The shell-server injects window.__SAFENT_TOKEN__ into the served index.html on
 // the ?k= bootstrap handshake. It is now a STABLE per-install bearer (no TTL): the
 // owner opens the UI once at /?k=<secret> and the bearer keeps working forever —
 // across idle/sleep/restart — so mutating API calls never 401 again. We cache it
 // in localStorage so a later direct navigation / reload (no ?k=) still carries it.
 // This is a local single-owner app: the credential never leaves the owner's
 // machine, and the sandboxed agent is netns-isolated from the control plane.
-const STORAGE_KEY = 'lumen_token'
+const STORAGE_KEY = 'safent_token'
 
 function readInjected(): string {
   const w = window as unknown as Record<string, unknown>
-  return (w['__LUMEN_TOKEN__'] as string) ?? ''
+  return (w['__SAFENT_TOKEN__'] as string) ?? ''
 }
 
 function readCached(): string {

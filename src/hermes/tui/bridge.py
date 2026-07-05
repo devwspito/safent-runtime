@@ -403,7 +403,7 @@ class OfflineRuntimeBridge(RuntimeBridge):
                 [
                     {
                         "id": "00000000-0000-0000-0000-000000000000",
-                        "name": "Lumen",
+                        "name": "Safent",
                         "role": "Cerebro del sistema",
                         "is_default": True,
                         "autonomy_level": "omnipotente",
@@ -580,7 +580,7 @@ class OfflineRuntimeBridge(RuntimeBridge):
         """Emit canned ChatDelta/ChatStreamEnd signals (offline demo streaming)."""
         await asyncio.sleep(0.15)
         canned = (
-            "Estás en **modo sin conexión** — respuesta de ejemplo. Cuando Lumen "
+            "Estás en **modo sin conexión** — respuesta de ejemplo. Cuando Safent "
             "Terminal corre sobre el SO, este texto llega token a token desde el "
             "Cerebro real. Mismo broker, mismo confinamiento, misma auditoría."
         )
@@ -597,7 +597,7 @@ class OfflineRuntimeBridge(RuntimeBridge):
         tid = stream_path.rsplit("/", 1)[-1]
         canned = (
             "Estás en **modo sin conexión** — el daemon no está disponible, "
-            "así que esto es una respuesta de ejemplo. Cuando Lumen Terminal "
+            "así que esto es una respuesta de ejemplo. Cuando Safent Terminal "
             "corre sobre el SO, este texto llega *token a token* desde el "
             "Cerebro real por el socket de tareas.\n\n"
             "- Mismo broker, mismo confinamiento, misma auditoría.\n"

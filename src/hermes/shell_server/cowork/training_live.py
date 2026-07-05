@@ -7,7 +7,7 @@ Auth
 WebSocket upgrades are plain GET requests, so the HTTP operator-token
 middleware (which only gates POST/PUT/PATCH/DELETE) does not run.  We
 replicate the token check in-handler using the same stable webui bearer
-that the React UI holds as ``window.__LUMEN_TOKEN__``.  The token is
+that the React UI holds as ``window.__SAFENT_TOKEN__``.  The token is
 passed as a ``?token=<value>`` query parameter (matching the pattern in
 MirrorServer._authed_token).  Missing or invalid token → close 1008.
 

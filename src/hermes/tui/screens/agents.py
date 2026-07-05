@@ -105,7 +105,7 @@ class AgentsPane(Pane):
             await self.refresh_data()
             # reflect in the header
             bar = self.app.query_one("StatusBar")
-            bar.agent_name = str(agent.get("name", "Lumen"))  # type: ignore[attr-defined]
+            bar.agent_name = str(agent.get("name", "Safent"))  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001
             self.notify(f"No se pudo activar: {exc}", severity="error", timeout=6)
 

@@ -1,4 +1,4 @@
-"""PackagesPane — read-only list of installed apps on the LumenSO system.
+"""PackagesPane — read-only list of installed apps on the SafentSO system.
 
 Shows Flatpak or RPM packages queried through the RuntimeBridge.  The active
 source is kept in self._source; pressing f/r swaps the source, fires a worker

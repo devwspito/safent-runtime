@@ -71,7 +71,7 @@ class SurfaceKind(StrEnum):
     """
 
     APP_LAUNCH = "app_launch"
-    """Lanza una aplicación de escritorio nativa via el compositor (lumenso-shell).
+    """Lanza una aplicación de escritorio nativa via el compositor (safentso-shell).
 
     El daemon (hermes, sin display) NUNCA puede lanzar apps directamente.
     En su lugar emite la señal D-Bus AppLaunchRequested(cmd) al compositor

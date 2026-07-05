@@ -1,12 +1,12 @@
 """Regression tests — MCP Neus single source of truth.
 
 Invariants pinned:
-  1. list_mcp_servers reads from Neus (tools.mcp_tool) not Lumen's own store.
+  1. list_mcp_servers reads from Neus (tools.mcp_tool) not Safent's own store.
   2. add_mcp_server writes to Neus after the gate passes — not to mcp-servers.json.
   3. A scan-FAIL without force stays blocked (gate is fail-closed).
   4. A scan-FAIL with owner force=True persists AND appears in list_mcp_servers.
-  5. remove_mcp_server deletes from Neus only (no Lumen store involved).
-  6. _neus_argv correctly maps Neus format to Lumen argv.
+  5. remove_mcp_server deletes from Neus only (no Safent store involved).
+  6. _neus_argv correctly maps Neus format to Safent argv.
 
 The test module patches:
   - tools.mcp_tool._load_mcp_config   (Neus config reader — raw dict form)
@@ -93,7 +93,7 @@ class TestNeusArgv:
 # ===========================================================================
 
 class TestNeusLoadEntries:
-    def test_converts_neus_dict_to_lumen_list(self):
+    def test_converts_neus_dict_to_safent_list(self):
         neus_map = {
             "github": {
                 "command": "npx",
@@ -225,7 +225,7 @@ class TestNeusRemoveMcpEntry:
 # ===========================================================================
 
 class TestListMcpServersReadsNeus:
-    """list_mcp_servers must draw from Neus, not from a Lumen-side store."""
+    """list_mcp_servers must draw from Neus, not from a Safent-side store."""
 
     def _make_wiring(self):
         from hermes.agents_os.infrastructure.dbus_runtime_service import (
@@ -486,7 +486,7 @@ class TestAddMcpServerGateAndNeusWrite:
 
         assert add_result["ok"] is True
 
-        # Now list — Neus state has the entry; no separate Lumen store is consulted.
+        # Now list — Neus state has the entry; no separate Safent store is consulted.
         expected_neus_cfg = {
             "myserver": neus_state["mcp_servers"]["myserver"]
         }

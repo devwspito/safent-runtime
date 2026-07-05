@@ -1,12 +1,12 @@
-# Lumen runtime — STANDARD container (Playwright/Ubuntu + systemd PID1).
+# Safent runtime — STANDARD container (Playwright/Ubuntu + systemd PID1).
 # Replaces the bootc-OS→qcow2→VM→relay delivery. Same daemon, same units, same
 # confinement — run via `podman/docker run --systemd=always -p 17517:7517`.
 #
-#   Build (from repo root):  podman build -f ops/container/Containerfile -t lumen:dev .
-#   Run:                     podman run -d --name lumen --systemd=always \
+#   Build (from repo root):  podman build -f ops/container/Containerfile -t safent:dev .
+#   Run:                     podman run -d --name safent --systemd=always \
 #                              --cap-drop ALL --cap-add NET_ADMIN --cap-add SYS_ADMIN \
 #                              --cap-add AUDIT_READ --security-opt no-new-privileges \
-#                              --shm-size=1g -p 17517:7517 lumen:dev
+#                              --shm-size=1g -p 17517:7517 safent:dev
 #   UI:                      http://localhost:17517
 #
 # systemd PID1 is REQUIRED: the daemon fail-closes via _assert_confinement_active()
@@ -14,17 +14,17 @@
 # would force the dev-mode bypass = silent loss of the confinement moat.
 FROM mcr.microsoft.com/playwright:v1.59.0-noble
 
-# LUMEN_EDITION only writes a COSMETIC label string to /usr/share/hermes/edition
+# SAFENT_EDITION only writes a COSMETIC label string to /usr/share/hermes/edition
 # (surfaced on /api/v1/profile, consumed by nothing). It does NOT gate any unit,
 # view, capability, or security control. hermes-config-sync is enabled in BOTH
 # editions (see below); the real activation is RUNTIME pairing state — the
 # .enterprise marker + is_associated() — so a paired CE image runs as the
 # associate. The 'enterprise' tag is therefore functionally redundant.
-# There is ONE runtime image; LUMEN_EDITION defaults to "community" and only
+# There is ONE runtime image; SAFENT_EDITION defaults to "community" and only
 # stamps the label. Build it:
 #   podman build -f ops/container/Containerfile \
-#                -t ghcr.io/devwspito/lumen:latest .
-ARG LUMEN_EDITION=community
+#                -t ghcr.io/devwspito/safent:latest .
+ARG SAFENT_EDITION=community
 
 ENV DEBIAN_FRONTEND=noninteractive PIP_BREAK_SYSTEM_PACKAGES=1
 
@@ -85,8 +85,8 @@ RUN cd /tmp/whlbuild && python3 -m pip wheel . --no-deps -w /tmp/whl \
 # Layer-cache strategy (mirrors the Python wheel-build pattern above):
 #   1. Copy only package manifests → npm ci (heavy layer, rarely invalidated).
 #   2. Copy the rest of frontend/ → vite build (fast layer, invalidated on src changes).
-# Output is placed at /opt/lumen-webapp — the path shell-server reads via the
-# LUMEN_REACT_DIST env default (src/hermes/shell_server/main.py: _react_dist).
+# Output is placed at /opt/safent-webapp — the path shell-server reads via the
+# SAFENT_REACT_DIST env default (src/hermes/shell_server/main.py: _react_dist).
 COPY frontend/package.json frontend/package-lock.json /tmp/frontbuild/
 RUN cd /tmp/frontbuild && npm ci --ignore-scripts
 
@@ -96,8 +96,8 @@ ARG FE_CACHEBUST=0
 RUN echo "fe-cachebust ${FE_CACHEBUST}" > /tmp/.fe_cachebust
 COPY frontend/ /tmp/frontbuild/
 RUN cd /tmp/frontbuild && rm -rf dist && npm run build \
-    && rm -rf /opt/lumen-webapp && mkdir -p /opt/lumen-webapp \
-    && cp -r dist/. /opt/lumen-webapp/ \
+    && rm -rf /opt/safent-webapp && mkdir -p /opt/safent-webapp \
+    && cp -r dist/. /opt/safent-webapp/ \
     && rm -rf /tmp/frontbuild
 
 # Browser automation = the npm stack (agent-browser + @playwright/mcp), EXACTLY as
@@ -110,7 +110,7 @@ ARG PLAYWRIGHT_MCP_VERSION=0.0.29
 # PIN agent-browser (2026-07-05 audit): its `snapshot --json` schema is unpinned and
 # the adapter's _parse_snapshot_json is schema-sensitive — an unpinned install lets a
 # silent upstream bump change the accessibility-tree payload the LLM/driver consumes.
-# 0.31.1 is the version red-teamed + evaluated (see project_lumen_agent_browser_go_nogo_fase4).
+# 0.31.1 is the version red-teamed + evaluated (see project_safent_agent_browser_go_nogo_fase4).
 # Bump this ARG deliberately (and re-verify the snapshot fixture) when moving versions.
 ARG AGENT_BROWSER_VERSION=0.31.1
 RUN npm install -g --ignore-scripts "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" "agent-browser@${AGENT_BROWSER_VERSION}" \
@@ -202,7 +202,7 @@ COPY ops/agents-os-edition/scripts/hermes-landlock-assert /usr/bin/hermes-landlo
 # CDP-controller confinement shim (2026-07-05 audit): replaces the /usr/bin/agent-browser
 # npm symlink so EVERY runtime agent-browser invocation applies the BROWSER_CONTROLLER
 # Landlock ruleset (denies the daemon's keystore to the controller) before execing the
-# real node CLI. See project_lumen_agent_browser_go_nogo_fase4.
+# real node CLI. See project_safent_agent_browser_go_nogo_fase4.
 COPY ops/agents-os-edition/scripts/hermes-agent-browser-shim /usr/libexec/hermes/hermes-agent-browser-shim
 # container-specific drop-ins (override ONLY the OS-coupling: bind host)
 COPY ops/container/dropins/ /usr/lib/systemd/system/
@@ -252,7 +252,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends socat x11vnc xc
 # install must never break the image bake — the Security Center's heuristic fallback
 # (HeuristicFallbackScanner) is the correct degraded path and is already tested.
 ARG TRIVY_VERSION=v0.71.2
-# CACHE DIR FUERA DEL VOLUMEN: run-lumen.sh monta `-v lumen-data:/var/lib/hermes`,
+# CACHE DIR FUERA DEL VOLUMEN: run-safent.sh monta `-v safent-data:/var/lib/hermes`,
 # así que una DB horneada bajo /var/lib/hermes/* queda SOMBREADA por el volumen en
 # runtime → trivy no la encuentra → degrada a [] = teatro (este era el bug). En
 # /var/lib/trivy (fuera del volumen) la DB horneada SOBREVIVE al arranque. El daemon
@@ -397,8 +397,8 @@ RUN systemctl enable \
 # querying the association store.  shell-server reads /usr/share/hermes/edition
 # at startup and exposes it on /api/v1/profile.
 # The ARG is re-declared after the FROM so it is in scope for this RUN layer.
-ARG LUMEN_EDITION=community
-RUN mkdir -p /usr/share/hermes && echo "${LUMEN_EDITION}" > /usr/share/hermes/edition
+ARG SAFENT_EDITION=community
+RUN mkdir -p /usr/share/hermes && echo "${SAFENT_EDITION}" > /usr/share/hermes/edition
 # Bake the build provenance (git SHA) so anyone can confirm EXACTLY which commit an
 # image was built from — `podman run --rm <img> cat /usr/share/hermes/build` (or the
 # OCI label org.opencontainers.image.revision). CI passes GIT_SHA=${{ github.sha }};
@@ -410,7 +410,7 @@ LABEL org.opencontainers.image.revision="${GIT_SHA}"
 # ConditionPathExists=/var/lib/hermes/instance/.enterprise keeps it inert in
 # community edition (no pairing marker) and auto-starts it the moment an instance
 # is paired — the CE image runs in associate mode, so gating on build-time
-# LUMEN_EDITION would (and did) leave paired CE instances without policy sync.
+# SAFENT_EDITION would (and did) leave paired CE instances without policy sync.
 RUN systemctl enable hermes-config-sync.service 2>&1 | tail -3 || true
 
 # podman-machine (macOS) compat: systemd's per-unit MemoryPressureWatch tries to bind the

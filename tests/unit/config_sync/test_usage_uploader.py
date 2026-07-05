@@ -78,7 +78,7 @@ def fake_store_associated():
         instance_id="inst-abc",
         tenant_id="tenant-xyz",
         paired_at="2026-06-26T10:00:00Z",
-        cloud_endpoint="https://cloud.lumen.run",
+        cloud_endpoint="https://cloud.safent.run",
         signing_pubkey_hex="a" * 64,
         license={},
         last_applied_version=0,

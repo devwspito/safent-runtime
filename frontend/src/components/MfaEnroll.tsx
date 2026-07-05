@@ -70,7 +70,7 @@ export default function MfaEnroll({ onEnrolled }: MfaEnrollProps) {
       )}
       <p className="seg-mfa-enroll__step">
         <strong>2.</strong> La app mostrará un código de 6 dígitos que cambia
-        cada 30&nbsp;s — eso es lo que pedirá Lumen al aprobar acciones.
+        cada 30&nbsp;s — eso es lo que pedirá Safent al aprobar acciones.
       </p>
       <button
         className="cv-btn cv-btn--primary"

@@ -217,7 +217,7 @@ class TestReAttach:
         """Re-attach: reconectar a una tarea terminada REPLAYA status+deltas+done.
 
         Antes re-attach descartaba los deltas → un suscriptor tardío (el ChatWorker
-        de Lumen, que se engancha tras completarse una respuesta rápida) recibía
+        de Safent, que se engancha tras completarse una respuesta rápida) recibía
         status+done vacío y la UI no mostraba NINGUNA respuesta. El broker ahora
         acumula los deltas y los replaya para que la respuesta se renderice.
         """

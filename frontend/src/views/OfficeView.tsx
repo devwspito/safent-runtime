@@ -5,7 +5,7 @@ import { X, AlertTriangle, Users, RefreshCw, Maximize2 } from 'lucide-react'
 
 import { getAgentRoster, getRuntimeStatus, listMcpServers, createAgent, updateAgent, deleteAgent, getDefaultRoster, setDefaultRoster, getAgentStats, openRuntimeStream } from '../api/client'
 import type { AgentRoster, RosterAgent, RosterDepartment, RuntimeStatus, CreateAgentPayload, UpdateAgentPayload, AgentStatsResponse } from '../api/types'
-import type { LumenAgent, LumenRuntimeStatus } from './office-live/engine/office-state'
+import type { SafentAgent, SafentRuntimeStatus } from './office-live/engine/office-state'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import { useT } from '../lib/i18n'
 import { activeAgentIds, departmentDisplayLabel, groupDepartmentsByKind } from '../lib/agentRoster'
@@ -34,11 +34,11 @@ const CalendarView = lazy(() => import('./CalendarView'))
 // ── Map roster → engine types ─────────────────────────────────────────────────
 
 /**
- * Converts a RosterAgent + its parent RosterDepartment into the LumenAgent
+ * Converts a RosterAgent + its parent RosterDepartment into the SafentAgent
  * shape expected by the office engine. The department info is required so the
  * engine can build one room per department from the real roster structure.
  */
-function rosterAgentToLumenAgent(a: RosterAgent, dept: RosterDepartment): LumenAgent {
+function rosterAgentToSafentAgent(a: RosterAgent, dept: RosterDepartment): SafentAgent {
   return {
     id: a.id,
     name: a.name,
@@ -59,7 +59,7 @@ function rosterAgentToLumenAgent(a: RosterAgent, dept: RosterDepartment): LumenA
 // not in Sistema — because scheduled tasks belong to the agents, not to config.
 type Tab = 'enjambre' | 'tarjetas' | 'live' | 'tareas'
 
-const AGENTS_VIEW_STORAGE_KEY = 'lumen_agents_view'
+const AGENTS_VIEW_STORAGE_KEY = 'safent_agents_view'
 const VALID_TABS: readonly Tab[] = ['enjambre', 'tarjetas', 'live', 'tareas']
 
 function readStoredTab(): Tab {
@@ -860,7 +860,7 @@ function TarjetasView({ roster, runtimeStatus, hasRuflo, onRosterRefetch, onAgen
           </section>
         )}
 
-        <p className={styles.attribution}>Lumen</p>
+        <p className={styles.attribution}>Safent</p>
       </div>
 
       {showCreateModal && (
@@ -987,16 +987,16 @@ export default function OfficeView() {
     }
   }
 
-  // Convert roster agents to the engine's LumenAgent shape for the canvas.
-  const engineAgents: LumenAgent[] = state.status === 'ready'
+  // Convert roster agents to the engine's SafentAgent shape for the canvas.
+  const engineAgents: SafentAgent[] = state.status === 'ready'
     ? state.roster.departments.flatMap((dept) =>
-        dept.agents.map((a) => rosterAgentToLumenAgent(a, dept))
+        dept.agents.map((a) => rosterAgentToSafentAgent(a, dept))
       )
     : []
 
   const totalAgentCount = engineAgents.length
 
-  const engineRuntimeStatus: LumenRuntimeStatus = state.status === 'ready'
+  const engineRuntimeStatus: SafentRuntimeStatus = state.status === 'ready'
     ? state.runtimeStatus
     : { state: 'idle', active_task_count: 0 }
 

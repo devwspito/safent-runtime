@@ -97,7 +97,7 @@ def generate_secret() -> str:
     return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
 
 
-def otpauth_uri(secret_b32: str, *, label: str = "owner", issuer: str = "Lumen") -> str:
+def otpauth_uri(secret_b32: str, *, label: str = "owner", issuer: str = "Safent") -> str:
     return (
         f"otpauth://totp/{quote(issuer)}:{quote(label)}"
         f"?secret={secret_b32}&issuer={quote(issuer)}&algorithm=SHA1&digits={_DIGITS}&period={_STEP}"

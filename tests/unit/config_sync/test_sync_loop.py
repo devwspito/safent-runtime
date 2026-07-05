@@ -30,8 +30,8 @@ pytestmark = pytest.mark.unit
 def test_policy_url_carries_applied_version_heartbeat() -> None:
     """Each poll reports the currently-applied version so Fleet shows real
     convergence (published vs applied), not just what was published."""
-    url = _policy_url("https://cloud.test/lumen-control/", "inst-1", 7)
-    assert url == "https://cloud.test/lumen-control/v1/policy?instance_id=inst-1&applied_version=7"
+    url = _policy_url("https://cloud.test/safent-control/", "inst-1", 7)
+    assert url == "https://cloud.test/safent-control/v1/policy?instance_id=inst-1&applied_version=7"
     # Default (not yet applied anything) reports 0 — backward-compatible.
     assert _policy_url("https://cloud.test", "inst-1").endswith("&applied_version=0")
 
@@ -105,7 +105,7 @@ class FakeStore:
         last_applied_version: int = 0,
         pubkey_hex: str = "a" * 64,
         tenant_id: str = "tenant-1",
-        cloud_endpoint: str = "https://cloud.lumen.run",
+        cloud_endpoint: str = "https://cloud.safent.run",
     ) -> None:
         self._is_associated = is_associated
         self.last_applied_version = last_applied_version

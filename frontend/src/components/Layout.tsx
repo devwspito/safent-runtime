@@ -403,7 +403,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
         <div className="sidebar-wordmark">
           <div className="sidebar-wordmark-inner">
             <div className="sidebar-mark" aria-hidden="true">L</div>
-            <span className="sidebar-name">Lumen</span>
+            <span className="sidebar-name">Safent</span>
           </div>
           <NotificationsPanel loadConversation={chat.loadConversation} />
         </div>
@@ -483,7 +483,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
         {/* Language selector + user chip */}
         <div className="sidebar-user">
           <div className="user-avatar" aria-hidden="true">U</div>
-          <span className="sidebar-user-name">Lumen</span>
+          <span className="sidebar-user-name">Safent</span>
           <div className="sidebar-lang" role="group" aria-label={t('settings.language')}>
             <button
               type="button"

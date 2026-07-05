@@ -1,4 +1,4 @@
-"""hermes.tui.main — entry point for Lumen Terminal (`hermes-tui`).
+"""hermes.tui.main — entry point for Safent Terminal (`hermes-tui`).
 
 Usage:
     hermes-tui            # connect to the daemon; fall back to offline if down
@@ -10,12 +10,12 @@ from __future__ import annotations
 import argparse
 import logging
 
-from hermes.tui.app import LumenTerminal
+from hermes.tui.app import SafentTerminal
 from hermes.tui.bridge import OfflineRuntimeBridge
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="hermes-tui", description="Lumen Terminal")
+    parser = argparse.ArgumentParser(prog="hermes-tui", description="Safent Terminal")
     parser.add_argument(
         "--offline",
         action="store_true",
@@ -30,7 +30,7 @@ def main() -> None:
     logging.basicConfig(level=getattr(logging, args.log.upper(), logging.WARNING))
 
     bridge = OfflineRuntimeBridge() if args.offline else None
-    LumenTerminal(bridge=bridge).run()
+    SafentTerminal(bridge=bridge).run()
 
 
 if __name__ == "__main__":

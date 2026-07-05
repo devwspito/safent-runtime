@@ -1,6 +1,6 @@
 """Human-facing summaries for HITL approval proposals.
 
-Single source of truth for the owner-facing card text shown in the Lumen Cowork
+Single source of truth for the owner-facing card text shown in the Safent Cowork
 approval panel.  Every proposal — regardless of origin (security_hook native danger,
 broker HITL, Nous engine write-pending, MCP/Composio read) — passes through
 `human_summary` before being surfaced in the frontend.

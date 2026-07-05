@@ -1,6 +1,6 @@
-# Install Lumen on Windows
+# Install Safent on Windows
 
-Lumen is a **Docker/OCI container** (systemd PID1 + the kernel cage:
+Safent is a **Docker/OCI container** (systemd PID1 + the kernel cage:
 Landlock/seccomp/netns/nftables). On Windows it runs inside a **rootful podman
 machine** — a small Linux VM on the WSL2 backend — exactly like the macOS path.
 The container, its run flags, and the security cage are **identical** to Linux and
@@ -23,36 +23,36 @@ and warns you if Landlock is missing.
 ## Install + run (one command)
 In PowerShell:
 ```powershell
-iwr -useb https://raw.githubusercontent.com/devwspito/lumen-runtime/main/get-lumen.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/devwspito/safent-runtime/main/get-safent.ps1 | iex
 ```
-It will: install the `lumen` command on your PATH, create/start a **rootful** podman
-machine (4 CPU / 8 GB, first time only), pull the Lumen image, run it with the
+It will: install the `safent` command on your PATH, create/start a **rootful** podman
+machine (4 CPU / 8 GB, first time only), pull the Safent image, run it with the
 correct flags, wait for boot, and open your browser at a ready URL **with the auth
 token**:
 ```
 http://localhost:17517/?k=<bootstrap-token>
 ```
-Open that URL — that's Lumen. (The `?k=` token authorizes the UI's actions; without
+Open that URL — that's Safent. (The `?k=` token authorizes the UI's actions; without
 it, config/install buttons return 401.)
 
 ### Manual (from a clone)
 ```powershell
-git clone https://github.com/devwspito/lumen-runtime.git
-cd lumen-runtime
-powershell -ExecutionPolicy Bypass -File .\lumen.ps1 update
+git clone https://github.com/devwspito/safent-runtime.git
+cd safent-runtime
+powershell -ExecutionPolicy Bypass -File .\safent.ps1 update
 ```
 
 ## Control it from the terminal
 ```powershell
-lumen            # open it (starts it if stopped)
-lumen stop       # stop
-lumen start      # start without opening
-lumen restart    # restart
-lumen update     # pull the latest image + recreate (keeps your config)
-lumen status     # running? on which port?
-lumen logs       # follow the container journal
-lumen pair <code>   # associate with an enterprise tenant (same image, associate mode)
-lumen unpair        # remove the association (revert to community)
+safent            # open it (starts it if stopped)
+safent stop       # stop
+safent start      # start without opening
+safent restart    # restart
+safent update     # pull the latest image + recreate (keeps your config)
+safent status     # running? on which port?
+safent logs       # follow the container journal
+safent pair <code>   # associate with an enterprise tenant (same image, associate mode)
+safent unpair        # remove the association (revert to community)
 ```
 
 ## First steps in the UI
@@ -66,18 +66,18 @@ lumen unpair        # remove the association (revert to community)
 ## Verify the cage is actually active (parity check)
 The daemon fail-closes if the cage is not real. To confirm full parity:
 ```powershell
-podman exec lumen cat /sys/kernel/security/lsm        # must list 'landlock'
-podman exec lumen systemctl is-active hermes-runtime  # must print 'active'
-podman exec lumen journalctl -u hermes-runtime | Select-String confinement
+podman exec safent cat /sys/kernel/security/lsm        # must list 'landlock'
+podman exec safent systemctl is-active hermes-runtime  # must print 'active'
+podman exec safent journalctl -u hermes-runtime | Select-String confinement
 ```
 If `/sys/kernel/security/lsm` is empty or lacks `landlock`, update the WSL2 kernel
 (`wsl --update`) and restart the machine (`podman machine stop`; `podman machine start`).
 
 ## Notes
-- Environment overrides match Linux/macOS: `LUMEN_IMAGE`, `LUMEN_NAME`, `LUMEN_PORT`,
-  `LUMEN_CLOUD_ENDPOINT`, `LUMEN_DATA_VOLUME`, `LUMEN_SECCOMP_URL`.
+- Environment overrides match Linux/macOS: `SAFENT_IMAGE`, `SAFENT_NAME`, `SAFENT_PORT`,
+  `SAFENT_CLOUD_ENDPOINT`, `SAFENT_DATA_VOLUME`, `SAFENT_SECCOMP_URL`.
 - State (your model key, conversations, installed MCPs/skills) lives in the
-  `lumen-data` podman volume and survives `podman rm` + image updates.
+  `safent-data` podman volume and survives `podman rm` + image updates.
 - The podman machine **must be rootful** (the cage needs root in the VM for
   netns/nftables/securityfs/cgroups). The launcher enforces this; if it reports the
   machine is rootless, convert it:

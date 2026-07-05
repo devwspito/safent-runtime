@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Lumen",
+  "productName": "Safent",
   "version": "0.1.0",
-  "identifier": "com.lumen.desktop",
+  "identifier": "com.safent.desktop",
   "build": {
     "frontendDist": "../dist",
     "beforeBuildCommand": "npm run build",

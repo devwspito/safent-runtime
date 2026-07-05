@@ -66,7 +66,7 @@ def _chat_item(text: str, conv_id: str = _CONV_ID) -> WorkItem:
 class _RecordingEngine:
     """Fake engine that records the DecisionContext it receives and returns a narrative."""
 
-    def __init__(self, narrative: str = "Soy Lumen, tu asistente.") -> None:
+    def __init__(self, narrative: str = "Soy Safent, tu asistente.") -> None:
         self.received: list[DecisionContext] = []
         self._narrative = narrative
 
@@ -152,7 +152,7 @@ class TestBug1OperatorInstructionPreserved:
             cycle_id=uuid4(),
             trigger="queue_drain:chat_message",
             operator_instruction=user_text,
-            agent_id="agent-lumen",
+            agent_id="agent-safent",
             domain_payload={"conversation_id": _CONV_ID},
         )
 
@@ -164,8 +164,8 @@ class TestBug1OperatorInstructionPreserved:
             f"_inject_chunk_sink but should be '{user_text}'. "
             "Bug #1: field was dropped when rebuilding DecisionContext."
         )
-        assert patched.agent_id == "agent-lumen", (
-            f"agent_id was '{patched.agent_id}' after _inject_chunk_sink, expected 'agent-lumen'."
+        assert patched.agent_id == "agent-safent", (
+            f"agent_id was '{patched.agent_id}' after _inject_chunk_sink, expected 'agent-safent'."
         )
         assert patched.metadata.get("chunk_sink") is sentinel_sink, (
             "chunk_sink must be present in patched metadata."
@@ -219,7 +219,7 @@ class TestBug2AssistantReplyPersisted:
 
         After fix: _handle_chat_narrative_reply calls append_message(role='assistant').
         """
-        agent_reply = "Soy Lumen, tu asistente personal."
+        agent_reply = "Soy Safent, tu asistente personal."
         engine = _RecordingEngine(narrative=agent_reply)
         conv_repo = _InMemoryConversationRepo()
 

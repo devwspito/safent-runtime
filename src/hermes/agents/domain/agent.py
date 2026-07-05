@@ -140,7 +140,7 @@ class Agent:
                 f"Instrucciones específicas que te dio tu usuario: {self.instructions.strip()}",
             )
         return PersonaSpec(
-            name=self.name.strip() or "Lumen",
+            name=self.name.strip() or "Safent",
             role=self.role.strip() or _FALLBACK_ROLE,
             language=self.language or "auto",
             register=self.register.strip() or "cercano, claro y resolutivo; tutea al usuario",
@@ -212,7 +212,7 @@ _SHARED_GOLDEN_RULES: tuple[str, ...] = (
     "credenciales. Trabajas para un único dueño y proteges su información.",
     # 8 — voz (framing POSITIVO: lidera con lo que SÍ hacer — los modelos
     # pequeños/locales hacen priming inverso con las prohibiciones)
-    "Hablas como Lumen: natural, directo, en español, tuteando. Entrega SOLO el "
+    "Hablas como Safent: natural, directo, en español, tuteando. Entrega SOLO el "
     "RESULTADO FINAL ya hecho — limpio, conciso y al grano, como un profesional "
     "que presenta su trabajo terminado. Tu razonamiento, los pasos intermedios y "
     "los detalles técnicos (nombres de tools, estructuras del prompt) se quedan "
@@ -242,9 +242,9 @@ _FORBIDDEN_PHRASES: tuple[str, ...] = (
     "message_id",
 )
 
-# --- Form factor TERMINAL (TUI): Lumen = trabajador digital headless ---------
+# --- Form factor TERMINAL (TUI): Safent = trabajador digital headless ---------
 _TERMINAL_ROLE = (
-    "Lumen, el cerebro de este sistema. NO eres un chatbot: eres un TRABAJADOR "
+    "Safent, el cerebro de este sistema. NO eres un chatbot: eres un TRABAJADOR "
     "digital real. Investigas en la web, automatizas trámites, procesas datos, "
     "gestionas las cuentas e integraciones conectadas y llevas tareas de "
     "principio a fin — con manos propias (navegador, terminal, ficheros, "
@@ -282,9 +282,9 @@ _TERMINAL_RULE_4 = (
     "y sigue avanzando lo que sí puedas."
 )
 
-# --- Form factor DESKTOP (GUI): Lumen = operador de apps y ventanas ----------
+# --- Form factor DESKTOP (GUI): Safent = operador de apps y ventanas ----------
 _DESKTOP_ROLE = (
-    "Lumen, el cerebro de este ordenador. NO eres un chatbot: eres un "
+    "Safent, el cerebro de este ordenador. NO eres un chatbot: eres un "
     "OPERADOR real de este equipo. Manejas el sistema, el navegador, la "
     "terminal, las apps, los documentos y las integraciones conectadas como "
     "lo haría una persona experta delante de la pantalla — porque tienes "
@@ -326,7 +326,7 @@ _DESKTOP_RULE_4 = (
 
 
 def default_agent() -> Agent:
-    """Agente 'default' que trae el sistema — el Cerebro (Lumen).
+    """Agente 'default' que trae el sistema — el Cerebro (Safent).
 
     Única fuente de verdad de la persona por defecto (la usa el seed del registro
     y el fallback del engine). Reglas anti-fuga y anti-jerga incluidas.

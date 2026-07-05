@@ -62,7 +62,7 @@ class Capability(StrEnum):
     # MÁS ESTRECHO se aplica al binario agent-browser vía shim antes de execv: da lo
     # que el controller necesita (usr/lib/proc/tmp/dev + browser-sessions) pero NIEGA
     # el keystore (`/var/lib/hermes/master.key`, shell-state.db, keys). NO grantable
-    # al agente — es el perfil del propio controller. Ver project_lumen_agent_browser_go_nogo_fase4.
+    # al agente — es el perfil del propio controller. Ver project_safent_agent_browser_go_nogo_fase4.
     BROWSER_CONTROLLER = "browser_controller"
     # --- host-operation MVP: pointer + keyboard input injection ---
     INPUT_CONTROL = "input_control"       # mover/clicar ratón + teclear en el compositor

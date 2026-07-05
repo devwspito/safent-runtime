@@ -1,17 +1,17 @@
 <#
-  lumen.ps1 - control the local Lumen container from PowerShell (Windows).
+  safent.ps1 - control the local Safent container from PowerShell (Windows).
 
-    lumen            open Lumen in the browser (starts it if stopped)
-    lumen stop       stop Lumen
-    lumen start      start Lumen without opening the browser
-    lumen restart    restart Lumen
-    lumen update     pull the latest image and recreate (keeps your config)
-    lumen status     is it running? on which port?
-    lumen logs       follow the container journal
-    lumen pair <code>   associate with an enterprise tenant (same image, associate mode)
-    lumen unpair        remove the enterprise association (reverts to community edition)
+    safent            open Safent in the browser (starts it if stopped)
+    safent stop       stop Safent
+    safent start      start Safent without opening the browser
+    safent restart    restart Safent
+    safent update     pull the latest image and recreate (keeps your config)
+    safent status     is it running? on which port?
+    safent logs       follow the container journal
+    safent pair <code>   associate with an enterprise tenant (same image, associate mode)
+    safent unpair        remove the enterprise association (reverts to community edition)
 
-  Windows parity note: Lumen ships as ONE container (systemd PID1 + the kernel
+  Windows parity note: Safent ships as ONE container (systemd PID1 + the kernel
   cage: Landlock/seccomp/netns/nftables). On Windows that container runs inside a
   ROOTFUL podman machine (a Linux VM on the WSL2/Hyper-V backend) — exactly the
   macOS model. The run flags are IDENTICAL to Linux/macOS; only the launcher
@@ -21,7 +21,7 @@
   configured IN THE UI.
 #>
 # Parse args from $args (NOT a param block): a typed param block makes PowerShell
-# treat `lumen -h` / `--help` as named parameters and throw before dispatch. With
+# treat `safent -h` / `--help` as named parameters and throw before dispatch. With
 # no param block, dashed tokens land in $args verbatim and reach the switch — the
 # same as the sh `case` seeing "-h"/"--help".
 $Command = if ($args.Count -ge 1) { [string]$args[0] } else { 'open' }
@@ -41,17 +41,17 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 # carries no edition-specific code: pairing state (the .enterprise marker +
 # is_associated()) activates associate behavior at runtime, so the same image runs
 # both roles. There is intentionally no separate "enterprise" image.
-$IMAGE          = if ($env:LUMEN_IMAGE)          { $env:LUMEN_IMAGE }          else { 'ghcr.io/devwspito/lumen:latest' }
-$NAME           = if ($env:LUMEN_NAME)           { $env:LUMEN_NAME }           else { 'lumen' }
-$PORT_PIN       = $env:LUMEN_PORT
+$IMAGE          = if ($env:SAFENT_IMAGE)          { $env:SAFENT_IMAGE }          else { 'ghcr.io/devwspito/safent:latest' }
+$NAME           = if ($env:SAFENT_NAME)           { $env:SAFENT_NAME }           else { 'safent' }
+$PORT_PIN       = $env:SAFENT_PORT
 # Enterprise cloud the instance pairs/syncs against. Empty for community edition.
-$CLOUD_ENDPOINT = $env:LUMEN_CLOUD_ENDPOINT
+$CLOUD_ENDPOINT = $env:SAFENT_CLOUD_ENDPOINT
 # Named volume that holds the persistent state (config, identity, skills, memory).
-$DATA_VOLUME    = if ($env:LUMEN_DATA_VOLUME)    { $env:LUMEN_DATA_VOLUME }    else { 'lumen-data' }
-$SECCOMP_URL    = if ($env:LUMEN_SECCOMP_URL)    { $env:LUMEN_SECCOMP_URL }    else { 'https://raw.githubusercontent.com/devwspito/lumen-runtime/main/ops/container/seccomp/lumen.json' }
+$DATA_VOLUME    = if ($env:SAFENT_DATA_VOLUME)    { $env:SAFENT_DATA_VOLUME }    else { 'safent-data' }
+$SECCOMP_URL    = if ($env:SAFENT_SECCOMP_URL)    { $env:SAFENT_SECCOMP_URL }    else { 'https://raw.githubusercontent.com/devwspito/safent-runtime/main/ops/container/seccomp/safent.json' }
 $HomeDir        = if ($env:USERPROFILE) { $env:USERPROFILE } elseif ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { $env:TEMP }
-$SECCOMP_DIR    = Join-Path $HomeDir '.lumen'
-$SECCOMP        = Join-Path $SECCOMP_DIR 'lumen-seccomp.json'
+$SECCOMP_DIR    = Join-Path $HomeDir '.safent'
+$SECCOMP        = Join-Path $SECCOMP_DIR 'safent-seccomp.json'
 
 # Pairing marker — written to the persistent volume on pair, removed on unpair.
 # config-sync's systemd ConditionPathExists keys off this marker.
@@ -64,7 +64,7 @@ $ENTERPRISE_MARKER = '/var/lib/hermes/instance/.enterprise'
 # fail-closes on. So we mandate Podman, exactly as the macOS installer does.
 $RT = (Get-Command podman -ErrorAction SilentlyContinue).Source
 if (-not $RT) {
-  Write-Host "[x] Lumen on Windows needs Podman (the security cage uses systemd + Landlock/"
+  Write-Host "[x] Safent on Windows needs Podman (the security cage uses systemd + Landlock/"
   Write-Host "    seccomp/netns inside a rootful podman machine; Docker can't reproduce it)."
   Write-Host "    1) Enable WSL2:        wsl --install   (then reboot)"
   Write-Host "    2) Install Podman:     https://podman.io/  (Podman Desktop)"
@@ -116,7 +116,7 @@ function Confirm-CageKernel($name) {
   if ($kver -match '^(\d+)\.(\d+)') {
     $maj = [int]$Matches[1]; $min = [int]$Matches[2]
     if ($maj -lt 6 -or ($maj -eq 6 -and $min -lt 6)) {
-      Write-Host "[!] The VM kernel is $kver; Lumen's cage needs >= 6.6 (Landlock + securityfs)."
+      Write-Host "[!] The VM kernel is $kver; Safent's cage needs >= 6.6 (Landlock + securityfs)."
       Write-Host "    Update it:  wsl --update   then:  podman machine stop $name; podman machine start $name"
     }
   }
@@ -127,12 +127,12 @@ function Confirm-CageKernel($name) {
     $lsm = ((& $RT machine ssh $name 'cat /sys/kernel/security/lsm 2>/dev/null' 2>$null) | Out-String).Trim()
   }
   if ($lsm -and ($lsm -notmatch 'landlock')) {
-    Write-Host "[!] Landlock is not active in the VM (lsm='$lsm'). Lumen fail-closes without it."
+    Write-Host "[!] Landlock is not active in the VM (lsm='$lsm'). Safent fail-closes without it."
     Write-Host "    Update the WSL2 kernel (wsl --update) to one with Landlock, then restart the machine."
   }
 }
 
-# seccomp profile under %USERPROFILE%\.lumen (podman reads it client-side and ships
+# seccomp profile under %USERPROFILE%\.safent (podman reads it client-side and ships
 # the JSON into the machine, so a Windows path is fine).
 function Initialize-Seccomp {
   New-Item -ItemType Directory -Force -Path $SECCOMP_DIR *> $null
@@ -140,13 +140,13 @@ function Initialize-Seccomp {
     Invoke-RestMethod -Uri $SECCOMP_URL -OutFile $SECCOMP -ErrorAction Stop
   } catch {
     Write-Host "[x] Could not download the seccomp profile ($SECCOMP_URL)."
-    Write-Host "    Set LUMEN_SECCOMP_URL to a reachable URL if the repo is not public."
+    Write-Host "    Set SAFENT_SECCOMP_URL to a reachable URL if the repo is not public."
     exit 1
   }
 }
 
 # Recreate the container with the hardened cage (loopback + min caps + seccomp).
-# The run flags are IDENTICAL to Linux/macOS (run-lumen.sh) — that is the parity.
+# The run flags are IDENTICAL to Linux/macOS (run-safent.sh) — that is the parity.
 function Invoke-Run {
   Initialize-Machine
   Initialize-Seccomp
@@ -157,7 +157,7 @@ function Invoke-Run {
     'run','-d','--name', $NAME, '--systemd=always',
     '-p', $publish
   )
-  if ($CLOUD_ENDPOINT) { $runArgs += @('-e', "LUMEN_CLOUD_ENDPOINT=$CLOUD_ENDPOINT") }
+  if ($CLOUD_ENDPOINT) { $runArgs += @('-e', "SAFENT_CLOUD_ENDPOINT=$CLOUD_ENDPOINT") }
   $runArgs += @(
     '--cap-add','NET_ADMIN','--cap-add','SYS_ADMIN','--cap-add','AUDIT_READ',
     '--security-opt', "seccomp=$SECCOMP",
@@ -169,7 +169,7 @@ function Invoke-Run {
     $image
   )
   & $RT @runArgs *> $null
-  if ($LASTEXITCODE -ne 0) { Write-Host "[x] Could not start the Lumen container."; exit 1 }
+  if ($LASTEXITCODE -ne 0) { Write-Host "[x] Could not start the Safent container."; exit 1 }
 }
 
 function Get-Port {
@@ -200,16 +200,16 @@ function Open-Browser($url) {
 }
 
 function Open-AndPrint {
-  Write-Host "[*] Waiting for Lumen..."
+  Write-Host "[*] Waiting for Safent..."
   $url = Wait-Url
   if ($url) {
     Write-Host ""
-    Write-Host "  Lumen is ready:"
+    Write-Host "  Safent is ready:"
     Write-Host "     $url"
     Write-Host ""
     Open-Browser $url
   } else {
-    Write-Host "  [!] Lumen started but I could not get the token. Check:  lumen logs"
+    Write-Host "  [!] Safent started but I could not get the token. Check:  safent logs"
     exit 1
   }
 }
@@ -219,9 +219,9 @@ function Open-AndPrint {
 function Cmd-Open {
   Initialize-Machine
   if (Test-Exists) {
-    if (-not (Test-Running)) { Write-Host "[*] Starting Lumen..."; & $RT start $NAME *> $null }
+    if (-not (Test-Running)) { Write-Host "[*] Starting Safent..."; & $RT start $NAME *> $null }
   } else {
-    Write-Host "[*] First run - downloading and starting Lumen..."
+    Write-Host "[*] First run - downloading and starting Safent..."
     & $RT pull $IMAGE *> $null
     Invoke-Run
   }
@@ -231,36 +231,36 @@ function Cmd-Open {
 function Cmd-Start {
   Initialize-Machine
   if (Test-Exists) {
-    if (Test-Running) { Write-Host "[ok] Lumen is already running (run 'lumen' to open it)."; return }
+    if (Test-Running) { Write-Host "[ok] Safent is already running (run 'safent' to open it)."; return }
     & $RT start $NAME *> $null
-    Write-Host "[ok] Lumen started. Open it with:  lumen"
+    Write-Host "[ok] Safent started. Open it with:  safent"
   } else {
     & $RT pull $IMAGE *> $null
     Invoke-Run
-    Write-Host "[ok] Lumen started. Open it with:  lumen"
+    Write-Host "[ok] Safent started. Open it with:  safent"
   }
 }
 
 function Cmd-Stop {
   if ((Test-Exists) -and (Test-Running)) {
     & $RT stop $NAME *> $null
-    if ($LASTEXITCODE -eq 0) { Write-Host "[ok] Lumen stopped." } else { Write-Host "[x] Could not stop it." }
+    if ($LASTEXITCODE -eq 0) { Write-Host "[ok] Safent stopped." } else { Write-Host "[x] Could not stop it." }
   } else {
-    Write-Host "[ok] Lumen was already stopped."
+    Write-Host "[ok] Safent was already stopped."
   }
 }
 
 function Cmd-Restart { Cmd-Stop; Cmd-Open }
 
 function Cmd-Update {
-  Write-Host "[*] Fetching the latest Lumen image..."
+  Write-Host "[*] Fetching the latest Safent image..."
   Initialize-Machine
   & $RT pull (Get-Image)
   # Fail-fast like the sh launcher (set -e): a failed pull must NOT fall through to
   # Invoke-Run, which would `rm -f` and recreate — destroying a working container.
   if ($LASTEXITCODE -ne 0) { Write-Host "[x] Could not fetch the latest image (keeping the current one)."; exit 1 }
   Write-Host "[*] Recreating the container with the new image..."
-  Invoke-Run   # -v lumen-data keeps your config (keystore, MFA, providers)
+  Invoke-Run   # -v safent-data keeps your config (keystore, MFA, providers)
   Open-AndPrint
 }
 
@@ -270,10 +270,10 @@ function Cmd-Update {
 # .enterprise marker; the marker gates config-sync, which pulls + applies signed
 # cloud policy.
 function Cmd-Pair($code) {
-  if (-not $code) { Write-Host "[x] Usage: lumen pair <code>"; exit 1 }
+  if (-not $code) { Write-Host "[x] Usage: safent pair <code>"; exit 1 }
   Initialize-Machine
   if (-not (Test-Running)) {
-    Write-Host "[*] Starting Lumen to complete pairing..."
+    Write-Host "[*] Starting Safent to complete pairing..."
     Cmd-Start
   }
   Write-Host "[*] Running pairing handshake..."
@@ -291,25 +291,25 @@ function Cmd-Pair($code) {
   # Write the pairing marker so config-sync's ConditionPathExists gate opens.
   & $RT exec $NAME sh -c "mkdir -p /var/lib/hermes/instance && touch $ENTERPRISE_MARKER" *> $null
   & $RT exec $NAME systemctl start hermes-config-sync.service *> $null
-  Write-Host "[ok] Enterprise association complete.  Restart Lumen to activate: lumen restart"
+  Write-Host "[ok] Enterprise association complete.  Restart Safent to activate: safent restart"
 }
 
 function Cmd-Unpair {
   Initialize-Machine
-  if (-not (Test-Running)) { Write-Host "[x] Lumen must be running to unpair.  Start it with: lumen start"; exit 1 }
+  if (-not (Test-Running)) { Write-Host "[x] Safent must be running to unpair.  Start it with: safent start"; exit 1 }
   & $RT exec $NAME python3 -m hermes.instance unpair
   if ($LASTEXITCODE -ne 0) { Write-Host "[x] Unpair failed."; exit 1 }
   & $RT exec $NAME rm -f $ENTERPRISE_MARKER *> $null
-  Write-Host "[ok] Instance unpaired.  Restart Lumen to revert to community edition: lumen restart"
+  Write-Host "[ok] Instance unpaired.  Restart Safent to revert to community edition: safent restart"
 }
 
 function Cmd-Status {
   if ((Test-Exists) -and (Test-Running)) {
-    Write-Host "[ok] Lumen running at  http://localhost:$(Get-Port)/   (open with: lumen)"
+    Write-Host "[ok] Safent running at  http://localhost:$(Get-Port)/   (open with: safent)"
   } elseif (Test-Exists) {
-    Write-Host "[ ] Lumen is stopped.  Start it with: lumen"
+    Write-Host "[ ] Safent is stopped.  Start it with: safent"
   } else {
-    Write-Host "[ ] Lumen is not installed.  Install with: lumen update"
+    Write-Host "[ ] Safent is not installed.  Install with: safent update"
   }
 }
 
@@ -317,17 +317,17 @@ function Cmd-Logs { & $RT logs -f $NAME }
 
 function Show-Usage {
   @'
-lumen - control your local Lumen
+safent - control your local Safent
 
-  lumen            open Lumen in the browser (starts it if stopped)
-  lumen stop       stop Lumen
-  lumen start      start Lumen without opening the browser
-  lumen restart    restart Lumen
-  lumen update     pull the latest version and apply it (keeps your config)
-  lumen status     is it running? on which port?
-  lumen logs       follow the container journal
-  lumen pair <code>   associate with an enterprise tenant (same image, associate mode)
-  lumen unpair        remove the enterprise association (reverts to community edition)
+  safent            open Safent in the browser (starts it if stopped)
+  safent stop       stop Safent
+  safent start      start Safent without opening the browser
+  safent restart    restart Safent
+  safent update     pull the latest version and apply it (keeps your config)
+  safent status     is it running? on which port?
+  safent logs       follow the container journal
+  safent pair <code>   associate with an enterprise tenant (same image, associate mode)
+  safent unpair        remove the enterprise association (reverts to community edition)
 '@ | Write-Host
 }
 

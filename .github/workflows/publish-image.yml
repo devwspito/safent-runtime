@@ -1,6 +1,6 @@
 name: publish-image
 
-# Build + push the hardened Lumen image (multi-arch) so `npx @devwspito/lumen`
+# Build + push the hardened Safent image (multi-arch) so `npx @devwspito/safent`
 # can pull it. Triggers on a version tag (e.g. `git tag v0.1.0 && git push --tags`)
 # or manually. Decoupled from the test/threat-model gates of agents-os-edition.yml.
 on:
@@ -13,7 +13,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE: ghcr.io/devwspito/lumen
+  IMAGE: ghcr.io/devwspito/safent
 
 jobs:
   build-push:

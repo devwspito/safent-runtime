@@ -1,5 +1,5 @@
 /**
- * Lumen office-state — bridges Lumen's Agent/RuntimeStatus API to the
+ * Safent office-state — bridges Safent's Agent/RuntimeStatus API to the
  * game engine.  All engine logic is unchanged; only the data wiring differs.
  */
 
@@ -35,9 +35,9 @@ import {
 } from "./renderer"
 import { buildOfficeLayout } from "./room-builder"
 
-// ── Lumen API shapes (subset of what we need) ──────────────────
+// ── Safent API shapes (subset of what we need) ──────────────────
 
-export interface LumenAgent {
+export interface SafentAgent {
   id: string
   name: string
   role: string
@@ -53,7 +53,7 @@ export interface LumenAgent {
   department_name: string
 }
 
-export interface LumenRuntimeStatus {
+export interface SafentRuntimeStatus {
   state: string
   active_task_count: number
   active_agent_id?: string
@@ -92,7 +92,7 @@ const KIND_TO_ROLE: Record<string, string> = {
 // One DepartmentInfo per unique department_id in the agent list.
 // CEO comes first; the rest are sorted alphabetically by name.
 
-function buildDepartmentsFromAgents(agents: LumenAgent[]): DepartmentInfo[] {
+function buildDepartmentsFromAgents(agents: SafentAgent[]): DepartmentInfo[] {
   const seen = new Map<string, DepartmentInfo>()
   for (const a of agents) {
     if (!seen.has(a.department_id)) {
@@ -108,8 +108,8 @@ function buildDepartmentsFromAgents(agents: LumenAgent[]): DepartmentInfo[] {
 }
 
 function toAgentInfos(
-  agents: LumenAgent[],
-  status: LumenRuntimeStatus,
+  agents: SafentAgent[],
+  status: SafentRuntimeStatus,
 ): AgentInfo[] {
   const activeIds = new Set<string>()
   if (status.active_agent_id) activeIds.add(status.active_agent_id)
@@ -123,7 +123,7 @@ function toAgentInfos(
   }))
 }
 
-// ── OfficeState (Lumen edition) ────────────────────────────────
+// ── OfficeState (Safent edition) ────────────────────────────────
 
 export class OfficeState {
   tileMap: TileTypeVal[][] = []
@@ -157,10 +157,10 @@ export class OfficeState {
     gridRow: number
   }> = []
 
-  /** Rebuild layout from Lumen API data */
+  /** Rebuild layout from Safent API data */
   syncFromApi(
-    agents: LumenAgent[],
-    runtimeStatus: LumenRuntimeStatus,
+    agents: SafentAgent[],
+    runtimeStatus: SafentRuntimeStatus,
     canvasWidth?: number,
     canvasHeight?: number,
   ): void {
@@ -264,7 +264,7 @@ export class OfficeState {
 
   /** Drive character working animation from live runtime status.
    *  Call this every time runtimeStatus changes (poll interval). */
-  applyRuntimeStatus(status: LumenRuntimeStatus): void {
+  applyRuntimeStatus(status: SafentRuntimeStatus): void {
     const activeIds = new Set<string>()
     if (status.active_agent_id) activeIds.add(status.active_agent_id)
     for (const a of status.activity ?? []) activeIds.add(a.agent_id)

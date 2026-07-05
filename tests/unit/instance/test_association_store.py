@@ -59,7 +59,7 @@ def _make_association(**overrides: object) -> InstanceAssociation:
         "instance_id": _INSTANCE_ID,
         "tenant_id": _TENANT_ID,
         "paired_at": "2026-06-26T10:00:00+00:00",
-        "cloud_endpoint": "https://cloud.lumen.run",
+        "cloud_endpoint": "https://cloud.safent.run",
         "signing_pubkey_hex": "deadbeef",
         "license": {"plan": "starter", "seats": 5},
         "last_applied_version": 0,
@@ -108,7 +108,7 @@ class TestSaveGet:
         assert result is not None
         assert result.instance_id == _INSTANCE_ID
         assert result.tenant_id == _TENANT_ID
-        assert result.cloud_endpoint == "https://cloud.lumen.run"
+        assert result.cloud_endpoint == "https://cloud.safent.run"
         assert result.signing_pubkey_hex == "deadbeef"
         assert result.license == {"plan": "starter", "seats": 5}
         assert result.last_applied_version == 0

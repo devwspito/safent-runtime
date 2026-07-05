@@ -10,7 +10,7 @@ Tests verify that blocked endpoints are rejected before any network call:
   - https://192.168.1.1 → PairingError (RFC 1918)
   - https://172.16.0.1 → PairingError (RFC 1918)
   - https://[::1] → PairingError (IPv6 loopback)
-  - https://cloud.lumen.run → allowed (no exception at construction time)
+  - https://cloud.safent.run → allowed (no exception at construction time)
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ pytestmark = pytest.mark.unit
 class TestHttpSchemeValidation:
     def test_http_scheme_rejected(self) -> None:
         with pytest.raises(PairingError, match="https://"):
-            _validate_cloud_endpoint("http://cloud.lumen.run")
+            _validate_cloud_endpoint("http://cloud.safent.run")
 
     def test_file_scheme_rejected(self) -> None:
         with pytest.raises(PairingError):
@@ -37,11 +37,11 @@ class TestHttpSchemeValidation:
 
     def test_no_scheme_rejected(self) -> None:
         with pytest.raises(PairingError):
-            _validate_cloud_endpoint("cloud.lumen.run")
+            _validate_cloud_endpoint("cloud.safent.run")
 
     def test_https_accepted(self) -> None:
         # Must not raise.
-        _validate_cloud_endpoint("https://cloud.lumen.run")
+        _validate_cloud_endpoint("https://cloud.safent.run")
 
 
 class TestSsrfBlockedHosts:
@@ -94,10 +94,10 @@ class TestSsrfBlockedHosts:
 
 class TestSsrfAllowedHosts:
     @pytest.mark.parametrize("url", [
-        "https://cloud.lumen.run",
+        "https://cloud.safent.run",
         "https://enterprise.example.com",
         "https://enterprise.example.com:443",
-        "https://my-company.lumen.io/pairing",
+        "https://my-company.safent.io/pairing",
     ])
     def test_safe_url_accepted(self, url: str) -> None:
         _validate_cloud_endpoint(url)
@@ -113,5 +113,5 @@ class TestHttpControlPlaneClientConstruction:
             HttpControlPlaneClient(cloud_endpoint="https://127.0.0.1:7517")
 
     def test_safe_endpoint_constructs(self) -> None:
-        client = HttpControlPlaneClient(cloud_endpoint="https://cloud.lumen.run")
+        client = HttpControlPlaneClient(cloud_endpoint="https://cloud.safent.run")
         assert client is not None

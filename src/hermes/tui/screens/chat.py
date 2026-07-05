@@ -1,4 +1,4 @@
-"""ChatPane — the Cerebro conversation. The heart of Lumen Terminal.
+"""ChatPane — the Cerebro conversation. The heart of Safent Terminal.
 
 Streams the agent's reply token-by-token over the reused TaskStreamClient
 (enqueue → stream_path → frames: delta / thinking_delta / tool_call / done).
@@ -140,7 +140,7 @@ class ChatPane(Vertical):
             css_class="msg-agent",
             role_style=PALETTE["teal"],
             initial_text=(
-                "Soy **Lumen**, el cerebro de este sistema. Opero el equipo, el "
+                "Soy **Safent**, el cerebro de este sistema. Opero el equipo, el "
                 "navegador y las apps por ti. Pídeme algo y me pongo a ello.\n\n"
                 "Escribe `/help` para los comandos rápidos (`/mcp`, `/skills`, "
                 "`/integraciones`, `/seguridad`…) o `/attach <ruta>` para adjuntar "
@@ -244,7 +244,7 @@ class ChatPane(Vertical):
     async def _render_system(self, markdown: str) -> None:
         log = self.query_one("#chat-log", VerticalScroll)
         msg = ChatMessage(
-            "Lumen",
+            "Safent",
             css_class="msg-agent",
             role_style=PALETTE["teal"],
             initial_text=markdown,

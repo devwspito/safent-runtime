@@ -493,7 +493,7 @@ class TestBeginComputerUseCatalogEntry:
 
     def test_build_os_native_tool_specs_excludes_begin_computer_use_native_replaced(self) -> None:
         """begin_computer_use (control GUI custom) ya NO se emite: lo reemplaza el
-        toolset NATIVO `computer_use` de Hermes (backend Wayland lumen-cua-driver).
+        toolset NATIVO `computer_use` de Hermes (backend Wayland safent-cua-driver).
         Sigue en el catálogo OS_NATIVE_SKILLS pero excluido del schema del LLM."""
         from hermes.shell_server.os_native_skills.tool_specs import build_os_native_tool_specs
 

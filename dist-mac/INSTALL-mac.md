@@ -1,6 +1,6 @@
-# Install Lumen on macOS (Apple Silicon)
+# Install Safent on macOS (Apple Silicon)
 
-Lumen is a **Docker/OCI container** (systemd PID1 + the kernel cage). On macOS it
+Safent is a **Docker/OCI container** (systemd PID1 + the kernel cage). On macOS it
 runs inside a **podman machine** (a tiny Linux VM) — podman supports the systemd +
 capabilities + seccomp the cage needs.
 
@@ -11,18 +11,18 @@ capabilities + seccomp the cage needs.
 
 ## Install + run (one command)
 ```sh
-git clone https://github.com/devwspito/lumen-runtime.git
-cd lumen-runtime
-./dist-mac/install-lumen-mac.sh
+git clone https://github.com/devwspito/safent-runtime.git
+cd safent-runtime
+./dist-mac/install-safent-mac.sh
 ```
-It will: install/start a podman machine (4 CPU / 8 GB), **build the Lumen image from this
+It will: install/start a podman machine (4 CPU / 8 GB), **build the Safent image from this
 repo** (one-time, ~15-20 min — pulls the public Playwright base + npm + pip; nothing
-private leaves your machine), run Lumen with the correct flags, wait for boot, and print
+private leaves your machine), run Safent with the correct flags, wait for boot, and print
 a ready-to-open URL **with the auth token**:
 ```
 http://localhost:17517/?k=<bootstrap-token>
 ```
-Open that URL — that's Lumen. (The `?k=` token authorizes the UI's actions; without it,
+Open that URL — that's Safent. (The `?k=` token authorizes the UI's actions; without it,
 config/install buttons return 401.)
 
 ## First steps in the UI
@@ -36,15 +36,15 @@ config/install buttons return 401.)
 
 ## Manage
 ```sh
-podman logs -f lumen        # daemon logs
-podman stop lumen           # stop
-podman start lumen          # start again
-podman rm -f lumen          # remove (state persists in the 'lumen-data' volume)
+podman logs -f safent        # daemon logs
+podman stop safent           # stop
+podman start safent          # start again
+podman rm -f safent          # remove (state persists in the 'safent-data' volume)
 ```
 
 ## Notes
 - Do **NOT** run with `--cap-drop ALL` or container-wide `--security-opt no-new-privileges`
   — systemd PID1 needs SETUID/SETGID, and the hardened units set NoNewPrivileges per-unit.
-  The installer uses the correct flags (see `ops/container/run-lumen.sh`).
-- State (your model key, conversations, installed MCPs/skills) lives in the `lumen-data`
+  The installer uses the correct flags (see `ops/container/run-safent.sh`).
+- State (your model key, conversations, installed MCPs/skills) lives in the `safent-data`
   podman volume and survives `podman rm` + image updates.

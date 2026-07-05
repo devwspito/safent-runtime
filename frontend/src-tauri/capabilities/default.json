@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for the Lumen native thin client",
+  "description": "Default capabilities for the Safent native thin client",
   "windows": ["main"],
   "permissions": ["core:default", "shell:allow-open"]
 }

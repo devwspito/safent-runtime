@@ -742,7 +742,7 @@ class DbusRuntimeServiceWiring:
         return self._provider_to_dict(p) if p is not None else {}
 
     # ------------------------------------------------------------------
-    # Native provider sync — collapses Lumen SQL store → hermes_cli NATIVO.
+    # Native provider sync — collapses Safent SQL store → hermes_cli NATIVO.
     # ------------------------------------------------------------------
 
     def _sync_to_native_provider(
@@ -761,7 +761,7 @@ class DbusRuntimeServiceWiring:
         fallback source as before.
 
         The call is intentionally fire-and-log: native write failures MUST NOT
-        break the Lumen flow (the SQL store is still valid fallback per the cascade
+        break the Safent flow (the SQL store is still valid fallback per the cascade
         in provider_config_source.resolve_model_config).
         """
         try:
@@ -1358,7 +1358,7 @@ class DbusRuntimeServiceWiring:
     # registry → surface adapter → broker → mcp_tool_specs → LLM); esto añade
     # la pieza que faltaba: configurar/persistir/conectar servidores.
     # Persistencia: config.yaml de Neus (hermes_cli.config), clave mcp_servers.
-    # Neus es la single source of truth; Lumen gates installs (scan/MFA) y
+    # Neus es la single source of truth; Safent gates installs (scan/MFA) y
     # luego escribe a Neus — nunca mantiene su propio store paralelo.
     # ------------------------------------------------------------------
 
@@ -3501,7 +3501,7 @@ class DbusRuntimeServiceWiring:
         Returns only trigger metadata + last-run info; no payload, no credentials.
 
         BUG-7 ROOT FIX: reads from Neus cron/jobs.json (single source of truth)
-        instead of the Lumen trigger_repo. The agent's `cronjob` tool writes to
+        instead of the Safent trigger_repo. The agent's `cronjob` tool writes to
         jobs.json; the UI creates via create_scheduled_task (which now also writes
         to jobs.json). Both paths write to the SAME store, so the dashboard is
         always consistent regardless of who created the job.
@@ -3837,7 +3837,7 @@ class DbusRuntimeServiceWiring:
             one_shot=one_shot,
             origin={
                 "trigger_instance_id": str(trigger.trigger_instance_id),
-                "source": "lumen_scheduled_task",
+                "source": "safent_scheduled_task",
             },
         )
 
@@ -6632,15 +6632,15 @@ def _validate_url(value: str, *, field: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Neus MCP registry bridge — Lumen reads/writes via hermes_cli.config so
+# Neus MCP registry bridge — Safent reads/writes via hermes_cli.config so
 # config.yaml (mcp_servers) is the single source of truth.  The old
-# mcp-servers.json (Lumen parallel store) is DELETED; these helpers replace it.
+# mcp-servers.json (Safent parallel store) is DELETED; these helpers replace it.
 # ---------------------------------------------------------------------------
 
 def _neus_argv(neus_cfg: dict) -> list[str]:
-    """Convert a Neus server config entry to a Lumen-style argv list.
+    """Convert a Neus server config entry to a Safent-style argv list.
 
-    Neus stores command + args separately; Lumen uses a flat argv.
+    Neus stores command + args separately; Safent uses a flat argv.
     """
     cmd = str(neus_cfg.get("command") or "")
     args = [str(a) for a in (neus_cfg.get("args") or [])]
@@ -6648,7 +6648,7 @@ def _neus_argv(neus_cfg: dict) -> list[str]:
 
 
 def _neus_load_entries() -> list[dict]:
-    """Return Neus mcp_servers as a list of Lumen-compatible dicts.
+    """Return Neus mcp_servers as a list of Safent-compatible dicts.
 
     Shape: [{server_id, label, argv, env?}, ...]. Fail-soft: returns []
     on any import or parse error so boot reconnect is never fatal.
@@ -6679,7 +6679,7 @@ def _neus_load_entries() -> list[dict]:
 def _neus_write_mcp_entry(server_id: str, argv: list[str], *, env: dict | None = None) -> None:
     """Persist a new/updated MCP server entry into Neus's config.yaml.
 
-    Gate contract: this function MUST only be called AFTER the Lumen security
+    Gate contract: this function MUST only be called AFTER the Safent security
     gate (scan/MFA) has passed. A poisoned argv[0] here is RCE because Neus
     will spawn it. The caller (add_mcp_server) enforces this ordering.
 
@@ -6732,7 +6732,7 @@ def _neus_remove_mcp_entry(server_id: str) -> None:
 # Neus cron bridge — single source of truth for the job CATALOG (BUG-7 fix)
 #
 # AUTHORIZATION vs CATALOG SPLIT (explicit):
-#   AUTHORIZATION (stays in Lumen):
+#   AUTHORIZATION (stays in Safent):
 #     SqliteAuthorizedTriggerRepository (authorized_trigger_instances table).
 #     Consulted by TriggerGate.enqueue_from_trigger → is_authorized() on EVERY
 #     autonomous trigger attempt. Fail-closed. Revocable instantly. The cage gate.
@@ -6775,7 +6775,7 @@ def _neus_cron_create_job(
 ) -> str | None:
     """Write a new job to Neus cron/jobs.json. Returns the Neus job id or None.
 
-    Gate contract: MUST only be called AFTER the Lumen security gate
+    Gate contract: MUST only be called AFTER the Safent security gate
     (trigger_repo.authorize) has passed. Fail-soft: logs and returns None on
     any error so the outer create_scheduled_task can still succeed (auth row
     already committed).
@@ -6915,7 +6915,7 @@ def _neus_cron_set_enabled(trigger_id: str, *, enabled: bool) -> bool:
             resume_job(job_id)
         else:
             from cron.jobs import pause_job  # noqa: PLC0415
-            pause_job(job_id, "disabled via lumen dashboard")
+            pause_job(job_id, "disabled via safent dashboard")
         return True
     except ImportError:
         logger.warning("hermes.dbus.neus_cron_set_enabled: cron.jobs unavailable")
@@ -7025,7 +7025,7 @@ async def _mcp_connect(
     # BYOK keys but leave them empty (e.g. ruflo's swarm: env has OPENAI_BASE_URL="" /
     # OPENAI_API_KEY=""). The MCP child is spawned by the launcher and does NOT inherit
     # the daemon's env, so resolve the active provider here and fill the empties → the
-    # MCP swarm uses the SAME LLM the owner configured for Lumen. "Download → it works".
+    # MCP swarm uses the SAME LLM the owner configured for Safent. "Download → it works".
     # Only FILLS declared-but-empty keys (never adds new ones → no env injection surface).
     resolved_env = dict(env or {})
     if ("OPENAI_BASE_URL" in resolved_env or "OPENAI_API_KEY" in resolved_env) and (

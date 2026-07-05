@@ -69,7 +69,7 @@ def _consent_ctx() -> Any:
 def _persona():
     from hermes.prompts.persona import PersonaSpec
     return PersonaSpec(
-        name="Lumen",
+        name="Safent",
         role="test-role",
         language="es",
         register="formal",
@@ -157,7 +157,7 @@ class TestBuildCapabilityToolSpecsCount:
 
     def test_excludes_gui_control_customs_replaced_by_native_computer_use(self) -> None:
         # click_app_element / type_in_app son control GUI de elementos →
-        # reemplazados por el toolset NATIVO computer_use (lumen-cua-driver).
+        # reemplazados por el toolset NATIVO computer_use (safent-cua-driver).
         # NO deben registrarse al LLM (Hermes nativo sin más).
         specs = _build_specs()
         names = {s.name for s in specs}

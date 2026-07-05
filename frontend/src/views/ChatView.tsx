@@ -1,5 +1,5 @@
 /**
- * ChatView — streaming chat with the Lumen agent.
+ * ChatView — streaming chat with the Safent agent.
  *
  * Chat state is owned by Layout and passed down via outlet context so that
  * RecentsSection (in the sidebar) and ChatView share the same instance.

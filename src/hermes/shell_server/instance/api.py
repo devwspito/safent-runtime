@@ -55,7 +55,7 @@ _ALL_VIEWS: list[str] = [
 # pure-UI dashboard with no /api/v1 feature surface (useFeatures forces it on),
 # so it is not a governable native view. Do NOT "fix" this by adding tablero to
 # _ALL_VIEWS — the cloud console mirrors _ALL_VIEWS as its authorable vocabulary
-# and treats chat+tablero as always-on (see lumen-control-enterprise Agents.tsx
+# and treats chat+tablero as always-on (see safent-control-enterprise Agents.tsx
 # ALWAYS_ON_VIEWS + tests/test_view_vocabulary_mirror).
 
 # Minimum view set for an associate instance before Fase 4 cloud policies arrive.
@@ -70,7 +70,7 @@ _ASSOCIATE_DEFAULT_VIEWS: list[str] = ["chat", "coste", "tablero"]
 class PairRequest(BaseModel):
     code: str = Field(min_length=1, max_length=256)
     cloud_endpoint: str = Field(
-        default="https://cloud.lumen.run",
+        default="https://cloud.safent.run",
         description="Control plane base URL (optional — defaults to the production endpoint).",
         max_length=2048,
     )
@@ -130,7 +130,7 @@ def create_instance_router(db_path: Path, vault: "SecretsVault") -> APIRouter:
 
     @router.post("/pair", response_model=PairResponse)
     async def pair_instance(body: PairRequest) -> PairResponse:
-        """Associate this Lumen instance with an enterprise tenant.
+        """Associate this Safent instance with an enterprise tenant.
 
         409 when already associated (use unpair first).
         """

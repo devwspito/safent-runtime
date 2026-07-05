@@ -1,1 +1,1 @@
-"""Lumen Terminal panes (content screens)."""
+"""Safent Terminal panes (content screens)."""

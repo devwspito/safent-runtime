@@ -394,7 +394,7 @@ def _load_bootstrap_commitment(commit_path: Path) -> str | None:
             "note": (
                 "owner opens the UI once at http://HOST:PORT/?k=<secret>; read the "
                 "plaintext secret from the host (root) with: "
-                "podman exec lumen-os cat /var/lib/hermes-bootstrap/bootstrap/"
+                "podman exec safent-os cat /var/lib/hermes-bootstrap/bootstrap/"
                 "webui-bootstrap"
             ),
         },
@@ -716,7 +716,7 @@ def create_app() -> FastAPI:
     #     0444 — world-readable but root-only-writable, non-invertible, unmovable.
     # The owner reads the plaintext from the host (root): `podman exec … cat
     # /var/lib/hermes-bootstrap/bootstrap/webui-bootstrap`, then presents it ONCE
-    # to GET / (?k= or the X-Lumen-Bootstrap header). On a constant-time commitment
+    # to GET / (?k= or the X-Safent-Bootstrap header). On a constant-time commitment
     # match GET / mints a short-lived ROTATING session token (never the operator
     # token). Default-deny: no commitment ⇒ no token, read-only browse only — never
     # a fail-open gate.
@@ -869,7 +869,7 @@ def create_app() -> FastAPI:
     app.include_router(create_audit_router(_DB_PATH))
 
     # Wizard HTTP eliminado (Principio 0: SO-nativo, no API). El onboarding
-    # de providers vive ahora en la UI nativa LumenSO (ProvidersApp) que llama
+    # de providers vive ahora en la UI nativa SafentSO (ProvidersApp) que llama
     # a D-Bus `configure_native_provider` directo.
     from hermes.shell_server.setup.api import create_setup_router
 
@@ -1237,7 +1237,7 @@ def create_app() -> FastAPI:
         ]
 
     # ------------------------------------------------------------------
-    # Lumen Cowork — web UI API routers (must be registered BEFORE the
+    # Safent Cowork — web UI API routers (must be registered BEFORE the
     # static mount so /api/v1/* routes are resolved first).
     # ------------------------------------------------------------------
 
@@ -1387,7 +1387,7 @@ def create_app() -> FastAPI:
     app.include_router(create_instance_router(_DB_PATH, vault))
 
     # UI-triggered update: GET reports current/latest version, POST drops a marker the
-    # host-side `lumen agent` watches to apply the update (the sandbox can't self-update).
+    # host-side `safent agent` watches to apply the update (the sandbox can't self-update).
     from hermes.shell_server.system_update import (  # noqa: PLC0415
         create_system_update_router,
     )
@@ -1398,17 +1398,17 @@ def create_app() -> FastAPI:
     # React SPA — the single official UI, served at /app/ ( / redirects here).
     # Absent at build time (dev without frontend build) → skipped silently.
     #
-    # Baked path: /opt/lumen-webapp  (set by Containerfile).
-    # Override for local dev: LUMEN_REACT_DIST env var.
+    # Baked path: /opt/safent-webapp  (set by Containerfile).
+    # Override for local dev: SAFENT_REACT_DIST env var.
     #
-    # Token injection: the bootstrap handshake injects window.__LUMEN_TOKEN__
+    # Token injection: the bootstrap handshake injects window.__SAFENT_TOKEN__
     # into the served index.html.
-    # The placeholder comment <!--lumen-token-injection-placeholder--> in
+    # The placeholder comment <!--safent-token-injection-placeholder--> in
     # frontend/index.html marks where the <script> tag is inserted (defence
     # in depth: even if </head> appears twice, the placeholder is unique).
     # ------------------------------------------------------------------
     _react_dist = Path(
-        os.environ.get("LUMEN_REACT_DIST", "/opt/lumen-webapp")
+        os.environ.get("SAFENT_REACT_DIST", "/opt/safent-webapp")
     )
     if _react_dist.is_dir():
         from fastapi.responses import HTMLResponse  # noqa: PLC0415
@@ -1428,22 +1428,22 @@ def create_app() -> FastAPI:
             page = (_react_dist / "index.html").read_text(encoding="utf-8")
             presented = (
                 request.query_params.get("k")
-                or request.headers.get("x-lumen-bootstrap", "")
+                or request.headers.get("x-safent-bootstrap", "")
             )
             if presented and _commitment_matches(
                 app.state.shell_bootstrap_commitment or "", presented
             ):
                 session_token = app.state.mint_session_token()
                 inject = (
-                    "<script>window.__LUMEN_TOKEN__="
+                    "<script>window.__SAFENT_TOKEN__="
                     + _json_mod_react.dumps(session_token)
                     + ";</script>"
                 )
                 # Replace the placeholder comment first (preferred); fall back
                 # to </head> so it works even if the placeholder is absent.
-                if "<!--lumen-token-injection-placeholder-->" in page:
+                if "<!--safent-token-injection-placeholder-->" in page:
                     page = page.replace(
-                        "<!--lumen-token-injection-placeholder-->", inject, 1
+                        "<!--safent-token-injection-placeholder-->", inject, 1
                     )
                 else:
                     page = page.replace("</head>", inject + "</head>", 1)

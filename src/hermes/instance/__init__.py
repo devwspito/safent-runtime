@@ -1,7 +1,7 @@
-"""hermes.instance — enterprise pairing (association) for the Lumen runtime.
+"""hermes.instance — enterprise pairing (association) for the Safent runtime.
 
-A Lumen instance is Community Edition (CE) by default.  When the operator
-runs `lumen pair <code>`, this package orchestrates the handshake with the
+A Safent instance is Community Edition (CE) by default.  When the operator
+runs `safent pair <code>`, this package orchestrates the handshake with the
 control plane and persists the resulting association, switching the instance
 to "associate" edition.
 

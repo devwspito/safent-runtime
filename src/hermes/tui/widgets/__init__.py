@@ -1,1 +1,1 @@
-"""Lumen Terminal widgets."""
+"""Safent Terminal widgets."""

@@ -7,7 +7,7 @@ Usage (inside the container):
 
 Security: the pairing code is read from stdin (--stdin flag), NOT from
 argv.  Reading from argv exposes the code in process listings (ps aux) and
-shell history.  The `lumen pair` CLI passes the code via stdin:
+shell history.  The `safent pair` CLI passes the code via stdin:
   echo "$_code" | $RT exec -i $NAME python3 -m hermes.instance pair --stdin
 
 The shell-server runs on the same machine so we share the same DB path
@@ -26,7 +26,7 @@ _DB_PATH = Path(
     os.environ.get("HERMES_SHELL_DB", "/var/lib/hermes/shell-state.db")
 )
 _DEFAULT_CLOUD = os.environ.get(
-    "LUMEN_CLOUD_ENDPOINT", "https://cloud.lumen.run"
+    "SAFENT_CLOUD_ENDPOINT", "https://cloud.safent.run"
 )
 
 

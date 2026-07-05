@@ -225,7 +225,7 @@ class AgentBrowserCli:
         # this module, so nothing else stops it. Refuse rather than spawn
         # unconfined. The confined browser path is the daemon's Nous browser_tool
         # driving the launcher's jailed Chromium via --cdp attach.
-        # See project_lumen_agent_browser_go_nogo_fase4.
+        # See project_safent_agent_browser_go_nogo_fase4.
         if _jail_enabled():
             raise AgentBrowserCommandError(
                 "AgentBrowserCli is disabled under HERMES_BROWSER_JAIL=1: it spawns "

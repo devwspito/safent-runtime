@@ -1,7 +1,7 @@
 """LLM synthesis of a taught demonstration into a real, reusable SKILL.md.
 
 The desktop teaching pipeline captured low-level input *steps* and replayed them
-deterministically. In the web Lumen there is no low-level capture, and a brittle
+deterministically. In the web Safent there is no low-level capture, and a brittle
 coordinate-replay is the wrong abstraction anyway. Instead we let the model do
 what a human teacher would: turn the demonstration (name + the operator's written
 description / narration of the steps) into a generalizable SKILL.md the agent can

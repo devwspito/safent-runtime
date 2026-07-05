@@ -21,7 +21,7 @@ Flow:
 Security design of the shared_secret:
   The shared_secret is NEVER transmitted.  Both sides derive it independently:
     HKDF-SHA256(ikm=code.encode(), salt=tenant_id.bytes,
-                info=b"lumen-pairing-shared-secret-v1", length=32)
+                info=b"safent-pairing-shared-secret-v1", length=32)
   The cloud derives it from the code it originally issued; the client derives it
   from the code the operator entered.  A MITM or replay cannot obtain the secret
   without knowing the original code.
@@ -218,7 +218,7 @@ def _derive_shared_secret(code: str, tenant_id: UUID) -> bytes:
     """Derive the HMAC shared_secret locally from the pairing code and tenant_id.
 
     HKDF-SHA256(ikm=code.encode("utf-8"), salt=tenant_id.bytes,
-                info=b"lumen-pairing-shared-secret-v1", length=32)
+                info=b"safent-pairing-shared-secret-v1", length=32)
 
     The cloud derives the SAME key from the code it originally issued.
     The key NEVER travels over the network — only the HMAC outputs do.
@@ -231,7 +231,7 @@ def _derive_shared_secret(code: str, tenant_id: UUID) -> bytes:
 
     return _hkdf_derive(
         ikm=code.encode("utf-8"),
-        info=b"lumen-pairing-shared-secret-v1",
+        info=b"safent-pairing-shared-secret-v1",
         salt=tenant_id.bytes,
         length=32,
     )
@@ -356,7 +356,7 @@ class PairingService:
         if self._store.is_associated():
             raise AlreadyAssociatedError(
                 "Esta instancia ya está asociada a un tenant. "
-                "Ejecuta 'lumen unpair' antes de volver a vincular."
+                "Ejecuta 'safent unpair' antes de volver a vincular."
             )
 
         from hermes.instance.identity import hardware_fingerprint, resolve_instance_id  # noqa: PLC0415

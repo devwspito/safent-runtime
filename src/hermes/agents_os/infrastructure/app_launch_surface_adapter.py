@@ -1,7 +1,7 @@
 """AppLaunchSurfaceAdapter — lanza apps de escritorio via el compositor.
 
 El daemon hermes corre sin display (usuario "hermes"). Para lanzar una app
-nativa debe señalizar al compositor lumenso-shell (usuario "hermes-user")
+nativa debe señalizar al compositor safentso-shell (usuario "hermes-user")
 via D-Bus: AppLaunchRequested(cmd: s). El compositor ejecuta:
     onAppLaunchRequested(cmd) → sysManager.launchNativeApp(cmd)
 

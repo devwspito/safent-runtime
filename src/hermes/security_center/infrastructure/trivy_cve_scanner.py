@@ -169,7 +169,7 @@ class TriviaCveScanner:
             return False
         spec = version.strip() or "latest"
         manifest = json.dumps({
-            "name": "lumen-cve-probe",
+            "name": "safent-cve-probe",
             "version": "0.0.0",
             "private": True,
             "dependencies": {name: spec},

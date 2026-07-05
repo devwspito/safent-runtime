@@ -1,6 +1,6 @@
-"""hermes.tui — Lumen Terminal.
+"""hermes.tui — Safent Terminal.
 
-A terminal-native frontend (Textual) for the Lumen agent OS daemon.
+A terminal-native frontend (Textual) for the Safent agent OS daemon.
 Talks to the SAME org.hermes.Runtime1 D-Bus surface the QML compositor uses,
 so the full security kernel (broker, netns/egress confinement, signed audit,
 consent gate, HITL) is identical — only the presentation is a TUI.

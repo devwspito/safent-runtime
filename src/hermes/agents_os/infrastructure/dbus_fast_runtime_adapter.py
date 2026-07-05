@@ -1798,7 +1798,7 @@ class Runtime1ServiceInterface(ServiceInterface):
         """Emitted when the agent requests launching a desktop application.
 
         cmd: binary basename (e.g. "gnome-calculator"). No args, no shell string.
-        The compositor (lumenso-shell / hermes-user) listens and calls
+        The compositor (safentso-shell / hermes-user) listens and calls
         sysManager.launchNativeApp(cmd).
         """
         return cmd

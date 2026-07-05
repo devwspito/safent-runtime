@@ -1,12 +1,12 @@
-# Lumen — Security Posture (standard container)
+# Safent — Security Posture (standard container)
 
-Honest statement of what the Lumen cage enforces, how to run it safely, the host
+Honest statement of what the Safent cage enforces, how to run it safely, the host
 it needs, and the residual risks. Validated by an adversarial red-team (penetrate
 + escape) against a fresh hardened container.
 
 **Credits.** The agent runtime is **Hermes**, built on the **Nous Research
-hermes-agent** engine — that is the brain Lumen wraps. The cage is **inspired by
-NVIDIA NemoClaw**. Lumen's differentiator is **the cage itself** — a real,
+hermes-agent** engine — that is the brain Safent wraps. The cage is **inspired by
+NVIDIA NemoClaw**. Safent's differentiator is **the cage itself** — a real,
 defensible OS-level containment with a **semantic governance layer** (per-action
 consent/HITL) on top, plus stupid-easy delivery. The cage is the product.
 
@@ -24,7 +24,7 @@ radius.
   of `master.key`) on every mutating `/api/v1` route. Unauthenticated `POST` →
   `401` (providers, chat, approvals, mcp, integrations). The token is delivered to
   the same-origin webui via the served `index.html`.
-- Published on **`127.0.0.1` only** (`run-lumen.sh`) — the control plane never faces
+- Published on **`127.0.0.1` only** (`run-safent.sh`) — the control plane never faces
   the LAN.
 - Provider `base_url` rejects link-local/cloud-metadata (`169.254.0.0/16`) → no SSRF
   to instance metadata. Private ranges are allowed (local-model on host gateway).
@@ -43,7 +43,7 @@ radius.
 **Kernel cage (escape):**
 - Browser (untrusted web content) jailed in a netns: egress only via the
   SNI-allowlist proxy; per-process **Landlock** FS jail; per-unit seccomp.
-- **seccomp** profile (`seccomp/lumen.json`): allows `landlock_*` (so the jail
+- **seccomp** profile (`seccomp/safent.json`): allows `landlock_*` (so the jail
   loads) and denies `mount`/`setns`/`ptrace`/`pivot_root` — a Chromium 0-day cannot
   `clone(CLONE_NEWNS)`/`mount`/`setns` out of the netns. **Do not use
   `seccomp=unconfined`.**
@@ -73,7 +73,7 @@ all denied.
 ## How to run
 
 ```bash
-ops/container/run-lumen.sh ghcr.io/devwspito/lumen:latest 17517
+ops/container/run-safent.sh ghcr.io/devwspito/safent:latest 17517
 # UI at http://localhost:17517 (the operator token is injected into the page)
 ```
 

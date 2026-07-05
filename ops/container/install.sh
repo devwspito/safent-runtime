@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# install.sh — instalador simple de Lumen: limpia, construye y arranca en un comando.
+# install.sh — instalador simple de Safent: limpia, construye y arranca en un comando.
 #
-# Filosofía: el instalador SOLO levanta Lumen. Todo lo "custom" (modelo/proveedor,
+# Filosofía: el instalador SOLO levanta Safent. Todo lo "custom" (modelo/proveedor,
 # agentes, MCP, skills, integraciones) se configura en la UI.
-# Para la instalación de usuario final, usa el CLI: `npx @devwspito/lumen`.
+# Para la instalación de usuario final, usa el CLI: `npx @devwspito/safent`.
 # Este script es el camino DESDE FUENTE (construye la imagen localmente).
 #
 #   ./ops/container/install.sh [PUERTO]      (puerto por defecto: 17517)
@@ -13,9 +13,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"   # raíz del repo
 cd "$HERE"
 
-IMAGE="lumen-runtime:clean"
+IMAGE="safent-runtime:clean"
 PORT="${1:-17517}"
-NAME="${LUMEN_NAME:-lumen}"
+NAME="${SAFENT_NAME:-safent}"
 RUNTIME="$(command -v podman || command -v docker || true)"
 [ -n "$RUNTIME" ] || { echo "✗ necesitas podman o docker instalado"; exit 1; }
 
@@ -31,7 +31,7 @@ fi
 
 echo "▸ 1/4 Limpieza (estado de fábrica)…"
 "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || true
-"$RUNTIME" volume rm lumen-data >/dev/null 2>&1 || true
+"$RUNTIME" volume rm safent-data >/dev/null 2>&1 || true
 "$RUNTIME" builder prune -af >/dev/null 2>&1 || true
 "$RUNTIME" image prune -af   >/dev/null 2>&1 || true
 
@@ -40,7 +40,7 @@ echo "▸ 2/4 Construyendo imagen (wheel py3.12 + frontend React, dentro del con
   -f ops/container/Containerfile -t "$IMAGE" .
 
 echo "▸ 3/4 Arrancando (launcher canónico endurecido)…"
-LUMEN_NAME="$NAME" ./ops/container/run-lumen.sh "$IMAGE" "$PORT"
+SAFENT_NAME="$NAME" ./ops/container/run-safent.sh "$IMAGE" "$PORT"
 
 echo "▸ 4/4 Esperando al daemon…"
 s=""
@@ -54,7 +54,7 @@ echo "  daemon: ${s:-sin respuesta}"
 secret="$("$RUNTIME" exec "$NAME" cat /var/lib/hermes-bootstrap/bootstrap/webui-bootstrap 2>/dev/null | tr -d '\r\n' || true)"
 echo
 if [ "$s" = active ] && [ -n "$secret" ]; then
-  echo "  ✅ Lumen está arriba. Abre:"
+  echo "  ✅ Safent está arriba. Abre:"
   echo "     http://localhost:${PORT}/?k=${secret}"
   echo
   echo "  (el modelo, agentes, MCP y skills se configuran en la UI)"

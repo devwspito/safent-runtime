@@ -1,4 +1,4 @@
-"""HITL approvals for the Lumen Cowork web UI (P4 elevation gate).
+"""HITL approvals for the Safent Cowork web UI (P4 elevation gate).
 
   GET  /api/v1/approvals/pending          → [{proposal_id, kind, summary, target, required_level}]
   POST /api/v1/approvals/{proposal_id}     body: {decision, totp?}

@@ -1,19 +1,19 @@
 #!/bin/sh
-# lumen - control the local Lumen container from your terminal.
+# safent - control the local Safent container from your terminal.
 #
-#   lumen            open Lumen in the browser (starts it if stopped)
-#   lumen stop       stop Lumen
-#   lumen start      start Lumen without opening the browser
-#   lumen restart    restart Lumen
-#   lumen update     pull the latest image and recreate (keeps your config)
-#   lumen status     is it running? on which port?
-#   lumen logs       follow the container journal
+#   safent            open Safent in the browser (starts it if stopped)
+#   safent stop       stop Safent
+#   safent start      start Safent without opening the browser
+#   safent restart    restart Safent
+#   safent update     pull the latest image and recreate (keeps your config)
+#   safent status     is it running? on which port?
+#   safent logs       follow the container journal
 #
 # ASCII-only + POSIX sh on purpose (portable across macOS bash 3.2 / dash / zsh-as-sh).
 # The model, Composio, Brave, agents and skills are all configured IN THE UI.
 set -e
 
-# Monotonic CLI revision. `lumen update` self-updates this script from CLI_URL
+# Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
 _CLI_REV=2
@@ -22,22 +22,22 @@ _CLI_REV=2
 # image carries no edition-specific code: pairing state (the .enterprise marker +
 # is_associated()) is what activates associate behavior at runtime, so the same
 # image runs both roles. There is intentionally no separate "enterprise" image.
-IMAGE="${LUMEN_IMAGE:-ghcr.io/devwspito/lumen:latest}"
-NAME="${LUMEN_NAME:-lumen}"
-PORT_PIN="${LUMEN_PORT:-}"
+IMAGE="${SAFENT_IMAGE:-ghcr.io/devwspito/safent:latest}"
+NAME="${SAFENT_NAME:-safent}"
+PORT_PIN="${SAFENT_PORT:-}"
 # Enterprise cloud the instance pairs/syncs against. Empty for community edition.
 # Forwarded into the container at run (-e) AND to the pair handshake (--cloud) so
-# the personalized curl one-liner (LUMEN_CLOUD_ENDPOINT=... lumen pair) reaches
-# the tenant's cloud instead of the default https://cloud.lumen.run.
-CLOUD_ENDPOINT="${LUMEN_CLOUD_ENDPOINT:-}"
+# the personalized curl one-liner (SAFENT_CLOUD_ENDPOINT=... safent pair) reaches
+# the tenant's cloud instead of the default https://cloud.safent.run.
+CLOUD_ENDPOINT="${SAFENT_CLOUD_ENDPOINT:-}"
 # Named volume that holds the persistent state (config, identity, skills, memory).
-# Override LUMEN_DATA_VOLUME to run more than one isolated instance on one host.
-DATA_VOLUME="${LUMEN_DATA_VOLUME:-lumen-data}"
-SECCOMP_URL="${LUMEN_SECCOMP_URL:-https://raw.githubusercontent.com/devwspito/lumen-runtime/main/ops/container/seccomp/lumen.json}"
-SECCOMP_DIR="${HOME:-/tmp}/.lumen"
-SECCOMP="$SECCOMP_DIR/lumen-seccomp.json"
-# Where `lumen update` fetches the newest CLI from (same source the installer uses).
-CLI_URL="${LUMEN_CLI_URL:-https://raw.githubusercontent.com/devwspito/lumen-runtime/main/lumen}"
+# Override SAFENT_DATA_VOLUME to run more than one isolated instance on one host.
+DATA_VOLUME="${SAFENT_DATA_VOLUME:-safent-data}"
+SECCOMP_URL="${SAFENT_SECCOMP_URL:-https://raw.githubusercontent.com/devwspito/safent-runtime/main/ops/container/seccomp/safent.json}"
+SECCOMP_DIR="${HOME:-/tmp}/.safent"
+SECCOMP="$SECCOMP_DIR/safent-seccomp.json"
+# Where `safent update` fetches the newest CLI from (same source the installer uses).
+CLI_URL="${SAFENT_CLI_URL:-https://raw.githubusercontent.com/devwspito/safent-runtime/main/safent}"
 
 RT="$(command -v podman 2>/dev/null || command -v docker 2>/dev/null || true)"
 [ -n "$RT" ] || { echo "[x] You need podman or docker.  ->  https://podman.io/get-started"; exit 1; }
@@ -86,7 +86,7 @@ _ensure_seccomp() {
   mkdir -p "$SECCOMP_DIR" 2>/dev/null || true
   if ! curl -fsSL "$SECCOMP_URL" -o "$SECCOMP" 2>/dev/null; then
     echo "[x] Could not download the seccomp profile ($SECCOMP_URL)."
-    echo "    Export LUMEN_SECCOMP_URL to a reachable URL if the repo is not public."
+    echo "    Export SAFENT_SECCOMP_URL to a reachable URL if the repo is not public."
     exit 1
   fi
 }
@@ -101,7 +101,7 @@ _run() {
   if [ -n "$PORT_PIN" ]; then publish="127.0.0.1:${PORT_PIN}:7517"; else publish="127.0.0.1::7517"; fi
   "$RT" run -d --name "$NAME" --systemd=always \
     -p "$publish" \
-    ${CLOUD_ENDPOINT:+-e LUMEN_CLOUD_ENDPOINT=$CLOUD_ENDPOINT} \
+    ${CLOUD_ENDPOINT:+-e SAFENT_CLOUD_ENDPOINT=$CLOUD_ENDPOINT} \
     --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
     --security-opt seccomp="$SECCOMP" \
     --security-opt unmask=/sys/kernel/security \
@@ -143,16 +143,16 @@ _open_browser() {
 }
 
 _open_and_print() {
-  echo "[*] Waiting for Lumen..."
+  echo "[*] Waiting for Safent..."
   url="$(_url)" || url=""
   if [ -n "$url" ]; then
     echo ""
-    echo "  Lumen is ready:"
+    echo "  Safent is ready:"
     echo "     $url"
     echo ""
     _open_browser "$url"
   else
-    echo "  [!] Lumen started but I could not get the token. Check:  lumen logs"
+    echo "  [!] Safent started but I could not get the token. Check:  safent logs"
     exit 1
   fi
 }
@@ -162,9 +162,9 @@ _open_and_print() {
 cmd_open() {
   _ensure_machine
   if _exists; then
-    _running || { echo "[*] Starting Lumen..."; "$RT" start "$NAME" >/dev/null 2>&1 || true; }
+    _running || { echo "[*] Starting Safent..."; "$RT" start "$NAME" >/dev/null 2>&1 || true; }
   else
-    echo "[*] First run - downloading and starting Lumen..."
+    echo "[*] First run - downloading and starting Safent..."
     "$RT" pull "$IMAGE" >/dev/null 2>&1 || true
     _run
   fi
@@ -174,37 +174,37 @@ cmd_open() {
 cmd_start() {
   _ensure_machine
   if _exists; then
-    if _running; then echo "[ok] Lumen is already running (run 'lumen' to open it)."; return; fi
+    if _running; then echo "[ok] Safent is already running (run 'safent' to open it)."; return; fi
     "$RT" start "$NAME" >/dev/null 2>&1 || true
-    echo "[ok] Lumen started. Open it with:  lumen"
+    echo "[ok] Safent started. Open it with:  safent"
   else
     "$RT" pull "$IMAGE" >/dev/null 2>&1 || true
     _run
-    echo "[ok] Lumen started. Open it with:  lumen"
+    echo "[ok] Safent started. Open it with:  safent"
   fi
 }
 
 cmd_stop() {
   if _exists && _running; then
-    if "$RT" stop "$NAME" >/dev/null 2>&1; then echo "[ok] Lumen stopped."; else echo "[x] Could not stop it."; fi
+    if "$RT" stop "$NAME" >/dev/null 2>&1; then echo "[ok] Safent stopped."; else echo "[x] Could not stop it."; fi
   else
-    echo "[ok] Lumen was already stopped."
+    echo "[ok] Safent was already stopped."
   fi
 }
 
 cmd_restart() { cmd_stop; cmd_open; }
 
-# Reclaim disk used by OLD Lumen images + dangling layers + the build cache. This is
+# Reclaim disk used by OLD Safent images + dangling layers + the build cache. This is
 # surgical and cannot lose data:
-#   • It removes ONLY images of the Lumen repo, and NEVER the one the current container
+#   • It removes ONLY images of the Safent repo, and NEVER the one the current container
 #     runs on (so a failed pull always leaves you on the working version).
 #   • It leaves every other app's images alone.
-#   • It never runs `volume prune`, so the lumen-data volume (keystore / MFA / providers
+#   • It never runs `volume prune`, so the safent-data volume (keystore / MFA / providers
 #     / config / memory) is physically out of reach of this path — nothing can be lost.
 # Each old version hoards ~7 GB; on a machine that filled up over time, freeing them
 # BEFORE the pull is what stops "no space left on device" from wedging the update.
 _reclaim_space() {
-  repo="${IMAGE%:*}"                                                   # ghcr.io/devwspito/lumen
+  repo="${IMAGE%:*}"                                                   # ghcr.io/devwspito/safent
   keep="$("$RT" inspect -f '{{.Image}}' "$NAME" 2>/dev/null | sed 's/^sha256://')"
   n=0
   if [ -n "$keep" ]; then
@@ -217,17 +217,17 @@ _reclaim_space() {
   fi
   "$RT" image prune -f   >/dev/null 2>&1 || true                       # untagged/dangling leftovers
   "$RT" builder prune -f >/dev/null 2>&1 || true                       # build cache (safe to drop)
-  [ "$n" -gt 0 ] && echo "[ok] Freed space from $n old Lumen image(s)."
+  [ "$n" -gt 0 ] && echo "[ok] Freed space from $n old Safent image(s)."
   return 0
 }
 
 # Self-update the CLI itself before updating the image. The prune/agent fixes
-# live in THIS script — the image cannot deliver them — so `lumen update` keeps
+# live in THIS script — the image cannot deliver them — so `safent update` keeps
 # the CLI current too, without the owner ever re-running the installer. Only
 # replaces when the published _CLI_REV is strictly newer (never downgrades);
 # fail-soft on any error (offline, read-only install dir, repo unreachable).
 _self_update() {
-  [ "${LUMEN_NO_SELF_UPDATE:-0}" = "1" ] && return 0
+  [ "${SAFENT_NO_SELF_UPDATE:-0}" = "1" ] && return 0
   tmp="$(mktemp 2>/dev/null)" || return 0
   if curl -fsSL "$CLI_URL" -o "$tmp" 2>/dev/null \
      && [ -s "$tmp" ] && head -1 "$tmp" | grep -q '^#!'; then
@@ -236,8 +236,8 @@ _self_update() {
        && sh -n "$tmp" 2>/dev/null; then
       if cat "$tmp" > "$0" 2>/dev/null; then
         rm -f "$tmp"
-        echo "[ok] lumen CLI updated (rev $_CLI_REV -> $remote_rev). Continuing..."
-        LUMEN_NO_SELF_UPDATE=1 exec "$0" update
+        echo "[ok] safent CLI updated (rev $_CLI_REV -> $remote_rev). Continuing..."
+        SAFENT_NO_SELF_UPDATE=1 exec "$0" update
       fi
     fi
   fi
@@ -245,29 +245,29 @@ _self_update() {
   return 0
 }
 
-# Make sure the UI-update watcher (`lumen agent`) is installed and running.
+# Make sure the UI-update watcher (`safent agent`) is installed and running.
 # The UI's "Actualizar" button only drops a flag INSIDE the container; without
 # this host-side watcher nothing picks it up and the UI hangs on "Updating…".
-# Installing it here (not only in get-lumen.sh) means one `lumen update` run is
+# Installing it here (not only in get-safent.sh) means one `safent update` run is
 # enough to enable UI updates on machines installed before the agent existed.
 _ensure_agent() {
-  self="$(command -v lumen 2>/dev/null || echo "$0")"
-  mkdir -p "$HOME/.lumen" 2>/dev/null || true
+  self="$(command -v safent 2>/dev/null || echo "$0")"
+  mkdir -p "$HOME/.safent" 2>/dev/null || true
   case "$OS" in
     Darwin)
-      _pl="$HOME/Library/LaunchAgents/run.lumen.agent.plist"
+      _pl="$HOME/Library/LaunchAgents/run.safent.agent.plist"
       if [ ! -f "$_pl" ] || ! grep -q "$self" "$_pl" 2>/dev/null; then
         mkdir -p "$HOME/Library/LaunchAgents" 2>/dev/null || return 0
         cat > "$_pl" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>run.lumen.agent</string>
+  <key>Label</key><string>run.safent.agent</string>
   <key>ProgramArguments</key><array><string>$self</string><string>agent</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$HOME/.lumen/agent.log</string>
-  <key>StandardErrorPath</key><string>$HOME/.lumen/agent.log</string>
+  <key>StandardOutPath</key><string>$HOME/.safent/agent.log</string>
+  <key>StandardErrorPath</key><string>$HOME/.safent/agent.log</string>
 </dict></plist>
 PLIST
         launchctl unload "$_pl" >/dev/null 2>&1 || true
@@ -278,11 +278,11 @@ PLIST
     Linux)
       if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
         _u="$HOME/.config/systemd/user"
-        if [ ! -f "$_u/lumen-agent.service" ]; then
+        if [ ! -f "$_u/safent-agent.service" ]; then
           mkdir -p "$_u" 2>/dev/null || true
-          cat > "$_u/lumen-agent.service" <<UNIT
+          cat > "$_u/safent-agent.service" <<UNIT
 [Unit]
-Description=Lumen UI-triggered update agent
+Description=Safent UI-triggered update agent
 [Service]
 ExecStart=$self agent
 Restart=always
@@ -291,7 +291,7 @@ RestartSec=10
 WantedBy=default.target
 UNIT
           systemctl --user daemon-reload >/dev/null 2>&1 || true
-          systemctl --user enable --now lumen-agent.service >/dev/null 2>&1 \
+          systemctl --user enable --now safent-agent.service >/dev/null 2>&1 \
             && echo "[ok] UI-triggered updates enabled (systemd --user)." || true
         fi
       fi
@@ -303,17 +303,17 @@ UNIT
 cmd_update() {
   _self_update
   _ensure_agent
-  echo "[*] Fetching the latest Lumen image..."
+  echo "[*] Fetching the latest Safent image..."
   _ensure_machine
   # Reclaim space BEFORE pulling so the new image has room even on a full disk. See
-  # _reclaim_space: it only ever touches old Lumen images / dangling layers / build
+  # _reclaim_space: it only ever touches old Safent images / dangling layers / build
   # cache — your data volume is never in scope.
   echo "[*] Reclaiming space from previous versions (your data is untouched)..."
   _reclaim_space
   # Pull the correct image (enterprise or community) based on the current marker.
   "$RT" pull "$(_image)"
   echo "[*] Recreating the container with the new image..."
-  _run   # -v lumen-data keeps your config (keystore, MFA, providers)
+  _run   # -v safent-data keeps your config (keystore, MFA, providers)
   # The image we ran until a second ago is now unreferenced (tag moved to the new pull,
   # container recreated) → reclaim it too, same surgical path.
   _reclaim_space
@@ -329,12 +329,12 @@ cmd_update() {
 cmd_pair() {
   _code="$1"
   if [ -z "$_code" ]; then
-    echo "[x] Usage: lumen pair <code>"; exit 1
+    echo "[x] Usage: safent pair <code>"; exit 1
   fi
   _ensure_machine
   # Ensure the container is running before we exec into it.
   if ! _running; then
-    echo "[*] Starting Lumen to complete pairing..."
+    echo "[*] Starting Safent to complete pairing..."
     cmd_start
   fi
   # Run the pairing handshake inside the container.
@@ -346,27 +346,27 @@ cmd_pair() {
   # Start cloud policy sync now (the unit is ConditionPathExists-gated on the
   # marker we just wrote). Best-effort — a restart would also bring it up.
   "$RT" exec "$NAME" systemctl start hermes-config-sync.service >/dev/null 2>&1 || true
-  echo "[ok] Enterprise association complete.  Restart Lumen to activate: lumen restart"
+  echo "[ok] Enterprise association complete.  Restart Safent to activate: safent restart"
 }
 
 cmd_unpair() {
   _ensure_machine
   if ! _running; then
-    echo "[x] Lumen must be running to unpair.  Start it with: lumen start"; exit 1
+    echo "[x] Safent must be running to unpair.  Start it with: safent start"; exit 1
   fi
   "$RT" exec "$NAME" python3 -m hermes.instance unpair || { echo "[x] Unpair failed."; exit 1; }
   # Remove the pairing marker so config-sync goes inert again (community mode).
   "$RT" exec "$NAME" rm -f "$_ENTERPRISE_MARKER" >/dev/null 2>&1 || true
-  echo "[ok] Instance unpaired.  Restart Lumen to revert to community edition: lumen restart"
+  echo "[ok] Instance unpaired.  Restart Safent to revert to community edition: safent restart"
 }
 
 cmd_status() {
   if _exists && _running; then
-    echo "[ok] Lumen running at  http://localhost:$(_port)/   (open with: lumen)"
+    echo "[ok] Safent running at  http://localhost:$(_port)/   (open with: safent)"
   elif _exists; then
-    echo "[ ] Lumen is stopped.  Start it with: lumen"
+    echo "[ ] Safent is stopped.  Start it with: safent"
   else
-    echo "[ ] Lumen is not installed.  Install with: lumen update"
+    echo "[ ] Safent is not installed.  Install with: safent update"
   fi
 }
 
@@ -377,7 +377,7 @@ cmd_logs() { "$RT" logs -f "$NAME"; }
 # would defeat the cage). So "update from the UI" works like this: the UI writes an
 # "update requested" marker into the data volume; THIS loop — installed once as a
 # launchd agent (macOS) / systemd --user unit or nohup (Linux) by the installer —
-# notices it and runs the same `lumen update` (prune-before-pull + recreate). The
+# notices it and runs the same `safent update` (prune-before-pull + recreate). The
 # user never opens a terminal. It also removes the marker so it runs exactly once
 # per request. Nothing here is privileged beyond the podman the user already runs.
 # In the daemon-owned instance dir (uid 880 can write there — same place as the
@@ -385,7 +385,7 @@ cmd_logs() { "$RT" logs -f "$NAME"; }
 # the daemon). The backend's POST /api/v1/system/update touches this exact path.
 _UPDATE_FLAG="/var/lib/hermes/instance/.update-requested"
 cmd_agent() {
-  echo "[*] Lumen update agent running (watches for UI-triggered updates)."
+  echo "[*] Safent update agent running (watches for UI-triggered updates)."
   while :; do
     if _running && "$RT" exec "$NAME" test -f "$_UPDATE_FLAG" 2>/dev/null; then
       "$RT" exec "$NAME" rm -f "$_UPDATE_FLAG" 2>/dev/null || true
@@ -398,17 +398,17 @@ cmd_agent() {
 
 usage() {
   cat <<'EOF'
-lumen - control your local Lumen
+safent - control your local Safent
 
-  lumen            open Lumen in the browser (starts it if stopped)
-  lumen stop       stop Lumen
-  lumen start      start Lumen without opening the browser
-  lumen restart    restart Lumen
-  lumen update     pull the latest version and apply it (keeps your config)
-  lumen status     is it running? on which port?
-  lumen logs       follow the container journal
-  lumen pair <code>   associate with an enterprise tenant (same image, associate mode)
-  lumen unpair        remove the enterprise association (reverts to community edition)
+  safent            open Safent in the browser (starts it if stopped)
+  safent stop       stop Safent
+  safent start      start Safent without opening the browser
+  safent restart    restart Safent
+  safent update     pull the latest version and apply it (keeps your config)
+  safent status     is it running? on which port?
+  safent logs       follow the container journal
+  safent pair <code>   associate with an enterprise tenant (same image, associate mode)
+  safent unpair        remove the enterprise association (reverts to community edition)
 EOF
 }
 

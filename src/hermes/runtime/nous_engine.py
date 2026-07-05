@@ -307,7 +307,7 @@ def _resolve_local_tz():
 
     Order: HERMES_TZ → TZ (both IANA names, e.g. 'Europe/Madrid') → the process'
     system local zone → UTC. Fail-soft: any bad name falls through. This is the
-    single knob for "what wall-clock does Lumen live in" — set by run-lumen.sh from
+    single knob for "what wall-clock does Safent live in" — set by run-safent.sh from
     the host and passed to the daemon unit via PassEnvironment.
     """
     from datetime import timezone as _tz  # noqa: PLC0415
@@ -2034,7 +2034,7 @@ class NousReasoningEngine:
         de la mecánica interna. Aquí construimos un asistente personal que conversa
         en prosa, usa tools solo si ayudan, y jamás filtra mecánica/IDs internos.
         """
-        name = getattr(persona, "name", "") or "Lumen"
+        name = getattr(persona, "name", "") or "Safent"
         lang = getattr(persona, "language", "") or "es-ES"
         # Framing POSITIVO: describir lo que SÍ hace. Enumerar términos prohibidos
         # ("no hables de queue_drain...") los PRIMA en la respuesta (priming inverso).

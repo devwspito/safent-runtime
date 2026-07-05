@@ -22,7 +22,7 @@ from pathlib import Path
 
 logger = logging.getLogger("hermes.mcp.offline_runtime")
 
-# Persistent per-package install root (under the lumen-data volume, outside any cache).
+# Persistent per-package install root (under the safent-data volume, outside any cache).
 MCP_INSTALL_ROOT = Path("/var/lib/hermes/mcp-installs")
 
 # npx leading boolean flags to skip when locating the package spec in an argv.

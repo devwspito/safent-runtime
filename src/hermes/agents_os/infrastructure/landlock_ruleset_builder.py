@@ -397,7 +397,7 @@ _CAPABILITY_PATHS: dict[Capability, tuple[tuple[str, frozenset[AccessRight]], ..
     # (its socket dir lives in /tmp via AGENT_BROWSER_SOCKET_DIR; libs/node in /usr;
     # certs in /etc) plus the browser-sessions subtree, and NOTHING under
     # /var/lib/hermes root. A CDP-client 0-day from a popped browser can no longer
-    # read the keystore. See project_lumen_agent_browser_go_nogo_fase4.
+    # read the keystore. See project_safent_agent_browser_go_nogo_fase4.
     Capability.BROWSER_CONTROLLER: (
         ("/usr", _RUNTIME_RX), ("/etc", _RUNTIME_RX), ("/bin", _RUNTIME_RX),
         ("/sbin", _RUNTIME_RX), ("/lib", _RUNTIME_RX), ("/lib64", _RUNTIME_RX),

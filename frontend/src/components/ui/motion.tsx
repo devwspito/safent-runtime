@@ -1,5 +1,5 @@
 /**
- * Motion system — reusable animation primitives for the Lumen UI.
+ * Motion system — reusable animation primitives for the Safent UI.
  *
  * Design intent: physical, delicate transitions that feel native.
  * Every animation respects prefers-reduced-motion via Motion's built-in

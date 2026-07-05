@@ -40,7 +40,7 @@ TOOL_CATALOG: frozenset[str] = NOUS_TOOL_CATALOG | _CAPABILITY_TOOLS | CAGED_NAT
 # ---------------------------------------------------------------------------
 # Category mapping: tool name → human-readable capability group.
 #
-# Category labels are UI-facing (Spanish, domain language for Lumen).
+# Category labels are UI-facing (Spanish, domain language for Safent).
 # Origin axes:
 #   - native (NOUS_TOOL_CATALOG): categorised by functional group below.
 #   - capability (_CAPABILITY_TOOLS + CAGED_NATIVE_TOOLS): derives from

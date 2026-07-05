@@ -85,7 +85,7 @@ class DefaultPromptBuilder:
 
     def _chat_system(self, persona: PersonaSpec) -> str:
         # Framing POSITIVO (no enumerar términos prohibidos: los prima).
-        name = getattr(persona, "name", "") or "Lumen"
+        name = getattr(persona, "name", "") or "Safent"
         lang = getattr(persona, "language", "") or self._AUTO_LANGUAGE
         if lang == self._AUTO_LANGUAGE:
             lang_line = self._LANGUAGE_AUTO_DIRECTIVE
