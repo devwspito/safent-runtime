@@ -68,6 +68,13 @@ class AccessScopeSpec(BaseModel):
     native_tools: list[str] = Field(default_factory=list, max_length=256)
     policy_overlay: dict[str, dict[str, bool]] = Field(default_factory=dict)
     views: list[str] = Field(default_factory=list, max_length=256)
+    # Per-role governance (2026-07-05): approval tier conferred by this scope.
+    # "standard" (default) → today's routing; "coordinator" → approval_router
+    # diverts fewer of this agent's actions to remote/ENTERPRISE approval
+    # (restrict-only; never skips the kernel floor). Cloud-authored, dropped-when-
+    # "standard" so a non-coordinator scope verifies BYTE-IDENTICALLY to a
+    # pre-per-role bundle. MUST match the cloud mirror.
+    approval_tier: str = Field(default="standard", max_length=32)
 
     @field_validator("native_tools")
     @classmethod
@@ -84,6 +91,15 @@ class AccessScopeSpec(BaseModel):
         if len(v) > 256:
             raise ValueError(f"policy_overlay exceeds 256 keys (got {len(v)})")
         return v
+
+    @model_serializer(mode="wrap")
+    def _serialize_scope(self, handler: Any) -> dict[str, Any]:
+        """Drop approval_tier when "standard" — byte-identical to a pre-per-role
+        bundle. MUST match the cloud mirror's _serialize_scope exactly."""
+        data = handler(self)
+        if self.approval_tier == "standard":
+            data.pop("approval_tier", None)
+        return data
 
 
 # ---------------------------------------------------------------------------
