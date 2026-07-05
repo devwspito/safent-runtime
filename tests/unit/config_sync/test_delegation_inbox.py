@@ -371,7 +371,13 @@ class TestVerifyEnvelope:
 
         assert outcome == "invalid_envelope"
 
-    def test_both_to_employee_and_to_agent_set_fails_xor(self, tmp_path) -> None:
+    def test_both_to_employee_and_to_agent_set_is_valid(self, tmp_path) -> None:
+        """The RESOLVED envelope legitimately carries BOTH the target employee AND
+        their agent — the cloud's DelegationService._resolve_target always returns
+        (instance, agent_template_id, employee_id) and signs both. The submission
+        contract is XOR, but the received envelope is not; accepting both is
+        required (2026-07-05: a strict XOR here rejected every real delegation as
+        invalid_envelope — caught by the live 2-associate A2A test)."""
         db_path = tmp_path / "state.db"
         private_key, pubkey_hex = _generate_keypair()
         envelope = _build_request_envelope(to_employee_id="bob@org.example", to_agent_id="agent-42")
@@ -387,7 +393,7 @@ class TestVerifyEnvelope:
         finally:
             conn.close()
 
-        assert outcome == "invalid_envelope"
+        assert outcome == "verified"
 
     def test_neither_to_employee_nor_to_agent_set_fails_xor(self, tmp_path) -> None:
         db_path = tmp_path / "state.db"

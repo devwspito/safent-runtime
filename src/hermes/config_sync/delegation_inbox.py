@@ -238,9 +238,16 @@ def _extract_envelope(item: Any) -> dict[str, str] | None:
         return None
     if len(envelope["body"]) > _MAX_DELEGATION_BODY_CHARS:
         return None
-    to_employee_set = bool(envelope["to_employee_id"])
-    to_agent_set = bool(envelope["to_agent_id"])
-    if to_employee_set == to_agent_set:  # both set or both empty — invalid XOR
+    # At least ONE of to_employee_id / to_agent_id must be set. The *submission*
+    # contract is XOR (delegate_to_colleague names an employee OR a specific
+    # agent), but the cloud RESOLVES the target server-side and signs an envelope
+    # that carries BOTH the resolved employee AND their agent (see
+    # DelegationService._resolve_target → (instance, agent_template_id,
+    # employee_id); the result path likewise fills both from/to). So the RECEIVED,
+    # resolved envelope legitimately has both populated — reject only when NEITHER
+    # is set (2026-07-05: a strict XOR here rejected every real delegation as
+    # invalid_envelope; caught by the live 2-associate A2A test).
+    if not envelope["to_employee_id"] and not envelope["to_agent_id"]:
         return None
     return envelope
 
