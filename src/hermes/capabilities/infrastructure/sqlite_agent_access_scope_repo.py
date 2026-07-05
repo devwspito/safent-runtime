@@ -50,8 +50,8 @@ class SqliteAgentAccessScopeRepo:
                 INSERT INTO agent_access_scopes (
                     tenant_id, agent_id, scope_id, native_tools, policy_overlay,
                     views, cerebro_unrestricted, enforced, updated_by, managed_by,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    approval_tier, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(tenant_id, agent_id) DO UPDATE SET
                     scope_id             = excluded.scope_id,
                     native_tools         = excluded.native_tools,
@@ -61,6 +61,7 @@ class SqliteAgentAccessScopeRepo:
                     enforced             = excluded.enforced,
                     updated_by           = excluded.updated_by,
                     managed_by           = excluded.managed_by,
+                    approval_tier        = excluded.approval_tier,
                     updated_at           = excluded.updated_at
                 """,
                 (
@@ -74,6 +75,7 @@ class SqliteAgentAccessScopeRepo:
                     int(scope.enforced),
                     scope.updated_by,
                     scope.managed_by,
+                    scope.approval_tier,
                     scope.updated_at.isoformat(),
                 ),
             )
@@ -109,5 +111,6 @@ class SqliteAgentAccessScopeRepo:
             cerebro_unrestricted=bool(row["cerebro_unrestricted"]),
             enforced=bool(row["enforced"]),
             managed_by=row["managed_by"],
+            approval_tier=(row["approval_tier"] if "approval_tier" in row.keys() else "standard"),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )

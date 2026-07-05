@@ -51,6 +51,7 @@ def route(
     irreversible: bool,
     agent_managed_by: str | None,
     tenant_remote_approval_enabled: bool,
+    approval_tier: str = "coordinator",
 ) -> ApprovalRoute:
     """Decide LOCAL vs ENTERPRISE for one already-approvable tool call.
 
@@ -73,6 +74,15 @@ def route(
         or bool(sensitivity_categories)
         or irreversible
     )
-    if tenant_gate and eligible:
+    # Per-role tier (restrict-only): a COORDINATOR agent is trusted to self-resolve
+    # DELICATE actions at the LOCAL owner gate (base behaviour). A STANDARD agent
+    # (or any non-"coordinator"/unknown tier — fail-closed) additionally escalates
+    # DELICATE to a remote ENTERPRISE approver, so an employee cannot self-approve a
+    # DELICATE action their coordinator is meant to sign off. This can ONLY flip
+    # LOCAL→ENTERPRISE, only when a remote approver exists (tenant_gate), and never
+    # touches the kernel floor. Default "coordinator" preserves today's behaviour for
+    # any caller that does not pass a tier.
+    escalate_delicate = approval_tier != "coordinator" and delicacy is Delicacy.DELICATE
+    if tenant_gate and (eligible or escalate_delicate):
         return ApprovalRoute.ENTERPRISE
     return ApprovalRoute.LOCAL

@@ -333,6 +333,29 @@ def _resolve_agent_managed_by(access_scope_repo: Any, tenant_id: str) -> str | N
         return None
 
 
+def _resolve_agent_approval_tier(access_scope_repo: Any, tenant_id: str) -> str:
+    """Best-effort approval tier ("coordinator" | "standard") for the ambient cycle
+    agent, fed to approval_router.route(). Fails CLOSED to "standard" (max gating:
+    a STANDARD agent escalates DELICATE actions to a remote ENTERPRISE approver) on
+    ANY error — a lookup failure must never grant the relaxed coordinator path. Only
+    ever affects WHO approves (never the kernel floor), and only bites when the agent
+    is cloud-managed with remote approval enabled (route()'s tenant gate)."""
+    try:
+        if access_scope_repo is None:
+            return "standard"
+        from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+            get_current_cycle_agent,
+        )
+
+        agent_id = get_current_cycle_agent()
+        if not agent_id:
+            return "standard"
+        scope = access_scope_repo.get_scope(agent_id, tenant_id)
+        return scope.approval_tier if scope is not None else "standard"
+    except Exception:  # noqa: BLE001 — fail-closed: unknown tier => max gating (standard)
+        return "standard"
+
+
 _REMOTE_APPROVAL_FLAG_TTL_S: float = 10.0
 # TTL cache for the tenant remote-approval flag. _tenant_remote_approval_enabled
 # sits on the native-danger gate's hot path (evaluated for every danger-gated
@@ -449,6 +472,7 @@ def _compute_danger_route(
             irreversible=is_destructive(tool_name),
             agent_managed_by=_resolve_agent_managed_by(access_scope_repo, tenant_id),
             tenant_remote_approval_enabled=_tenant_remote_approval_enabled(),
+            approval_tier=_resolve_agent_approval_tier(access_scope_repo, tenant_id),
         )
         return resolved_route, categories
     except Exception as exc:  # noqa: BLE001 — fail-soft: never widen/skip the gate

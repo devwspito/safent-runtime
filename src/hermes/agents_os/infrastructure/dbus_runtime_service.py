@@ -4253,6 +4253,7 @@ class DbusRuntimeServiceWiring:
             cerebro_unrestricted=fields["cerebro_unrestricted"],
             enforced=fields["enforced"],
             managed_by="cloud",
+            approval_tier=fields["approval_tier"],
         )
         repo.upsert(scope)
         logger.info(
@@ -5350,7 +5351,9 @@ def _uid_to_uuid(uid: int) -> UUID:
 # hermes.config_sync.policy_document.AccessScopeSpec exactly.
 _ACCESS_SCOPE_ALLOWED_KEYS: frozenset[str] = frozenset({
     "enforced", "cerebro_unrestricted", "native_tools", "policy_overlay", "views",
+    "approval_tier",
 })
+_ACCESS_SCOPE_APPROVAL_TIERS: frozenset[str] = frozenset({"standard", "coordinator"})
 _ACCESS_SCOPE_MAX_LIST_LEN = 256
 _ACCESS_SCOPE_MAX_STR_LEN = 128  # per native_tools/views entry (CWE-20 — F3 review fix)
 
@@ -5408,6 +5411,9 @@ def _parse_access_scope_json(scope_json: str) -> tuple[dict, str | None]:
     policy_overlay = raw.get("policy_overlay", {})
     enforced = raw.get("enforced", False)
     cerebro_unrestricted = raw.get("cerebro_unrestricted", True)
+    # approval_tier is drop-when-"standard" on the wire, so absent → "standard"
+    # (fail-closed: unknown/absent tier gets the stricter escalation).
+    approval_tier = raw.get("approval_tier", "standard")
 
     if not isinstance(native_tools, list) or not all(isinstance(t, str) for t in native_tools):
         return {}, "native_tools debe ser list[str]"
@@ -5431,6 +5437,8 @@ def _parse_access_scope_json(scope_json: str) -> tuple[dict, str | None]:
         return {}, "enforced debe ser bool"
     if not isinstance(cerebro_unrestricted, bool):
         return {}, "cerebro_unrestricted debe ser bool"
+    if not isinstance(approval_tier, str) or approval_tier not in _ACCESS_SCOPE_APPROVAL_TIERS:
+        return {}, f"approval_tier debe ser uno de {sorted(_ACCESS_SCOPE_APPROVAL_TIERS)}"
 
     return {
         "native_tools": native_tools,
@@ -5438,6 +5446,7 @@ def _parse_access_scope_json(scope_json: str) -> tuple[dict, str | None]:
         "policy_overlay": policy_overlay,
         "enforced": enforced,
         "cerebro_unrestricted": cerebro_unrestricted,
+        "approval_tier": approval_tier,
     }, None
 
 

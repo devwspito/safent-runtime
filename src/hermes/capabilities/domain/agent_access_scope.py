@@ -57,6 +57,11 @@ class AgentAccessScope:
     cerebro_unrestricted: bool = True
     enforced: bool = False
     managed_by: str | None = None
+    # Per-role approval tier (2026-07-05): "coordinator" self-resolves DELICATE
+    # actions at the LOCAL owner gate; "standard" (default, fail-closed) escalates
+    # them to a remote ENTERPRISE approver. Cloud-authored, lands from the signed
+    # bundle. Consumed ONLY by approval_router.route() — never widens the floor.
+    approval_tier: str = "standard"
     updated_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
 
     def __post_init__(self) -> None:
@@ -86,6 +91,7 @@ class AgentAccessScope:
         cerebro_unrestricted: bool = True,
         enforced: bool = False,
         managed_by: str | None = None,
+        approval_tier: str = "standard",
     ) -> AgentAccessScope:
         """Factory: create a new scope with a generated id."""
         return cls(
@@ -99,6 +105,7 @@ class AgentAccessScope:
             cerebro_unrestricted=cerebro_unrestricted,
             enforced=enforced,
             managed_by=managed_by,
+            approval_tier=approval_tier,
         )
 
     def allows_native_tool(self, tool_name: str) -> bool:
@@ -127,5 +134,6 @@ class AgentAccessScope:
             "enforced": self.enforced,
             "updated_by": self.updated_by,
             "managed_by": self.managed_by,
+            "approval_tier": self.approval_tier,
             "updated_at": self.updated_at.isoformat(),
         }

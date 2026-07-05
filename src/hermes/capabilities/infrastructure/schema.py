@@ -321,6 +321,7 @@ CREATE TABLE IF NOT EXISTS agent_access_scopes (
     enforced             INTEGER NOT NULL DEFAULT 0,
     updated_by           INTEGER NOT NULL,
     managed_by           TEXT,
+    approval_tier        TEXT NOT NULL DEFAULT 'standard',
     updated_at           TEXT NOT NULL,
     PRIMARY KEY (tenant_id, agent_id)
 );
@@ -347,3 +348,12 @@ def ensure_capabilities_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL_PENDING_APPROVALS_INDEXES)
     # Enterprise Fase 2 Phase 1: runtime-only per-agent access scope table.
     conn.executescript(_DDL_AGENT_ACCESS_SCOPES)
+    # EXPAND (per-role governance, 2026-07-05): approval_tier column for DBs
+    # created before it existed. Idempotent — no-op if the column is present.
+    try:
+        conn.execute(
+            "ALTER TABLE agent_access_scopes "
+            "ADD COLUMN approval_tier TEXT NOT NULL DEFAULT 'standard'"
+        )
+    except sqlite3.OperationalError:
+        pass
