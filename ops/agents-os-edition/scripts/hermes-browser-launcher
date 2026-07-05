@@ -704,12 +704,28 @@ def _max_exec_sessions() -> int:
     raw = os.environ.get("HERMES_MAX_EXEC_SESSIONS", "").strip()
     if raw:
         try:
-            return max(1, int(raw))
+            value = max(1, int(raw))
         except ValueError:
             logger.warning(
                 "launcher.invalid_max_exec_sessions raw=%r — using default %d",
                 raw, _MAX_EXEC_SESSIONS_DEFAULT,
             )
+            return _MAX_EXEC_SESSIONS_DEFAULT
+        if value > 1:
+            # SECURITY (2026-07-05 audit): raising this above 1 puts multiple
+            # exec browsers in the SAME shared netns, where session A can reach
+            # session B's CDP (9333/9400+) and RFB (5900/5950+) at 10.200.0.2 with
+            # no app-level auth (cross-session bleed, latent HIGH). The nft
+            # policy-drop + this cap=1 are the SOLE gate. Do NOT raise it until
+            # per-session netns lands (see project_lumen_agent_browser_go_nogo_fase4
+            # / project_lumen_080_premium_ux). Loud + auditable, never silent.
+            logger.warning(
+                "launcher.max_exec_sessions_above_1 value=%d — SECURITY: shared-netns "
+                "cross-session CDP/RFB bleed is UNGATED above 1; only safe AFTER "
+                "per-session netns. Confirm you understand the risk.",
+                value,
+            )
+        return value
     return _MAX_EXEC_SESSIONS_DEFAULT
 
 
@@ -744,7 +760,8 @@ def _active_exec_unit_names(exclude: str) -> list[str]:
 
 def _check_exec_session_cap(session_name: str) -> None:
     """Raise ExecSessionCapExceeded if launching *session_name* would exceed
-    HERMES_MAX_EXEC_SESSIONS concurrent exec-* sessions (default 3).
+    HERMES_MAX_EXEC_SESSIONS concurrent exec-* sessions (default 1 — frozen at 1
+    until per-session netns; see _max_exec_sessions()).
 
     teaching-* sessions are never capped (single owner session, not per-task).
     Re-launching an ALREADY-active session (e.g. crash-restart of exec-browse)

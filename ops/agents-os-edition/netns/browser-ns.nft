@@ -28,7 +28,18 @@ table inet hermes_browser_local {
         type filter hook output priority 0; policy drop;
 
         # Loopback interno del netns (necesario para IPC del propio Chromium).
+        # ORDER: this precedes the IPv6 drop below so IPv6 loopback (::1) — if any
+        # Chromium/Xvfb component ever uses it — is preserved; only NON-loopback
+        # IPv6 is dropped.
         oif "lo" accept comment "loopback interno del netns"
+
+        # IPv6 belt (2026-07-05 audit): the browser netns has IPv6 disabled on the
+        # veth, so non-loopback IPv6 has no path anyway — but the `oif "lo" accept`
+        # and `ct state established,related accept` rules are FAMILY-AGNOSTIC, so an
+        # explicit non-loopback IPv6 drop makes the denial auditable and closes those
+        # family-agnostic accepts to any non-loopback IPv6 (defence in depth). The
+        # ultimate IPv6 guarantor remains `policy drop`.
+        meta nfproto ipv6 drop comment "no non-loopback IPv6 egress from the browser netns"
 
         # Respuestas a conexiones establecidas (e.g., accept de un socket de escucha).
         ct state established,related accept comment "respuestas ct established"
@@ -47,7 +58,18 @@ table inet hermes_browser_local {
         type filter hook input priority 0; policy drop;
 
         # Loopback interno + conexiones establecidas (respuestas del proxy).
+        # ORDER: `iif "lo" accept` precedes the IPv6 drop so IPv6 loopback (::1) is
+        # preserved; only non-loopback IPv6 is dropped below.
         iif "lo" accept comment "loopback interno"
+
+        # IPv6 belt (2026-07-05 audit): x11vnc binds [::]:5900 despite `-listen
+        # 10.200.0.2`, and the CDP/RFB/clip accepts below are `ip saddr` (IPv4-only)
+        # while `iif "lo"` + `ct established` are family-agnostic. This explicit
+        # non-loopback IPv6 drop makes the RFB/CDP IPv6 denial auditable and closes
+        # the family-agnostic accepts to non-loopback IPv6. `policy drop` remains the
+        # ultimate IPv6 guarantor. No unauth IPv6 reaches CDP/RFB/clipboard.
+        meta nfproto ipv6 drop comment "no non-loopback IPv6 ingress (RFB/CDP/clip)"
+
         ct state established,related accept comment "respuestas del proxy"
 
         # Daemon (host gateway 10.200.0.1) → Chromium CDP listener on 9333.

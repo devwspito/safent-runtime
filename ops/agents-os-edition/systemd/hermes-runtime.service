@@ -120,6 +120,15 @@ Environment=HERMES_CUA_DRIVER_CMD=/usr/libexec/lumen-cua-driver
 # aquí: User=hermes en Fedora) → sin esto Chrome arranca headed y muere con
 # "Missing X server or $DISPLAY". --no-sandbox: necesario sin user-namespace en el
 # daemon. (El navegador VISIBLE del usuario va por activate_app, no por aquí.)
+# SECURITY (2026-07-05 audit): --no-sandbox here would "arm" an unconfined,
+# renderer-sandbox-OFF Chrome ONLY on an agent-browser SELF-SPAWN. Under the jail
+# (HERMES_BROWSER_JAIL=1, always in prod) NO self-spawn can occur: the seatbelt
+# patches tools.browser_tool._create_local_session to raise, and AgentBrowserCli._run
+# fail-closes (see agent_browser_cli.py guard). agent-browser only ever ATTACHES via
+# --cdp to the launcher-owned jailed Chromium (attach ignores these args — it does not
+# launch Chrome). So these args are INERT under the jail; they apply only to the CI
+# path (jail=0), where there is no jail to weaken and --no-sandbox is required to start
+# Chrome without a user-namespace. Do NOT rely on this env as a security boundary.
 Environment=AGENT_BROWSER_ARGS=--headless=new,--no-sandbox,--disable-dev-shm-usage
 # POSTURA: autónomo en lo seguro, HITL nativo de Hermes cuando hay TAINT (P0-1,
 # red-team W23). El gate del Cerebro son CUATRO capas:

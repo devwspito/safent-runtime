@@ -1,0 +1,27 @@
+{
+  "success": true,
+  "data": {
+    "lifecycle": {
+      "effectiveLaunch": {
+        "browserLaunched": true,
+        "engine": "chrome",
+        "launchHash": 17252972644368640662
+      },
+      "launched": false,
+      "relaunchedBrowser": false,
+      "restartedBackground": false,
+      "restoreStatus": "not_configured",
+      "reused": true,
+      "saveStatus": "not_attempted"
+    },
+    "origin": "data:text/html,<h1>Login</h1><form><input aria-label=Email><input aria-label=Password type=password><button>Continue</button></form>",
+    "refs": {
+      "e1": {"name": "Login", "role": "heading"},
+      "e2": {"name": "Email", "role": "textbox"},
+      "e3": {"name": "Password", "role": "textbox"},
+      "e4": {"name": "Continue", "role": "button"}
+    },
+    "snapshot": "- heading \"Login\" [level=1, ref=e1]\n- form\n  - textbox \"Email\" [ref=e2]\n  - textbox \"Password\" [ref=e3]\n  - button \"Continue\" [ref=e4]"
+  },
+  "error": null
+}

@@ -149,12 +149,26 @@ def cleanup_thread_browser_session(task_id: str) -> None:
       call, thinking-budget exhausted, rollback) or after a 300 s inactivity
       timeout. On the HAPPY path of run_conversation the session — and with it
       the agent-browser controller daemon (``cdp_<hash>``) plus the CDP
-      supervisor websocket — LEAKS. We call run_conversation without a task_id,
-      so every cycle mints a fresh task → a fresh ``cdp_<hash>`` controller that
-      attaches to the SAME single jailed Chromium. A leaked controller from
-      cycle N then contends with cycle N+1's controller (both run
-      ``Target.setAutoAttach`` on one browser) → the second ``open`` deadlocks
-      and times out after 60 s. Reaping per cycle keeps the next cycle clean.
+      supervisor websocket — LEAKS. The vendored ``tools.browser_tool`` mints a
+      FRESH random ``cdp_<hash>`` controller each time a cycle first touches the
+      browser (its session name is a random ``uuid4``, NOT derived from our
+      task_id). A leaked controller from cycle N then contends with cycle N+1's
+      controller (both run ``Target.setAutoAttach`` on the SAME single jailed
+      Chromium) → the second ``open`` deadlocks and times out after 60 s.
+      *_run_conversation_streaming_or_fallback DOES pass task_id=cycle_task_id*,
+      and browser_tool keys its reap map by that task_id, so calling
+      ``cleanup_browser(cycle_task_id)`` here reaps this cycle's controller and
+      keeps the next cycle clean. (Do NOT trust an older comment claiming we call
+      run_conversation "without a task_id" — we do pass it; see nous_engine
+      _run_conversation_streaming_or_fallback.)
+
+      Root-cause note (deferred, out of repo scope): the churn itself — a fresh
+      random ``cdp_<hash>`` per cycle instead of ONE reused session — lives in
+      the vendored ``tools.browser_tool`` (``/usr/.../dist-packages/tools``),
+      which this repo does not own. The proper fix (derive the agent-browser
+      session from a stable task_id / reuse one controller in attach mode) must
+      land there; this per-cycle reaper is the correct repo-side mitigation until
+      then. It does NOT raise the concurrency cap (still one jailed Chromium).
 
     What it does NOT touch: the underlying jailed Chromium. That browser is a
     systemd-managed service (hermes-browser-launcher), not a browser_tool

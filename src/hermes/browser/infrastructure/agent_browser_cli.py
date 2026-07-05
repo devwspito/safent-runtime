@@ -211,8 +211,30 @@ class AgentBrowserCli:
         Siempre pasa --session para aislamiento. shell=False obligatorio.
 
         Raises:
-            AgentBrowserCommandError: si el proceso sale con codigo != 0.
+            AgentBrowserCommandError: si el proceso sale con codigo != 0, o si
+                HERMES_BROWSER_JAIL=1 (fail-closed: este adaptador NO puede correr
+                confinado — ver guard abajo).
         """
+        # FAIL-CLOSED under the kernel jail (SECURITY, 2026-07-05 audit).
+        # This adapter invokes `agent-browser --session <name>` WITHOUT `--cdp`,
+        # so agent-browser spawns its OWN browser instead of attaching to the
+        # launcher-owned jailed Chromium. Under HERMES_BROWSER_JAIL=1 that browser
+        # would run in the daemon's host netns as uid 880 — OUTSIDE netns /
+        # Landlock / seccomp / the audited egress proxy. The generic seatbelt
+        # (install_jail_block_local_session) only patches tools.browser_tool, NOT
+        # this module, so nothing else stops it. Refuse rather than spawn
+        # unconfined. The confined browser path is the daemon's Nous browser_tool
+        # driving the launcher's jailed Chromium via --cdp attach.
+        # See project_lumen_agent_browser_go_nogo_fase4.
+        if _jail_enabled():
+            raise AgentBrowserCommandError(
+                "AgentBrowserCli is disabled under HERMES_BROWSER_JAIL=1: it spawns "
+                "its own agent-browser browser (no --cdp attach) which would run "
+                "UNCONFINED outside the netns/Landlock/seccomp jail. Use the daemon's "
+                "confined browser path (Nous browser_tool → launcher-owned jailed "
+                "Chromium via --cdp) instead."
+            )
+
         browser_argv = [self._binary, "--session", self._session_name, *args]
 
         if not self._daemon_spawned:

@@ -151,9 +151,43 @@ class TestNoBareArgvFallback:
 
         with patch.dict("os.environ", {"HERMES_BROWSER_JAIL": "1"}), \
              patch("hermes.browser.infrastructure.agent_browser_cli._jail_enabled", return_value=True):
-            with pytest.raises(AgentBrowserCommandError, match="launcher unavailable"):
-                # _run triggers _spawn_daemon_jailed on first call.
+            # The fail-closed guard (2026-07-05 audit) refuses under jail BEFORE
+            # even consulting the launcher — this adapter has no --cdp attach, so
+            # any spawn would be UNCONFINED. Stronger than the old
+            # launcher-unavailable check.
+            with pytest.raises(AgentBrowserCommandError, match="UNCONFINED"):
+                # _run fail-closes on the jail guard before _spawn_daemon_jailed.
                 await cli._run(["open", "https://example.com"])
+
+    @pytest.mark.asyncio
+    async def test_agent_browser_cli_refuses_under_jail_even_with_working_launcher(
+        self,
+    ) -> None:
+        """The fail-closed guard fires under jail EVEN when the launcher works.
+
+        This is the actual hole closed (2026-07-05 security audit): the adapter
+        runs `agent-browser --session <name>` with NO --cdp, so agent-browser
+        spawns its OWN browser (ignoring the launcher's jailed Chromium) —
+        UNCONFINED in the daemon's host netns. It must never reach the spawn.
+        """
+        from hermes.browser.infrastructure.agent_browser_cli import (
+            AgentBrowserCli,
+            AgentBrowserCommandError,
+        )
+
+        cli = AgentBrowserCli(session_name="exec-abc")
+        cli._started = True
+        working_client = MagicMock()
+        working_client.launch = AsyncMock(return_value=None)  # launcher SUCCEEDS
+        cli._launcher_client = working_client
+
+        with patch.dict("os.environ", {"HERMES_BROWSER_JAIL": "1"}), \
+             patch("hermes.browser.infrastructure.agent_browser_cli._jail_enabled", return_value=True), \
+             patch("asyncio.create_subprocess_exec") as mock_exec:
+            with pytest.raises(AgentBrowserCommandError, match="UNCONFINED"):
+                await cli._run(["open", "https://example.com"])
+            mock_exec.assert_not_called()  # never spawned
+            working_client.launch.assert_not_awaited()  # guard fires first
 
     @pytest.mark.asyncio
     async def test_no_subprocess_called_when_launcher_fails(self) -> None:
@@ -177,6 +211,38 @@ class TestNoBareArgvFallback:
             with pytest.raises(AgentBrowserCommandError):
                 await cli._run(["open", "https://example.com"])
             mock_exec.assert_not_called()
+
+
+# ── Exec-session cap frozen at 1 (shared-netns bleed guard) ───────────────────
+
+class TestExecSessionCapFrozen:
+    """HERMES_MAX_EXEC_SESSIONS default MUST stay 1 until per-session netns.
+
+    Above 1, exec browsers share one netns → cross-session CDP/RFB bleed at
+    10.200.0.2 with no app auth (latent HIGH). cap=1 + the nft policy-drop are the
+    sole gate; a silent bump to the default would re-open the gap.
+    """
+
+    def _launcher_src(self) -> str:
+        launcher = (
+            Path(__file__).resolve().parents[3]
+            / "ops" / "agents-os-edition" / "scripts" / "hermes-browser-launcher"
+        )
+        return launcher.read_text(encoding="utf-8")
+
+    def test_default_cap_is_one(self) -> None:
+        src = self._launcher_src()
+        assert "_MAX_EXEC_SESSIONS_DEFAULT = 1" in src, (
+            "The concurrent exec-session cap default MUST be 1 until per-session "
+            "netns lands — a shared netns above 1 opens cross-session CDP/RFB bleed."
+        )
+
+    def test_raising_cap_above_1_warns_loudly(self) -> None:
+        src = self._launcher_src()
+        assert "max_exec_sessions_above_1" in src, (
+            "Raising HERMES_MAX_EXEC_SESSIONS above 1 must emit a loud, auditable "
+            "SECURITY warning (never a silent gap re-opening)."
+        )
 
 
 # ── Daemon NOT in browser netns (architecture invariant) ──────────────────────

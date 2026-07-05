@@ -107,7 +107,13 @@ RUN cd /tmp/frontbuild && rm -rf dist && npm run build \
 # (Ubuntu apt chromium is a snap stub that won't run in a container).
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ARG PLAYWRIGHT_MCP_VERSION=0.0.29
-RUN npm install -g --ignore-scripts "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" agent-browser \
+# PIN agent-browser (2026-07-05 audit): its `snapshot --json` schema is unpinned and
+# the adapter's _parse_snapshot_json is schema-sensitive — an unpinned install lets a
+# silent upstream bump change the accessibility-tree payload the LLM/driver consumes.
+# 0.31.1 is the version red-teamed + evaluated (see project_lumen_agent_browser_go_nogo_fase4).
+# Bump this ARG deliberately (and re-verify the snapshot fixture) when moving versions.
+ARG AGENT_BROWSER_VERSION=0.31.1
+RUN npm install -g --ignore-scripts "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" "agent-browser@${AGENT_BROWSER_VERSION}" \
     && chmod +x /usr/lib/node_modules/agent-browser/bin/agent-browser-* \
     && npx --yes playwright install chromium \
     && CHROME="$(find /ms-playwright -type f -name chrome -path '*chrome-linux*' | head -1)" \
