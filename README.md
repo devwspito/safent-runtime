@@ -1,122 +1,212 @@
-# safent-runtime
+<div align="center">
 
-**Safent** — agentic runtime delivered as a **Playwright/Ubuntu Docker container** (systemd PID1).
+# Safent
 
-> ⚠️ This is the **clean product repo**. It is a **Docker container**, **NOT** qemu / qcow2 / Apple-VZ / bootc.
-> That VM delivery is **legacy** and is intentionally **not** in this repo.
+### Hire a governed AI workforce — jailed at the kernel, running on your team's own machines, managed from one console.
 
-## Install (one line)
+**Safent turns any employee's computer into a safe home for an autonomous AI agent.**
+The agent runs *locally* (their CPU, their browser, their apps) so it scales to 15 or 15,000 people at near-zero central cost — while a central control plane holds every agent inside a kernel-level jail and enforces exactly what each one is allowed to do.
 
-Same container, same security cage on every OS. Pick your platform:
+Upload your staff roster in *any* format → get back a fully provisioned org with per-role security and one personalized install link per employee. It should feel like magic. That's the point.
 
-### Linux (amd64 / arm64)
+`safe agent` → **Safent**.
+
+[Quick start](#-quick-start) · [Why Safent](#-why-safent) · [Architecture](#-architecture) · [Security model](#-the-jail--why-you-can-trust-an-agent-with-real-credentials) · [Built with](#-built-with--acknowledgements) · [License](#-license)
+
+</div>
+
+---
+
+## What is this?
+
+Safent is an **open-core AI-workforce platform**. This repository is **Safent Community** — the open-source local runtime that every employee installs. It is a hardened container that runs one autonomous agent under a kernel-enforced cage: Landlock + seccomp + a private network namespace + a default-deny egress proxy + an unprivileged uid. Inside that cage the agent can chat, browse the web like a human, drive desktop apps, run tools, and call MCP servers — but it **cannot** escape, exfiltrate, or do anything its owner hasn't allowed.
+
+The paid **Safent Enterprise** control plane (a separate, closed component) is the *management* layer: it provisions employees, signs per-agent and per-role security policy with an Ed25519 tenant key, routes human approvals, and relays agent-to-agent delegation. Every associate verifies that signed policy locally before applying it. **The heavy compute is always local; the cloud only governs.** That is the whole magic — and the whole moat.
+
+> **Community is fully usable on its own** (a single local agent, no cloud). Enterprise adds fleet management, signed governance, and cross-human orchestration. You can run 150 Community agents governed by one Enterprise tenant, and no one can *administer* them as a fleet without the tenant's private key — even though the runtime they're built on is open source.
+
+---
+
+## ✨ Why Safent
+
+Most "AI agent" products are a chat box wired to some tools. Safent is built for the part that actually matters when you put an agent on a real employee's machine with real credentials:
+
+- 🔒 **A real jail, not a prompt.** The agent is confined by the Linux kernel — Landlock filesystem rules, a seccomp-bpf syscall floor, a netns with no route except an audited egress proxy, and uid-separation. A jailbreak *in the prompt* does nothing; the floor is model-independent and holds even if the model is actively hostile (we red-teamed it with an adversarial LLM and it held on all three layers: model refusal, hooks, kernel).
+- 🧩 **Governance that's real — per-agent *and* per-role.** Every agent gets a signed access scope: an allow-list of native tools + an approval tier. Define roles (e.g. *Coordinator* vs *Standard*) once and govern 150 agents by role; override any single agent when you need to. A *Coordinator* self-resolves sensitive actions locally; a *Standard* agent escalates them to a remote approver. The agent can never pick its own role — it only ever arrives inside an Ed25519-signed bundle.
+- 🪄 **Magic onboarding.** Point Safent at a messy roster (a spreadsheet, a phone-extension dump, an org chart) → an LLM normalizes it into departments + employees + suggested roles → you review → deploy → **N personalized install links**, each carrying that employee's role and permissions. One click per employee, zero manual setup on their side.
+- 🌐 **Works with software that has no API.** When there's no CRM integration to call, the agent operates the software *like a human* — through a jailed, headful browser. This is the long tail of the real world (legacy portals, internal tools, government sites), covered.
+- 👁️ **Watch it work — and audit it later.** A jailed headful Chromium is streamed over standard VNC (Xvfb + x11vnc + noVNC) so a manager can watch live and trust what's happening — and every action is recorded for the audit trail.
+- 🏠 **Local-first, cloud-governed.** Nothing heavy runs in your datacenter. Each agent uses the hardware it already sits on. The control plane is tiny.
+- 🔌 **Bring your own model.** Route to a local model, GLM, Claude, or GPT — per agent, per task — through a single provider abstraction.
+
+### Where it fits
+
+Safent is **not** trying to out-Claude-Code Claude Code. Claude Code is a brilliant pair-programmer for *developers* in a *terminal*. Safent is a **governed AI workforce for a whole company** — including the non-technical majority — with the safety and management layer an enterprise actually needs before it lets an agent touch real systems. Different arena, different job.
+
+---
+
+## 🚀 Quick start
+
+**Prerequisite:** a container runtime. On macOS, either [Podman](https://podman.io) (`brew install podman`) or [Docker Desktop](https://www.docker.com/products/docker-desktop/); on Linux, Podman or Docker with `systemd` support.
+
+**One line — install, cage, and run a single local agent (Community):**
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/devwspito/safent-runtime/main/get-safent.sh | sh
 ```
-Requires **podman** or **docker** on a **Landlock-capable kernel** (≥ 5.13 — standard on current distros).
 
-### macOS (Apple Silicon / Intel)
-```sh
-curl -fsSL https://raw.githubusercontent.com/devwspito/safent-runtime/main/get-safent.sh | sh
-```
-Runs inside a **rootful podman machine** (the installer creates it). Details: [dist-mac/INSTALL-mac.md](dist-mac/INSTALL-mac.md).
+This downloads the `safent` CLI, pulls the hardened image, creates the cage (on macOS it provisions a rootful Podman machine for you), and opens the UI at `http://localhost:17517/app/`.
 
-### Windows (10 / 11) — PowerShell
-```powershell
-iwr -useb https://raw.githubusercontent.com/devwspito/safent-runtime/main/get-safent.ps1 | iex
-```
-Requires **WSL2** (`wsl --install`) + **Podman Desktop**, on a **WSL2 kernel ≥ 6.6** (`wsl --update`). Runs inside a rootful podman machine — the **same cage** as Linux/macOS. Details: [dist-win/INSTALL-win.md](dist-win/INSTALL-win.md).
-
-All three pull the same public hardened image, run it with the security cage, and open your
-browser at a per-boot unique token. The model, Composio, agents and skills are all
-configured in the UI.
-
-## Control it from the terminal — the `safent` command
-
-The installer also drops a `safent` command on your PATH. If you close the browser tab and
-forget the URL, just run `safent` to get it back:
+**Join an Enterprise fleet** — every employee runs their own personalized one-liner:
 
 ```sh
-safent            # open Safent in the browser (starts it if stopped)
-safent stop       # stop Safent
-safent update     # pull the latest version and apply it (keeps your config)
-safent status     # is it running? on which port?
-safent restart    # restart it
-safent logs       # follow the container journal
+curl -fsSL https://raw.githubusercontent.com/devwspito/safent-runtime/main/get-safent.sh | \
+  SAFENT_CLOUD_ENDPOINT=https://<your-tenant>.safent.example \
+  SAFENT_PAIR_CODE=<their-code> sh
 ```
 
-`safent update` re-pulls the published image and recreates the container; your keystore,
-MFA enrollment and provider settings persist in the `safent-data` volume.
+The install pairs the agent, config-sync pulls the **signed** policy bundle, the associate verifies the Ed25519 signature against the tenant's public key, and the agent comes up already governed by its role. No manual configuration on the employee's side.
 
-## What's inside (the whole product, one container)
-
-- **Daemon** — the Safent runtime + the **Nous** reasoning engine.
-- **The cage** — OpenShell confinement substrate (`ops/agent-cage/`) + netns/egress moat + Landlock + seccomp. The agent's terminal/browser/MCP run sandboxed.
-- **Safent UI** — QML compositor + apps (`src/hermes/lumen/`: chat, tasks, security, skills, integrations, memory).
-- **Office UI** — live "agent floor" web view (`frontend/src/views/OfficeView.tsx`), part of the Safent React web app.
-- **MCP / skills / composio** — `tool_search`/`tool_call` discovery (incl. **ruflo** multi-agent swarm), skills, composio.
-
-## Build
+**Everyday commands:**
 
 ```sh
-./scripts/build.sh            # wheel + container image → safent-runtime:clean
+safent start        # run the caged daemon
+safent pair <code>  # associate with an Enterprise tenant
+safent update       # pull the latest hardened image
+safent stop         # stop the daemon
 ```
 
-Or manually:
+**Build from source:**
 
 ```sh
 python3 -m pip wheel . --no-deps -w dist/
-podman build -f ops/container/Containerfile -t safent-runtime:clean .
+podman build -f ops/container/Containerfile -t safent-runtime:dev .
+NAME=safent HOST_PORT=17517 ./ops/container/run-safent.sh safent-runtime:dev
 ```
 
-## Run
+---
 
-Use the canonical launcher (correct caps + seccomp + securityfs):
+## 🏗️ Architecture
+
+```
+        ┌───────────────────────────────────────────────┐
+        │  Safent Enterprise  (closed, cloud — GOVERNS)  │
+        │  • provisions employees, roles, licenses       │
+        │  • signs policy with the tenant Ed25519 key    │
+        │  • routes human approvals (step-up MFA)        │
+        │  • relays agent↔agent delegation (notary)      │
+        └───────────────────────────────────────────────┘
+             ▲ signed policy bundles          ▲ pull-only
+             │ (Ed25519, verify-first)        │ (associates never accept inbound)
+   ┌─────────┴──────────┐   ┌─────────────────┴────┐   (…one per employee, their own machine)
+   │ Community runtime  │   │ Community runtime    │
+   │  (THIS REPO)       │   │                      │
+   │ ┌────────────────┐ │   │  each agent runs on  │
+   │ │ THE KERNEL CAGE│ │   │  the EMPLOYEE's own  │
+   │ │ Landlock       │ │   │  CPU / browser / apps│
+   │ │ seccomp-bpf    │ │   │  → near-zero central │
+   │ │ netns + egress │ │   │    cost, scales flat │
+   │ │ uid separation │ │   │                      │
+   │ └──────┬─────────┘ │   └──────────────────────┘
+   │   Nous reasoning   │
+   │   engine (LiteLLM) │  chat · jailed browser (Playwright/CDP) · desktop ·
+   │   + tools + MCP    │  MCP servers · Composio tools · skills · live-view (VNC)
+   └────────────────────┘
+```
+
+- **The daemon** (`src/hermes/`, Python package `hermes`) — the reasoning engine (Nous), the security hook that gates every tool call, config-sync, the pairing client, MCP + Composio integration, and the web UI.
+- **The cage** (`ops/`, `src/hermes/security/`) — the systemd units, D-Bus policy, netns/nftables, seccomp profiles and launchers that confine every subprocess (browser included) at the kernel level.
+- **The UIs** — a React web app (chat, an "agent floor" office view, security center, skills, MCP, providers), a native desktop shell, and a terminal UI.
+- **Delivery** — a single hardened container built from `ops/container/Containerfile` (`FROM mcr.microsoft.com/playwright`), run with `--systemd=always`. Not a VM, not a custom OS.
+
+---
+
+## 🛡️ The jail — why you can trust an agent with real credentials
+
+An agent that logs into your CRM is a huge attack surface. Safent's answer is defense in depth, with the kernel as the floor:
+
+1. **Model layer** — the agent refuses obvious malice.
+2. **Hook layer** — every tool call passes a security hook: a hardline-command detector, a self-jailbreak / denylist check, and the signed per-agent / per-role access scope. Sensitive actions require human approval (owner MFA locally, or a remote Enterprise approver).
+3. **Kernel layer (inviolable)** — Landlock restricts the filesystem, seccomp-bpf restricts syscalls, a private network namespace routes all traffic through an **audited default-deny egress proxy**, and the browser + every launcher run under an unprivileged uid. This layer is **model-independent**: it holds even against an actively adversarial LLM.
+
+The Enterprise approval flow can *relax which human signs off* on a dangerous action (a coordinator instead of the employee) — but **nothing** relaxes the kernel floor. Not the owner, not the cloud, not a coordinator. Governance decides *who approves*; the cage decides *what is even possible*.
+
+Policy travels only inside Ed25519-signed bundles, verified **before** any field is trusted (signature-first). A compromised associate cannot forge a wider scope or a higher role for itself.
+
+---
+
+## 🧠 A note on honesty
+
+Autonomous browser control on a *novel* portal is genuinely hard — for every model, not just ours. Safent does the **human-in-the-loop** browser path (live-view, teach-a-flow-once, approve sensitive steps) really well; fully-autonomous, unattended operation of an unseen UI is where you should measure before you trust. We'd rather tell you that than sell you a demo that breaks on the first real form. Do it *really well* on the handful of systems you actually use, or don't promise it.
+
+---
+
+## 🙏 Built with — Acknowledgements
+
+Safent stands on an enormous amount of open-source work. We use these projects gratefully and want to give credit where it's due — Safent would not exist without them:
+
+### The agent & model layer
+- **[NousResearch — Hermes](https://github.com/NousResearch)** — the reasoning-agent lineage Safent's engine grew from.
+- **[LiteLLM](https://github.com/BerriAI/litellm)** (BerriAI) — the provider abstraction that lets one agent route to any model.
+- **[Model Context Protocol](https://modelcontextprotocol.io)** (Anthropic) — the open standard for tool/context servers, and the **[MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)**.
+- **[Composio](https://composio.dev)** — managed authentication + hundreds of tool integrations.
+- The model makers whose weights power real deployments: **GLM** (Zhipu AI / Z.ai), **Qwen** (Alibaba), and any Claude / GPT / open model reached through LiteLLM.
+
+### The browser & desktop layer
+- **[Playwright](https://playwright.dev)** (Microsoft) — the base image and browser-automation core, and **[@playwright/mcp](https://github.com/microsoft/playwright-mcp)**.
+- **[agent-browser](https://www.npmjs.com/package/agent-browser)** — accessibility-tree browser control with stable element refs.
+- **[Chromium](https://www.chromium.org)** / Chrome for Testing (Google) — the actual browser.
+- **[noVNC](https://novnc.com)**, **[x11vnc](https://github.com/LibVNC/x11vnc)**, and **Xvfb** (X.Org) — the headful live-view stack.
+- **[Tesseract OCR](https://github.com/tesseract-ocr/tesseract)** (via `pytesseract`) and **[selectolax](https://github.com/rushter/selectolax)** — perception helpers.
+
+### The runtime, API & data layer
+- **[FastAPI](https://fastapi.tiangolo.com)** + **[Starlette](https://www.starlette.io)** + **[Uvicorn](https://www.uvicorn.org)** (Sebastián Ramírez & encode) — the daemon's HTTP surface.
+- **[Pydantic](https://docs.pydantic.dev)** — typed models and the signed-policy schema.
+- **[cryptography](https://cryptography.io)** (PyCA) — Ed25519 signing/verification.
+- **[dbus-fast](https://github.com/Bluetooth-Devices/dbus-fast)**, **[structlog](https://www.structlog.org)**, **[tenacity](https://github.com/jd/tenacity)**, **[aiohttp](https://docs.aiohttp.org)**, **[rfc3161ng](https://pypi.org/project/rfc3161ng/)** (RFC 3161 trusted timestamps), **[fastembed](https://github.com/qdrant/fastembed)** (Qdrant).
+- **[uv](https://github.com/astral-sh/uv)** (Astral) — Python packaging.
+
+### The web UI
+- **[React](https://react.dev)**, **[Vite](https://vitejs.dev)**, **[TypeScript](https://www.typescriptlang.org)**, **[Vitest](https://vitest.dev)**.
+- **[Three.js](https://threejs.org)** + **[react-force-graph](https://github.com/vasturiano/react-force-graph)** — the 3D agent-swarm view.
+- **[Recharts](https://recharts.org)**, **[lucide-react](https://lucide.dev)**, **[marked](https://marked.js.org)**, **[DOMPurify](https://github.com/cure53/DOMPurify)**, **[Motion](https://motion.dev)**, **[qrcode.react](https://github.com/zpao/qrcode.react)**.
+
+### The cage & platform
+- **The Linux kernel** — **Landlock**, **seccomp-bpf**, **network namespaces**, and **nftables** are the reasons this is a real jail and not a promise.
+- **[systemd](https://systemd.io)** — PID 1 and per-service hardening inside the container.
+- **[Podman](https://podman.io)** / **[Docker](https://www.docker.com)** — the delivery runtime.
+- **[Trivy](https://github.com/aquasecurity/trivy)** (Aqua Security) — vulnerability scanning baked into the image.
+
+If we've used your work and missed you here, that's a bug — please open an issue and we'll fix it. Credit matters.
+
+---
+
+## 🤝 Contributing
+
+Issues and PRs are welcome. Please run the unit gate before opening a PR:
 
 ```sh
-NAME=safent HOST_PORT=17517 ./ops/container/run-safent.sh
-# UI: http://localhost:17517
+PYTHONPATH=src python3 -m pytest tests/unit/agents_os/ tests/unit/cli/ tests/unit/apps/ -q
 ```
 
-Or the equivalent raw command:
+The kernel cage is the crown jewel — changes that touch `src/hermes/security/`, `src/hermes/runtime/security_hook.py`, or `ops/agents-os-edition/` (netns/seccomp/dbus) get extra scrutiny. **Never weaken the floor.**
 
-```sh
-podman run -d --name safent --systemd=always \
-  -p 127.0.0.1:17517:7517 \
-  --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
-  --security-opt seccomp=ops/container/seccomp/safent.json \
-  --security-opt unmask=/sys/kernel/security \
-  -v /sys/kernel/security:/sys/kernel/security:ro \
-  -v safent-data:/var/lib/hermes \
-  --shm-size=1g \
-  safent-runtime:clean
-```
+---
 
-> ⚠️ Do **NOT** use `--cap-drop ALL` or container-wide `--security-opt no-new-privileges`:
-> systemd (PID1) needs SETUID/SETGID to start the per-unit services, and the hardened
-> units set `NoNewPrivileges` **per-unit** — a container-wide one breaks dbus/login setuid
-> and the boot fails (exit 216/GROUP). `--systemd=always` is required (the daemon
-> fail-closes via `_assert_confinement_active()` checking the netns/egress units).
+## 📄 License
 
-## Layout
+Safent is **open-core**:
 
-| Path | What |
-|---|---|
-| `src/hermes/` | The product: daemon, Nous, Safent UI, Office UI, MCP/skills/composio |
-| `ops/container/` | The **Playwright Containerfile** (the delivery) + run script + seccomp + dropins |
-| `ops/agent-cage/` | OpenShell confinement substrate (binary + systemd) |
-| `ops/agents-os-edition/` | systemd units, dbus, netns, scripts, seed — baked into the container |
-| `tests/` | Test suite (gate: `tests/unit/{agents_os,cli,apps}`) |
+- **Safent Community** (this repository) — the local runtime. **Open source under the [Apache License 2.0](LICENSE).**
+- **Safent Enterprise** — the cloud management / control plane. Commercial, closed-source.
 
-## Tests
+The security model is designed so that **anyone can run Community, but no one can administer a fleet as an Enterprise without the tenant's private key** — the open source and the business coexist by construction.
 
-```sh
-pytest tests/unit/agents_os/ tests/unit/cli/ tests/unit/apps/ -q
-```
+---
 
-## License
+<div align="center">
 
-**[PolyForm Noncommercial License 1.0.0](LICENSE)** — free to use, study, modify and share
-for **any noncommercial purpose** (personal, research, education, nonprofits, hobby).
-**Commercial use is not permitted** under this license. For a commercial license, contact
-the author.
+**Built by [devwspito](https://github.com/devwspito).**
+Hire your AI workforce. Keep it caged. Manage it from one place.
+
+</div>

@@ -1,96 +1,13 @@
-Agents OS — Third-Party Notices
-================================
+Safent
+Copyright 2026 devwspito
 
-This project (hermes-runtime / Agents OS Edition) is licensed under the
-Apache License, Version 2.0. Copyright 2024-2026 Agents OS contributors.
+This product includes software developed as part of the Safent project.
 
-The following third-party components are incorporated or downloaded at
-build time. Their licenses are reproduced below or referenced by URL.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
--------------------------------------------------------------------------------
-1. hermes-agent (NousResearch)
--------------------------------------------------------------------------------
-Source:  https://github.com/NousResearch/hermes-agent
-License: MIT
+    http://www.apache.org/licenses/LICENSE-2.0
 
-  Copyright (c) NousResearch
-
-  Permission is hereby granted, free of charge, to any person obtaining a copy
-  of this software and associated documentation files (the "Software"), to deal
-  in the Software without restriction, including without limitation the rights
-  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-  copies of the Software, and to permit persons to whom the Software is
-  furnished to do so, subject to the following conditions:
-
-  The above copyright notice and this permission notice shall be included in all
-  copies or substantial portions of the Software.
-
-  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-  SOFTWARE.
-
-Installed at build time via pip from the Git repository, pinned to a specific
-commit (see ARG HERMES_AGENT_COMMIT in Containerfile.personal-desktop).
-
--------------------------------------------------------------------------------
-2. DSPy (Stanford NLP / dspy-ai) — optional dependency
--------------------------------------------------------------------------------
-Source:  https://github.com/stanfordnlp/dspy
-License: MIT
-PyPI:    https://pypi.org/project/dspy-ai/
-
-DSPy is an optional extra dependency used for structured prompt optimization.
-It is NOT baked into the base OS image; it is available as an installable
-extra for downstream consumers of hermes-runtime:
-
-  pip install "hermes-runtime[dspy]"
-
-See https://github.com/stanfordnlp/dspy/blob/main/LICENSE for the full MIT
-license text.
-
--------------------------------------------------------------------------------
-3. cosign (Sigstore / sigstore/cosign) — binary downloaded at build time
--------------------------------------------------------------------------------
-Source:  https://github.com/sigstore/cosign
-License: Apache-2.0
-Version: see ARG COSIGN_VERSION in Containerfile.base
-
-The cosign binary is downloaded from the official GitHub release of the
-Sigstore project and verified against the published cosign_checksums.txt
-before installation. It is not part of the hermes-runtime source tree.
-
-See https://github.com/sigstore/cosign/blob/main/LICENSE for the full
-Apache-2.0 license text.
-
--------------------------------------------------------------------------------
-4. cloudflared (Cloudflare, Inc.) — binary downloaded at build time
--------------------------------------------------------------------------------
-Source:  https://github.com/cloudflare/cloudflared
-License: Apache-2.0
-Version: see ARG CLOUDFLARED_VERSION in Containerfile.personal-desktop
-
-The cloudflared binary is downloaded from the official GitHub release of
-Cloudflare, Inc. and verified against the SHA256 checksums published in the
-release notes before installation. It is not part of the hermes-runtime
-source tree.
-
-See https://github.com/cloudflare/cloudflared/blob/master/LICENSE for the
-full Apache-2.0 license text.
-
--------------------------------------------------------------------------------
-5. Fedora bootc base image
--------------------------------------------------------------------------------
-Source:  https://quay.io/fedora/fedora-bootc
-License: Various (Fedora is a collection of packages each under their own
-         open-source license; see https://docs.fedoraproject.org/en-US/legal/).
-
-The Agents OS image is built FROM the official Fedora bootc base image. Fedora
-is a trademark of Red Hat, Inc. The use of Fedora as a base does not imply
-endorsement by Red Hat.
-
--------------------------------------------------------------------------------
-End of NOTICE
+See the "Built with — Acknowledgements" section of README.md for the
+open-source projects Safent is built on, and their respective licenses.
