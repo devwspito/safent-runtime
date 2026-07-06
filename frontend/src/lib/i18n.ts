@@ -802,6 +802,7 @@ const translations = {
     'agents.status.online':       'En línea',
     'agents.badge.default':       'CEO',
     'agents.badge.factory':       'Del sistema',
+    'agents.badge.directory':     'Compañero/a',
 
     // Agents / Office view — create card
     'agents.card.create.aria':    'Crear nuevo agente',
@@ -817,6 +818,7 @@ const translations = {
     'agents.drawer.delete':       'Borrar',
     'agents.drawer.readonly.default': 'No editable (puedes clonarlo para crear tu propia versión).',
     'agents.drawer.readonly.factory': 'Agente del sistema — clónalo para personalizar.',
+    'agents.drawer.readonly.directory': 'Agente de un compañero de otro departamento — solo consulta.',
     'agents.drawer.confirm.title':    '¿Eliminar "{name}"?',
     'agents.drawer.confirm.desc':     'El agente se eliminará permanentemente. Esta acción no se puede deshacer.',
     'agents.drawer.confirm.confirm':  'Eliminar',
@@ -1706,6 +1708,7 @@ const translations = {
     'agents.status.online':       'Online',
     'agents.badge.default':       'CEO',
     'agents.badge.factory':       'System',
+    'agents.badge.directory':     'Colleague',
 
     // Agents / Office view — create card
     'agents.card.create.aria':    'Create new agent',
@@ -1721,6 +1724,7 @@ const translations = {
     'agents.drawer.delete':       'Delete',
     'agents.drawer.readonly.default': 'Not editable (you can clone it to create your own version).',
     'agents.drawer.readonly.factory': 'System agent — clone it to customize.',
+    'agents.drawer.readonly.directory': "A colleague's agent from another department — view only.",
     'agents.drawer.confirm.title':    'Delete "{name}"?',
     'agents.drawer.confirm.desc':     'The agent will be permanently deleted. This action cannot be undone.',
     'agents.drawer.confirm.confirm':  'Delete',

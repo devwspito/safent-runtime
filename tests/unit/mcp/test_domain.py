@@ -184,6 +184,65 @@ class TestClassifyMcpToolUserAdded:
 
 
 # ---------------------------------------------------------------------------
+# classify_mcp_tool — MANAGED_REMOTE (first-party, egresses to a managed
+# control-plane, e.g. safent-control). Reads fluid; writes LOW+not-auto so
+# CTRL-5 (requires_forced_hitl) bites the instant the cycle is tainted.
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyMcpToolManagedRemote:
+    """MANAGED_REMOTE classification is purely name-driven (no hint dependency)."""
+
+    @pytest.mark.parametrize("name", ["list_agents", "get_usage", "resource_fetch"])
+    def test_read_verb_is_low_and_auto(self, name: str) -> None:
+        cls = classify_mcp_tool(name, trust_level=TrustLevel.MANAGED_REMOTE)
+        assert cls.risk is RiskLevel.LOW
+        assert cls.auto_executable is True
+
+    @pytest.mark.parametrize("name", ["create_employee", "delete_agent", "update_billing"])
+    def test_write_verb_is_low_but_not_auto(self, name: str) -> None:
+        cls = classify_mcp_tool(name, trust_level=TrustLevel.MANAGED_REMOTE)
+        assert cls.risk is RiskLevel.LOW
+        assert cls.auto_executable is False
+
+    def test_destructive_hint_forces_high_even_for_managed_remote(self) -> None:
+        cls = classify_mcp_tool(
+            "list_agents",
+            destructive_hint=True,
+            trust_level=TrustLevel.MANAGED_REMOTE,
+        )
+        assert cls.risk is RiskLevel.HIGH
+        assert cls.auto_executable is False
+
+    def test_read_only_hint_is_irrelevant_for_managed_remote(self) -> None:
+        """Unlike BUILTIN/USER_TRUSTED, MANAGED_REMOTE never consults read_only_hint."""
+        cls = classify_mcp_tool(
+            "delete_agent",
+            read_only_hint=True,
+            trust_level=TrustLevel.MANAGED_REMOTE,
+        )
+        assert cls.risk is RiskLevel.LOW
+        assert cls.auto_executable is False
+
+
+class TestClassifyMcpToolManagedRemoteDoesNotAffectOtherTiers:
+    """Regression: adding MANAGED_REMOTE must not change BUILTIN/USER_ADDED output."""
+
+    def test_builtin_excel_style_tool_unchanged(self) -> None:
+        cls = classify_mcp_tool("workbook_write", trust_level=TrustLevel.BUILTIN)
+        assert cls.risk is RiskLevel.LOW
+        assert cls.auto_executable is True
+
+    def test_user_added_write_tool_unchanged(self) -> None:
+        cls = classify_mcp_tool(
+            "create_employee",
+            trust_level=TrustLevel.USER_ADDED,
+        )
+        assert cls.risk is RiskLevel.HIGH
+        assert cls.auto_executable is False
+
+
+# ---------------------------------------------------------------------------
 # McpTool entity
 # ---------------------------------------------------------------------------
 

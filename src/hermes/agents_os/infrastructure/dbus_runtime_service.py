@@ -7068,10 +7068,21 @@ async def _mcp_connect(
             )
     # Confianza: los MCP VETADOS del stack de fábrica (locales, sin egress, horneados por
     # nosotros) entran como BUILTIN → sus tools fluyen sin HITL (la jaula contiene; lo
-    # marcado destructivo sigue gateado). Cualquier OTRO (añadido por el usuario) =
-    # USER_ADDED: DEFAULT_DENY + HITL en cada tool-call (el broker escala, no recorta).
+    # marcado destructivo sigue gateado). Los MCP de primera parte que SÍ EGRESAN a un
+    # control-plane gestionado (p.ej. safent-control → cloud /api/*) entran como
+    # MANAGED_REMOTE: NO heredan la postura frictionless de BUILTIN (la jaula no los
+    # confina — hablan con un servicio remoto) — lecturas fluyen, escrituras exigen HITL
+    # en cuanto el ciclo se tainta por una respuesta MCP no confiable (CTRL-5). Cualquier
+    # OTRO (añadido por el usuario) = USER_ADDED: DEFAULT_DENY + HITL en cada tool-call
+    # (el broker escala, no recorta).
     _BUILTIN_MCP_SLUGS = frozenset({"excel", "word", "powerpoint"})
-    _trust = TrustLevel.BUILTIN if server_id in _BUILTIN_MCP_SLUGS else TrustLevel.USER_ADDED
+    _MANAGED_REMOTE_MCP_SLUGS = frozenset({"safent-control"})
+    if server_id in _MANAGED_REMOTE_MCP_SLUGS:
+        _trust = TrustLevel.MANAGED_REMOTE
+    elif server_id in _BUILTIN_MCP_SLUGS:
+        _trust = TrustLevel.BUILTIN
+    else:
+        _trust = TrustLevel.USER_ADDED
     return await manager.connect(
         server_id=McpServerId(server_id),
         slug=ServerSlug(server_id),

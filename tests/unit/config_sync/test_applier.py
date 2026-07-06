@@ -17,6 +17,7 @@ from hermes.config_sync.applier import (
 from hermes.config_sync.policy_document import (
     AgentSpec,
     ConsentSpec,
+    DirectorySpec,
     EgressSpec,
     FeaturesSpec,
     IntegrationSpec,
@@ -892,6 +893,93 @@ class TestApplyResult:
         r = ApplyResult(applied=0, failed=[], rejected=["skill:x:scan_blocked"])
         assert r.ok is True
         assert len(r.rejected) == 1
+
+
+# ---------------------------------------------------------------------------
+# Fase 3 — directory (department-scoped visibility)
+# ---------------------------------------------------------------------------
+
+
+class FakeDirectoryStore:
+    """Records update_directory() calls; satisfies _DirectoryStoreProtocol."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict | None] = []
+
+    def update_directory(self, directory: dict | None) -> None:
+        self.calls.append(directory)
+
+
+_DIRECTORY_ENTRY = {
+    "employee_id": "emp-1",
+    "agent_id": "agent-1",
+    "name": "Ada",
+    "department": "ventas",
+}
+
+
+class TestDirectoryApplier:
+    @pytest.mark.asyncio
+    async def test_directory_present_is_stored(self) -> None:
+        proxy = FakeDbusProxy()
+        store = FakeDirectoryStore()
+        payload = _empty_payload(directory={"entries": [_DIRECTORY_ENTRY]})
+
+        result = await PolicyApplier(proxy, directory_store=store).apply(
+            payload, current_agents=[]
+        )
+
+        assert result.ok is True
+        assert store.calls == [{"entries": [_DIRECTORY_ENTRY]}]
+
+    @pytest.mark.asyncio
+    async def test_directory_absent_clears_previously_stored_one(self) -> None:
+        """A subsequent bundle with directory=None must clear the store."""
+        proxy = FakeDbusProxy()
+        store = FakeDirectoryStore()
+
+        await PolicyApplier(proxy, directory_store=store).apply(
+            _empty_payload(directory={"entries": [_DIRECTORY_ENTRY]}),
+            current_agents=[],
+        )
+        await PolicyApplier(proxy, directory_store=store).apply(
+            _empty_payload(), current_agents=[]
+        )
+
+        assert store.calls == [{"entries": [_DIRECTORY_ENTRY]}, None]
+
+    @pytest.mark.asyncio
+    async def test_no_directory_store_injected_is_a_no_op(self) -> None:
+        """Existing single-arg PolicyApplier(proxy) callers are unaffected."""
+        proxy = FakeDbusProxy()
+        payload = _empty_payload(directory={"entries": [_DIRECTORY_ENTRY]})
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert result.ok is True  # never raises, never marks the section failed
+
+    @pytest.mark.asyncio
+    async def test_directory_persist_failure_does_not_block_version_advancement(
+        self,
+    ) -> None:
+        """Presentation-only data: a persistence error must not fail apply()."""
+        proxy = FakeDbusProxy()
+
+        class _BoomStore:
+            def update_directory(self, directory: dict | None) -> None:
+                raise RuntimeError("disk full")
+
+        payload = _empty_payload(directory={"entries": [_DIRECTORY_ENTRY]})
+        result = await PolicyApplier(proxy, directory_store=_BoomStore()).apply(
+            payload, current_agents=[]
+        )
+
+        assert result.ok is True
+
+    def test_directory_spec_parses_from_payload_dict(self) -> None:
+        payload = _empty_payload(directory={"entries": [_DIRECTORY_ENTRY]})
+        assert isinstance(payload.directory, DirectorySpec)
+        assert payload.directory.entries[0].employee_id == "emp-1"
 
 
 # ---------------------------------------------------------------------------

@@ -310,3 +310,83 @@ class TestClear:
         # After clear, the ciphertext bytes must not appear in the DB file.
         raw = db_path.read_bytes()
         assert ciphertext not in raw
+
+
+# ------------------------------------------------------------------
+# Directory (Fase 3 — department-scoped visibility)
+# ------------------------------------------------------------------
+
+
+class TestDirectory:
+    def test_get_returns_none_directory_when_never_pushed(
+        self, db_path: Path, vault: SecretsVault
+    ) -> None:
+        """A fresh pairing has no directory — get().directory is None."""
+        store = _store(db_path, vault)
+        store.save(association=_make_association(), instance_secret=_SECRET)
+        result = store.get()
+        assert result is not None
+        assert result.directory is None
+
+    def test_update_directory_persists_entries(
+        self, db_path: Path, vault: SecretsVault
+    ) -> None:
+        store = _store(db_path, vault)
+        store.save(association=_make_association(), instance_secret=_SECRET)
+        directory = {
+            "entries": [
+                {
+                    "employee_id": "emp-1",
+                    "agent_id": "agent-1",
+                    "name": "Ada",
+                    "department": "ventas",
+                }
+            ]
+        }
+        store.update_directory(directory)
+        result = store.get()
+        assert result is not None
+        assert result.directory == directory
+
+    def test_update_directory_none_clears_it(
+        self, db_path: Path, vault: SecretsVault
+    ) -> None:
+        """A subsequent bundle with directory=None clears the previously stored one."""
+        store = _store(db_path, vault)
+        store.save(association=_make_association(), instance_secret=_SECRET)
+        store.update_directory({"entries": [{"employee_id": "e", "agent_id": "a", "name": "A", "department": "d"}]})
+        assert store.get().directory is not None  # noqa: S101 — sanity precondition
+
+        store.update_directory(None)
+
+        result = store.get()
+        assert result is not None
+        assert result.directory is None
+
+    def test_update_directory_empty_entries_is_present_not_none(
+        self, db_path: Path, vault: SecretsVault
+    ) -> None:
+        """visibility_scope='none' -> {"entries": []} is a PRESENT directory
+        (distinct from no directory at all)."""
+        store = _store(db_path, vault)
+        store.save(association=_make_association(), instance_secret=_SECRET)
+        store.update_directory({"entries": []})
+        result = store.get()
+        assert result is not None
+        assert result.directory == {"entries": []}
+
+    def test_directory_survives_unrelated_license_update(
+        self, db_path: Path, vault: SecretsVault
+    ) -> None:
+        """update_license must not clobber a previously-stored directory."""
+        store = _store(db_path, vault)
+        store.save(association=_make_association(), instance_secret=_SECRET)
+        directory = {"entries": [{"employee_id": "e", "agent_id": "a", "name": "A", "department": "d"}]}
+        store.update_directory(directory)
+
+        store.update_license({"plan": "pro", "max_agents": 10, "expires_at": "", "views": []})
+
+        result = store.get()
+        assert result is not None
+        assert result.directory == directory
+        assert result.license["plan"] == "pro"

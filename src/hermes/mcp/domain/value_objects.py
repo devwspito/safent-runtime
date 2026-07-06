@@ -26,11 +26,25 @@ class TrustLevel(StrEnum):
     USER_TRUSTED: community / publisher-signed; DEFAULT_DENY + approved domains.
     USER_ADDED: any unverified spec; DEFAULT_DENY with EMPTY egress allowlist,
                 HITL forced on every tool-call.
+    MANAGED_REMOTE: first-party server that EGRESSES to a managed control-plane
+                (e.g. safent-control → cloud /api/*). Unlike BUILTIN, it is not
+                confined to the jail (it talks to a remote service we don't run
+                in-process), so it cannot inherit BUILTIN's frictionless posture.
+                Reads flow fluidly (LOW + auto_executable). Writes are LOW but
+                NEVER auto_executable — an untainted typed write can still run
+                per the broker's autonomy table, but the moment the cycle is
+                tainted (derived_from_untrusted_content=True, e.g. because a
+                poisoned roster/tool response was read this cycle) the broker's
+                requires_forced_hitl() elevates it to a forced HITL. Tool
+                RESPONSES from a MANAGED_REMOTE server are always untrusted
+                content (same "mcp" tag rule as every other MCP tier) — a
+                compromised control-plane cannot silently drive further writes.
     """
 
     BUILTIN = "builtin"
     USER_TRUSTED = "user_trusted"
     USER_ADDED = "user_added"
+    MANAGED_REMOTE = "managed_remote"
 
 
 # ---------------------------------------------------------------------------

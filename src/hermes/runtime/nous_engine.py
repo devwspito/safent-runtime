@@ -2246,6 +2246,18 @@ class NousReasoningEngine:
         loop = asyncio.get_event_loop()
         tenant_id = self._tenant_id or context.tenant_id
 
+        # F3: resolve external ToolSpecs filtered per active agent (B4).
+        # agent_id from DecisionContext (CTRL-secure: set server-side from WorkItem).
+        # Falls back to DEFAULT_AGENT_ID (CEO) — never reads the global active_agent.
+        # MOVED ABOVE _resolve_per_cycle_consent (Fase 2 Phase 4e): that call now
+        # needs active_agent_id too, resolved HERE on the event-loop thread —
+        # see ConsentContext.agent_id's docstring for why.
+        from hermes.agents.domain.agent import DEFAULT_AGENT_ID as _DEFAULT_AGENT_ID  # noqa: PLC0415
+
+        active_agent_id = context.agent_id if hasattr(context, "agent_id") else None
+        if active_agent_id is None:
+            active_agent_id = _DEFAULT_AGENT_ID
+
         # spec 014 inc. 3 (CTRL-13 fix): resolve per-cycle operator_id from metadata.
         # The orchestrator injects "task_operator_id" (a UUID) from
         # item.payload["enqueued_by"] — set server-side from channel.sender_uid
@@ -2253,7 +2265,12 @@ class NousReasoningEngine:
         # that may have operator_id=None (HERMES_OPERATOR_ID absent at boot).
         # INVARIANT: the source is always the orchestrator-injected UUID, never
         # any LLM-controlled parameter. The engine cannot fabricate an operator_id.
-        per_cycle_consent = _resolve_per_cycle_consent(self._consent_context, context)
+        # active_agent_id is ALSO stamped here (Fase 2 Phase 4e) — see
+        # _resolve_per_cycle_consent's docstring.
+        per_cycle_consent = _resolve_per_cycle_consent(
+            self._consent_context, context,
+            active_agent_id=str(active_agent_id) if active_agent_id else "",
+        )
 
         # Update the shared consent_ref so READ handlers pick up the per-cycle
         # operator_id. This propagates to all capability READ handler closures
@@ -2264,14 +2281,6 @@ class NousReasoningEngine:
         if per_cycle_consent is not None and self._capability_consent_ref is not None:
             self._capability_consent_ref[0] = per_cycle_consent
 
-        # F3: resolve external ToolSpecs filtered per active agent (B4).
-        # agent_id from DecisionContext (CTRL-secure: set server-side from WorkItem).
-        # Falls back to DEFAULT_AGENT_ID (CEO) — never reads the global active_agent.
-        from hermes.agents.domain.agent import DEFAULT_AGENT_ID as _DEFAULT_AGENT_ID  # noqa: PLC0415
-
-        active_agent_id = context.agent_id if hasattr(context, "agent_id") else None
-        if active_agent_id is None:
-            active_agent_id = _DEFAULT_AGENT_ID
         # FIX B.1 — wire streaming: extract chunk_sink injected by the orchestrator
         # and build a sync callback that emits incremental tokens to the client.
         # The counting_sink wrapper (injected by the orchestrator) increments
@@ -2985,6 +2994,7 @@ class NousReasoningEngine:
 def _resolve_per_cycle_consent(
     base: "ConsentContext | None",
     context: DecisionContext,
+    active_agent_id: str = "",
 ) -> "ConsentContext | None":
     """Resuelve el ConsentContext per-ciclo con el operator_id real del WorkItem.
 
@@ -3002,9 +3012,23 @@ def _resolve_per_cycle_consent(
     Si base ya tiene operator_id, lo conserva (el daemon arrancó con
     HERMES_OPERATOR_ID configurado — el valor de arranque es igualmente legítimo).
     Si task_operator_id está ausente, devuelve base sin cambios.
+
+    `active_agent_id` (Fase 2 Phase 4e — broker Enterprise routing fix): stamped
+    onto the returned ConsentContext's `agent_id` field UNCONDITIONALLY (independent
+    of the operator_id branch above) — this runs on the EVENT-LOOP thread, the
+    SAME thread `run_cycle` resolves `active_agent_id` on, BEFORE the
+    run_in_executor dispatch. This is the explicit, non-thread-local conduit
+    CapabilityBroker.dispatch() reads (consent_context.agent_id) to resolve
+    Enterprise routing — see ConsentContext.agent_id's own docstring for why a
+    threading.local can never work there.
     """
     if base is None:
         return None
+
+    if active_agent_id and active_agent_id != base.agent_id:
+        import dataclasses  # noqa: PLC0415
+
+        base = dataclasses.replace(base, agent_id=active_agent_id)
 
     task_operator_id: "UUID | None" = context.metadata.get("task_operator_id")
     if task_operator_id is None:
@@ -3024,6 +3048,7 @@ def _resolve_per_cycle_consent(
         tenant_id=base.tenant_id,
         operator_id=task_operator_id,
         derived_from_untrusted_content=base.derived_from_untrusted_content,
+        agent_id=base.agent_id,
     )
 
 

@@ -1192,29 +1192,34 @@ def _load_signing_key_or_fail() -> bytes:
     En tests: monkeypatch HERMES_AUDIT_KEY o HERMES_MASTER_KEY_PATH.
     Fail-closed: si ninguna fuente produce una clave, lanza RuntimeError.
     NUNCA usa secrets.token_bytes() — la cadena no sería verificable cross-restart.
+
+    Thin wrapper (Fase 2 Phase 4e) over `audit_signing_key.
+    load_signing_key_with_fallback` — the SAME priority chain, extracted so
+    `hermes.config_sync.remote_approvals` (a SEPARATE process) can
+    independently reproduce this exact key. Preserved here under this name/
+    RuntimeError contract for existing callers/tests.
     """
-    from hermes.runtime.audit_signing_key import load_signing_key, MissingAuditSeal  # noqa: PLC0415
+    import os as _os  # noqa: PLC0415
 
-    try:
-        return load_signing_key()
-    except MissingAuditSeal:
-        pass
+    from hermes.runtime.audit_signing_key import (  # noqa: PLC0415
+        MissingAuditSeal,
+        load_signing_key_with_fallback,
+    )
 
-    # Fallback: deriva desde master.key via HKDF (per-install, estable).
+    env_present = bool(_os.environ.get("HERMES_AUDIT_KEY", "").strip())
     try:
-        from hermes.shell_server.security.secrets import SecretsVault  # noqa: PLC0415
-        vault = SecretsVault()
-        key = vault.derive_subkey(label="audit-chain")
-        logger.info(
-            "hermes.runtime.audit_key_from_master_key — "
-            "HERMES_AUDIT_KEY ausente; clave derivada de master.key (HKDF, per-install)"
-        )
-        return key
-    except RuntimeError as exc:
+        key = load_signing_key_with_fallback()
+    except MissingAuditSeal as exc:
         raise RuntimeError(
             "hermes.runtime.audit_key_unavailable: ni HERMES_AUDIT_KEY ni "
             f"master.key están disponibles — audit fail-closed. Detalle: {exc}"
         ) from exc
+    if not env_present:
+        logger.info(
+            "hermes.runtime.audit_key_from_master_key — "
+            "HERMES_AUDIT_KEY ausente; clave derivada de master.key (HKDF, per-install)"
+        )
+    return key
 
 
 def _build_platform_repos(db_path: Path):
@@ -1427,10 +1432,12 @@ async def _run(*, systemd_notify: bool) -> None:
         os_native_dispatcher.wire_computer_use_broker(broker)
 
     # Enterprise Fase 2 Phase 1: per-agent access scope repo (SAME shell-state.db).
-    # Built once here and reused by BOTH the security hook (native-tool floor)
-    # and the Nous engine (CEO/Cerebro scopable bypass) — single source of truth.
-    # Fail-soft: repo construction failure disables both (fail-open, unchanged
-    # from before this feature existed).
+    # Built once here and reused by the security hook (native-tool floor), the
+    # Nous engine (CEO/Cerebro scopable bypass), AND — Fase 2 Phase 4e — the
+    # broker's Enterprise approval routing (install_*/set_policy/skill_manage/
+    # MCP write) — single source of truth. Fail-soft: repo construction
+    # failure disables all three (fail-open, unchanged from before this
+    # feature existed).
     _access_scope_repo = None
     try:
         from hermes.capabilities.infrastructure.sqlite_agent_access_scope_repo import (  # noqa: PLC0415
@@ -1442,6 +1449,16 @@ async def _run(*, systemd_notify: bool) -> None:
             "hermes.runtime.access_scope_repo_unavailable: %s — "
             "per-agent native-tool floor disabled (fail-open)",
             _scope_repo_exc,
+        )
+
+    # Step 4 of two-step wiring (Fase 2 Phase 4e): the broker was already
+    # built above, BEFORE this repo existed — wire it in now, mirroring
+    # os_native_dispatcher.wire_computer_use_broker's own two-step pattern.
+    # None-safe: CapabilityBroker.dispatch()'s broker MFA-tier routing stays
+    # LOCAL when _access_scope_repo is None (fail-soft above), zero regression.
+    if _access_scope_repo is not None:
+        broker.wire_access_scope(
+            access_scope_repo=_access_scope_repo, tenant_id=str(_resolve_tenant_id())
         )
 
     # Register native security hooks on hermes-agent's global PluginManager.

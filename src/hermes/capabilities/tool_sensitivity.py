@@ -1,10 +1,12 @@
 """SENSITIVE tier — classification layer for Enterprise approval routing.
 
-Enterprise governance, Fase 2 Phase 4a. Runtime-only, INERT by default: this
-module only PRODUCES a classification signal (`sensitivity()`); nothing consumes
-it to gate/allow/block yet — that wiring is `hermes.capabilities.approval_router`
-(consulted, but inert, from `hermes.runtime.security_hook`). The remote-approver
-path (posting to a cloud approver, config_sync push) is a LATER phase.
+Enterprise governance, Fase 2 Phase 4a. Runtime-only. This module PRODUCES a
+classification signal (`sensitivity()`); since Fase 2 Phase 4c,
+`hermes.capabilities.approval_router.route()` no longer consults it for the
+routing decision (routing is keyed purely on `tool_delicacy.is_mfa_required`)
+— `security_hook._compute_danger_route` still calls `sensitivity()` and
+persists the result as CONTEXT on an ENTERPRISE-routed pending row, pushed to
+the cloud admin via `hermes.config_sync.remote_approvals` for their review.
 
 Do NOT reinvent PII/taint detection — this module DELEGATES to the existing
 single sources of truth:
@@ -33,8 +35,11 @@ class SensitivityCategory(StrEnum):
     """A SENSITIVE-tier signal carried by a single tool call.
 
     Each category is an independent, hand-curated classification axis — a
-    call may carry zero, one, or several at once. approval_router.route()
-    only cares whether the resulting set is non-empty.
+    call may carry zero, one, or several at once. Since Fase 2 Phase 4c,
+    approval_router.route() no longer consults this classification (routing
+    is keyed purely on tool_delicacy.is_mfa_required); the resulting set is
+    still computed and persisted as CONTEXT on an ENTERPRISE-routed row, for
+    the remote admin reviewing the decision.
     """
 
     PII_READ = "pii_read"      # reads personally-identifiable data

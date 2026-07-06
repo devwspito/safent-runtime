@@ -13,7 +13,10 @@ Application order (dependency graph):
   6. consents      — capability grants (HIGH consents require human approval)
   7. egress        — only ADDS to allow-list; never removes owner grants
   8. license       — persisted in association_store
-  9. DELETE stale cloud-managed agents (P1-4: AFTER all upserts succeed)
+  9. directory     — Fase 3 department-scoped visibility; persisted in
+                      association_store (no D-Bus verb — read-only
+                      presentation data, see _apply_directory)
+  10. DELETE stale cloud-managed agents (P1-4: AFTER all upserts succeed)
 
   NOTE — features/views:
   Feature-view entitlements travel in license.views (LicenseSpec) which is
@@ -21,6 +24,15 @@ Application order (dependency graph):
   middleware reads license["views"] from the association_store directly —
   no D-Bus verb (set_feature_flags) is needed.  FeaturesSpec in the bundle
   is kept for wire-compat but is NOT applied here.
+
+  NOTE — directory (Fase 3):
+  Like license, the directory has no D-Bus verb: _apply_directory persists
+  it straight into association_store via the injected directory_store
+  (SQLiteAssociationStore.update_directory).  roster_api and
+  DelegationSurfaceAdapter read it back from the same store.  A directory
+  persistence failure is logged, never marks the section failed (this is
+  presentation data, not a security control — the cloud enforces the
+  department gate authoritatively on delegation).
 
 P0-3 — D-Bus verb allow-list:
   Only verbs in _ALLOWED_VERBS may be called by config-sync.  Any attempt to
@@ -69,12 +81,13 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from hermes.config_sync.policy_document import (
     AgentSpec,
     ConsentSpec,
+    DirectorySpec,
     EgressSpec,
     IntegrationSpec,
     LicenseSpec,
@@ -235,6 +248,22 @@ class ApplyResult:
 
 
 # ---------------------------------------------------------------------------
+# Directory store protocol (Fase 3 — department-scoped visibility)
+# ---------------------------------------------------------------------------
+
+
+class _DirectoryStoreProtocol(Protocol):
+    """Duck-typed dependency — satisfied by SQLiteAssociationStore.
+
+    Mirrors uploader.py's _AssociationStoreProtocol pattern: the applier
+    depends on the narrow slice it needs, not the concrete store class.
+    """
+
+    def update_directory(self, directory: dict | None) -> None:
+        ...
+
+
+# ---------------------------------------------------------------------------
 # Applier
 # ---------------------------------------------------------------------------
 
@@ -243,10 +272,22 @@ class PolicyApplier:
     """Applies a PolicyPayload to the local associate via the D-Bus proxy.
 
     The proxy is injected so tests can pass a FakeDbusProxy without D-Bus.
+
+    directory_store (Fase 3, optional): where the delivered department
+    directory is persisted. Unlike agents/providers/etc. this section has
+    NO D-Bus verb — it is read-only presentation data (the cloud already
+    enforces the department gate authoritatively on delegation), so it is
+    persisted the SAME way license.views already is: directly into
+    SQLiteAssociationStore, no daemon round-trip. None (the default) makes
+    `_apply_directory` a no-op — existing callers/tests that don't inject a
+    store are unaffected.
     """
 
-    def __init__(self, proxy: Any) -> None:
+    def __init__(
+        self, proxy: Any, *, directory_store: _DirectoryStoreProtocol | None = None
+    ) -> None:
         self._proxy = proxy
+        self._directory_store = directory_store
 
     async def apply(
         self,
@@ -283,6 +324,7 @@ class PolicyApplier:
         # returns ok.  The feature_guard middleware reads them directly from the
         # association_store — no separate D-Bus verb is needed or correct.
         self._validate_license(payload.license)
+        self._apply_directory(payload.directory)
 
         # Phase 2: DELETE stale cloud-managed agents — only if all upserts ok.
         # If any upsert failed we stop here; the sync loop will not advance the
@@ -554,6 +596,29 @@ class PolicyApplier:
     def _validate_license(self, license_spec: LicenseSpec) -> None:
         if not license_spec.plan:
             logger.warning("hermes.config_sync.applier.license_missing_plan")
+
+    def _apply_directory(self, directory: DirectorySpec | None) -> None:
+        """Replace-on-apply persistence of the Fase-3 department directory.
+
+        None clears the stored directory — the roster/delegation UX fall
+        back to today's local-roster-only behaviour (zero regression).
+
+        Presentation-only data: a persistence failure here is logged but
+        never marks the section failed (mirrors _validate_license) — it
+        must never block version advancement or the critical security
+        sections (agents/consents/egress) from applying.
+        """
+        if self._directory_store is None:
+            return
+        try:
+            self._directory_store.update_directory(
+                directory.model_dump() if directory is not None else None
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "hermes.config_sync.applier.directory_persist_failed",
+                extra={"reason": str(exc)},
+            )
 
     # ------------------------------------------------------------------
     # Agent upsert helpers

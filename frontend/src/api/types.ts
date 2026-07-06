@@ -67,8 +67,10 @@ export interface RosterAgent {
   id: string
   name: string
   description: string
-  // The backend (roster_api) emits "factory" (team-provided) or "custom" (user-made).
-  source: 'factory' | 'custom'
+  // The backend (roster_api) emits "factory" (team-provided), "custom" (user-made),
+  // or "directory" (a colleague's agent, surfaced read-only — Fase 3 department-
+  // scoped visibility; it belongs to another instance, never editable here).
+  source: 'factory' | 'custom' | 'directory'
   department: string
   is_default: boolean
   color: string | null

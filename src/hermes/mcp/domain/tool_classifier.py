@@ -8,6 +8,10 @@ Security invariants (plan.md §Data model):
       * Neither hint can ELEVATE risk beyond what server trust allows.
   - The tool's effective trust never exceeds its server's TrustLevel.
   - auto_executable=True only for LOW risk + non-USER_ADDED trust.
+  - MANAGED_REMOTE (first-party, but egressing to a managed control-plane):
+      classified purely from the tool NAME (no hint dependency) — read
+      verbs → LOW+auto, write verbs → LOW+not-auto. destructive_hint still
+      forces HIGH+not-auto. See _classify_managed_remote().
 
 Domain layer: pure Python + stdlib only.
 """
@@ -64,12 +68,53 @@ def classify_mcp_tool(
     if forced_high:
         return McpToolClassification(risk=RiskLevel.HIGH, auto_executable=False)
 
+    if trust_level is TrustLevel.MANAGED_REMOTE:
+        return _classify_managed_remote(name)
+
     if read_only_hint is True and _name_looks_read_only(name):
         risk = RiskLevel.LOW
         auto_executable = trust_level is not TrustLevel.USER_ADDED
         return McpToolClassification(risk=risk, auto_executable=auto_executable)
 
     return McpToolClassification(risk=RiskLevel.HIGH, auto_executable=False)
+
+
+def _classify_managed_remote(name: str) -> McpToolClassification:
+    """Classify a MANAGED_REMOTE tool by name alone (no hint dependency).
+
+    MANAGED_REMOTE servers are first-party but egress to a managed
+    control-plane (e.g. safent-control). Reads flow fluidly: LOW + auto.
+    Writes stay LOW (typed single-writes remain usable per the broker's
+    autonomy table) but are NEVER auto_executable — this is deliberate,
+    not a gap: it's what makes requires_forced_hitl() bite the instant the
+    cycle is tainted by an untrusted MCP response (CTRL-5). Using HIGH
+    here instead would force HITL on every write even when untainted,
+    killing the fluency this tier exists to provide.
+
+    destructive_hint=True is handled by the caller BEFORE this branch runs
+    (via _is_forced_high) — it always forces HIGH + not-auto, same as
+    every other trust level.
+    """
+    if _managed_remote_looks_read_only(name):
+        return McpToolClassification(risk=RiskLevel.LOW, auto_executable=True)
+    return McpToolClassification(risk=RiskLevel.LOW, auto_executable=False)
+
+
+def _managed_remote_looks_read_only(name: str) -> bool:
+    """True if either end of the tool name matches a read-only verb.
+
+    Deliberately broader than _name_looks_read_only() (suffix-only): a
+    control-plane bridge like safent-control mirrors REST-style resource
+    endpoints, which snake_case to VERB-FIRST tool names (list_agents,
+    get_usage, create_employee, delete_agent) — the opposite convention
+    from the noun-first tools tested elsewhere (resource_list). Checking
+    both ends against the same conservative _READ_SUFFIXES set covers
+    both conventions without widening what counts as a "read verb".
+    """
+    parts = name.lower().split("_")
+    if not parts:
+        return False
+    return parts[0] in _READ_SUFFIXES or parts[-1] in _READ_SUFFIXES
 
 
 def _is_forced_high(destructive_hint: bool | None, trust_level: TrustLevel) -> bool:

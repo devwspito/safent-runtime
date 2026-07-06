@@ -15,12 +15,15 @@ Gate order (fail-closed — a single BLOCK from any step short-circuits):
   5. Native code guard   — check_execute_code_guard() for execute_code.
   6. Denylist gate       — broker._check_denylist() for os_native service ops.
 
-Step 1.6 (Enterprise governance, Fase 2 Phase 4b): when a native danger needs
-owner approval (hook_mfa_block fired), `_compute_danger_route()` consults
-approval_router.route() to decide WHO resolves it — LOCAL (today's D-Bus
-approve/deny) or ENTERPRISE (a remote Enterprise approver, via
-hermes.config_sync.remote_approvals). Routing NEVER creates a new approval
-surface and NEVER substitutes the floor (Steps 2/3/6 below still run
+Step 1.6 (Enterprise governance, Fase 2 Phase 4c — TOTP-keyed model): when a
+native danger needs owner approval (hook_mfa_block fired),
+`_compute_danger_route()` consults approval_router.route() to decide WHO
+resolves it — LOCAL (the worker's plain Approve/Deny, no TOTP, today's D-Bus
+path) for a SIMPLE-tier action, or ENTERPRISE (the tenant's centralized TOTP
+admin, via hermes.config_sync.remote_approvals) for an MFA-tier action
+(`tool_delicacy.is_mfa_required`) on a cloud-managed agent — the worker has no
+TOTP, so they can never approve those, only deny. Routing NEVER creates a new
+approval surface and NEVER substitutes the floor (Steps 2/3/6 below still run
 unconditionally for every tool call, native-danger or not) — it only decides
 who resolves the SAME block-and-resume Event that Step 1.6 was always going to
 register (see `_resolve_native_danger_approval`'s docstring).
@@ -52,6 +55,24 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 from hermes.runtime.nous_tool_risk_map import classify_nous_tool
+
+# Enterprise approval-routing resolution (Fase 2 Phase 4d) — lives in
+# hermes.capabilities.infrastructure.enterprise_approval_routing so BOTH this
+# native-danger gate AND CapabilityBroker.dispatch() (broker-mediated MCP/
+# capability tools) consult the EXACT SAME resolution logic and can never
+# diverge on WHO resolves a given tool's approval. Re-exported here under
+# their ORIGINAL private names — zero call-site change below, and existing
+# tests that patch/import these dotted paths (`hermes.runtime.security_hook.
+# _tenant_remote_approval_enabled` etc.) keep working unchanged: patching an
+# attribute on THIS module still intercepts every unqualified lookup inside
+# this module's own functions (e.g. `_compute_danger_route` below).
+from hermes.capabilities.infrastructure.enterprise_approval_routing import (
+    _read_tenant_remote_approval_flag,
+    _remote_approval_flag_cache,
+    resolve_agent_approval_tier as _resolve_agent_approval_tier,
+    resolve_agent_managed_by as _resolve_agent_managed_by,
+    tenant_remote_approval_enabled as _tenant_remote_approval_enabled,
+)
 
 if TYPE_CHECKING:
     from hermes.agents_os.application.audit_hash_chain import (
@@ -305,127 +326,6 @@ def _resolve_tool_policy_for_cycle(
         return base_store, f"security gate error (fail-closed): {type(exc).__name__}"
 
 
-def _resolve_agent_managed_by(access_scope_repo: Any, tenant_id: str) -> str | None:
-    """Best-effort `managed_by` ("cloud" | None) for the ambient cycle agent.
-
-    Enterprise governance, Fase 2 Phase 4a — feeds approval_router.route()'s
-    tenant-gate check. Fails soft to None (=> never cloud-gated => LOCAL) on
-    any error: no repo wired, no ambient agent, no scope row, or a lookup
-    failure all degrade to "not cloud-managed". Mirrors the fail-open posture
-    of _check_agent_access_scope's own scope lookup (Step 1.1) — this is an
-    observability consult, not an enforcement gate, so it must never raise.
-    """
-    try:
-        if access_scope_repo is None:
-            return None
-
-        from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
-            get_current_cycle_agent,
-        )
-
-        agent_id = get_current_cycle_agent()
-        if not agent_id:
-            return None
-
-        scope = access_scope_repo.get_scope(agent_id, tenant_id)
-        return scope.managed_by if scope is not None else None
-    except Exception:  # noqa: BLE001 — fail-soft: unknown managed_by => not cloud-gated
-        return None
-
-
-def _resolve_agent_approval_tier(access_scope_repo: Any, tenant_id: str) -> str:
-    """Best-effort approval tier ("coordinator" | "standard") for the ambient cycle
-    agent, fed to approval_router.route(). Fails CLOSED to "standard" (max gating:
-    a STANDARD agent escalates DELICATE actions to a remote ENTERPRISE approver) on
-    ANY error — a lookup failure must never grant the relaxed coordinator path. Only
-    ever affects WHO approves (never the kernel floor), and only bites when the agent
-    is cloud-managed with remote approval enabled (route()'s tenant gate)."""
-    try:
-        if access_scope_repo is None:
-            return "standard"
-        from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
-            get_current_cycle_agent,
-        )
-
-        agent_id = get_current_cycle_agent()
-        if not agent_id:
-            return "standard"
-        scope = access_scope_repo.get_scope(agent_id, tenant_id)
-        return scope.approval_tier if scope is not None else "standard"
-    except Exception:  # noqa: BLE001 — fail-closed: unknown tier => max gating (standard)
-        return "standard"
-
-
-_REMOTE_APPROVAL_FLAG_TTL_S: float = 10.0
-# TTL cache for the tenant remote-approval flag. _tenant_remote_approval_enabled
-# sits on the native-danger gate's hot path (evaluated for every danger-gated
-# tool call) — caching avoids a fresh SQLite connection per call. A read that is
-# stale by up to the TTL is safe: this flag only ever decides WHO resolves an
-# approval that was ALREADY going to block (LOCAL vs ENTERPRISE); it can never
-# skip the gate itself (I-3).
-_remote_approval_flag_cache: dict[str, Any] = {"value": False, "expires_at": 0.0}
-
-
-def _tenant_remote_approval_enabled() -> bool:
-    """Real accessor for the tenant's remote-approval flag (Fase 2 Phase 4b).
-
-    True ONLY when this instance is paired/associated (Enterprise edition) AND
-    the tenant's currently-applied license carries
-    `remote_approval_enabled=True` — pushed by the cloud via
-    `config_sync.policy_document.LicenseSpec` and persisted in
-    `association_store.license_json` (the SAME store `feature_guard.py` reads
-    for view entitlements; see `config_sync/applier.py`'s NOTE on
-    `store.update_license()`). Fail-safe False on ANY error: unpaired instance,
-    missing store, corrupt license, DB unavailable — a read failure NEVER
-    widens who can approve, it only ever falls back to today's LOCAL path.
-    """
-    import time  # noqa: PLC0415
-
-    now = time.monotonic()
-    if now < _remote_approval_flag_cache["expires_at"]:
-        return bool(_remote_approval_flag_cache["value"])
-
-    value = _read_tenant_remote_approval_flag()
-    _remote_approval_flag_cache["value"] = value
-    _remote_approval_flag_cache["expires_at"] = now + _REMOTE_APPROVAL_FLAG_TTL_S
-    return value
-
-
-def _read_tenant_remote_approval_flag() -> bool:
-    """Uncached read of the association store's license.remote_approval_enabled.
-
-    Never raises — any failure degrades to False (fail-safe: LOCAL stays the
-    only reachable route for every tool call until this explicitly returns True).
-    """
-    try:
-        import os  # noqa: PLC0415
-        from pathlib import Path  # noqa: PLC0415
-
-        from hermes.instance.association_store import SQLiteAssociationStore  # noqa: PLC0415
-        from hermes.shell_server.security.secrets import SecretsVault  # noqa: PLC0415
-
-        db_path = Path(
-            os.environ.get(
-                "HERMES_SHELL_DB",
-                os.environ.get("HERMES_STATE_DB", "/var/lib/hermes/shell-state.db"),
-            )
-        )
-        store = SQLiteAssociationStore(db_path=db_path, vault=SecretsVault())
-        if not store.is_associated():
-            return False
-        assoc = store.get()
-        if assoc is None:
-            return False
-        return bool(assoc.license.get("remote_approval_enabled", False))
-    except Exception as exc:  # noqa: BLE001 — fail-safe: any error => False
-        logger.warning(
-            "hermes.security_hook.tenant_remote_approval_flag_read_failed error=%r"
-            " — defaulting False (LOCAL)",
-            exc,
-        )
-        return False
-
-
 def _compute_danger_route(
     tool_name: str,
     args: dict[str, Any],
@@ -434,42 +334,44 @@ def _compute_danger_route(
 ) -> tuple[Any, frozenset]:
     """Compute the Enterprise approval route for a danger-gated action.
 
-    Enterprise governance, Fase 2 Phase 4b — REAL routing (supersedes Phase
-    4a's inert Step 1.6a observability-only consult). Consulted ONLY here, at
-    the native-danger gate, for an action that ALREADY requires owner approval
-    (hook_mfa_block fired) — this NEVER creates a new approval surface, it only
-    decides WHO resolves the SAME approval that was always going to block
-    (I-3: substitutes ONLY the owner-MFA gate, never the hardline/self-
-    jailbreak/denylist floor, which runs later in Steps 2/3/6 regardless).
+    Enterprise governance, Fase 2 Phase 4c — TOTP-keyed routing (supersedes
+    Phase 4b's delicacy/sensitivity/irreversible eligibility calculus).
+    Consulted ONLY here, at the native-danger gate, for an action that ALREADY
+    requires owner approval (hook_mfa_block fired) — this NEVER creates a new
+    approval surface, it only decides WHO resolves the SAME approval that was
+    always going to block (I-3: substitutes ONLY the owner-MFA gate, never the
+    hardline/self-jailbreak/denylist floor, which runs later in Steps 2/3/6
+    regardless).
 
-    Fail-soft to (LOCAL, frozenset()) on ANY error: a bug in this NEW routing
+    `approval_router.route()` now decides purely on `tool_delicacy.
+    is_mfa_required(tool_name)` (the worker has no TOTP; Enterprise is the
+    centralized TOTP admin) — see that module's docstring for the full model.
+
+    Fail-soft to (LOCAL, frozenset()) on ANY error: a bug in this routing
     consult must never widen who can approve nor skip the existing, proven
     native-danger gate — worst case, the LOCAL path runs exactly as it does
     today.
 
-    Returns (route, sensitivity_categories) — the categories are returned
-    alongside the route so the caller can persist them on an ENTERPRISE row
-    without re-classifying the same call twice.
+    Returns (route, sensitivity_categories) — `sensitivity_categories` no
+    longer feeds the routing decision; it is still classified and returned so
+    the caller can persist it as CONTEXT on an ENTERPRISE row (surfaced to the
+    remote admin reviewing the decision) without re-classifying the call twice.
     """
     from hermes.capabilities.approval_router import ApprovalRoute  # noqa: PLC0415
 
     try:
         from hermes.capabilities.approval_router import route as _route  # noqa: PLC0415
-        from hermes.capabilities.tool_delicacy import delicacy, is_destructive  # noqa: PLC0415
         from hermes.capabilities.tool_sensitivity import sensitivity  # noqa: PLC0415
 
         # egress_allowlist intentionally EMPTY: the owner's real per-tenant egress
         # grants live in the shell_server egress-plane (a different bounded
         # context) and are not threaded through here yet — the conservative
         # default (nothing granted) only ever makes NEW_EGRESS classification
-        # MORE likely, never less, so this cannot under-route an eligible action
-        # to LOCAL when it should have gone to ENTERPRISE.
+        # MORE likely, never less. Context-only now (see docstring above): it no
+        # longer feeds the routing decision, only the persisted enterprise-row context.
         categories = sensitivity(tool_name, args)
         resolved_route = _route(
             tool=tool_name,
-            delicacy=delicacy(tool_name),
-            sensitivity_categories=categories,
-            irreversible=is_destructive(tool_name),
             agent_managed_by=_resolve_agent_managed_by(access_scope_repo, tenant_id),
             tenant_remote_approval_enabled=_tenant_remote_approval_enabled(),
             approval_tier=_resolve_agent_approval_tier(access_scope_repo, tenant_id),

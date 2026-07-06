@@ -284,7 +284,7 @@ async def _sync_once(
         )
         return
 
-    applier = PolicyApplier(proxy)
+    applier = PolicyApplier(proxy, directory_store=store)
     apply_result = await applier.apply(bundle.payload, tenant_id=bundle.tenant_id)
 
     if apply_result.ok:

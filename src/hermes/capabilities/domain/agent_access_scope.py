@@ -57,10 +57,12 @@ class AgentAccessScope:
     cerebro_unrestricted: bool = True
     enforced: bool = False
     managed_by: str | None = None
-    # Per-role approval tier (2026-07-05): "coordinator" self-resolves DELICATE
-    # actions at the LOCAL owner gate; "standard" (default, fail-closed) escalates
-    # them to a remote ENTERPRISE approver. Cloud-authored, lands from the signed
-    # bundle. Consumed ONLY by approval_router.route() — never widens the floor.
+    # Per-role approval tier (2026-07-05; INERT for routing since Fase 2 Phase
+    # 4c's TOTP-keyed model, 2026-07-06): "coordinator" | "standard" no longer
+    # changes WHO resolves an approval — approval_router.route() now decides
+    # purely on tool_delicacy.is_mfa_required(tool), the same for every tier.
+    # Cloud-authored, lands from the signed bundle. Kept for back-compat/
+    # observability only — never widens the floor.
     approval_tier: str = "standard"
     updated_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
 

@@ -7,6 +7,11 @@ Covers:
   (d) Kill-switch (agent paused) → REJECTED_BY_POLICY before MCP adapter.
   (e) mcp_adapter not configured → REJECTED_BY_POLICY (Constitución IV).
   (f) Browser's existing MCP path (StdioMcpSession) is unaffected by these changes.
+  (g) MANAGED_REMOTE WRITE binding (LOW risk, auto_executable=False — the
+      classify_mcp_tool() shape for safent-control write verbs): taint decides
+      everything. Tainted → forced HITL (PENDING_APPROVAL), untainted → runs
+      the normal LOW path. This is the anti-prompt-injection control for the
+      whole cloud management surface (see mcp/domain/tool_classifier.py).
 """
 
 from __future__ import annotations
@@ -89,6 +94,7 @@ def _build_broker(
     agent_state=None,
     mcp_adapter=None,
     registry=None,
+    autonomous_default: bool = False,
 ) -> Any:
     from hermes.agents_os.application.audit_hash_chain import AuditHashChainSigner
     from hermes.capabilities.application.capability_broker import CapabilityBroker
@@ -125,6 +131,7 @@ def _build_broker(
         anchor=FakeExternalAnchor(),
         agent_state=agent_state,
         mcp_adapter=mcp_adapter,
+        autonomous_default=autonomous_default,
     )
     broker._audit_entries = audit_entries
     return broker
@@ -444,3 +451,142 @@ class TestBrowserMcpPathUnaffected:
         # StdioMcpClient does NOT have browser-specific methods
         assert not hasattr(StdioMcpClient, "navigate")
         assert not hasattr(StdioMcpClient, "snapshot")
+
+
+# ---------------------------------------------------------------------------
+# (g) MANAGED_REMOTE WRITE binding — taint decides everything (CTRL-5)
+#
+# classify_mcp_tool(trust_level=MANAGED_REMOTE) gives write verbs
+# risk=LOW, auto_executable=False (mcp/domain/tool_classifier.py). This is
+# the shape a real safent-control write binding (e.g. create_employee,
+# delete_agent) resolves to. The test below is the load-bearing assertion
+# for the whole anti-prompt-injection control: a poisoned safent-control
+# read (or any other MCP response, tagged "mcp" and therefore untrusted per
+# CapturingToolHost._is_untrusted_read) taints the cycle, and that taint —
+# not consent, not autonomy level — is what stops the write from
+# auto-executing.
+# ---------------------------------------------------------------------------
+
+
+def _managed_remote_write_registry() -> Any:
+    from hermes.agents_os.domain.surface_kind import SurfaceKind
+    from hermes.capabilities.domain.ports import CapabilityBinding, RiskLevel
+    from hermes.capabilities.testing.fake_capability_registry import FakeCapabilityRegistry
+
+    registry = FakeCapabilityRegistry()
+    registry.register(CapabilityBinding(
+        tool_name="mcp__safent-control__create_employee",
+        surface_kind=SurfaceKind.MCP_CALL,
+        required_capability=None,
+        risk=RiskLevel.LOW,
+        auto_executable=False,
+        executor="mcp",
+    ))
+    return registry
+
+
+class TestMcpManagedRemoteWriteTaintFullAutonomous:
+    """Cerebro runs with HERMES_AUTONOMOUS_DEFAULT=1 (autonomous_default=True):
+    needs_hitl collapses to `effective_risk is HIGH` — auto_executable and
+    autonomy_level stop mattering entirely. Taint is the ONLY thing left
+    that can turn effective_risk HIGH for a LOW binding (requires_forced_hitl).
+    """
+
+    @pytest.mark.asyncio
+    async def test_tainted_managed_remote_write_forces_pending_approval(self) -> None:
+        mcp_adapter = _RecordingMcpAdapter()
+        broker = _build_broker(
+            agent_state=_RunningAgentState(),
+            mcp_adapter=mcp_adapter,
+            registry=_managed_remote_write_registry(),
+            autonomous_default=True,
+        )
+
+        from hermes.capabilities.domain.ports import ExecutionStatus
+
+        proposal = _mcp_proposal("mcp__safent-control__create_employee")
+        outcome = await broker.dispatch(proposal, _clean_consent(tainted=True))
+
+        assert outcome.status is ExecutionStatus.PENDING_APPROVAL, (
+            "MANAGED_REMOTE write (LOW, not-auto) under a tainted cycle must be "
+            "forced to HITL — an injected safent-control response cannot drive "
+            f"a management write autonomously. Got: {outcome}"
+        )
+        assert len(mcp_adapter.calls) == 0, "Adapter must NOT run without HITL approval"
+
+    @pytest.mark.asyncio
+    async def test_untainted_managed_remote_write_executes(self) -> None:
+        mcp_adapter = _RecordingMcpAdapter()
+        broker = _build_broker(
+            agent_state=_RunningAgentState(),
+            mcp_adapter=mcp_adapter,
+            registry=_managed_remote_write_registry(),
+            autonomous_default=True,
+        )
+
+        from hermes.capabilities.domain.ports import ExecutionStatus
+
+        proposal = _mcp_proposal("mcp__safent-control__create_employee")
+        outcome = await broker.dispatch(proposal, _clean_consent(tainted=False))
+
+        assert outcome.status is ExecutionStatus.EXECUTED, (
+            "The SAME MANAGED_REMOTE write, untainted, must execute under the "
+            f"full-autonomous default — taint is the deciding factor. Got: {outcome}"
+        )
+        assert len(mcp_adapter.calls) == 1
+
+
+class TestMcpManagedRemoteWriteTaintDefaultPolicy:
+    """Default (non-autonomous, BALANCED) policy: LOW+non-auto already asks for
+    HITL regardless of taint (the normal consented-write path). Taint must
+    still force HITL when no policy relaxation would otherwise apply, and a
+    real human approval (valid HITL token) can still clear a tainted write —
+    forced HITL means "ask the human", not "silently deny forever".
+    """
+
+    @pytest.mark.asyncio
+    async def test_tainted_managed_remote_write_pending_without_token(self) -> None:
+        from hermes.capabilities.domain.ports import ExecutionStatus
+
+        mcp_adapter = _RecordingMcpAdapter()
+        broker = _build_broker(
+            agent_state=_RunningAgentState(),
+            mcp_adapter=mcp_adapter,
+            registry=_managed_remote_write_registry(),
+        )
+
+        proposal = _mcp_proposal("mcp__safent-control__create_employee")
+        outcome = await broker.dispatch(proposal, _clean_consent(tainted=True))
+
+        assert outcome.status is ExecutionStatus.PENDING_APPROVAL
+        assert len(mcp_adapter.calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_tainted_managed_remote_write_executes_after_human_approval(self) -> None:
+        """A forced-HITL write is not a dead end: a real approval token clears it."""
+        from hermes.capabilities.domain.ports import ExecutionStatus
+
+        mcp_adapter = _RecordingMcpAdapter()
+        broker = _build_broker(
+            agent_state=_RunningAgentState(),
+            mcp_adapter=mcp_adapter,
+            registry=_managed_remote_write_registry(),
+        )
+
+        proposal = _mcp_proposal("mcp__safent-control__create_employee")
+        tainted_consent = _clean_consent(tainted=True)
+
+        first = await broker.dispatch(proposal, tainted_consent)
+        assert first.status is ExecutionStatus.PENDING_APPROVAL
+
+        token = await broker._approval_gate.approve(
+            proposal_id=proposal.proposal_id, approved_by=_OPERATOR
+        )
+        second = await broker.dispatch(
+            proposal, tainted_consent, hitl_approval_token=token
+        )
+
+        assert second.status is ExecutionStatus.EXECUTED, (
+            f"A validly-approved token must clear the forced HITL: {second}"
+        )
+        assert len(mcp_adapter.calls) == 1

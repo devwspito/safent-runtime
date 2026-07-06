@@ -58,8 +58,10 @@ approval (runtime/associate side):
       filas `route='enterprise'` AND `status='pending'`.
 
   `sensitivity` es el JSON de la lista de `SensitivityCategory` (pii_read/
-  new_egress/spend) que aportó la elegibilidad ENTERPRISE — contexto para el
-  aprobador remoto; solo se persiste junto a route='enterprise'.
+  new_egress/spend) de ESTA acción — contexto informativo para el aprobador
+  remoto (NO decide la ruta desde Fase 2 Phase 4c: la ruta depende solo de
+  `tool_delicacy.is_mfa_required(tool)`); solo se persiste junto a
+  route='enterprise'.
 
   `agent_id` es el agente del roster (ciclo ambiente) que propuso la acción —
   necesario para el body PINNED que el push loop de remote_approvals envía a

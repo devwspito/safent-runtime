@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS instance_association (
   license_json              TEXT    NOT NULL DEFAULT '{}',
   last_applied_version      INTEGER NOT NULL DEFAULT 0,
   state                     TEXT    NOT NULL DEFAULT 'active',
-  instance_secret_ciphertext BLOB
+  instance_secret_ciphertext BLOB,
+  directory_json            TEXT    NOT NULL DEFAULT ''
 );
 """
 
@@ -53,6 +54,11 @@ class InstanceAssociation:
     license: dict           # noqa: ANN001 — arbitrary JSON from the control plane
     last_applied_version: int
     state: str              # "active" | "revoked"
+    # Fase 3 (department-scoped visibility): the DirectorySpec dump
+    # ({"entries": [...]}) delivered by the latest applied bundle, or None
+    # when no directory was pushed (visibility_scope="all", the default —
+    # the associate falls back to today's local-roster-only behaviour).
+    directory: dict | None = None
 
 
 class SQLiteAssociationStore:
@@ -175,6 +181,26 @@ class SQLiteAssociationStore:
             )
         logger.info("hermes.instance.license_updated")
 
+    def update_directory(self, directory: dict | None) -> None:
+        """Persist the Fase-3 department-scoped directory (replace-on-apply).
+
+        `directory` is the DirectorySpec dump ({"entries": [...]}). None
+        clears it — the roster/delegation UX then fall back to today's
+        local-roster-only behaviour (mirrors update_license's overwrite
+        semantics; presentation data only, the cloud enforces the
+        department gate authoritatively).
+        """
+        directory_json = json.dumps(directory) if directory is not None else ""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE instance_association SET directory_json = ? WHERE id = 1",
+                (directory_json,),
+            )
+        logger.info(
+            "hermes.instance.directory_updated",
+            extra={"entries": len(directory.get("entries", [])) if directory else 0},
+        )
+
     def mark_revoked(self) -> None:
         """Flip state to 'revoked' without deleting the row (audit trail)."""
         with self._connect() as conn:
@@ -229,12 +255,21 @@ class SQLiteAssociationStore:
             conn.execute(
                 "ALTER TABLE instance_association ADD COLUMN signing_pubkey_hex TEXT NOT NULL DEFAULT ''"
             )
+        if "directory_json" not in cols:
+            conn.execute(
+                "ALTER TABLE instance_association ADD COLUMN directory_json TEXT NOT NULL DEFAULT ''"
+            )
 
     def _row_to_association(self, row: sqlite3.Row) -> InstanceAssociation:
         try:
             license_data: dict = json.loads(row["license_json"] or "{}")
         except (json.JSONDecodeError, TypeError):
             license_data = {}
+        directory_raw = row["directory_json"] or ""
+        try:
+            directory_data: dict | None = json.loads(directory_raw) if directory_raw else None
+        except (json.JSONDecodeError, TypeError):
+            directory_data = None
         return InstanceAssociation(
             instance_id=row["instance_id"],
             tenant_id=row["tenant_id"],
@@ -244,4 +279,5 @@ class SQLiteAssociationStore:
             license=license_data,
             last_applied_version=int(row["last_applied_version"] or 0),
             state=row["state"],
+            directory=directory_data,
         )

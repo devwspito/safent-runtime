@@ -1360,7 +1360,7 @@ def create_app() -> FastAPI:
     app.include_router(create_providers_router())
     # Roster must be registered BEFORE agents_router to avoid FastAPI resolving
     # /api/v1/agents/roster as /api/v1/agents/{agent_id}.
-    app.include_router(create_roster_router())
+    app.include_router(create_roster_router(_DB_PATH, vault))
     app.include_router(create_agents_router())
     app.include_router(create_composio_router())
     app.include_router(create_skills_hub_router(_DB_PATH))

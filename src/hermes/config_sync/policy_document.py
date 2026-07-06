@@ -29,7 +29,8 @@ SIGNING FORMAT (P0-1):
 CARDINALIY CAPS (P1-3, enforced at Pydantic parse time):
   agents ≤ 200, providers ≤ 50, mcp ≤ 100, skills ≤ 200, consents ≤ 200,
   egress.allow_domains ≤ 500, mcp.env ≤ 100 keys, access_scope.native_tools/
-  views ≤ 256 each, access_scope.policy_overlay ≤ 256 keys.
+  views ≤ 256 each, access_scope.policy_overlay ≤ 256 keys,
+  directory.entries ≤ 200 (Fase 3).
 """
 
 from __future__ import annotations
@@ -75,6 +76,17 @@ class AccessScopeSpec(BaseModel):
     # "standard" so a non-coordinator scope verifies BYTE-IDENTICALLY to a
     # pre-per-role bundle. MUST match the cloud mirror.
     approval_tier: str = Field(default="standard", max_length=32)
+    # Fase 3 (department-scoped visibility): "all" (default) | "department" |
+    # "none". A GOVERNANCE decision — resolved from the agent's GovernanceRole
+    # by the cloud compiler, NEVER self-set by the per-agent template (same
+    # discipline as approval_tier). Controls whether PolicyPayload.directory
+    # is populated for this agent's instance (see DirectorySpec). Dropped-
+    # when-"all" so an org that never restricts visibility verifies BYTE-
+    # IDENTICALLY to a pre-Fase-3 bundle. MUST match the cloud mirror.
+    #
+    # NOTE: consumption (filtering the local roster / OfficeView by this
+    # value) is a SEPARATE later task — this field is wire-contract only here.
+    visibility_scope: str = Field(default="all", max_length=32)
 
     @field_validator("native_tools")
     @classmethod
@@ -94,11 +106,14 @@ class AccessScopeSpec(BaseModel):
 
     @model_serializer(mode="wrap")
     def _serialize_scope(self, handler: Any) -> dict[str, Any]:
-        """Drop approval_tier when "standard" — byte-identical to a pre-per-role
-        bundle. MUST match the cloud mirror's _serialize_scope exactly."""
+        """Drop approval_tier when "standard" and visibility_scope when "all"
+        — byte-identical to a pre-per-role / pre-Fase-3 bundle. MUST match
+        the cloud mirror's _serialize_scope exactly."""
         data = handler(self)
         if self.approval_tier == "standard":
             data.pop("approval_tier", None)
+        if self.visibility_scope == "all":
+            data.pop("visibility_scope", None)
         return data
 
 
@@ -306,6 +321,39 @@ class LicenseSpec(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Directory spec (Fase 3 — department-scoped visibility)
+# ---------------------------------------------------------------------------
+
+
+class DirectoryEntrySpec(BaseModel):
+    """One colleague-agent entry in a department-scoped directory (Fase 3)."""
+
+    employee_id: str = Field(min_length=1, max_length=64)
+    agent_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    department: str = Field(default="", max_length=64)
+
+
+class DirectorySpec(BaseModel):
+    """Org directory scoped to the bound agent's visibility (Fase 3).
+
+    Built by the cloud PUBLISHER (never the compiler — the compiler stays
+    pure) from the org's OTHER agent templates whose department matches the
+    bound employee's. Absent from the wire (PolicyPayload.directory is None)
+    when the agent's effective visibility_scope is "all" — today's behavior,
+    the associate keeps showing its own local roster, zero regression. An
+    EMPTY entries list (not None) means visibility_scope="none": "see no
+    colleagues" is explicit, distinct from "no directory pushed at all".
+    MUST match the cloud mirror.
+
+    NOTE: consumption (roster filter / OfficeView / delegation-adapter) is a
+    SEPARATE later task — this model is wire-contract only here.
+    """
+
+    entries: list[DirectoryEntrySpec] = Field(default_factory=list, max_length=200)
+
+
+# ---------------------------------------------------------------------------
 # Top-level payload and bundle
 # ---------------------------------------------------------------------------
 
@@ -323,6 +371,21 @@ class PolicyPayload(BaseModel):
     consents: list[ConsentSpec] = Field(default_factory=list, max_length=200)
     features: FeaturesSpec = Field(default_factory=FeaturesSpec)
     license: LicenseSpec = Field(default_factory=LicenseSpec)
+    # Fase 3 (department-scoped visibility): None (default) → byte-identical
+    # to a pre-Fase-3 bundle (the associate keeps its own local roster, zero
+    # regression). Present only when an agent's effective visibility_scope is
+    # "department" or "none" — see DirectorySpec's docstring.
+    directory: DirectorySpec | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_payload(self, handler: Any) -> dict[str, Any]:
+        """Drop directory from the dump when unset — byte-identical to a
+        pre-Fase-3 bundle (the key must be ABSENT, never "directory":null).
+        MUST match the cloud mirror's _serialize_payload exactly."""
+        data = handler(self)
+        if self.directory is None:
+            data.pop("directory", None)
+        return data
 
 
 class PolicyBundle(BaseModel):
