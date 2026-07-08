@@ -2050,25 +2050,13 @@ class NousReasoningEngine:
             "Hablas siempre en términos del usuario y del mundo real. Tu lenguaje es el "
             "de una persona, no el de un sistema.",
             "Cuidas la privacidad: nada sale del equipo sin permiso explícito del usuario.",
-            # Tool-selection rule: la distinción CRÍTICA es VISIBLE vs headless.
-            # "abrir el navegador / una web para que el usuario la VEA" = activate_app
-            # con url (Chromium en la sesión gráfica). browser_navigate es headless
-            # (invisible) y solo sirve para que el AGENTE lea/opere la web por dentro.
-            # Nombres de tools reales (no inventar): activate_app, browser_navigate,
-            # browser_click, browser_type, browser_snapshot, terminal, computer_use.
-            "Regla de herramientas (elige bien): para que el usuario VEA algo en "
-            "pantalla —abrir una app (calculadora, editor, visor) o el navegador en "
-            "una web— usa activate_app. Para el navegador pasa la url: "
-            "activate_app(app_name='navegador', url='https://www.youtube.com') abre "
-            "Chromium VISIBLE en esa web. 'abre el navegador', 'abre YouTube', "
-            "'muéstrame X web', 'abre la calculadora' = activate_app (con url si es web). "
-            "Para LEER o automatizar una web por dentro SIN mostrarla (scrapear, "
-            "rellenar un form en background, comprobar un dato) usa browser_navigate + "
-            "browser_click/browser_type/browser_snapshot (navegador agéntico headless, "
-            "invisible — NO se ve en pantalla). Nunca uses browser_navigate ni terminal "
-            "para abrir algo que el usuario deba VER. Comandos del sistema → terminal; "
-            "ficheros → read_file/write_file/patch; control de pantalla → computer_use. "
-            "Usa siempre la herramienta más simple y directa.",
+            # Tool-selection rule: eje READ (buscar/leer info → web_search/web_extract,
+            # sin navegador) vs INTERACT (operar un sitio con sesión/JS → browser_*) vs
+            # VISIBLE (mostrar al usuario → activate_app). Fuente ÚNICA compartida con el
+            # path autónomo (DefaultPromptBuilder._system) para no volver a divergir: el
+            # duplicado inline anterior enviaba a browser_navigate para "comprobar un
+            # dato", provocando el sobre-uso del navegador vivo en tareas de solo lectura.
+            DefaultPromptBuilder._TOOL_SELECTION_RULE,
             # Aprobaciones: cuando una herramienta requiere permiso del dueño, el sistema
             # muestra automáticamente una tarjeta de aprobación (HITL). El agente NUNCA
             # debe negarse ni proponer un rodeo: debe invocar la herramienta y, si el sistema

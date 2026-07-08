@@ -818,16 +818,15 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "LOW risk — observation only, no state mutation."
     ),
     "activate_app": (
-        "USE THIS to OPEN or LAUNCH a desktop app the user must SEE on screen, OR to open "
-        "the browser at a website the user wants to VIEW. By name (calculator, calendar, "
-        "files, text editor, browser). For the BROWSER, pass `url` to open it directly at "
-        "that page: activate_app(app_name='navegador', url='https://www.youtube.com') opens "
-        "a VISIBLE Chromium window at YouTube. So 'open the browser', 'open YouTube', "
-        "'show me <website>', 'open the calculator' → activate_app (with url if it's a web). "
-        "Instant — no mouse/keyboard control needed. LOW risk — no data mutation. "
-        "To READ or automate a website WITHOUT showing it to the user (scraping, background "
-        "form-fill, checking a value), use browser_navigate instead (headless, invisible). "
-        "Prefer activate_app over begin_computer_use for simply opening or switching to an app."
+        "PURPOSE: SHOW something to the user on screen — a desktop app (calculator, "
+        "calendar, files, text editor) or the browser opened at a web page. For the "
+        "browser pass `url`: activate_app(app_name='navegador', url='https://...') opens "
+        "a VISIBLE Chromium window at that page. Use this when the point is that the USER "
+        "looks at it. Instant — no mouse/keyboard control needed. LOW risk — no data "
+        "mutation. (To find or read web information for yourself, web_search/web_extract "
+        "are the default; to operate inside a site — login, forms, clicks — use "
+        "browser_navigate.) Prefer activate_app over begin_computer_use for simply "
+        "opening or switching to an app."
     ),
     "click_app_element": (
         "Click an accessible element in a desktop application (button, menu item, etc.). "
