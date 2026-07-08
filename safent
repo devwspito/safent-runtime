@@ -84,11 +84,28 @@ _ensure_machine() {
 # seccomp profile under $HOME (on macOS the VM mounts $HOME but NOT /tmp).
 _ensure_seccomp() {
   mkdir -p "$SECCOMP_DIR" 2>/dev/null || true
-  if ! curl -fsSL "$SECCOMP_URL" -o "$SECCOMP" 2>/dev/null; then
-    echo "[x] Could not download the seccomp profile ($SECCOMP_URL)."
-    echo "    Export SAFENT_SECCOMP_URL to a reachable URL if the repo is not public."
-    exit 1
+  # 1. Preferred: pull the profile straight out of the image — v0.8.29+ ship it baked
+  #    at /usr/share/hermes/seccomp/safent.json, version-matched and with NO network.
+  if "$RTN" run --rm --entrypoint cat "$(_image)" \
+       /usr/share/hermes/seccomp/safent.json > "$SECCOMP.tmp" 2>/dev/null && [ -s "$SECCOMP.tmp" ]; then
+    mv "$SECCOMP.tmp" "$SECCOMP"; return 0
   fi
+  rm -f "$SECCOMP.tmp" 2>/dev/null || true
+  # 2. Fallback: download from the repo (older images without the baked file), with
+  #    retries so a transient raw.githubusercontent hiccup doesn't break the update.
+  if curl -fsSL --retry 3 --retry-delay 2 "$SECCOMP_URL" -o "$SECCOMP.tmp" 2>/dev/null && [ -s "$SECCOMP.tmp" ]; then
+    mv "$SECCOMP.tmp" "$SECCOMP"; return 0
+  fi
+  rm -f "$SECCOMP.tmp" 2>/dev/null || true
+  # 3. Last resort: reuse a previously-cached profile so a transient failure never
+  #    bricks an already-working install (the profile rarely changes).
+  if [ -s "$SECCOMP" ]; then
+    echo "[!] Using the cached seccomp profile (could not refresh from image or $SECCOMP_URL)."
+    return 0
+  fi
+  echo "[x] Could not obtain the seccomp profile (image + $SECCOMP_URL failed, no cache)."
+  echo "    Check the image pulled correctly, or export SAFENT_SECCOMP_URL to a reachable URL."
+  exit 1
 }
 
 # Recreate the container with the hardened cage (loopback + min caps + seccomp).

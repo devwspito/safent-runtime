@@ -177,6 +177,10 @@ COPY ops/agents-os-edition/seed/mcp-servers.json /usr/share/hermes/seed/
 # it makes the in-unit defense-in-depth real instead of relying solely on the outer
 # container seccomp profile.
 COPY ops/agents-os-edition/seccomp/chromium-browser.json /usr/share/hermes/seccomp/chromium-browser.json
+# Outer container seccomp profile, baked so the CLI can extract it from the image
+# (version-matched) instead of fetching it over the network at every start — the
+# download-only path bricked `safent update` on any transient GitHub hiccup.
+COPY ops/container/seccomp/safent.json /usr/share/hermes/seccomp/safent.json
 
 # ── Egress blocklist (hagezi "light" — bundled at build time) ─────────────────
 # Proxy reads /usr/share/hermes/egress-blocklist.txt at boot and applies it as an
