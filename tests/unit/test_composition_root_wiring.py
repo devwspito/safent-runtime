@@ -4,11 +4,9 @@ Verifies that the critical integration gaps are closed:
   (W1) Broker receives composio_adapter= (KC-4).
   (W2) Broker uses ComposioCapabilityRegistry (dynamic slug resolution).
   (W3) NousReasoningEngine receives broker + consent_context (F2).
-  (W4) HermesShellWindow._approved_sites_store passed to HermesSettingsWindow.
   (W5) ComposioToolsRegistry built with broker-aware tools_builder (KC-4 live-reload).
 
-Each test is pure-unit: no network, no real DB, no GTK. Import of GTK-dependent
-modules is guarded so the test suite can run in headless CI environments.
+Each test is pure-unit: no network, no real DB.
 """
 
 from __future__ import annotations
@@ -332,78 +330,6 @@ class TestNousEngineReceivesBroker:
         assert "BLOCKED" in data["error"], (
             f"W3: result must contain 'BLOCKED', got: {data['error']}"
         )
-
-
-# ---------------------------------------------------------------------------
-# W4: ApprovedSitesStore wired from window to settings
-# ---------------------------------------------------------------------------
-
-
-class TestApprovedSitesStoreWiring:
-    """W4: ApprovedSitesStore created in HermesShellWindow and passed to HermesSettingsWindow."""
-
-    def test_approved_sites_store_exists_on_window(self) -> None:
-        """HermesShellWindow.__init__ creates an _approved_sites_store attribute."""
-        from hermes.shell.presentation.gtk4.approved_sites_store import ApprovedSitesStore
-
-        # We can't instantiate HermesShellWindow without GTK, but we can verify
-        # that the module-level import is present and the store attribute is defined
-        # in the __init__ source by checking the class body.
-        import inspect
-        import hermes.shell.presentation.gtk4.window as window_module  # noqa: PLC0415
-
-        src = inspect.getsource(window_module.HermesShellWindow.__init__)
-        assert "ApprovedSitesStore" in src or "_approved_sites_store" in src, (
-            "W4: HermesShellWindow.__init__ must instantiate ApprovedSitesStore"
-        )
-
-    def test_settings_window_receives_approved_sites_store(self) -> None:
-        """_open_settings_window passes approved_sites_store= to HermesSettingsWindow."""
-        import inspect
-        import hermes.shell.presentation.gtk4.window as window_module  # noqa: PLC0415
-
-        src = inspect.getsource(window_module.HermesShellWindow._open_settings_window)
-        assert "approved_sites_store" in src, (
-            "W4: _open_settings_window must pass approved_sites_store= to HermesSettingsWindow"
-        )
-
-    def test_approved_sites_store_import_in_window_module(self) -> None:
-        """window.py imports ApprovedSitesStore at module level."""
-        import hermes.shell.presentation.gtk4.window as window_module  # noqa: PLC0415
-
-        assert hasattr(window_module, "ApprovedSitesStore"), (
-            "W4: window module must import ApprovedSitesStore"
-        )
-
-    def test_approved_sites_store_basic_lifecycle(self, tmp_path) -> None:
-        """ApprovedSitesStore add/remove/as_frozenset works correctly."""
-        from hermes.shell.presentation.gtk4.approved_sites_store import ApprovedSitesStore
-
-        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path)}):
-            store = ApprovedSitesStore()
-
-            added = store.add("example.com")
-            assert added is True
-            assert "example.com" in store.as_frozenset()
-
-            removed = store.remove("example.com")
-            assert removed is True
-            assert "example.com" not in store.as_frozenset()
-
-    def test_approved_sites_store_rejects_invalid_domain(self, tmp_path) -> None:
-        """ApprovedSitesStore rejects domains with schemes or slashes (fail-closed)."""
-        from hermes.shell.presentation.gtk4.approved_sites_store import ApprovedSitesStore
-
-        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path)}):
-            store = ApprovedSitesStore()
-
-            assert store.add("https://example.com") is False, (
-                "W4: domain with scheme must be rejected"
-            )
-            assert store.add("example.com/path") is False, (
-                "W4: domain with path must be rejected"
-            )
-            assert store.as_frozenset() == frozenset()
 
 
 # ---------------------------------------------------------------------------

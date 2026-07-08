@@ -7,7 +7,6 @@ same list_skills_native() path as agent-created skills.
 
 Callers:
   - hermes.shell_server.training.api  (server-side sign endpoint)
-  - hermes.shell.presentation.gtk4.widgets.training_panel  (in-session sign)
 
 P0-4 signing strategy:
   - build_signing_key() (v1, path-HMAC) is retained ONLY for read-side
