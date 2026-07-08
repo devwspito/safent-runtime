@@ -58,8 +58,10 @@ approval (runtime/associate side):
       filas `route='enterprise'` AND `status='pending'`.
 
   `sensitivity` es el JSON de la lista de `SensitivityCategory` (pii_read/
-  new_egress/spend) que aportó la elegibilidad ENTERPRISE — contexto para el
-  aprobador remoto; solo se persiste junto a route='enterprise'.
+  new_egress/spend) de ESTA acción — contexto informativo para el aprobador
+  remoto (NO decide la ruta desde Fase 2 Phase 4c: la ruta depende solo de
+  `tool_delicacy.is_mfa_required(tool)`); solo se persiste junto a
+  route='enterprise'.
 
   `agent_id` es el agente del roster (ciclo ambiente) que propuso la acción —
   necesario para el body PINNED que el push loop de remote_approvals envía a
@@ -322,6 +324,7 @@ CREATE TABLE IF NOT EXISTS agent_access_scopes (
     updated_by           INTEGER NOT NULL,
     managed_by           TEXT,
     approval_tier        TEXT NOT NULL DEFAULT 'standard',
+    authorized_mcp_servers TEXT NOT NULL DEFAULT '[]',
     updated_at           TEXT NOT NULL,
     PRIMARY KEY (tenant_id, agent_id)
 );
@@ -354,6 +357,15 @@ def ensure_capabilities_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE agent_access_scopes "
             "ADD COLUMN approval_tier TEXT NOT NULL DEFAULT 'standard'"
+        )
+    except sqlite3.OperationalError:
+        pass
+    # EXPAND (bundle-authorized MCP admission, 2026-07-07): authorized_mcp_servers
+    # column for DBs created before it existed. Idempotent — no-op if present.
+    try:
+        conn.execute(
+            "ALTER TABLE agent_access_scopes "
+            "ADD COLUMN authorized_mcp_servers TEXT NOT NULL DEFAULT '[]'"
         )
     except sqlite3.OperationalError:
         pass

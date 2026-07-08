@@ -804,8 +804,20 @@ def create_app() -> FastAPI:
     from hermes.agents.infrastructure.sqlite_agent_registry import (  # noqa: PLC0415
         SqliteAgentRegistry,
     )
+    from hermes.instance.association_store import SQLiteAssociationStore  # noqa: PLC0415
 
-    agent_registry = SqliteAgentRegistry(db_path=_DB_PATH)
+    # Inc 5' (2026-07-07): Community seeds only the native `default` agent —
+    # the 27 roster-* templates are never created (owner: "not seeded", not
+    # merely hidden). Mirrors FeatureGuardMiddleware's own edition read
+    # (same store/vault); a store error defaults to "community" (fail to the
+    # SMALLER surface, not the larger one).
+    try:
+        _edition = SQLiteAssociationStore(db_path=_DB_PATH, vault=vault).edition()
+    except Exception:  # noqa: BLE001
+        _edition = "community"
+    agent_registry = SqliteAgentRegistry(
+        db_path=_DB_PATH, seed_default_roster=(_edition != "community")
+    )
     app.state.repo = repo
     app.state.vault = vault
     app.state.conv_repo = conv_repo
@@ -1360,7 +1372,7 @@ def create_app() -> FastAPI:
     app.include_router(create_providers_router())
     # Roster must be registered BEFORE agents_router to avoid FastAPI resolving
     # /api/v1/agents/roster as /api/v1/agents/{agent_id}.
-    app.include_router(create_roster_router())
+    app.include_router(create_roster_router(_DB_PATH, vault))
     app.include_router(create_agents_router())
     app.include_router(create_composio_router())
     app.include_router(create_skills_hub_router(_DB_PATH))

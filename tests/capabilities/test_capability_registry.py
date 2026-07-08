@@ -2,7 +2,9 @@
 
 Cubre:
 - is_terminal_command_allowlisted: binarios seguros/inseguros.
-- Broker rechaza consent PERSISTENT sobre binding persistent_forbidden=True (CTRL-3).
+- Un consent PERSISTENT sobre un binding persistent_forbidden=True NO auto-concede
+  la operación (CTRL-3): el broker cae al gate HITL, que exige un token de sesión
+  fresco → PENDING_APPROVAL, nunca EXECUTED.
 """
 
 from __future__ import annotations
@@ -133,15 +135,23 @@ class TestCapabilityRegistry:
 
 
 # ---------------------------------------------------------------------------
-# B3: Broker rechaza consent PERSISTENT sobre persistent_forbidden=True (CTRL-3)
+# B3: consent PERSISTENT sobre persistent_forbidden=True NO auto-concede (CTRL-3)
 # ---------------------------------------------------------------------------
 
 
 class TestBrokerPersistentForbidden:
-    """El broker rechaza con REJECTED_BY_POLICY si consent es PERSISTENT y
-    el binding tiene persistent_forbidden=True (CTRL-3)."""
+    """Un consent PERSISTENT NO vale como auto-grant sobre un binding con
+    persistent_forbidden=True (CTRL-3). El broker no ejecuta silenciosamente:
+    cae al gate HITL, que exige una aprobación de SESIÓN fresca (token
+    criptográfico single-use). Sin token ⇒ PENDING_APPROVAL, jamás EXECUTED.
 
-    async def test_persistent_consent_on_delete_file_rejected(
+    Nota de evolución: el broker antes rechazaba en duro con REJECTED_BY_POLICY;
+    ahora deja pasar al gate HITL (capability_broker._run_consent_gate) para no
+    romper el chicken-and-egg de la tarjeta ámbar. El invariante de seguridad se
+    conserva porque el token HITL sigue siendo obligatorio — el consent PERSISTENT
+    no puede auto-ejecutar la operación peligrosa."""
+
+    async def test_persistent_consent_on_delete_file_not_auto_executed(
         self, tmp_path
     ) -> None:
         from hermes.capabilities.application.capability_broker import CapabilityBroker
@@ -212,16 +222,20 @@ class TestBrokerPersistentForbidden:
 
         outcome = await broker.dispatch(proposal, ctx)
 
-        assert outcome.status == ExecutionStatus.REJECTED_BY_POLICY, (
+        assert outcome.status == ExecutionStatus.PENDING_APPROVAL, (
             "consent PERSISTENT sobre delete_file (persistent_forbidden=True) "
-            "debe ser rechazado con REJECTED_BY_POLICY (CTRL-3)."
+            "NO auto-concede: el broker cae al gate HITL y devuelve "
+            "PENDING_APPROVAL (tarjeta ámbar), exigiendo aprobación fresca (CTRL-3)."
         )
-        assert "PERSISTENT" in (outcome.error or "")
+        # Invariante de seguridad: el consent PERSISTENT NUNCA auto-ejecuta la
+        # operación peligrosa sin token HITL fresco.
+        assert outcome.status is not ExecutionStatus.EXECUTED
 
-    async def test_persistent_consent_on_run_command_rejected(
+    async def test_persistent_consent_on_run_command_not_auto_executed(
         self, tmp_path
     ) -> None:
-        """run_command con consent PERSISTENT ⇒ REJECTED_BY_POLICY (CTRL-3)."""
+        """run_command con consent PERSISTENT NO auto-concede ⇒ PENDING_APPROVAL,
+        exige token HITL fresco; jamás EXECUTED (CTRL-3)."""
         from hermes.capabilities.application.capability_broker import CapabilityBroker
         from hermes.capabilities.application.capability_registry import CapabilityRegistry
         from hermes.capabilities.application.hitl_approval_minter import HitlApprovalMinter
@@ -285,4 +299,9 @@ class TestBrokerPersistentForbidden:
         ctx = ConsentContext(tenant_id=uuid4(), operator_id=operator_id)
 
         outcome = await broker.dispatch(proposal, ctx)
-        assert outcome.status == ExecutionStatus.REJECTED_BY_POLICY
+        assert outcome.status == ExecutionStatus.PENDING_APPROVAL, (
+            "consent PERSISTENT sobre run_command (persistent_forbidden=True) "
+            "NO auto-concede: cae al gate HITL → PENDING_APPROVAL (CTRL-3)."
+        )
+        # Invariante de seguridad: nunca auto-ejecuta sin token HITL fresco.
+        assert outcome.status is not ExecutionStatus.EXECUTED

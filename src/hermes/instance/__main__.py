@@ -88,6 +88,9 @@ def cmd_unpair() -> None:
         print("[ok] Not associated — nothing to unpair.")
         return
     store.clear()
+    from hermes.instance.pairing_service import remove_enterprise_marker  # noqa: PLC0415
+
+    remove_enterprise_marker()  # config-sync goes inert again (no more policy pulls)
     print("[ok] Instance unpaired.  Edition reverted to community.")
 
 

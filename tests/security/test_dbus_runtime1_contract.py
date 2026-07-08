@@ -70,7 +70,7 @@ class TestMethodSignatures:
         assert "Enqueue" in methods, "Método Enqueue debe estar declarado"
 
     def test_enqueue_in_signature(self, iface: Runtime1ServiceInterface) -> None:
-        """Enqueue: trigger_kind(s) text(s) priority(i) dedup_key(s) conversation_id(s) operator_token(s) → 6 args in.
+        """Enqueue: trigger_kind(s) text(s) priority(i) dedup_key(s) conversation_id(s) operator_token(s) agent_id(s) → 7 args in.
 
         The 5th argument (conversation_id, type 's') was added when the daemon
         threading of conversation_id was completed.  An empty string means no
@@ -83,11 +83,19 @@ class TestMethodSignatures:
         authorized operator (sender_uid ∈ authorized_uids); a signed token,
         MANDATORY, for PROXY calls from the shell-server — the real operator_id
         is extracted from it, never the proxy's uid.
+
+        The 7th argument (agent_id, type 's') was added by the per-conversation
+        agent contract (cycle B / phase 1, commit 2d103ac) which killed the
+        global active-agent singleton: it names the agent hired for this
+        conversation ("" = unspecified). It carries NO authority — like every
+        other arg it is subject-to server-side authZ (sender_uid resolved by
+        _resolve_current_sender_uid); enqueued_by is still injected server-side
+        and is NOT a parameter (see test_enqueue_has_no_enqueued_by_parameter).
         """
         methods = self._method_map(iface)
         m = methods["Enqueue"]
-        assert m.in_signature == "ssisss", (
-            f"Enqueue in_signature debe ser 'ssisss', got '{m.in_signature}'"
+        assert m.in_signature == "ssissss", (
+            f"Enqueue in_signature debe ser 'ssissss', got '{m.in_signature}'"
         )
 
     def test_enqueue_out_signature(self, iface: Runtime1ServiceInterface) -> None:

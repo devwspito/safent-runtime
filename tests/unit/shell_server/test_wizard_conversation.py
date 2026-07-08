@@ -14,12 +14,23 @@ from uuid import UUID
 
 import pytest
 
-# Ensure spec contracts importable.
+# spec-003 first-boot wizard (the `contracts` port package AND the
+# `hermes.shell_server.wizard` package it drives) is not vendored in this
+# checkout/CI and is absent from the baked image. Skip the whole module when
+# unavailable instead of failing collection. Mirrors the guard in
+# tests/unit/agents_os/test_first_boot_wizard.py.
 _SPEC = Path(__file__).parents[3] / "specs" / "003-agents-os-edition"
 if str(_SPEC) not in sys.path:
     sys.path.insert(0, str(_SPEC))
 
-from contracts.first_boot_wizard_port import WizardState  # noqa: E402
+try:
+    from contracts.first_boot_wizard_port import WizardState  # noqa: E402
+    import hermes.shell_server.wizard.conversation  # noqa: E402,F401
+except (ImportError, RuntimeError):  # spec-003 wizard not present in this checkout/CI/image
+    pytest.skip(
+        "spec 003 first-boot wizard not present in this checkout/CI",
+        allow_module_level=True,
+    )
 
 pytestmark = pytest.mark.unit
 

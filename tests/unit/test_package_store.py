@@ -174,19 +174,21 @@ class TestPackageStoreServiceInstallUninstall:
         result = svc.start_uninstall(source="rpm", package_id="gimp")
         assert result["op_id"] == "op2"
 
-    def test_invalid_source_returns_error_key(self) -> None:
+    def test_invalid_source_raises(self) -> None:
+        """The app service validates and RAISES; the D-Bus adapter translates the
+        ValueError into a {"error": ...} dict (see TestWiringPackageStoreAuthZ)."""
         from hermes.package_store.application.package_store_service import PackageStoreService
 
         svc = PackageStoreService(catalog=_fake_catalog(), manager=_fake_manager())
-        result = svc.start_install(source="npm", package_id="react")
-        assert "error" in result
+        with pytest.raises(ValueError):
+            svc.start_install(source="npm", package_id="react")
 
-    def test_blank_package_id_returns_error_key(self) -> None:
+    def test_blank_package_id_raises(self) -> None:
         from hermes.package_store.application.package_store_service import PackageStoreService
 
         svc = PackageStoreService(catalog=_fake_catalog(), manager=_fake_manager())
-        result = svc.start_install(source="flatpak", package_id="   ")
-        assert "error" in result
+        with pytest.raises(ValueError, match="blank"):
+            svc.start_install(source="flatpak", package_id="   ")
 
 
 class TestPackageStoreServiceGetOpStatus:
@@ -258,11 +260,33 @@ class TestWiringPackageStoreAuthZ:
     def test_install_authorized_uid_returns_op_id(self) -> None:
         wiring = _wiring()
         svc = wiring._package_store_service()
-        with patch.object(svc, "start_install", return_value={"op_id": "op99"}):
+        # install_package runs a pre-install Security Center scan before delegating.
+        # Mock it (fail-open None → proceed) to isolate the wiring's authZ+delegation
+        # from the security-center infrastructure (which writes to /var/lib/hermes).
+        with patch.object(wiring, "_scan_install_target", return_value=None), \
+                patch.object(svc, "start_install", return_value={"op_id": "op99"}):
             result = wiring.install_package(
                 source="flatpak", package_id="org.inkscape.Inkscape", sender_uid=_OPERATOR_UID
             )
         assert result["op_id"] == "op99"
+
+    def test_install_invalid_source_returns_error_key(self) -> None:
+        """The D-Bus boundary must translate the service's ValueError into an
+        {"error": ...} dict rather than propagate an exception to the caller."""
+        wiring = _wiring()
+        with patch.object(wiring, "_scan_install_target", return_value=None):
+            result = wiring.install_package(
+                source="npm", package_id="react", sender_uid=_OPERATOR_UID
+            )
+        assert "error" in result
+
+    def test_install_blank_package_id_returns_error_key(self) -> None:
+        wiring = _wiring()
+        with patch.object(wiring, "_scan_install_target", return_value=None):
+            result = wiring.install_package(
+                source="flatpak", package_id="   ", sender_uid=_OPERATOR_UID
+            )
+        assert "error" in result
 
     def test_uninstall_authorized_uid_returns_op_id(self) -> None:
         wiring = _wiring()

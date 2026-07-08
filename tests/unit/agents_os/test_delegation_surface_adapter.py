@@ -9,6 +9,9 @@ Covers:
   - Unassociated instance / missing secret / transport error -> failed
     (never raises).
   - An autonomous (non-chat) task never binds a correlation (non-fatal).
+  - Fase 3 UX pre-check: when a directory is stored, a target outside it
+    fails FAST with a clear local message (no HTTP call); a target inside it
+    proceeds; no directory at all -> the check is skipped (zero regression).
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from hermes.agents_os.domain.ports.surface_adapter_port import (
 from hermes.agents_os.domain.surface_kind import SurfaceKind
 from hermes.agents_os.infrastructure.delegation_surface_adapter import (
     DelegationSurfaceAdapter,
+    _validate_params,
 )
 
 pytestmark = pytest.mark.unit
@@ -36,8 +40,15 @@ def _fake_store(*, associated: bool = True, secret: str | None = "shh-secret") -
     store.is_associated.return_value = associated
     assoc = MagicMock()
     assoc.cloud_endpoint = "https://cloud.example.com"
+    assoc.directory = None
     store.get.return_value = assoc if associated else None
     store.reveal_instance_secret.return_value = secret
+    return store
+
+
+def _fake_store_with_directory(entries: list[dict]) -> MagicMock:
+    store = _fake_store()
+    store.get.return_value.directory = {"entries": entries}
     return store
 
 
@@ -243,3 +254,103 @@ class TestReplay:
         result = adapter.serialize_for_signing(action)
         assert b"correlation_id" not in result  # never signs a per-call nonce
         assert b"bob@org.example" in result
+
+
+# ---------------------------------------------------------------------------
+# Fase 3 — directory UX pre-check (_validate_params)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateParamsDirectoryPreCheck:
+    def test_no_directory_skips_the_check(self) -> None:
+        """visible_employee_ids=None (no directory pushed) -> opt-in, no regression."""
+        employee_id, task, error = _validate_params(
+            {"employee_id": "outsider@org.example", "task": "x"}, None
+        )
+        assert error == ""
+        assert employee_id == "outsider@org.example"
+        assert task == "x"
+
+    def test_target_in_directory_passes(self) -> None:
+        employee_id, task, error = _validate_params(
+            {"employee_id": "bob@org.example", "task": "x"},
+            {"bob@org.example", "alice@org.example"},
+        )
+        assert error == ""
+        assert employee_id == "bob@org.example"
+
+    def test_target_not_in_directory_fails_with_clear_message(self) -> None:
+        employee_id, task, error = _validate_params(
+            {"employee_id": "outsider@org.example", "task": "x"},
+            {"bob@org.example"},
+        )
+        assert employee_id == ""
+        assert task == ""
+        assert error == "Ese compañero no está en tu directorio de departamento."
+
+    def test_empty_directory_rejects_every_target(self) -> None:
+        """visibility_scope='none' -> {"entries": []} -> visible set is empty."""
+        _, _, error = _validate_params(
+            {"employee_id": "anyone@org.example", "task": "x"}, set()
+        )
+        assert error == "Ese compañero no está en tu directorio de departamento."
+
+    def test_empty_params_error_takes_precedence_over_directory_check(self) -> None:
+        """Missing employee_id/task is checked first, regardless of the directory."""
+        _, _, error = _validate_params({"task": "x"}, {"bob@org.example"})
+        assert error == "delegate_to_colleague requiere 'employee_id' y 'task' no vacíos"
+
+
+class TestReplayDirectoryPreCheck:
+    @pytest.mark.asyncio
+    async def test_target_outside_directory_fails_without_http_call(self, tmp_path) -> None:
+        db_path = tmp_path / "state.db"
+        store = _fake_store_with_directory(
+            [{"employee_id": "alice@org.example", "agent_id": "a1", "name": "Alice", "department": "d"}]
+        )
+        adapter = DelegationSurfaceAdapter(association_store=store, db_path=db_path)
+        action = CapturedAction(
+            surface_kind=SurfaceKind.PEER_DELEGATION,
+            payload={"employee_id": "outsider@org.example", "task": "review this"},
+        )
+
+        with patch("httpx.post") as mock_post:
+            outcome = await adapter.replay(action)
+
+        assert outcome.status == ReplayStatus.EXECUTED_FAILED
+        assert outcome.error == "Ese compañero no está en tu directorio de departamento."
+        mock_post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_target_inside_directory_proceeds_to_outbox(self, tmp_path) -> None:
+        db_path = tmp_path / "state.db"
+        store = _fake_store_with_directory(
+            [{"employee_id": "alice@org.example", "agent_id": "a1", "name": "Alice", "department": "d"}]
+        )
+        adapter = DelegationSurfaceAdapter(association_store=store, db_path=db_path)
+        action = CapturedAction(
+            surface_kind=SurfaceKind.PEER_DELEGATION,
+            payload={"employee_id": "alice@org.example", "task": "review this"},
+        )
+
+        with patch("httpx.post", return_value=MagicMock(status_code=200)) as mock_post:
+            outcome = await adapter.replay(action)
+
+        assert outcome.status == ReplayStatus.EXECUTED_OK
+        mock_post.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_directory_at_all_proceeds_to_outbox(self, tmp_path) -> None:
+        """visibility_scope='all' (default, no directory stored) -> zero regression."""
+        db_path = tmp_path / "state.db"
+        adapter = DelegationSurfaceAdapter(association_store=_fake_store(), db_path=db_path)
+        action = CapturedAction(
+            surface_kind=SurfaceKind.PEER_DELEGATION,
+            payload={"employee_id": "anyone@org.example", "task": "review this"},
+        )
+
+        with patch("httpx.post", return_value=MagicMock(status_code=200)) as mock_post:
+            outcome = await adapter.replay(action)
+
+        assert outcome.status == ReplayStatus.EXECUTED_OK
+        mock_post.assert_called_once()

@@ -116,7 +116,9 @@ async def test_pointer_button_right_release() -> None:
     params = session.send.await_args_list[0][0][1]
     assert params["type"] == "mouseReleased"
     assert params["button"] == "right"
-    assert params["clickCount"] == 0
+    # Release keeps clickCount == 1 (matching the press) so Chrome synthesises
+    # the DOM 'click'; a clickCount of 0 on release silently drops the click.
+    assert params["clickCount"] == 1
 
 
 @pytest.mark.asyncio

@@ -65,11 +65,21 @@ def _make_gate(db_path) -> SqliteApprovalGate:
 
 async def _register_enterprise_row(
     gate: SqliteApprovalGate, *, action_digest: str, agent_id: str = "agent-a",
+    work_item_id: UUID | None = None,
 ) -> str:
+    """Registers a route='enterprise' pending row.
+
+    `work_item_id` defaults to UUID(int=0) — the SAME sentinel `security_hook.
+    _resolve_native_danger_approval` always uses for a NATIVE-danger row (it
+    has no real WorkQueue task). This is what makes `_verify_and_apply_
+    decision` treat it as a native row (flip status + signal the Event) —
+    matching what the vast majority of tests in this module actually exercise.
+    Pass a REAL UUID explicitly to simulate a BROKER row instead (Part B —
+    see TestVerifyAndApplyDecisionBrokerRow)."""
     proposal_id = uuid4()
     await gate.register_pending(
         proposal_id=proposal_id,
-        work_item_id=uuid4(),
+        work_item_id=work_item_id if work_item_id is not None else UUID(int=0),
         consent_context=ConsentContext(tenant_id=_TENANT_ID, operator_id=_OPERATOR_ID),
         risk=RiskLevel.HIGH,
         justification="remote approvals test",
@@ -372,7 +382,7 @@ class TestVerifyAndApplyDecision:
                     item={**envelope, "signature_hex": signature_hex},
                     pubkey_hex=pubkey_hex,
                     own_instance_id=_OWN_INSTANCE_ID,
-                    conn=conn,
+                    conn=conn, db_path=db_path,
                 )
 
         assert outcome == "applied"
@@ -403,7 +413,7 @@ class TestVerifyAndApplyDecision:
                     item={**envelope, "signature_hex": signature_hex},
                     pubkey_hex=pubkey_hex,
                     own_instance_id=_OWN_INSTANCE_ID,
-                    conn=conn,
+                    conn=conn, db_path=db_path,
                 )
 
         assert outcome == "applied"
@@ -432,7 +442,7 @@ class TestVerifyAndApplyDecision:
                     item={**tampered, "signature_hex": signature_hex},
                     pubkey_hex=pubkey_hex,
                     own_instance_id=_OWN_INSTANCE_ID,
-                    conn=conn,
+                    conn=conn, db_path=db_path,
                 )
 
         assert outcome == "bad_signature"
@@ -463,7 +473,7 @@ class TestVerifyAndApplyDecision:
                     item={**envelope, "signature_hex": signature_hex},
                     pubkey_hex=pubkey_hex,
                     own_instance_id=_OWN_INSTANCE_ID,
-                    conn=conn,
+                    conn=conn, db_path=db_path,
                 )
 
         assert outcome == "digest_mismatch"
@@ -492,7 +502,7 @@ class TestVerifyAndApplyDecision:
                     item={**envelope, "signature_hex": signature_hex},
                     pubkey_hex=pubkey_hex,
                     own_instance_id=_OWN_INSTANCE_ID,  # differs from envelope's instance_id
-                    conn=conn,
+                    conn=conn, db_path=db_path,
                 )
 
         assert outcome == "wrong_instance"
@@ -523,7 +533,7 @@ class TestVerifyAndApplyDecision:
                 ra._ensure_remote_approval_schema(conn)
                 outcome = ra._verify_and_apply_decision(
                     item={**envelope, "signature_hex": signature_hex},
-                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
 
         assert outcome == "unknown_request"
@@ -559,7 +569,7 @@ class TestVerifyAndApplyDecision:
                 )
                 outcome = ra._verify_and_apply_decision(
                     item={**envelope, "signature_hex": signature_hex},
-                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
 
         assert outcome == "request_proposal_mismatch"
@@ -589,7 +599,7 @@ class TestVerifyAndApplyDecision:
                 _seed_push_mapping(conn, proposal_id=proposal_id, request_id=request_id)
                 first = ra._verify_and_apply_decision(
                     item=item, pubkey_hex=pubkey_hex,
-                    own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
                 # Re-register a SECOND pending row with the SAME action_digest
                 # would collide on the partial UNIQUE index; instead directly
@@ -599,7 +609,7 @@ class TestVerifyAndApplyDecision:
                 # against a fresh 'pending' row sharing the SAME nonce.
                 second = ra._verify_and_apply_decision(
                     item=item, pubkey_hex=pubkey_hex,
-                    own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
 
         assert first == "applied"
@@ -641,11 +651,11 @@ class TestVerifyAndApplyDecision:
                 _seed_push_mapping(conn, proposal_id=proposal_id_2, request_id=request_id_2)
                 first = ra._verify_and_apply_decision(
                     item={**envelope_1, "signature_hex": sig_1}, pubkey_hex=pubkey_hex,
-                    own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
                 second = ra._verify_and_apply_decision(
                     item={**envelope_2, "signature_hex": sig_2}, pubkey_hex=pubkey_hex,
-                    own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
 
         assert first == "applied"
@@ -677,7 +687,7 @@ class TestVerifyAndApplyDecision:
                 _seed_push_mapping(conn, proposal_id=proposal_id, request_id=request_id)
                 outcome = ra._verify_and_apply_decision(
                     item={**envelope, "signature_hex": signature_hex},
-                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
 
         assert outcome == "unknown_proposal"
@@ -707,7 +717,7 @@ class TestVerifyAndApplyDecision:
                 _seed_push_mapping(conn, proposal_id=proposal_id, request_id=request_id)
                 outcome = ra._verify_and_apply_decision(
                     item={**envelope, "signature_hex": signature_hex},
-                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
 
         assert outcome == "already_resolved"
@@ -734,7 +744,7 @@ class TestVerifyAndApplyDecision:
                 ra._ensure_remote_approval_schema(conn)
                 outcome = ra._verify_and_apply_decision(
                     item={**broken, "signature_hex": signature_hex},
-                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
 
         assert outcome == "invalid_envelope"
@@ -760,7 +770,7 @@ class TestVerifyAndApplyDecision:
                 ra._ensure_remote_approval_schema(conn)
                 outcome = ra._verify_and_apply_decision(
                     item={**envelope, "signature_hex": signature_hex},
-                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
 
         assert outcome == "invalid_envelope"
@@ -845,7 +855,7 @@ class TestAckLoop:
             with patch("hermes.runtime.security_hook.signal_native_danger_approval"):
                 first_outcome = ra._verify_and_apply_decision(
                     item=item, pubkey_hex=pubkey_hex,
-                    own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
         assert first_outcome == "applied"
 
@@ -1060,16 +1070,20 @@ class TestPerOccurrenceFreshApproval:
                 ra._ensure_remote_approval_schema(conn)
                 outcome_1 = ra._verify_and_apply_decision(
                     item={**envelope_1, "signature_hex": sig_1}, pubkey_hex=pubkey_hex,
-                    own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
         assert outcome_1 == "applied"
         mock_1.assert_called_once_with(proposal_id_str, "denied")
         assert _row(db_path, proposal_id_str)["status"] == "rejected"
 
         # --- Occurrence #2: the SAME action recurs — revives the row. ---
+        # work_item_id=UUID(int=0): the native-danger sentinel (matches
+        # occurrence #1 and the rest of this module's native-path tests) —
+        # this test is about per-occurrence fresh approval, not the broker/
+        # native distinction (see TestVerifyAndApplyDecisionBrokerRow for that).
         await gate.register_pending(
             proposal_id=proposal_id,
-            work_item_id=uuid4(),
+            work_item_id=UUID(int=0),
             consent_context=ConsentContext(tenant_id=_TENANT_ID, operator_id=_OPERATOR_ID),
             risk=RiskLevel.HIGH,
             justification="second occurrence",
@@ -1106,7 +1120,7 @@ class TestPerOccurrenceFreshApproval:
                 ra._ensure_remote_approval_schema(conn)
                 outcome_2 = ra._verify_and_apply_decision(
                     item={**envelope_2, "signature_hex": sig_2}, pubkey_hex=pubkey_hex,
-                    own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
         assert outcome_2 == "applied"
         mock_2.assert_called_once_with(proposal_id_str, "approved")
@@ -1181,7 +1195,7 @@ class TestPerOccurrenceFreshApproval:
                 ra._ensure_remote_approval_schema(conn)
                 outcome = ra._verify_and_apply_decision(
                     item={**stale_envelope, "signature_hex": stale_sig},
-                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn,
+                    pubkey_hex=pubkey_hex, own_instance_id=_OWN_INSTANCE_ID, conn=conn, db_path=db_path,
                 )
 
         assert outcome == "stale_request"

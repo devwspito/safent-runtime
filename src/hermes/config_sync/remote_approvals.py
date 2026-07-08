@@ -125,8 +125,15 @@ _VALID_DECISIONS: frozenset[str] = frozenset({"approve", "deny"})
 # instance's perspective and must be ACKed (bug #1) so the cloud's
 # unacked_only GET stops re-serving it:
 #   - applied:        the happy path — decision verified and applied.
-#   - already_resolved: a re-served duplicate for a row we (or a local DENY)
-#     already resolved — acking it is exactly what stops the infinite re-serve.
+#   - already_resolved: a re-served duplicate for a row we (or a local DENY,
+#     or — Fase 2 Phase 4e/Part B — a prior tick's own successful broker
+#     mint) already resolved — acking it is exactly what stops the infinite
+#     re-serve. This is ALSO the "already applied" outcome: no new
+#     "already_applied" code was introduced (see `_verify_and_apply_
+#     decision`'s row["status"] != "pending" guard, checked BEFORE any
+#     mint/nonce work) — reusing this existing, already-ACKed code keeps the
+#     outcome space minimal and is semantically identical (someone already
+#     resolved this row; nothing left to (re)apply).
 #   - replayed_nonce:  same duplicate, caught by the nonce store instead.
 #   - stale_request:   the request_id belongs to an occurrence that has since
 #     been SUPERSEDED by a fresher push (bug #2) — it can never be validly
@@ -417,8 +424,8 @@ def _nonce_seen_or_mark(conn: sqlite3.Connection, nonce: str) -> bool:
 
 def _fetch_pending_row(conn: sqlite3.Connection, proposal_id: str) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT proposal_id, status, action_digest FROM pending_approvals "
-        "WHERE proposal_id = ?",
+        "SELECT proposal_id, status, action_digest, work_item_id, route "
+        "FROM pending_approvals WHERE proposal_id = ?",
         (proposal_id,),
     ).fetchone()
 
@@ -467,16 +474,282 @@ def _resolve_pending_row(conn: sqlite3.Connection, proposal_id: str, new_status:
     return cursor.rowcount == 1
 
 
+# Native-danger rows always register work_item_id=UUID(int=0) (security_hook.
+# _resolve_native_danger_approval); a broker row (CapabilityBroker.dispatch())
+# carries the REAL WorkQueue work_item_id. This string distinguishes the two
+# WITHOUT importing uuid at module scope for a single comparison.
+_NATIVE_DANGER_WORK_ITEM_SENTINEL = "00000000-0000-0000-0000-000000000000"
+
+
+def _is_broker_row(row: sqlite3.Row) -> bool:
+    """True iff *row* originated from CapabilityBroker.dispatch() (a REAL
+    WorkQueue work_item_id) rather than the native-danger gate. Distinguishes
+    WHICH execution path resumes the approved action: a broker row resumes
+    via the work-item drain + `approved_token_for()`; a native row resumes via
+    the SAME `threading.Event` the hook already registered (Part A/B, Fase 2
+    Phase 4e)."""
+    work_item_id = row["work_item_id"] if "work_item_id" in row.keys() else ""
+    return bool(work_item_id) and work_item_id != _NATIVE_DANGER_WORK_ITEM_SENTINEL
+
+
+def _build_enterprise_mint_gate(db_path: Path) -> Any:
+    """Construct a THROWAWAY SqliteApprovalGate scoped to THIS single mint
+    call (mirrors this module's own "conexión por llamada" pattern — no
+    persistent state across ticks).
+
+    Uses the SAME signing key the main runtime daemon's own gate uses
+    (`hermes.runtime.audit_signing_key.load_signing_key_with_fallback` —
+    master.key is a shared per-install FILE, not process-local state), so a
+    token minted HERE verifies correctly when the main daemon's OWN gate
+    later calls `verify_token()` during the actual tool dispatch.
+
+    `audit_repo=None` (deliberate): a hash-chain append from a SEPARATE
+    process concurrent with the main daemon's own audit writer risks a
+    chain-order race across two independent writers. The durable, queryable
+    record of THIS decision is the `pending_approvals` row itself
+    (approved_by/token_hmac/resolved_at, persisted by this same call) plus
+    the PROPOSAL_EXECUTED audit entry the main daemon's broker signs when the
+    token is later consumed — full accountability without a second
+    concurrent chain writer.
+    """
+    from hermes.agents_os.application.audit_hash_chain import AuditHashChainSigner  # noqa: PLC0415
+    from hermes.capabilities.application.hitl_approval_minter import HitlApprovalMinter  # noqa: PLC0415
+    from hermes.capabilities.infrastructure.sqlite_approval_gate import SqliteApprovalGate  # noqa: PLC0415
+    from hermes.runtime.audit_signing_key import load_signing_key_with_fallback  # noqa: PLC0415
+
+    signing_key = load_signing_key_with_fallback()
+    return SqliteApprovalGate(
+        db_path=db_path,
+        minter=HitlApprovalMinter(signing_key=signing_key),
+        signer=AuditHashChainSigner(signing_key=signing_key),
+        audit_repo=None,
+        mfa_verifier=None,
+    )
+
+
+def _run_sync(coro: Any) -> Any:
+    """Run *coro* to completion synchronously, regardless of whether the
+    CALLING thread already has a running asyncio event loop.
+
+    `config_sync/__main__.py`'s `_run_loop` IS an `async def` and calls
+    `run_remote_approvals_once` (this module's sync entry point) directly on
+    its own thread — asyncio forbids nesting a second loop on a thread that
+    already has one running (`asyncio.run()` raises `RuntimeError: cannot be
+    called from a running event loop`; even a brand-new loop's own
+    `run_until_complete` raises `RuntimeError: Cannot run the event loop
+    while another loop is running` on that SAME thread) — production's
+    `_run_loop` IS exactly such a thread.
+
+    Hops to a SEPARATE, dedicated thread with its own fresh event loop
+    instead — the only way to run a coroutine to completion synchronously
+    without depending on whatever asyncio state the calling thread has. Safe
+    because the gate/queue coroutines this module drives do no REAL async
+    I/O (`audit_repo=None` — see `_build_enterprise_mint_gate`'s docstring);
+    they are `async def` only to satisfy their Port contracts, so a
+    throwaway thread is pure overhead, not a correctness concern, and this
+    call is on the poll tick's cold path (once per approved decision), never
+    a hot loop.
+    """
+    import asyncio  # noqa: PLC0415
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+    def _runner() -> Any:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_runner).result()
+
+
+_WORK_ITEM_STUCK_STATUS = "pending_approval"
+
+
+def _fetch_work_item_status(db_path: Path, work_item_id: str) -> str | None:
+    """Raw read of `agent_tasks.status` — used ONLY to CONFIRM a re-enqueue
+    attempt actually took effect (Fase 2 Phase 4e, MEDIUM fix: never trust
+    the absence of an exception alone — `re_enqueue_after_approval` can
+    raise `ValueError` for BOTH "already re-enqueued" (harmless, idempotent)
+    and "item genuinely missing" (a real problem); only re-reading the row
+    distinguishes them)."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status FROM agent_tasks WHERE task_id = ?", (work_item_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["status"] if row is not None else None
+
+
+def _reenqueue_and_confirm_broker_row(
+    *, conn: sqlite3.Connection, proposal_id: str, nonce: str, work_item_id: str,
+    db_path: Path,
+) -> str:
+    """Re-enqueue a MINTED broker row's WorkItem and CONFIRM it actually took
+    effect before declaring the cloud decision 'applied' (Fase 2 Phase 4e —
+    MEDIUM fix, adversarial review). The mint (`approve_enterprise_decision`)
+    and this re-enqueue are TWO SEPARATE, non-atomic autocommit transactions
+    — a transient failure here (WAL write contention past busy_timeout) or a
+    process kill between the two must NEVER be reported as success: doing so
+    would mark the nonce + get ACKed, permanently stranding an already-minted
+    approval whose WorkItem never moves past 'pending_approval' (nothing else
+    ever re-enqueues it — `claim_next` only selects 'pending',
+    `reconcile_stale` only recovers 'in_progress').
+
+    This is the SINGLE place that declares a broker-enterprise decision truly
+    'applied' — called both right after a fresh mint AND as the SELF-HEAL
+    path for a row whose mint succeeded on a PRIOR tick but whose re-enqueue
+    never got confirmed (crash, or a previously-swallowed transient failure).
+    Idempotent either way: `re_enqueue_after_approval`'s own `WHERE status=
+    'pending_approval'` guard makes a repeat call on an already-moved item a
+    safe no-op (raises `ValueError`, caught below).
+
+    Verification, NOT assumption: after the attempt, re-reads the WorkItem's
+    REAL status (`_fetch_work_item_status`) — 'applied' is returned ONLY when
+    that status is confirmed to be something OTHER than 'pending_approval'
+    (moved to 'pending' just now, or already 'pending'/'in_progress'/
+    'completed'/etc. from an earlier successful attempt). Any other outcome
+    (still stuck, or the item vanished) returns 'reenqueue_pending' — NOT in
+    `_ACK_OUTCOMES` — so the cloud re-serves the SAME (already cryptographically
+    verified) decision next tick and this exact self-heal path retries.
+    """
+    from uuid import UUID as _UUID  # noqa: PLC0415
+
+    from hermes.tasks.infrastructure.sqlite_work_queue import SqliteWorkQueue  # noqa: PLC0415
+
+    queue = SqliteWorkQueue(db_path=db_path)
+    try:
+        _run_sync(queue.re_enqueue_after_approval(_UUID(work_item_id)))
+    except ValueError:
+        # Idempotent per re_enqueue_after_approval's own contract: the item
+        # doesn't exist OR isn't 'pending_approval' anymore — could mean it
+        # was ALREADY moved on a prior attempt (self-heal, harmless) or is
+        # genuinely missing (a real problem) — the status re-read below is
+        # what actually decides, never this exception alone.
+        pass
+    except Exception as exc:  # noqa: BLE001 — genuine transient failure (e.g. OperationalError)
+        logger.warning(
+            "hermes.config_sync.remote_approvals.enterprise_reenqueue_failed "
+            "proposal=%s work_item_id=%s error=%r — retryable, NOT acked",
+            proposal_id, work_item_id, exc,
+        )
+        return "reenqueue_pending"
+
+    status = _fetch_work_item_status(db_path, work_item_id)
+    if status is None:
+        logger.warning(
+            "hermes.config_sync.remote_approvals.enterprise_reenqueue_work_item_missing "
+            "proposal=%s work_item_id=%s — retryable, NOT acked",
+            proposal_id, work_item_id,
+        )
+        return "reenqueue_pending"
+    if status == _WORK_ITEM_STUCK_STATUS:
+        logger.warning(
+            "hermes.config_sync.remote_approvals.enterprise_reenqueue_still_stuck "
+            "proposal=%s work_item_id=%s — retryable, NOT acked",
+            proposal_id, work_item_id,
+        )
+        return "reenqueue_pending"
+
+    logger.info(
+        "hermes.config_sync.remote_approvals.enterprise_reenqueue_confirmed "
+        "proposal=%s work_item_id=%s status=%s",
+        proposal_id, work_item_id, status,
+    )
+    # CONFIRMED — mark the nonce now (best-effort bookkeeping/observability;
+    # correctness never depends on it, since both the row's own status guard
+    # AND this function's own idempotent re-enqueue guard already make a
+    # re-served decision safe to re-process). A mark failure here must never
+    # turn a CONFIRMED success into a reported failure.
+    _nonce_seen_or_mark(conn, nonce)
+    return "applied"
+
+
+def _mint_and_reenqueue_broker_row(
+    *, conn: sqlite3.Connection, proposal_id: str, nonce: str, row: sqlite3.Row,
+    db_path: Path,
+) -> str:
+    """Apply a VERIFIED cloud 'approve' decision for a still-'pending' BROKER
+    row (Fase 2 Phase 4e — Part B): mint the token_hmac via
+    `approve_enterprise_decision` (the cloud-decision counterpart of
+    `approve()`, which itself deliberately blocks this route — I-1/I-3),
+    then hand off to `_reenqueue_and_confirm_broker_row` for the re-enqueue +
+    verified-confirm + nonce-mark step — mirrors exactly what
+    `dbus_runtime_service.approve_action` does for a LOCAL broker approval
+    (`gate.approve()` -> `queue.re_enqueue_after_approval()`).
+
+    Fail-closed: a minting error (signing key unavailable, DB error, or the
+    row raced to another state) returns 'mint_failed'/'already_resolved' —
+    NEITHER is ACKed (see _ACK_OUTCOMES's docstring), so a genuine infra
+    failure is retried next tick; the row itself is untouched (still
+    'pending') since `approve_enterprise_decision`'s atomic UPDATE never
+    committed.
+    """
+    from uuid import UUID as _UUID  # noqa: PLC0415
+
+    from hermes.capabilities.infrastructure.sqlite_approval_gate import (  # noqa: PLC0415
+        ApprovalGateError,
+    )
+
+    try:
+        gate = _build_enterprise_mint_gate(db_path)
+        _run_sync(gate.approve_enterprise_decision(proposal_id=_UUID(proposal_id)))
+    except ApprovalGateError as exc:
+        if exc.reason == "not_enterprise_route":
+            # Defense-in-depth guard fired unexpectedly (this caller only
+            # reaches here for what it believes is a broker row awaiting
+            # cloud approval) — fail loudly, fail closed, never mint.
+            logger.error(
+                "hermes.config_sync.remote_approvals.enterprise_mint_wrong_route "
+                "proposal=%s — row is not route='enterprise'; refusing to mint "
+                "(fail-closed).",
+                proposal_id,
+            )
+            return "mint_failed"
+        logger.info(
+            "hermes.config_sync.remote_approvals.enterprise_mint_already_resolved "
+            "proposal=%s reason=%s — resolved concurrently (e.g. a local deny "
+            "raced in first).",
+            proposal_id, exc.reason,
+        )
+        return "already_resolved"
+    except Exception as exc:  # noqa: BLE001 — fail-closed: no mint => no execution
+        logger.error(
+            "hermes.config_sync.remote_approvals.enterprise_mint_failed "
+            "proposal=%s error=%r",
+            proposal_id, exc,
+        )
+        return "mint_failed"
+
+    # Mint DURABLY committed (status='approved', token_hmac persisted) —
+    # from here on, ANY failure to re-enqueue must self-heal on a later tick
+    # (see _reenqueue_and_confirm_broker_row), never be swallowed into
+    # 'applied'.
+    return _reenqueue_and_confirm_broker_row(
+        conn=conn, proposal_id=proposal_id, nonce=nonce,
+        work_item_id=row["work_item_id"], db_path=db_path,
+    )
+
+
 def _verify_and_apply_decision(
     *, item: Any, pubkey_hex: str, own_instance_id: str, conn: sqlite3.Connection,
+    db_path: Path,
 ) -> str:
     """Verify ONE decision fail-closed; apply it iff every check passes.
 
     Returns an outcome code for observability (never raises):
     invalid_envelope | bad_signature | wrong_instance | unknown_request |
     request_proposal_mismatch | stale_request | unknown_proposal |
-    digest_mismatch | already_resolved | replayed_nonce | applied.
-    See `_ACK_OUTCOMES` for which of these are ACKed to the cloud.
+    digest_mismatch | already_resolved | replayed_nonce | mint_failed |
+    reenqueue_pending | applied.
+    See `_ACK_OUTCOMES` for which of these are ACKed to the cloud —
+    `reenqueue_pending` (Fase 2 Phase 4e — MEDIUM fix) is deliberately
+    NEVER acked: a minted-but-not-yet-confirmed-re-enqueued broker approval
+    must keep being re-served until the re-enqueue is CONFIRMED (see
+    `_reenqueue_and_confirm_broker_row`).
     """
     envelope = _extract_envelope(item)
     if envelope is None:
@@ -518,18 +791,104 @@ def _verify_and_apply_decision(
     if (row["action_digest"] or "") != envelope["action_digest"]:
         return "digest_mismatch"
     if row["status"] != "pending":
+        # Self-heal (Fase 2 Phase 4e — MEDIUM fix, adversarial review): a
+        # BROKER row whose mint ALREADY succeeded on a prior tick
+        # (status='approved') but whose WorkItem re-enqueue was never
+        # CONFIRMED (crash between the two non-atomic commits, or a
+        # previously-swallowed transient re-enqueue failure) would otherwise
+        # be reported "already_resolved" and ACKed here forever — stranding
+        # a minted-but-never-executed approval. Re-attempt the (idempotent)
+        # re-enqueue instead; only ACK once it is CONFIRMED past
+        # 'pending_approval'. Native rows never mint a token here, so they
+        # have nothing to self-heal — unchanged.
+        if (
+            envelope["decision"] == "approve"
+            and row["status"] == "approved"
+            and _is_broker_row(row)
+            and _fetch_work_item_status(db_path, row["work_item_id"]) == _WORK_ITEM_STUCK_STATUS
+        ):
+            # STILL stuck — genuinely needs the self-heal re-enqueue attempt.
+            # (If the work item is already PAST 'pending_approval', there is
+            # nothing to heal — fall through to the plain already_resolved
+            # ACK below, exactly like any other already-applied re-serve.)
+            return _reenqueue_and_confirm_broker_row(
+                conn=conn, proposal_id=proposal_id, nonce=envelope["nonce"],
+                work_item_id=row["work_item_id"], db_path=db_path,
+            )
+        # Catches an ALREADY-APPLIED decision re-served by the cloud (a prior
+        # tick's successful mint+reenqueue, or a prior tick's local deny
+        # racing ahead) BEFORE any nonce/mint work — ACKed (see
+        # _ACK_OUTCOMES), nothing to (re)apply, no double-mint, no
+        # double-execute. Whichever resolution reached the DB first wins
+        # (I-2/I-3 untouched).
         return "already_resolved"
+
+    # Fase 2 Phase 4e/Part B fix (adversarial review, confirmed finding):
+    # for an APPROVE decision on a BROKER row, attempt the mint+re-enqueue
+    # BEFORE marking the nonce — the ONLY branch in this function ordered
+    # this way. Rationale: `_mint_and_reenqueue_broker_row` is the ONLY
+    # fallible, cross-connection/cross-thread step here (a fresh
+    # SqliteApprovalGate + a fresh master.key derivation on a separate
+    # thread) and can fail TRANSIENTLY (WAL write contention past
+    # busy_timeout, a momentarily-unreadable master.key, the unit killed
+    # mid-flight). Marking the nonce BEFORE that fallible step — as the
+    # DENY/NATIVE branches below safely do, since THEIR resolution is a
+    # single autocommit statement with no failure window — would burn the
+    # nonce on a transient failure while the row stays 'pending' and never
+    # gets re-pushed (pushed_at == created_at, unchanged); the cloud's NEXT
+    # re-serve of the SAME (still cryptographically valid) decision would
+    # then hit 'replayed_nonce' — ACKed, telling the cloud to stop
+    # re-serving a decision that was NEVER actually applied. That
+    # permanently drops a verified enterprise approval (the exact dead-end
+    # Part B was meant to remove). Minting FIRST makes a transient failure
+    # fully retryable: on failure the nonce stays unmarked and 'mint_failed'
+    # is NOT ACKed, so the cloud re-serves the SAME decision next tick and
+    # this SAME code path retries from scratch — safe because
+    # `approve_enterprise_decision`'s UPDATE is status-guarded (`WHERE
+    # status='pending'`, idempotent: a retry can never double-mint) and
+    # `re_enqueue_after_approval`'s UPDATE is status-guarded (`WHERE
+    # status='pending_approval'`, idempotent: it can never double-enqueue).
+    if envelope["decision"] == "approve" and _is_broker_row(row):
+        mint_outcome = _mint_and_reenqueue_broker_row(
+            conn=conn, proposal_id=proposal_id, nonce=envelope["nonce"],
+            row=row, db_path=db_path,
+        )
+        if mint_outcome != "applied":
+            # 'mint_failed' (mint itself failed — retry next tick, nonce
+            # untouched, NOT acked), 'already_resolved' (TOCTOU inside the
+            # mint call — someone else resolved the row between our read
+            # above and the mint attempt; acked, nothing left to do), or
+            # 'reenqueue_pending' (mint succeeded but the re-enqueue was not
+            # yet CONFIRMED — retry next tick, nonce untouched, NOT acked;
+            # see _reenqueue_and_confirm_broker_row).
+            return mint_outcome
+        # 'applied' — the nonce was already marked inside
+        # _reenqueue_and_confirm_broker_row, ONLY after the re-enqueue was
+        # CONFIRMED (never here, and never before that confirmation).
+        return "applied"
+
     if not _nonce_seen_or_mark(conn, envelope["nonce"]):
         return "replayed_nonce"
 
-    new_status = "approved" if envelope["decision"] == "approve" else "rejected"
-    if not _resolve_pending_row(conn, proposal_id, new_status):
+    # DENY: unchanged behaviour for both native AND broker rows — no token,
+    # no execution, either way (I-2 is untouched by this branch). A single
+    # autocommit statement, no failure window — nonce-before is safe here.
+    if envelope["decision"] != "approve":
+        if not _resolve_pending_row(conn, proposal_id, "rejected"):
+            return "already_resolved"
+        from hermes.runtime.security_hook import signal_native_danger_approval  # noqa: PLC0415
+        signal_native_danger_approval(proposal_id, "denied")
+        return "applied"
+
+    # APPROVE + NATIVE row (the broker case already returned above): unchanged
+    # — flip status, signal the SAME Event the hook already registered (I-3).
+    # No token: the native path never used one, and this is a single
+    # autocommit statement — no failure window, nonce-before is safe (see the
+    # broker branch's docstring above for why it differs).
+    if not _resolve_pending_row(conn, proposal_id, "approved"):
         return "already_resolved"
-
     from hermes.runtime.security_hook import signal_native_danger_approval  # noqa: PLC0415
-
-    choice = "approved" if envelope["decision"] == "approve" else "denied"
-    signal_native_danger_approval(proposal_id, choice)
+    signal_native_danger_approval(proposal_id, "approved")
     return "applied"
 
 
@@ -616,6 +975,7 @@ def poll_and_apply_decisions(
         for item in items:
             outcome = _verify_and_apply_decision(
                 item=item, pubkey_hex=pubkey_hex, own_instance_id=instance_id, conn=conn,
+                db_path=db_path,
             )
             proposal_id = item.get("proposal_id") if isinstance(item, dict) else None
             logger.info(

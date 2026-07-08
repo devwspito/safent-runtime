@@ -83,22 +83,18 @@ def _make_mock_meta(name: str) -> Any:
 
 
 def _build_wiring() -> Any:
-    """Return a minimal DbusRuntimeServiceWiring instance (no ports needed)."""
+    """Return a minimal DbusRuntimeServiceWiring instance (no ports needed).
+
+    search_skills_hub / cancel_skills_hub_search only touch the module-level
+    _hub_search_* helpers, so the wiring needs no real ports — only the three
+    required constructor kwargs (agent_state, approval_gate, authorized_uids).
+    """
     from hermes.agents_os.infrastructure.dbus_runtime_service import (
         DbusRuntimeServiceWiring,
     )
-    from hermes.agents_os.application.audit_hash_chain import AuditHashChainSigner
-    import sqlite3, tempfile
-    from pathlib import Path
-    tmp = tempfile.mkdtemp()
-    db_path = Path(tmp) / "audit.db"
-    conn = sqlite3.connect(str(db_path))
-    signer = AuditHashChainSigner(conn)
     return DbusRuntimeServiceWiring(
-        runtime_service=MagicMock(),
-        agent_state_port=MagicMock(),
+        agent_state=MagicMock(),
         approval_gate=MagicMock(),
-        audit_signer=signer,
         authorized_uids=frozenset({1000}),
         skill_governance=MagicMock(),
     )
@@ -112,30 +108,18 @@ def test_search_returns_cancelled_when_event_set():
 
     fake_meta = _make_mock_meta("email-skill")
 
-    with (
-        patch(
-            "hermes.agents_os.infrastructure.dbus_runtime_service.DbusRuntimeServiceWiring"
-            ".search_skills_hub",
-            autospec=True,
-        ) as mock_method,
-    ):
-        # Call the real method via the module-level function directly.
-        from hermes.agents_os.infrastructure.dbus_runtime_service import (
-            DbusRuntimeServiceWiring,
+    # Exercise the REAL search_skills_hub to hit the cancel-event branch.
+    # Only tools.skills_hub is stubbed; the method itself must run unpatched.
+    with patch.dict("sys.modules", {"tools.skills_hub": MagicMock()}):
+        import sys
+        hub_mod = sys.modules["tools.skills_hub"]
+        hub_mod.create_source_router.return_value = object()
+        hub_mod.unified_search.return_value = [fake_meta]
+
+        wiring = _build_wiring()
+        result = wiring.search_skills_hub(
+            query="email", source="all", limit=10, query_id=qid
         )
-
-        # We need to call search_skills_hub on a real instance to exercise the
-        # cancel-event branch.  Patch tools.skills_hub instead.
-        with patch.dict("sys.modules", {"tools.skills_hub": MagicMock()}):
-            import sys
-            hub_mod = sys.modules["tools.skills_hub"]
-            hub_mod.create_source_router.return_value = object()
-            hub_mod.unified_search.return_value = [fake_meta]
-
-            wiring = _build_wiring()
-            result = wiring.search_skills_hub(
-                query="email", source="all", limit=10, query_id=qid
-            )
 
     assert result["cancelled"] is True
     assert result["results"] == []

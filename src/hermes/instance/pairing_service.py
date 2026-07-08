@@ -46,7 +46,9 @@ import binascii
 import hashlib
 import hmac as _hmac_mod
 import logging
+import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
@@ -442,6 +444,13 @@ class PairingService:
             instance_secret=proof_response["instance_secret"],
         )
 
+        # Pairing is the event that turns a Community runtime into an associate.
+        # hermes-config-sync.service is gated by ConditionPathExists on this marker
+        # and stays inert until it exists — so pairing MUST create it, else a
+        # freshly-paired instance never pulls its signed policy and the Enterprise
+        # governance loop (policy sync + remote approvals + A2A) never starts.
+        write_enterprise_marker()
+
         logger.info(
             "hermes.instance.pairing.complete",
             extra={"tenant_id": str(tenant_id), "instance_id": instance_id},
@@ -452,6 +461,38 @@ class PairingService:
 # ------------------------------------------------------------------
 # Module-level helpers (also used by tests via import)
 # ------------------------------------------------------------------
+
+# Marker file that gates hermes-config-sync.service (Enterprise policy pull +
+# remote-approval + A2A loops). Its systemd unit has
+# ConditionPathExists=/var/lib/hermes/instance/.enterprise. Overridable via env
+# for tests. It is a FIXED path (not derived from the association-store DB, which
+# lives at /var/lib/hermes/shell-state.db — a different directory).
+_DEFAULT_ENTERPRISE_MARKER = "/var/lib/hermes/instance/.enterprise"
+
+
+def enterprise_marker_path() -> Path:
+    return Path(os.environ.get("HERMES_ENTERPRISE_MARKER", _DEFAULT_ENTERPRISE_MARKER))
+
+
+def write_enterprise_marker() -> None:
+    """Create the .enterprise marker so config-sync can start. Idempotent; a
+    failure is non-fatal (logged) — pairing already succeeded and the marker can
+    be re-created on the next pair/boot."""
+    try:
+        marker = enterprise_marker_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch(exist_ok=True)
+    except OSError as exc:  # noqa: BLE001
+        logger.warning("hermes.instance.enterprise_marker_write_failed: %s", exc)
+
+
+def remove_enterprise_marker() -> None:
+    """Remove the .enterprise marker on unpair so config-sync goes inert again.
+    Idempotent; a failure is non-fatal (logged)."""
+    try:
+        enterprise_marker_path().unlink(missing_ok=True)
+    except OSError as exc:  # noqa: BLE001
+        logger.warning("hermes.instance.enterprise_marker_remove_failed: %s", exc)
 
 
 def _build_challenge(cp_response: dict) -> EnrollmentChallenge:

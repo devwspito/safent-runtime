@@ -336,3 +336,85 @@ class TestNativeToolsViewsStringLengthCapF3:
             sender_uid=_OPERATOR_UID,
         )
         assert result["ok"] is True
+
+
+class TestMcpServersField:
+    """2026-07-07 confused-deputy fix: mcp_servers is a config-sync-LOCAL
+    addition to the D-Bus JSON payload (never part of the signed cloud
+    bundle) — the applier derives it from AgentSpec.capabilities and lands it
+    here as the allowed replacement for BindCapabilityToAgent on MCP."""
+
+    @pytest.mark.asyncio
+    async def test_mcp_servers_lands_on_scope(self, tmp_path: Path) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        result = await wiring.set_agent_access_scope(
+            agent_id="cerebro",
+            scope_json='{"enforced": true, "cerebro_unrestricted": false, '
+                       '"mcp_servers": ["safent-control"]}',
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        assert result["ok"] is True
+        scope = repo.get_scope("cerebro", _TENANT_ID)
+        assert scope is not None
+        assert scope.authorized_mcp_servers == frozenset({"safent-control"})
+
+    @pytest.mark.asyncio
+    async def test_absent_mcp_servers_defaults_to_empty_fail_closed(
+        self, tmp_path: Path
+    ) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        await wiring.set_agent_access_scope(
+            agent_id="agent-a",
+            scope_json="{}",
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        scope = repo.get_scope("agent-a", _TENANT_ID)
+        assert scope is not None
+        assert scope.authorized_mcp_servers == frozenset()
+
+    @pytest.mark.asyncio
+    async def test_mcp_servers_not_a_list_rejected(self, tmp_path: Path) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        result = await wiring.set_agent_access_scope(
+            agent_id="agent-a",
+            scope_json='{"mcp_servers": "safent-control"}',
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        assert result["ok"] is False
+        assert repo.get_scope("agent-a", _TENANT_ID) is None
+
+    @pytest.mark.asyncio
+    async def test_mcp_servers_over_256_rejected(self, tmp_path: Path) -> None:
+        import json
+
+        wiring, repo = _make_wiring(tmp_path)
+        scope_json = json.dumps({"mcp_servers": [f"srv{i}" for i in range(257)]})
+        result = await wiring.set_agent_access_scope(
+            agent_id="agent-a",
+            scope_json=scope_json,
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        assert result["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_upsert_replaces_previous_mcp_servers(self, tmp_path: Path) -> None:
+        wiring, repo = _make_wiring(tmp_path)
+        await wiring.set_agent_access_scope(
+            agent_id="cerebro",
+            scope_json='{"mcp_servers": ["old-mcp"]}',
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        await wiring.set_agent_access_scope(
+            agent_id="cerebro",
+            scope_json='{"mcp_servers": ["safent-control"]}',
+            tenant_id=_TENANT_ID,
+            sender_uid=_OPERATOR_UID,
+        )
+        scope = repo.get_scope("cerebro", _TENANT_ID)
+        assert scope is not None
+        assert scope.authorized_mcp_servers == frozenset({"safent-control"})

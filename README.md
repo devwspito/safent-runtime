@@ -197,10 +197,12 @@ The kernel cage is the crown jewel — changes that touch `src/hermes/security/`
 
 Safent is **open-core**:
 
-- **Safent Community** (this repository) — the local runtime. **Open source under the [Apache License 2.0](LICENSE).**
+- **Safent Community** (this repository) — the local runtime. **Source-available under the [Business Source License 1.1](LICENSE).** Free to run, self-host, modify, and use internally (including in production for your own organization). The one thing you may **not** do is offer it to third parties as a hosted/managed service that competes with Safent Enterprise. Each version converts to **AGPL-3.0-or-later** on its Change Date (four years after release), so the code always ends up fully open — and any future hosted fork must then publish its changes.
 - **Safent Enterprise** — the cloud management / control plane. Commercial, closed-source.
 
-The security model is designed so that **anyone can run Community, but no one can administer a fleet as an Enterprise without the tenant's private key** — the open source and the business coexist by construction.
+The security model is designed so that **anyone can run Community, but no one can administer a fleet as an Enterprise without the tenant's private key** — the source-available runtime and the business coexist by construction.
+
+> BSL 1.1 is *source-available*, not OSI "open source." For a use beyond the Additional Use Grant, contact the Licensor for a commercial license.
 
 ---
 

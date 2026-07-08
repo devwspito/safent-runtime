@@ -78,3 +78,38 @@ def _assert_min_length(key: bytes) -> None:
             f"{_ENV_VAR} demasiado corta: {len(key)} bytes < mínimo {_MIN_KEY_BYTES}. "
             "Usa un secreto de al menos 32 bytes."
         )
+
+
+def load_signing_key_with_fallback() -> bytes:
+    """Same priority chain as the main daemon's boot sequence:
+
+      1. HERMES_AUDIT_KEY (hex) — systemd credentials, production.
+      2. SecretsVault.derive_subkey("audit-chain") — HKDF from master.key
+         (per-install, stable, same file every process on this host reads).
+
+    This is the SAME key `AuditHashChainSigner` and `HitlApprovalMinter` use
+    in the main runtime daemon (`runtime/__main__.py`'s `_load_signing_key_or_
+    fail`, now a thin wrapper around this function). Extracted here (Fase 2
+    Phase 4e) so a SEPARATE process — `hermes.config_sync`'s `remote_approvals`
+    module runs as its own systemd unit, not in-process with the runtime
+    daemon — can independently reproduce the IDENTICAL key (master.key is a
+    shared per-install file, not process-local state) to mint an HITL approval
+    token the main daemon's own gate can later verify.
+
+    Raises:
+        MissingAuditSeal: neither source produces a usable key (fail-closed).
+    """
+    try:
+        return load_signing_key()
+    except MissingAuditSeal:
+        pass
+
+    try:
+        from hermes.shell_server.security.secrets import SecretsVault  # noqa: PLC0415
+
+        return SecretsVault().derive_subkey(label="audit-chain")
+    except RuntimeError as exc:
+        raise MissingAuditSeal(
+            f"ni {_ENV_VAR} ni master.key están disponibles — "
+            f"clave de firma no derivable. Detalle: {exc}"
+        ) from exc

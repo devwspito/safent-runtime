@@ -74,7 +74,15 @@ class TestToolSpecBridge:
     def test_build_all_specs(self) -> None:
         specs = build_os_native_tool_specs()
         names = {s.name for s in specs}
-        assert names == {s.name for s in OS_NATIVE_SKILLS}
+        # GUI-control skills that the NATIVE `computer_use` toolset replaces are
+        # deliberately NOT exposed to the LLM (see _COMPUTER_USE_NATIVE_REPLACED
+        # in tool_specs.py) so the model uses the native tool, not the custom one.
+        native_replaced = {"mouse_click", "type_text", "begin_computer_use"}
+        expected = {s.name for s in OS_NATIVE_SKILLS} - native_replaced
+        assert names == expected
+        # Invariant: none of the native-replaced GUI-control skills leak into
+        # the specs exposed to the LLM.
+        assert names.isdisjoint(native_replaced)
         # screenshot READ_ONLY, screen_record WRITE_PROPOSAL
         by_name = {s.name: s for s in specs}
         assert by_name["screenshot"].risk is ToolRisk.READ_ONLY

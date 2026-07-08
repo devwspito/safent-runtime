@@ -1465,6 +1465,9 @@ class DbusRuntimeServiceWiring:
         arbitrarias son rechazadas (no silenciadas) para evitar inyección.
         OD_DAEMON_URL se valida como URL http(s). El token OD_API_TOKEN se
         persiste cifrado en la config y nunca se registra en claro en logs.
+        HOME/MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME pasan la validación (R16)
+        pero el LAUNCHER decide el HOME real del hijo MCP — ver el comentario
+        de _MCP_BYOK_ENV_KEYS.
         """
         self._authorize_and_resolve(sender_uid, operation="add_mcp_server")
         if self._mcp_manager is None:
@@ -1574,6 +1577,18 @@ class DbusRuntimeServiceWiring:
         except RuntimeError as exc:
             logger.warning("hermes.dbus.mcp_prefetch_failed server=%s error=%s", sid, exc)
             return {"ok": False, "error": f"prefetch falló: {exc}"}
+        # R16 (2026-07-07): a MANAGED_REMOTE server (safent-control) bridges to OUR OWN
+        # paired cloud control plane, which lives in the default-deny MCP netns's egress
+        # jail like everything else. Grant that ONE host — never bundle/argv-supplied,
+        # only the locally-paired, SSRF-validated cloud_endpoint — before the connect
+        # attempt. Best-effort: a failure here surfaces as a network error at connect,
+        # same as today; it never blocks the add on an unrelated failure.
+        try:
+            _grant_mcp_egress_for_managed_remote(sid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "hermes.dbus.mcp_egress_grant_failed server=%s error=%s", sid, exc
+            )
         try:
             server = await _mcp_connect(self._mcp_manager, sid, argv, env=byok_env)
         except Exception as exc:  # noqa: BLE001
@@ -4254,6 +4269,7 @@ class DbusRuntimeServiceWiring:
             enforced=fields["enforced"],
             managed_by="cloud",
             approval_tier=fields["approval_tier"],
+            authorized_mcp_servers=frozenset(fields["mcp_servers"]),
         )
         repo.upsert(scope)
         logger.info(
@@ -5348,10 +5364,16 @@ def _uid_to_uuid(uid: int) -> UUID:
 
 
 # AccessScopeSpec wire shape (Fase 2 Phase 3) — mirrors
-# hermes.config_sync.policy_document.AccessScopeSpec exactly.
+# hermes.config_sync.policy_document.AccessScopeSpec, PLUS "mcp_servers":
+# a config-sync-LOCAL addition (2026-07-07), never part of the signed cloud
+# bundle/policy_document.py. The applier derives it from the already-verified
+# bundle's AgentSpec.capabilities (kind="mcp") and injects it into the
+# set_agent_access_scope JSON it builds itself — see
+# hermes/config_sync/applier.py._apply_access_scope. This is the allowed
+# replacement for the confused-deputy-denied BindCapabilityToAgent verb.
 _ACCESS_SCOPE_ALLOWED_KEYS: frozenset[str] = frozenset({
     "enforced", "cerebro_unrestricted", "native_tools", "policy_overlay", "views",
-    "approval_tier",
+    "approval_tier", "mcp_servers",
 })
 _ACCESS_SCOPE_APPROVAL_TIERS: frozenset[str] = frozenset({"standard", "coordinator"})
 _ACCESS_SCOPE_MAX_LIST_LEN = 256
@@ -5414,12 +5436,21 @@ def _parse_access_scope_json(scope_json: str) -> tuple[dict, str | None]:
     # approval_tier is drop-when-"standard" on the wire, so absent → "standard"
     # (fail-closed: unknown/absent tier gets the stricter escalation).
     approval_tier = raw.get("approval_tier", "standard")
+    # mcp_servers: config-sync-local addition (see _ACCESS_SCOPE_ALLOWED_KEYS
+    # docstring) — absent → [] (fail-closed: no bundle-authorized MCP servers).
+    mcp_servers = raw.get("mcp_servers", [])
 
     if not isinstance(native_tools, list) or not all(isinstance(t, str) for t in native_tools):
         return {}, "native_tools debe ser list[str]"
     if len(native_tools) > _ACCESS_SCOPE_MAX_LIST_LEN:
         return {}, f"native_tools excede {_ACCESS_SCOPE_MAX_LIST_LEN} entradas"
     if (err := _validate_bounded_str_list(native_tools, field_name="native_tools")) is not None:
+        return {}, err
+    if not isinstance(mcp_servers, list) or not all(isinstance(s, str) for s in mcp_servers):
+        return {}, "mcp_servers debe ser list[str]"
+    if len(mcp_servers) > _ACCESS_SCOPE_MAX_LIST_LEN:
+        return {}, f"mcp_servers excede {_ACCESS_SCOPE_MAX_LIST_LEN} entradas"
+    if (err := _validate_bounded_str_list(mcp_servers, field_name="mcp_servers")) is not None:
         return {}, err
     if not isinstance(views, list) or not all(isinstance(v, str) for v in views):
         return {}, "views debe ser list[str]"
@@ -5447,6 +5478,7 @@ def _parse_access_scope_json(scope_json: str) -> tuple[dict, str | None]:
         "enforced": enforced,
         "cerebro_unrestricted": cerebro_unrestricted,
         "approval_tier": approval_tier,
+        "mcp_servers": mcp_servers,
     }, None
 
 
@@ -6571,6 +6603,21 @@ def _prefetch_git_mcp(server_id: str, git_spec: str) -> None:
 # not in the launcher will be silently discarded at spawn time.
 # Expanding this set is a security-posture decision: add only named, bounded
 # variables for specific published MCP servers; never allow arbitrary keys.
+#
+# 2026-07-07 (R16) — HOME/MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME: OAuth-bridge
+# servers (mcp-remote, used by the managed-remote "safent-control" MCP) write a
+# local token cache and need a writable HOME. These are validated HERE (so a
+# bundle/BYOK draft carrying them does not hard-fail add_mcp_server wholesale —
+# see _validate_mcp_env, which rejects the ENTIRE draft on any unrecognised
+# key) but are DELIBERATELY NOT mirrored into the launcher's
+# _ALLOWED_ENV_KEYS for HOME: the launcher's own unit env already pins a
+# writable, group-writable HOME (/var/lib/hermes/mcp-home) for every MCP
+# child, and letting a caller (even a signed cloud bundle) override it risks
+# repointing HOME at a path the jailed MCP child cannot write (exactly the
+# EACCES this class of bug produces — see hermes-mcp-launcher's own comment
+# on _ALLOWED_ENV_KEYS). MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME are validated
+# here but likewise not forwarded by the launcher: they fall back to
+# $HOME/.mcp-auth / $HOME/.config, both writable once HOME is launcher-pinned.
 _MCP_BYOK_ENV_KEYS: frozenset[str] = frozenset({
     "OD_DAEMON_URL",
     "OD_API_TOKEN",
@@ -6586,6 +6633,11 @@ _MCP_BYOK_ENV_KEYS: frozenset[str] = frozenset({
     # Ruflo MCP (ruflo): endpoint OpenAI-compatible → enruta a nuestro LLM nativo.
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
+    # OAuth-bridge servers (mcp-remote / safent-control). NOT mirrored into the
+    # launcher's _ALLOWED_ENV_KEYS — see the block comment above.
+    "HOME",
+    "MCP_REMOTE_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
 })
 
 
@@ -7017,6 +7069,91 @@ def _mcp_id(server_id: str):
     return McpServerId(server_id)
 
 
+# MCP servers that bridge to OUR OWN managed cloud control plane (mcp-remote-style
+# OAuth bridges), as opposed to a third-party published server or a local/offline one.
+# Shared by _mcp_connect (trust classification) and _grant_mcp_egress_for_managed_remote
+# (R16, below) — single source, no drift between the two call sites.
+_MANAGED_REMOTE_MCP_SLUGS: frozenset[str] = frozenset({"safent-control"})
+
+
+def _grant_mcp_egress_for_managed_remote(server_id: str) -> None:
+    """R16 (2026-07-07): grant the MCP netns egress to OUR OWN paired cloud endpoint.
+
+    The MCP runtime netns is default-deny (C1 PASS-2/4) — a MANAGED_REMOTE server
+    (mcp-remote bridging to safent-control) cannot resolve/reach ANY host until its
+    target is on the MCP plane's pinned allow-list. Unlike a third-party BYOK server
+    (whose vetted host is baked into _CURATED_MCP_HOSTS), the control-plane host is
+    PER-TENANT — it can only be resolved from the LOCAL, Ed25519-pairing-established
+    `instance_association.cloud_endpoint`, never from the bundle's own argv/env (that
+    would let a compromised bundle request a grant for an arbitrary host). No-op for
+    every other server_id, and a no-op (not a failure) when the instance isn't paired.
+
+    Reuses the SAME grants file + control-socket push the owner's manual MCP-egress
+    elevation API already uses (hermes.shell_server.egress_api) — no new proxy-side
+    mechanism, no new persisted state shape.
+    """
+    if server_id not in _MANAGED_REMOTE_MCP_SLUGS:
+        return
+    import os as _os_eg  # noqa: PLC0415
+    import sqlite3 as _sqlite3_eg  # noqa: PLC0415
+    from pathlib import Path as _Path_eg  # noqa: PLC0415
+    from urllib.parse import urlparse as _urlparse_eg  # noqa: PLC0415
+
+    from hermes.instance.infrastructure.http_control_plane_client import (  # noqa: PLC0415
+        PairingError,
+        _validate_cloud_endpoint,
+    )
+
+    db_path = _Path_eg(
+        _os_eg.environ.get("HERMES_SHELL_DB", "/var/lib/hermes/shell-state.db")
+    )
+    if not db_path.is_file():
+        return
+    conn = _sqlite3_eg.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        row = conn.execute(
+            "SELECT cloud_endpoint FROM instance_association WHERE state = 'active' "
+            "LIMIT 1"
+        ).fetchone()
+    except _sqlite3_eg.Error:
+        return
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        return
+    cloud_endpoint = str(row[0])
+    try:
+        _validate_cloud_endpoint(cloud_endpoint)
+    except PairingError as exc:
+        logger.warning(
+            "hermes.dbus.mcp_egress_grant_unsafe_endpoint server=%s error=%s",
+            server_id, exc,
+        )
+        return
+    host = _urlparse_eg(cloud_endpoint).hostname
+    if not host:
+        return
+
+    from hermes.shell_server.egress_api import (  # noqa: PLC0415
+        _MCP_GRANT_SESSION,
+        _MCP_GRANTS_PATH,
+        _load_from,
+        _push_session,
+        _save_to,
+    )
+
+    existing = set(_load_from(_MCP_GRANTS_PATH))
+    if host in existing:
+        return
+    domains = sorted(existing | {host})
+    _save_to(_MCP_GRANTS_PATH, domains)
+    pushed = _push_session(_MCP_GRANT_SESSION, domains)
+    logger.info(
+        "hermes.dbus.mcp_egress_granted server=%s host=%s pushed=%s",
+        server_id, host, pushed,
+    )
+
+
 async def _mcp_connect(
     manager,
     server_id: str,
@@ -7068,10 +7205,20 @@ async def _mcp_connect(
             )
     # Confianza: los MCP VETADOS del stack de fábrica (locales, sin egress, horneados por
     # nosotros) entran como BUILTIN → sus tools fluyen sin HITL (la jaula contiene; lo
-    # marcado destructivo sigue gateado). Cualquier OTRO (añadido por el usuario) =
-    # USER_ADDED: DEFAULT_DENY + HITL en cada tool-call (el broker escala, no recorta).
+    # marcado destructivo sigue gateado). Los MCP de primera parte que SÍ EGRESAN a un
+    # control-plane gestionado (p.ej. safent-control → cloud /api/*) entran como
+    # MANAGED_REMOTE: NO heredan la postura frictionless de BUILTIN (la jaula no los
+    # confina — hablan con un servicio remoto) — lecturas fluyen, escrituras exigen HITL
+    # en cuanto el ciclo se tainta por una respuesta MCP no confiable (CTRL-5). Cualquier
+    # OTRO (añadido por el usuario) = USER_ADDED: DEFAULT_DENY + HITL en cada tool-call
+    # (el broker escala, no recorta).
     _BUILTIN_MCP_SLUGS = frozenset({"excel", "word", "powerpoint"})
-    _trust = TrustLevel.BUILTIN if server_id in _BUILTIN_MCP_SLUGS else TrustLevel.USER_ADDED
+    if server_id in _MANAGED_REMOTE_MCP_SLUGS:
+        _trust = TrustLevel.MANAGED_REMOTE
+    elif server_id in _BUILTIN_MCP_SLUGS:
+        _trust = TrustLevel.BUILTIN
+    else:
+        _trust = TrustLevel.USER_ADDED
     return await manager.connect(
         server_id=McpServerId(server_id),
         slug=ServerSlug(server_id),

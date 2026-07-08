@@ -102,6 +102,13 @@ class CapabilityBroker:
         audit_repo:      SignedAuditRepositoryPort — persiste append-only.
         intent_log:      IntentLog — idempotencia (CTRL-11).
         anchor:          ExternalAnchorPort opcional (CTRL-8).
+        access_scope_repo: AgentAccessScope repo opcional (Fase 2 Phase 4e) —
+                     habilita el enrutamiento Enterprise (LOCAL vs ENTERPRISE)
+                     de las aprobaciones HITL mediadas por el broker
+                     (install_*/set_policy/skill_manage/MCP write). None
+                     (default) => TODO queda LOCAL, comportamiento de hoy sin
+                     cambio — ver `wire_access_scope`/`_resolve_enterprise_route`.
+        tenant_id:   tenant_id del daemon, usado junto con access_scope_repo.
     """
 
     def __init__(
@@ -121,6 +128,8 @@ class CapabilityBroker:
         mcp_adapter: McpSurfaceAdapter | None = None,
         install_executor: InstallExecutorPort | None = None,
         autonomous_default: bool = False,
+        access_scope_repo: Any | None = None,
+        tenant_id: str = "",
     ) -> None:
         self._registry = registry
         # FULL AUTÓNOMO por defecto (decisión del dueño, 2026-06-12): el Cerebro
@@ -145,6 +154,23 @@ class CapabilityBroker:
         self._mcp_adapter = mcp_adapter
         # Install executor: search/install/connect tools (fail-closed when None).
         self._install_executor = install_executor
+        # Enterprise approval routing (Fase 2 Phase 4e): optional, None by
+        # default (Community / composition root hasn't wired it yet) => every
+        # broker HITL registration stays LOCAL, zero regression. Wired for
+        # real via `wire_access_scope` (two-step wiring — the repo is built
+        # AFTER the broker at the composition root, see __main__.py).
+        self._access_scope_repo = access_scope_repo
+        self._tenant_id = tenant_id
+
+    def wire_access_scope(self, *, access_scope_repo: Any, tenant_id: str) -> None:
+        """Post-construction wiring for the Enterprise access-scope repo
+        (Fase 2 Phase 4e) — mirrors the two-step wiring pattern already used
+        for `os_native_dispatcher.wire_computer_use_broker` in `__main__.py`
+        (the repo is built AFTER the broker in the boot sequence). Optional;
+        skipping this call leaves `dispatch()`'s broker MFA-tier routing at
+        LOCAL (today's behaviour, unchanged)."""
+        self._access_scope_repo = access_scope_repo
+        self._tenant_id = tenant_id
 
     def registered_surface_kinds(self) -> frozenset:
         """SurfaceKinds con adapter realmente registrado en el dispatcher.
@@ -243,6 +269,34 @@ class CapabilityBroker:
                 # y para que approve_action pueda re-encolar la tarea REAL tras la
                 # aprobación (bug fix 2026-07: antes se perdía y quedaba en 0).
                 resolved_work_item_id = work_item_id if work_item_id is not None else UUID(int=0)
+                # Enterprise approval routing (Fase 2 Phase 4e — corrected):
+                # mirrors security_hook._compute_danger_route via the SAME
+                # shared resolver, so the native gate and the broker can never
+                # diverge on WHO resolves a given tool's approval. Uses the
+                # EXPLICIT consent_context.agent_id (NEVER a threading.local —
+                # see ConsentContext.agent_id's docstring for the prior bug
+                # this replaces: the broker coroutine runs on the event-loop
+                # thread, a different OS thread than the one that stamps
+                # conversation_task_registry's thread-locals).
+                enterprise_route, agent_id, sensitivity_categories = (
+                    self._resolve_enterprise_route(
+                        tool_name=proposal.tool_name, args=proposal.parameters,
+                        agent_id=consent_context.agent_id,
+                    )
+                )
+                # Enterprise round-trip requires a non-empty action_digest —
+                # the cloud's signed decision envelope always carries one, and
+                # remote_approvals._extract_envelope fail-closed rejects ANY
+                # empty field ("invalid_envelope"). A broker row otherwise
+                # never sets one (dedup here is by proposal_id — see
+                # register_pending's own NULL-vs-'' comment); compute it ONLY
+                # when this row is actually going to Enterprise — a LOCAL
+                # broker row is unaffected (action_digest stays NULL, exactly
+                # as before this fix).
+                action_digest = (
+                    _compute_action_digest(proposal.tool_name, proposal.parameters)
+                    if enterprise_route == "enterprise" else ""
+                )
                 pending_status = await self._approval_gate.register_pending(
                     proposal_id=proposal.proposal_id,
                     work_item_id=resolved_work_item_id,
@@ -251,7 +305,11 @@ class CapabilityBroker:
                     justification=proposal.justification,
                     parameters_redacted=proposal.parameters,
                     tool_name=proposal.tool_name,
+                    action_digest=action_digest,
                     conversation_id=conversation_id,
+                    route=enterprise_route,
+                    sensitivity_categories=sensitivity_categories,
+                    agent_id=agent_id,
                 )
                 # Durable breaker (2026-07): register_pending devuelve un status
                 # distinto de 'pending' cuando la MISMA propuesta se re-registró
@@ -645,6 +703,63 @@ class CapabilityBroker:
             proposal_id=proposal_id, token=token
         )
 
+    def _resolve_enterprise_route(
+        self, *, tool_name: str, args: dict[str, Any], agent_id: str,
+    ) -> tuple[str, str, frozenset]:
+        """Resolve the Enterprise approval route for a broker HITL proposal
+        (Fase 2 Phase 4e). Calls the SAME `enterprise_approval_routing.
+        resolve_route_and_context` that `hermes.runtime.security_hook.
+        _compute_danger_route` calls — the native-danger gate and the broker
+        can never diverge on WHO resolves a given tool's approval.
+
+        `agent_id` MUST be the EXPLICIT identity resolved on the cycle's
+        event-loop thread (`ConsentContext.agent_id` — see its docstring) —
+        NEVER `conversation_task_registry.get_current_cycle_agent()`, a
+        threading.local stamped on a DIFFERENT OS thread (the executor thread)
+        than the one this coroutine runs on (bridged via
+        run_coroutine_threadsafe). Reading that thread-local here always
+        resolved "" in the real daemon — the root cause of the prior, reverted
+        attempt's dead routing (Fase 2 Phase 4d).
+
+        `access_scope_repo=None` (Community / composition root hasn't wired
+        `wire_access_scope` yet) => LOCAL, unchanged from today (zero
+        regression). Fail-closed: ANY resolution error also degrades to LOCAL
+        (never auto-executes, mirrors `_compute_danger_route`'s own
+        fail-soft-to-LOCAL discipline).
+
+        Returns (route_str, agent_id, sensitivity_categories) matching
+        `ApprovalGatePort.register_pending`'s wire shape — "" (LOCAL) or
+        "enterprise", masked to ""/frozenset() for LOCAL exactly like
+        `security_hook._resolve_native_danger_approval` masks its own call.
+        """
+        if self._access_scope_repo is None:
+            return "", "", frozenset()
+        try:
+            from hermes.capabilities.approval_router import ApprovalRoute  # noqa: PLC0415
+            from hermes.capabilities.infrastructure.enterprise_approval_routing import (  # noqa: PLC0415
+                resolve_route_and_context,
+            )
+
+            resolved_route, categories = resolve_route_and_context(
+                tool_name=tool_name, args=args,
+                access_scope_repo=self._access_scope_repo, tenant_id=self._tenant_id,
+                agent_id=agent_id,
+            )
+            is_enterprise = resolved_route is ApprovalRoute.ENTERPRISE
+            return (
+                "enterprise" if is_enterprise else "",
+                agent_id if is_enterprise else "",
+                categories if is_enterprise else frozenset(),
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-closed: never widen/skip the gate
+            logger.warning(
+                "hermes.capabilities.broker.enterprise_route_resolve_failed tool=%s "
+                "error=%r — falling back to LOCAL",
+                tool_name,
+                exc,
+            )
+            return "", "", frozenset()
+
 
 # Satisface CapabilityBrokerPort structural check.
 assert isinstance(CapabilityBroker, type)
@@ -653,6 +768,25 @@ assert isinstance(CapabilityBroker, type)
 # ---------------------------------------------------------------------------
 # Helpers puros (sin efectos laterales)
 # ---------------------------------------------------------------------------
+
+
+def _compute_action_digest(tool_name: str, parameters: dict[str, Any]) -> str:
+    """Deterministic digest of (tool_name, parameters) — SAME formula as
+    `security_hook._resolve_native_danger_approval` / `nous_engine.
+    _deterministic_proposal_id` (sha256 of tool_name + canonical JSON params),
+    kept byte-identical so a native and a broker occurrence of the SAME
+    action collide on the SAME digest, matching the existing native-path
+    semantics. Deliberately inlined here rather than extracted into a shared
+    module (out of scope for this change) — three short, stable call sites of
+    one formula is not a drift risk worth a premature cross-module
+    abstraction; the value is only ever a dedup/cross-check key for the
+    Enterprise round-trip, never security-decision-bearing on its own.
+    """
+    import hashlib
+    import json as _json
+
+    digest_input = tool_name + "\x00" + _json.dumps(parameters, sort_keys=True, default=str)
+    return hashlib.sha256(digest_input.encode("utf-8", "replace")).hexdigest()
 
 
 def _compute_effective_risk(

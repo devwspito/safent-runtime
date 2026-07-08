@@ -1,12 +1,17 @@
 """spec 015 — Two-mode security kernel tests.
 
-Tests the three core invariants:
-  1. AUTO ON  → session YOLO enabled → dangerous command bypasses gateway notify cb.
+Tests the core invariants:
+  1. Session YOLO (dangers run free) requires BOTH auto_mode=ON AND the owner
+     having lowered the danger gate (mfa_on_dangers=OFF). With the danger gate
+     at its default (ON), AUTO mode still surfaces the ApprovalRequested card
+     for dangerous commands — "DANGERS piden MFA sí o sí". The danger gate wins
+     over AUTO mode.
   2. AUTO OFF → dangerous command triggers the gateway notify cb (cb called).
   3. ResolveApproval(deny) → resolve_gateway_approval called with "deny".
 
 All tests are unit tests: they monkeypatch tools.approval so the suite runs
-without hermes-agent installed.
+without hermes-agent installed, and patch ToolPolicyStore.mfa_on_dangers so
+the danger-gate state is deterministic and independent of host policy files.
 """
 from __future__ import annotations
 
@@ -91,16 +96,43 @@ def _make_fake_approval_module(
 
 
 # ---------------------------------------------------------------------------
-# Test 1 — AUTO ON → session YOLO enabled → gateway notify cb NOT triggered
+# Danger-gate helper: force ToolPolicyStore.mfa_on_dangers() deterministically
+# ---------------------------------------------------------------------------
+
+
+def _force_danger_gate(monkeypatch, *, mfa_on_dangers: bool) -> None:
+    """Pin the owner's danger-gate flag so tests are independent of host policy.
+
+    apply_auto_mode_for_cycle reads the flag via _load_mfa_on_dangers ->
+    ToolPolicyStore().mfa_on_dangers(); patching the class method keeps the real
+    import/plumbing path in the source under test.
+    """
+    from hermes.capabilities.tool_policy import ToolPolicyStore
+
+    monkeypatch.setattr(
+        ToolPolicyStore, "mfa_on_dangers", lambda self: mfa_on_dangers
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 1 — AUTO ON is necessary but NOT sufficient for session YOLO.
+#          YOLO requires auto_mode=ON AND mfa_on_dangers=OFF (owner escape hatch).
+#          With the danger gate at its default (ON), AUTO mode still cards dangers.
 # ---------------------------------------------------------------------------
 
 
 class TestAutoModeOn:
-    """AUTO mode ON: enable_session_yolo is called per-cycle; gateway cb not triggered."""
+    """AUTO mode ON: session YOLO only when the owner also lowered the danger gate.
 
-    def test_enable_session_yolo_called_when_auto_mode_on(
+    The danger gate (mfa_on_dangers, default ON) wins over AUTO mode: dangerous
+    commands keep pausing for owner MFA even in autonomous mode unless the owner
+    explicitly lowered the gate (the escape hatch, itself set behind MFA).
+    """
+
+    def test_enable_session_yolo_when_auto_on_and_danger_gate_lowered(
         self, tmp_path, monkeypatch
     ) -> None:
+        """AUTO ON + owner lowered the danger gate → full autonomy (YOLO enabled)."""
         enable_calls: list[str] = []
         disable_calls: list[str] = []
 
@@ -116,6 +148,7 @@ class TestAutoModeOn:
 
         # Patch the settings path
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _force_danger_gate(monkeypatch, mfa_on_dangers=False)
 
         from hermes.runtime.approval_gateway import (
             apply_auto_mode_for_cycle,
@@ -126,14 +159,54 @@ class TestAutoModeOn:
         apply_auto_mode_for_cycle()
 
         assert enable_calls == ["cerebro"], (
-            "enable_session_yolo must be called with 'cerebro' when AUTO is ON"
+            "enable_session_yolo must be called with 'cerebro' only when AUTO is ON "
+            "AND the owner lowered the danger gate (mfa_on_dangers=OFF)"
         )
-        assert disable_calls == [], "disable_session_yolo must NOT be called when AUTO is ON"
+        assert disable_calls == [], (
+            "disable_session_yolo must NOT be called in full-autonomy mode"
+        )
 
-    def test_gateway_cb_not_triggered_in_auto_mode(
+    def test_danger_gate_wins_over_auto_mode_by_default(
         self, tmp_path, monkeypatch
     ) -> None:
-        """In AUTO mode, check_all_command_guards approves without triggering the cb."""
+        """SECURITY INVARIANT: AUTO ON alone (danger gate at default ON) must NOT
+        grant YOLO — dangers keep pausing for owner MFA ('DANGERS piden MFA')."""
+        enable_calls: list[str] = []
+        disable_calls: list[str] = []
+
+        fake_mod = _make_fake_approval_module(
+            enable_called=enable_calls,
+            disable_called=disable_calls,
+        )
+        monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
+        monkeypatch.setitem(sys.modules, "tools.approval", fake_mod)
+
+        settings = tmp_path / "security_mode.json"
+        settings.write_text(json.dumps({"auto_mode": True}))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _force_danger_gate(monkeypatch, mfa_on_dangers=True)
+
+        from hermes.runtime.approval_gateway import (
+            apply_auto_mode_for_cycle,
+            set_session_key_for_thread,
+        )
+
+        set_session_key_for_thread()
+        apply_auto_mode_for_cycle()
+
+        assert disable_calls == ["cerebro"], (
+            "disable_session_yolo must be called: the danger gate (default ON) wins "
+            "over AUTO mode — dangers keep pausing for owner MFA"
+        )
+        assert enable_calls == [], (
+            "enable_session_yolo must NOT be called while the danger gate is up"
+        )
+
+    def test_gateway_cb_not_triggered_in_full_autonomy(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """AUTO ON + danger gate lowered → check_all_command_guards approves
+        without triggering the cb (session YOLO active)."""
         notify_cb_store: list = []
         gateway_triggered: list[dict] = []
 
@@ -144,6 +217,7 @@ class TestAutoModeOn:
         settings = tmp_path / "security_mode.json"
         settings.write_text(json.dumps({"auto_mode": True}))
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _force_danger_gate(monkeypatch, mfa_on_dangers=False)
 
         from hermes.runtime.approval_gateway import (
             apply_auto_mode_for_cycle,
@@ -160,13 +234,50 @@ class TestAutoModeOn:
         set_session_key_for_thread()
         apply_auto_mode_for_cycle()
 
-        # Simulate a dangerous command — in AUTO mode (session YOLO active),
+        # Simulate a dangerous command — in full autonomy (session YOLO active),
         # check_all_command_guards returns approved without calling the cb.
         result = fake_mod.check_all_command_guards("rm -rf /tmp/x", "local")
         assert result["approved"] is True
         assert gateway_triggered == [], (
-            "Gateway cb must NOT be triggered when AUTO mode is ON (session YOLO active)"
+            "Gateway cb must NOT be triggered in full autonomy (session YOLO active)"
         )
+
+    def test_gateway_cb_triggered_in_auto_mode_when_danger_gate_up(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """SECURITY INVARIANT: with the danger gate at default (ON), a dangerous
+        command in AUTO mode STILL surfaces the ApprovalRequested card."""
+        gateway_triggered: list[dict] = []
+
+        fake_mod = _make_fake_approval_module()
+        monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
+        monkeypatch.setitem(sys.modules, "tools.approval", fake_mod)
+
+        settings = tmp_path / "security_mode.json"
+        settings.write_text(json.dumps({"auto_mode": True}))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _force_danger_gate(monkeypatch, mfa_on_dangers=True)
+
+        from hermes.runtime.approval_gateway import (
+            apply_auto_mode_for_cycle,
+            register_gateway_notify_callback,
+            set_session_key_for_thread,
+        )
+
+        def emit(payload_json: str) -> None:
+            gateway_triggered.append(json.loads(payload_json))
+
+        register_gateway_notify_callback(emit)
+
+        set_session_key_for_thread()
+        apply_auto_mode_for_cycle()  # AUTO ON but danger gate up → disable YOLO
+
+        # Dangerous command: session YOLO disabled → gateway cb fires
+        result = fake_mod.check_all_command_guards("rm -rf /tmp/x", "local")
+        assert result["approved"] is False
+        assert len(gateway_triggered) == 1
+        assert gateway_triggered[0]["command"] == "rm -rf /tmp/x"
+        assert "request_id" in gateway_triggered[0]
 
 
 # ---------------------------------------------------------------------------

@@ -610,3 +610,204 @@ class TestLicenseSpecRemoteApprovalEnabledBackCompat:
         assert "remote_approval_enabled" not in parsed_license
         assert parsed_license["plan"] == "starter"
         assert parsed_license["max_agents"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Fase 3 — department-scoped visibility (AccessScopeSpec.visibility_scope +
+# PolicyPayload.directory). Wire-contract only here: consumption (roster
+# filter / OfficeView / delegation-adapter) is a SEPARATE later task.
+# ---------------------------------------------------------------------------
+
+
+class TestVisibilityScopeRoundTrip:
+    def test_default_is_all(self) -> None:
+        assert AccessScopeSpec().visibility_scope == "all"
+
+    def test_department_round_trips_through_signing_bytes(self) -> None:
+        scope = AccessScopeSpec(visibility_scope="department")
+        agent = AgentSpec(agent_id="a1", name="Agent", access_scope=scope)
+        payload = PolicyPayload(agents=[agent])
+
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-07-06T00:00:00Z", payload=payload)
+        parsed_payload = PolicyPayload.model_validate(json.loads(b)["payload"])
+
+        assert parsed_payload.agents[0].access_scope.visibility_scope == "department"
+
+    def test_none_round_trips_through_signing_bytes(self) -> None:
+        scope = AccessScopeSpec(visibility_scope="none")
+        agent = AgentSpec(agent_id="a1", name="Agent", access_scope=scope)
+        payload = PolicyPayload(agents=[agent])
+
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-07-06T00:00:00Z", payload=payload)
+        parsed_payload = PolicyPayload.model_validate(json.loads(b)["payload"])
+
+        assert parsed_payload.agents[0].access_scope.visibility_scope == "none"
+
+
+class TestVisibilityScopeBackCompat:
+    """A scope with visibility_scope="all" (the default) must parse + sign
+    BYTE-IDENTICALLY to before this field existed — it must never appear
+    (not even as "all") in the serialized dict when unset/default."""
+
+    def test_key_absent_from_dump_when_all(self) -> None:
+        scope = AccessScopeSpec(enforced=True)
+        agent = AgentSpec(agent_id="a1", name="Agent", access_scope=scope)
+        payload = PolicyPayload(agents=[agent])
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-07-06T00:00:00Z", payload=payload)
+        parsed_scope = json.loads(b)["payload"]["agents"][0]["access_scope"]
+        assert "visibility_scope" not in parsed_scope
+
+    def test_key_present_when_department(self) -> None:
+        scope = AccessScopeSpec(visibility_scope="department")
+        agent = AgentSpec(agent_id="a1", name="Agent", access_scope=scope)
+        payload = PolicyPayload(agents=[agent])
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-07-06T00:00:00Z", payload=payload)
+        parsed_scope = json.loads(b)["payload"]["agents"][0]["access_scope"]
+        assert parsed_scope["visibility_scope"] == "department"
+
+    def test_signing_bytes_unaffected_by_the_new_field_existing(self) -> None:
+        """The committed TestAccessScopeSigningVector vector (no
+        visibility_scope key at all) must sign to the exact same bytes now
+        that the field exists — it never appears when "all"."""
+        scope = AccessScopeSpec(
+            enforced=True, cerebro_unrestricted=False,
+            native_tools=["execute_code", "terminal"],
+            policy_overlay={"send_message": {"enabled": False}},
+            views=["calendar"],
+        )
+        agent = AgentSpec(agent_id="cloud-agent-1", name="Support", access_scope=scope)
+        payload = PolicyPayload(agents=[agent])
+        b = signing_bytes(
+            version=1, tenant_id="test-tenant", issued_at="2026-06-26T10:00:00Z", payload=payload,
+        )
+        parsed = json.loads(b)
+        assert parsed["payload"]["agents"][0]["access_scope"] == {
+            "cerebro_unrestricted": False,
+            "enforced": True,
+            "native_tools": ["execute_code", "terminal"],
+            "policy_overlay": {"send_message": {"enabled": False}},
+            "views": ["calendar"],
+        }
+
+
+class TestIntegrationToolkitsRoundTrip:
+    """Cerebro Enterprise Increment 0 (R-B): AccessScopeSpec.integration_toolkits
+    — per-agent composio toolkit allow-list. Wire-contract only here:
+    enforcement (_expand_composio / composio_skill_service) is a SEPARATE
+    later task."""
+
+    def test_default_is_empty_list(self) -> None:
+        assert AccessScopeSpec().integration_toolkits == []
+
+    def test_round_trips_through_signing_bytes(self) -> None:
+        scope = AccessScopeSpec(integration_toolkits=["gmail", "googledrive"])
+        agent = AgentSpec(agent_id="a1", name="Agent", access_scope=scope)
+        payload = PolicyPayload(agents=[agent])
+
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-07-07T00:00:00Z", payload=payload)
+        parsed_payload = PolicyPayload.model_validate(json.loads(b)["payload"])
+
+        assert parsed_payload.agents[0].access_scope.integration_toolkits == ["gmail", "googledrive"]
+
+    def test_sorted_and_deduplicated(self) -> None:
+        scope = AccessScopeSpec(integration_toolkits=["slack", "gmail", "slack", "googledrive"])
+        assert scope.integration_toolkits == ["gmail", "googledrive", "slack"]
+
+    def test_over_256_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AccessScopeSpec(integration_toolkits=[f"toolkit{i}" for i in range(257)])
+
+
+class TestIntegrationToolkitsBackCompat:
+    """A scope with integration_toolkits=[] (the default) must parse + sign
+    BYTE-IDENTICALLY to before this field existed — it must never appear
+    (not even as []) in the serialized dict when unset/empty."""
+
+    def test_key_absent_from_dump_when_empty(self) -> None:
+        scope = AccessScopeSpec(enforced=True)
+        agent = AgentSpec(agent_id="a1", name="Agent", access_scope=scope)
+        payload = PolicyPayload(agents=[agent])
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-07-07T00:00:00Z", payload=payload)
+        parsed_scope = json.loads(b)["payload"]["agents"][0]["access_scope"]
+        assert "integration_toolkits" not in parsed_scope
+
+    def test_key_present_when_non_empty(self) -> None:
+        scope = AccessScopeSpec(integration_toolkits=["gmail"])
+        agent = AgentSpec(agent_id="a1", name="Agent", access_scope=scope)
+        payload = PolicyPayload(agents=[agent])
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-07-07T00:00:00Z", payload=payload)
+        parsed_scope = json.loads(b)["payload"]["agents"][0]["access_scope"]
+        assert parsed_scope["integration_toolkits"] == ["gmail"]
+
+    def test_signing_bytes_unaffected_by_the_new_field_existing(self) -> None:
+        """The committed TestAccessScopeSigningVector vector (no
+        integration_toolkits key at all) must sign to the exact same bytes
+        now that the field exists — it never appears when empty."""
+        scope = AccessScopeSpec(
+            enforced=True, cerebro_unrestricted=False,
+            native_tools=["execute_code", "terminal"],
+            policy_overlay={"send_message": {"enabled": False}},
+            views=["calendar"],
+        )
+        agent = AgentSpec(agent_id="cloud-agent-1", name="Support", access_scope=scope)
+        payload = PolicyPayload(agents=[agent])
+        b = signing_bytes(
+            version=1, tenant_id="test-tenant", issued_at="2026-06-26T10:00:00Z", payload=payload,
+        )
+        parsed = json.loads(b)
+        assert parsed["payload"]["agents"][0]["access_scope"] == {
+            "cerebro_unrestricted": False,
+            "enforced": True,
+            "native_tools": ["execute_code", "terminal"],
+            "policy_overlay": {"send_message": {"enabled": False}},
+            "views": ["calendar"],
+        }
+
+
+class TestDirectorySpecRoundTrip:
+    def test_entries_round_trip_through_signing_bytes(self) -> None:
+        from hermes.config_sync.policy_document import DirectoryEntrySpec, DirectorySpec
+
+        directory = DirectorySpec(entries=[
+            DirectoryEntrySpec(employee_id="e2", agent_id="a2", name="Ana", department="Ventas"),
+        ])
+        payload = PolicyPayload(directory=directory)
+
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-07-06T00:00:00Z", payload=payload)
+        parsed_payload = PolicyPayload.model_validate(json.loads(b)["payload"])
+
+        assert parsed_payload.directory == directory
+
+    def test_explicit_empty_entries_still_serializes(self) -> None:
+        """visibility_scope="none" -> DirectorySpec(entries=[]) must still
+        appear on the wire (distinct from no directory pushed at all) —
+        only `directory is None` is dropped."""
+        from hermes.config_sync.policy_document import DirectorySpec
+
+        payload = PolicyPayload(directory=DirectorySpec(entries=[]))
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-07-06T00:00:00Z", payload=payload)
+        parsed = json.loads(b)["payload"]
+        assert parsed["directory"] == {"entries": []}
+
+
+class TestDirectorySpecBackCompat:
+    """A payload with directory=None (the default) must parse + sign BYTE-
+    IDENTICALLY to before this field existed — the key must be ABSENT, never
+    "directory":null."""
+
+    def test_key_absent_from_dump_when_none(self) -> None:
+        payload = PolicyPayload()
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-07-06T00:00:00Z", payload=payload)
+        parsed_payload = json.loads(b)["payload"]
+        assert "directory" not in parsed_payload
+
+    def test_signing_bytes_unaffected_by_the_new_field_existing(self) -> None:
+        """The committed TestSigningBytes vectors (built before `directory`
+        existed) must sign to the exact same bytes now that the field
+        exists on PolicyPayload."""
+        payload = PolicyPayload.model_validate(_minimal_payload_dict())
+        b = signing_bytes(
+            version=1, tenant_id="tenant-abc", issued_at="2026-06-26T10:00:00Z", payload=payload,
+        )
+        parsed_payload = json.loads(b)["payload"]
+        assert "directory" not in parsed_payload

@@ -223,7 +223,11 @@ class SafentTerminal(App):
         self.go_to(pane_id)
 
     def go_to(self, pane_id: str) -> None:
-        self.query_one(Sidebar).select_pane(pane_id)  # emits Navigate → _switch_to
+        self.query_one(Sidebar).select_pane(pane_id)  # cosmetic highlight
+        # Authoritative switch: ListView.Highlighted (which drives Navigate →
+        # _switch_to) does NOT re-fire when the selected index is unchanged, so
+        # relying on the highlight event alone can leave the content pane stale.
+        self._switch_to(pane_id)
 
     def _switch_to(self, pane_id: str) -> None:
         cs = self.query_one("#content", ContentSwitcher)

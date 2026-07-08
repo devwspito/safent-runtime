@@ -4,11 +4,9 @@ Verifies that the critical integration gaps are closed:
   (W1) Broker receives composio_adapter= (KC-4).
   (W2) Broker uses ComposioCapabilityRegistry (dynamic slug resolution).
   (W3) NousReasoningEngine receives broker + consent_context (F2).
-  (W4) HermesShellWindow._approved_sites_store passed to HermesSettingsWindow.
   (W5) ComposioToolsRegistry built with broker-aware tools_builder (KC-4 live-reload).
 
-Each test is pure-unit: no network, no real DB, no GTK. Import of GTK-dependent
-modules is guarded so the test suite can run in headless CI environments.
+Each test is pure-unit: no network, no real DB.
 """
 
 from __future__ import annotations
@@ -185,16 +183,43 @@ class TestBrokerUsesComposioCapabilityRegistry:
             "W2: static registry binding must not be overridden by ComposioCapabilityRegistry"
         )
 
-    def test_composio_write_slug_returns_none(self) -> None:
-        """WRITE Composio slugs → None (fail-closed in broker)."""
+    def test_composio_write_slug_requires_hitl_never_auto_executes(self) -> None:
+        """WRITE Composio slugs → HIGH + non-auto-executable binding (HITL-gated).
+
+        Sovereign-write model (commit 65bc386): a WRITE slug that is NOT in the
+        static registry resolves to a Composio binding with risk=HIGH and
+        auto_executable=False. The broker's _needs_hitl treats HIGH as an
+        unconditional HITL requirement (no autonomy level can exempt it), so the
+        write can NEVER auto-execute — it only runs after the owner approves the
+        HITL card + TOTP. Previously WRITE slugs resolved to None, which
+        structurally blocked EVERY integration write even with owner approval.
+
+        The security invariant enforced here: a WRITE Composio slug must never be
+        auto-executable and must be HIGH risk (fail-closed against silent
+        execution).
+        """
         from hermes.capabilities.application.composio_capability_registry import (
             ComposioCapabilityRegistry,
         )
         from hermes.capabilities.application.capability_registry import CapabilityRegistry
+        from hermes.capabilities.domain.ports import RiskLevel
 
         registry = ComposioCapabilityRegistry(static_registry=CapabilityRegistry())
-        assert registry.resolve("gmail_send_email") is None, (
-            "W2: WRITE Composio slug must resolve to None (fail-closed)"
+        binding = registry.resolve("gmail_send_email")
+
+        assert binding is not None, (
+            "W2: WRITE Composio slug must resolve to a binding so it can reach an "
+            "HITL approval card (not be structurally blocked before approval)"
+        )
+        assert binding.executor == "composio", (
+            "W2: WRITE Composio binding must dispatch via the composio executor"
+        )
+        assert binding.risk is RiskLevel.HIGH, (
+            "W2: WRITE Composio binding must be HIGH risk (forces HITL, no exemption)"
+        )
+        assert binding.auto_executable is False, (
+            "W2: WRITE Composio binding must NEVER be auto-executable — it requires "
+            "owner HITL approval (card + TOTP) before executing"
         )
 
 
@@ -305,78 +330,6 @@ class TestNousEngineReceivesBroker:
         assert "BLOCKED" in data["error"], (
             f"W3: result must contain 'BLOCKED', got: {data['error']}"
         )
-
-
-# ---------------------------------------------------------------------------
-# W4: ApprovedSitesStore wired from window to settings
-# ---------------------------------------------------------------------------
-
-
-class TestApprovedSitesStoreWiring:
-    """W4: ApprovedSitesStore created in HermesShellWindow and passed to HermesSettingsWindow."""
-
-    def test_approved_sites_store_exists_on_window(self) -> None:
-        """HermesShellWindow.__init__ creates an _approved_sites_store attribute."""
-        from hermes.shell.presentation.gtk4.approved_sites_store import ApprovedSitesStore
-
-        # We can't instantiate HermesShellWindow without GTK, but we can verify
-        # that the module-level import is present and the store attribute is defined
-        # in the __init__ source by checking the class body.
-        import inspect
-        import hermes.shell.presentation.gtk4.window as window_module  # noqa: PLC0415
-
-        src = inspect.getsource(window_module.HermesShellWindow.__init__)
-        assert "ApprovedSitesStore" in src or "_approved_sites_store" in src, (
-            "W4: HermesShellWindow.__init__ must instantiate ApprovedSitesStore"
-        )
-
-    def test_settings_window_receives_approved_sites_store(self) -> None:
-        """_open_settings_window passes approved_sites_store= to HermesSettingsWindow."""
-        import inspect
-        import hermes.shell.presentation.gtk4.window as window_module  # noqa: PLC0415
-
-        src = inspect.getsource(window_module.HermesShellWindow._open_settings_window)
-        assert "approved_sites_store" in src, (
-            "W4: _open_settings_window must pass approved_sites_store= to HermesSettingsWindow"
-        )
-
-    def test_approved_sites_store_import_in_window_module(self) -> None:
-        """window.py imports ApprovedSitesStore at module level."""
-        import hermes.shell.presentation.gtk4.window as window_module  # noqa: PLC0415
-
-        assert hasattr(window_module, "ApprovedSitesStore"), (
-            "W4: window module must import ApprovedSitesStore"
-        )
-
-    def test_approved_sites_store_basic_lifecycle(self, tmp_path) -> None:
-        """ApprovedSitesStore add/remove/as_frozenset works correctly."""
-        from hermes.shell.presentation.gtk4.approved_sites_store import ApprovedSitesStore
-
-        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path)}):
-            store = ApprovedSitesStore()
-
-            added = store.add("example.com")
-            assert added is True
-            assert "example.com" in store.as_frozenset()
-
-            removed = store.remove("example.com")
-            assert removed is True
-            assert "example.com" not in store.as_frozenset()
-
-    def test_approved_sites_store_rejects_invalid_domain(self, tmp_path) -> None:
-        """ApprovedSitesStore rejects domains with schemes or slashes (fail-closed)."""
-        from hermes.shell.presentation.gtk4.approved_sites_store import ApprovedSitesStore
-
-        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path)}):
-            store = ApprovedSitesStore()
-
-            assert store.add("https://example.com") is False, (
-                "W4: domain with scheme must be rejected"
-            )
-            assert store.add("example.com/path") is False, (
-                "W4: domain with path must be rejected"
-            )
-            assert store.as_frozenset() == frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -675,10 +628,13 @@ class TestOsNativeDispatcherWiring:
 
         fake_consent = MagicMock()
 
-        # resolve_model_config is imported locally inside _build_os_native_dispatcher;
-        # patch it at its definition site so the local import picks up the mock.
+        # _build_os_native_dispatcher reads the model from
+        # ActiveProviderService(db_path=_DB_PATH).resolve() (NOT resolve_model_config).
+        # Patch THAT to None so "no model configured" is deterministic and independent
+        # of whatever provider the ambient shell-state.db (_DB_PATH) happens to hold —
+        # otherwise an earlier test that seeds a provider leaks in and _cu_model != "".
         with patch(
-            "hermes.runtime.provider_config_source.resolve_model_config",
+            "hermes.runtime.active_provider.ActiveProviderService.resolve",
             return_value=None,
         ):
             dispatcher = _build_os_native_dispatcher(

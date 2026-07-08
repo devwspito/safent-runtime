@@ -5,8 +5,10 @@ simulado para verificar la lógica de decisión.
 
 Cubre:
   - CONNECT a dominio permitido (open-logged) → 200 + audit allow.
-  - CONNECT a dominio denegado (default-deny con SNI) → 403 + audit deny.
-  - CONNECT sin TLS bytes en default-deny → 403 sin audit (no SNI).
+  - CONNECT a dominio denegado (default-deny con SNI) → 200 (host permitido) +
+    túnel cerrado en el gate SNI + audit deny (SNI), sin upstream.
+  - CONNECT a host no permitido en default-deny → 403 en el pre-check + audit deny
+    (keyed por el host del CONNECT, identificador verificado).
   - HTTP plano a dominio permitido → forwarded (upstream simulado).
   - HTTP plano en default-deny → 403 inmediato (Fix-7).
   - CONNECT con Host inválido → 403.
@@ -162,6 +164,20 @@ async def _run_connect_handler(
         _fake_open_connection,
     )
 
+    # Stub la resolución DNS anti-SSRF (_resolve_external_ips hace getaddrinfo real).
+    # En unit tests no hay red y los dominios de prueba (allowed.com, *.example) no
+    # resuelven; devolver una IP pública fija (RFC 5737 TEST-NET-3) deja que el
+    # handler alcance la lógica de decisión de política en vez de morir en el
+    # refuse-on-unresolvable. Devuelve una LISTA (RFC 8305 Happy Eyeballs), que es
+    # el contrato actual de la función (antes era _resolve_external_ip → str).
+    async def _fake_resolve_external_ips(host):
+        return ["203.0.113.10"]
+
+    monkeypatch.setattr(
+        "hermes.egress_proxy.infrastructure.proxy_handler._resolve_external_ips",
+        _fake_resolve_external_ips,
+    )
+
     handler = ProxyConnectionHandler(policy_engine=engine, audit_sink=sink)
     await handler.handle(reader, writer)
     return bytes(transport.written)
@@ -210,14 +226,9 @@ class TestConnectHandler:
             )
         )
         sink = InMemoryAuditSink()
-        # Stub DNS resolution so the handler reaches the SNI check (fake domains
-        # don't resolve; real resolution is not what this test exercises).
-        async def _fake_resolve(host):
-            return "1.2.3.4"
-        monkeypatch.setattr(
-            "hermes.egress_proxy.infrastructure.proxy_handler._resolve_external_ip",
-            _fake_resolve,
-        )
+        # DNS is stubbed inside _run_connect_handler (no real network in unit tests):
+        # the fake domains don't resolve, so the helper returns a fixed public IP,
+        # letting the handler reach the SNI check that this test exercises.
         connect = b"CONNECT allowed-cdn.example:443 HTTP/1.1\r\n\r\n"
         tls = _make_tls_client_hello("blocked.example")  # fronted SNI
         await _run_connect_handler(connect, engine, sink, monkeypatch, tls_payload=tls)
@@ -238,12 +249,7 @@ class TestConnectHandler:
             )
         )
         sink = InMemoryAuditSink()
-        async def _fake_resolve(host):
-            return "1.2.3.4"
-        monkeypatch.setattr(
-            "hermes.egress_proxy.infrastructure.proxy_handler._resolve_external_ip",
-            _fake_resolve,
-        )
+        # DNS resolution is stubbed inside _run_connect_handler (see helper).
         connect = b"CONNECT site.example:443 HTTP/1.1\r\n\r\n"
         tls = _make_tls_client_hello("site.example")
         written = await _run_connect_handler(connect, engine, sink, monkeypatch, tls_payload=tls)
@@ -256,18 +262,29 @@ class TestConnectHandler:
     ) -> None:
         """Fix-4: DEFAULT_DENY checks the SNI, not just the CONNECT host.
 
-        A CONNECT with a whitelisted CONNECT host but an evil SNI is denied.
-        The audit record uses the SNI hostname (the authoritative identifier).
+        A CONNECT with a whitelisted CONNECT host but an evil SNI is caught by the
+        SNI gate. The audit record uses the SNI hostname (the authoritative
+        identifier), the SNI is recorded as DENIED, and no upstream to evil.com is
+        opened.
+
+        Protocol note (deadlock fix): the whitelisted CONNECT host clears the
+        up-front host pre-check, so the proxy MUST send ``200 Connection
+        established`` before the client will emit its ClientHello — a 403 can no
+        longer be sent at this point. The security gate is therefore the SNI
+        decision: on denial the tunnel is closed WITHOUT opening any upstream, so
+        the ``200`` reaches the client but evil.com receives nothing.
         """
         engine = _make_policy_engine(
             EgressMode.DEFAULT_DENY, frozenset({"allowed.com"})
         )
         sink = InMemoryAuditSink()
-        # CONNECT host doesn't matter — SNI is the gate in DEFAULT_DENY.
+        # Whitelisted CONNECT host clears the pre-check; the evil SNI is the gate.
         connect = b"CONNECT allowed.com:443 HTTP/1.1\r\n\r\n"
         tls = _make_tls_client_hello("evil.com")
         written = await _run_connect_handler(connect, engine, sink, monkeypatch, tls_payload=tls)
-        assert b"403" in written
+        # 200 to the client (needed to elicit the ClientHello), but the evil SNI is
+        # then denied and the tunnel dropped — never allowed, no upstream opened.
+        assert b"200" in written
         assert "evil.com" in sink.denied_domains()
         assert sink.allowed_domains() == []
 
@@ -275,9 +292,13 @@ class TestConnectHandler:
     async def test_default_deny_blocks_unlisted_domain_no_sni(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Fix-4: in DEFAULT_DENY, CONNECT without a ClientHello is denied immediately.
+        """Fix-4: in DEFAULT_DENY, a CONNECT to an un-whitelisted host is rejected
+        at the up-front host pre-check with a clean 403 — before any ClientHello.
 
-        No audit record is emitted — the domain cannot be verified (no SNI).
+        The denial IS audited, keyed by the CONNECT host. That host is a verified
+        identifier (the literal CONNECT target the client asked for), not an
+        unauthenticated SNI claim, so recording it is correct and desirable. No
+        allow is ever recorded and no tunnel is established.
         """
         engine = _make_policy_engine(
             EgressMode.DEFAULT_DENY, frozenset({"allowed.com"})
@@ -286,8 +307,8 @@ class TestConnectHandler:
         request = b"CONNECT evil.com:443 HTTP/1.1\r\n\r\n"
         written = await _run_connect_handler(request, engine, sink, monkeypatch)
         assert b"403" in written
-        # No audit record because no SNI was available to verify.
-        assert sink.denied_domains() == []
+        # Un-whitelisted CONNECT host → denied at the pre-check and audited; never allowed.
+        assert "evil.com" in sink.denied_domains()
         assert sink.allowed_domains() == []
 
     @pytest.mark.asyncio

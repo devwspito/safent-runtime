@@ -102,7 +102,7 @@ class TestOrchestratorTaintsPropagation:
         received_consents: list[ConsentContext] = []
 
         class _CaptureBroker:
-            async def dispatch(self, proposal, consent, *, hitl_approval_token=None, work_item_id=None, autonomy_level=None):
+            async def dispatch(self, proposal, consent, *, hitl_approval_token=None, work_item_id=None, autonomy_level=None, conversation_id=""):
                 received_consents.append(consent)
                 return ExecutionOutcome(
                     proposal_id=proposal.proposal_id,
@@ -171,7 +171,7 @@ class TestOrchestratorTaintsPropagation:
         received_consents: list[ConsentContext] = []
 
         class _CaptureBroker:
-            async def dispatch(self, proposal, consent, *, hitl_approval_token=None, work_item_id=None, autonomy_level=None):
+            async def dispatch(self, proposal, consent, *, hitl_approval_token=None, work_item_id=None, autonomy_level=None, conversation_id=""):
                 received_consents.append(consent)
                 return ExecutionOutcome(
                     proposal_id=proposal.proposal_id,

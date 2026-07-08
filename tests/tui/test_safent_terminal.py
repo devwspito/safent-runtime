@@ -115,7 +115,7 @@ async def test_kill_switch_toggles_pause() -> None:
         assert app._paused is False
 
 
-async def test_slash_commands_render_listings() -> None:
+async def test_slash_commands_navigate_and_help() -> None:
     from hermes.tui.screens.chat import ChatMessage, ChatPane
 
     app = SafentTerminal(bridge=OfflineRuntimeBridge())
@@ -126,8 +126,11 @@ async def test_slash_commands_render_listings() -> None:
             await chat._handle_slash(cmd)
             await pilot.pause()
         texts = " ".join(m.text for m in app.query(ChatMessage))
-        assert "Comandos" in texts  # /help rendered
-        assert "Centro de seguridad" in texts  # /security rendered
+        # Only /help and /attach answer in-chat; every pane command jumps to its
+        # section and confirms the jump inline ("Navegando a **<cmd>**…").
+        assert "Comandos" in texts  # /help renders the command listing in-chat
+        assert "Navegando a **security**" in texts  # /security -> Seguridad pane
+        assert "Navegando a **mcp**" in texts  # /mcp -> MCP pane
 
 
 async def test_security_review_modal_on_signal() -> None:

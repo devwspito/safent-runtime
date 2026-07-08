@@ -1,10 +1,11 @@
 """Unit tests for McpCapabilityRegistry.
 
 Tests cover:
-  (a) Static registry takes priority over MCP resolution.
+  (a) mcp__<slug>__<tool> names are owned by the MCP registry — an inner
+      catch-all (e.g. Composio's slug matcher) can NOT hijack them.
   (b) Known mcp__<slug>__<tool> resolves to MCP_CALL binding with executor='mcp'.
   (c) Unknown server (slug not in manager) → None (broker fail-closes).
-  (d) Non-MCP tool name → None (delegated, not resolved).
+  (d) Non-MCP tool name → delegated to the inner registry.
   (e) Malformed qualified name → None.
   (f) Resolved binding has correct risk/auto_executable from tool classification.
 """
@@ -73,11 +74,14 @@ def _low_tool(slug_str: str, name: str) -> McpTool:
 
 
 def _high_tool(slug_str: str, name: str) -> McpTool:
+    # USER_ADDED (not BUILTIN): a USER_ADDED server with no read-only hint is
+    # forced HIGH + not-auto. BUILTIN is frictionless (LOW+auto) by design — the
+    # jail is the control, not the approval — so it would NOT yield a HIGH tool.
     return McpTool.build(
         name=name,
         description="",
         slug=ServerSlug(slug_str),
-        trust_level=TrustLevel.BUILTIN,
+        trust_level=TrustLevel.USER_ADDED,
     )
 
 
@@ -87,15 +91,43 @@ def _high_tool(slug_str: str, name: str) -> McpTool:
 
 
 class TestMcpCapabilityRegistryResolution:
-    def test_static_takes_priority(self) -> None:
-        static = FakeCapabilityRegistry()
-        static.register_low("mcp__some-server__resource_list")
-        manager = McpServerManager(client_factory=lambda _t: _FakeMcpClient())
-        registry = McpCapabilityRegistry(static_registry=static, server_manager=manager)
+    def test_mcp_name_not_hijacked_by_inner_catchall(self) -> None:
+        """Regression (2026-07-08): an inner catch-all must NOT hijack an mcp__ name.
 
-        binding = registry.resolve("mcp__some-server__resource_list")
+        ComposioCapabilityRegistry._looks_like_composio_slug fires on any
+        underscored name, so it used to claim every mcp__<slug>__<tool> and
+        return a HIGH api_call/executor=composio binding — forcing pure MCP
+        reads (list_/get_) to HITL and mis-routing execution. The MCP registry
+        owns its namespace: it resolves the live tool regardless of what the
+        inner registry would return for the same name.
+        """
+        hijacker = FakeCapabilityRegistry()
+        hijacker.register_high("mcp__playwright-mcp__resource_list")  # the would-be hijack
+
+        manager = _make_manager_with_server(
+            "playwright-mcp",
+            [_low_tool("playwright-mcp", "resource_list")],
+        )
+        registry = McpCapabilityRegistry(static_registry=hijacker, server_manager=manager)
+
+        binding = registry.resolve("mcp__playwright-mcp__resource_list")
         assert binding is not None
-        assert binding.executor != "mcp", "Static registry wins over MCP dynamic resolution"
+        assert binding.executor == "mcp", "MCP owns its namespace; inner must not hijack"
+        assert binding.surface_kind is SurfaceKind.MCP_CALL
+        assert binding.risk is RiskLevel.LOW
+        assert binding.auto_executable is True
+
+    def test_non_mcp_name_delegates_to_inner(self) -> None:
+        """A non-mcp name still delegates to the inner registry, which owns it."""
+        inner = FakeCapabilityRegistry()
+        inner.register_low("GITHUB_LIST_REPOS")
+        manager = McpServerManager(client_factory=lambda _t: _FakeMcpClient())
+        registry = McpCapabilityRegistry(static_registry=inner, server_manager=manager)
+
+        binding = registry.resolve("GITHUB_LIST_REPOS")
+        assert binding is not None
+        assert binding.risk is RiskLevel.LOW
+        assert binding.auto_executable is True
 
     def test_known_mcp_tool_resolves_mcp_call(self) -> None:
         manager = _make_manager_with_server(

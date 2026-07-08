@@ -298,14 +298,30 @@ class TestConcurrentNoDoubleGate:
     Registry wrappers must NOT be invoked from the concurrent path for WRITE tools."""
 
     def test_invoke_tool_write_does_not_hit_registry(self) -> None:
-        """When _invoke_tool handles a WRITE, registry.dispatch is not called."""
+        """When _invoke_tool handles a native FILE WRITE, it reaches EXACTLY ONE
+        gate — the deterministic cage — and never double-gates via registry.dispatch
+        nor runs the native in-daemon handler.
+
+        DESIGN EVOLUTION (red-team 2026-06-19): native fs/exec tools
+        (write_file/patch/terminal/…) no longer route through the broker on the
+        concurrent path — they route through GovernedAIAgent._run_caged_tool
+        (uid-999 OpenShell sandbox / exec-launcher, egress-jailed, secrets
+        InaccessiblePaths). The broker rejected the natives ('no registrado', no
+        surface-adapter); the cage is now the single deterministic chokepoint for
+        every hand the agent has.
+
+        The security invariant preserved here is 'no double-gate, no in-daemon
+        native execution': _invoke_tool must reach exactly ONE gate (the cage) and
+        must NOT reach the process-global registry wrapper nor the original native
+        handler.
+        """
         from hermes.runtime.nous_engine import GovernedAIAgent  # noqa: PLC0415
 
         broker = MagicMock()
-        dispatch_calls: list[Any] = []
+        broker_bridge_calls: list[Any] = []
 
         def _fake_bridge(*, proposal, broker, consent_context, engine_loop, **_):
-            dispatch_calls.append(proposal)
+            broker_bridge_calls.append(proposal)
             return _outcome_executed()
 
         agent, call_log = _make_governed_agent_with_mock_registry(broker)
@@ -313,25 +329,45 @@ class TestConcurrentNoDoubleGate:
         registry_dispatch_calls: list[Any] = []
         agent._fake_registry.dispatch.side_effect = lambda *a, **kw: registry_dispatch_calls.append(a) or "registry_hit"
 
-        with patch("hermes.runtime.nous_engine._dispatch_via_bridge", side_effect=_fake_bridge):
-            # Directly call _invoke_tool as the concurrent path does.
-            result_str = agent._invoke_tool(
-                "write_file",
-                {"path": "/tmp/concurrent.txt", "content": "data"},
-                "task-concurrent",
-                "call-001",
-            )
+        # Spy on the cage chokepoint (do not touch the host exec-launcher socket).
+        cage_calls: list[tuple[str, dict[str, Any]]] = []
 
-        # Broker called once via _invoke_tool.
-        assert len(dispatch_calls) == 1
+        def _spy_cage(function_name: str, function_args: dict[str, Any]) -> str:
+            cage_calls.append((function_name, function_args))
+            return json.dumps({"caged": True})
+
+        with patch("hermes.runtime.nous_engine._dispatch_via_bridge", side_effect=_fake_bridge):
+            with patch.object(agent, "_run_caged_tool", side_effect=_spy_cage):
+                # Directly call _invoke_tool as the concurrent path does.
+                result_str = agent._invoke_tool(
+                    "write_file",
+                    {"path": "/tmp/concurrent.txt", "content": "data"},
+                    "task-concurrent",
+                    "call-001",
+                )
+
+        # The WRITE was gated by the deterministic cage EXACTLY ONCE (the chokepoint
+        # that confines fs surfaces to uid 999 — not the daemon process).
+        assert cage_calls == [
+            ("write_file", {"path": "/tmp/concurrent.txt", "content": "data"})
+        ], f"native FILE WRITE did not route through the cage exactly once: {cage_calls}"
+
+        # The broker bridge is NOT used for native file writes on the concurrent path
+        # (would be a second, redundant gate).
+        assert len(broker_bridge_calls) == 0, (
+            "broker bridge was invoked for a caged native WRITE — double-gate risk"
+        )
 
         # Registry.dispatch was NOT called (concurrent path does not go through registry).
         assert len(registry_dispatch_calls) == 0, (
             "registry.dispatch was called from the concurrent path — double-gate risk"
         )
 
-        # Native handler not called.
+        # Original native in-daemon handler NOT called (the in-daemon bypass stays closed).
         assert len(call_log["native"]) == 0
+
+        # Result came from the cage, not from the native handler.
+        assert json.loads(result_str) == {"caged": True}
 
     def test_invoke_tool_read_does_not_call_broker(self) -> None:
         """For READ tools on the concurrent path, broker is NOT called."""

@@ -1,17 +1,20 @@
-"""security_hook Enterprise approval routing — Fase 2 Phase 4b (REAL routing).
+"""security_hook Enterprise approval routing — Fase 2 Phase 4c (TOTP-keyed).
 
-Supersedes Phase 4a's inert Step 1.6a (which logged approval_router.route()
-for EVERY native tool call, purely for observability). Phase 4b moves the
-consult INSIDE the native-danger gate (Step 1.6) — it is now computed ONLY for
-an action that ALREADY needs owner approval (hook_mfa_block fired), and its
-result decides WHO resolves that SAME approval:
+Supersedes Phase 4b's delicacy/sensitivity/irreversible eligibility calculus.
+The consult happens INSIDE the native-danger gate (Step 1.6) — it is computed
+ONLY for an action that ALREADY needs owner approval (hook_mfa_block fired),
+and its result decides WHO resolves that SAME approval:
 
   - flag OFF (default) → LOCAL, byte-identical to today's native-danger path.
-  - flag ON + eligible (MOST_DELICATE/sensitive/irreversible) + cloud-managed
-    agent → ENTERPRISE: `_resolve_native_danger_approval` is called with
-    route=ApprovalRoute.ENTERPRISE (persists route='enterprise' + sensitivity
-    + agent_id on the pending row — verified in
+  - flag ON + the tool is MFA-tier (`tool_delicacy.is_mfa_required`) + the
+    agent is cloud-managed → ENTERPRISE: `_resolve_native_danger_approval` is
+    called with route=ApprovalRoute.ENTERPRISE (persists route='enterprise' +
+    sensitivity + agent_id on the pending row — verified in
     test_hitl_enterprise_route_block_and_resume.py's end-to-end coverage).
+    The worker has no TOTP, so they can never approve these, only deny.
+  - A SIMPLE-tier tool (no TOTP, e.g. cronjob — MOST_DELICATE by delicacy()
+    but explicitly carved out of the MFA tier) stays LOCAL even fully
+    tenant-gated: the worker approves it alone with a plain click.
   - A tool that never reaches the native-danger gate (NORMAL delicacy, no MFA
     required) never triggers the routing consult at all.
   - A raising router fails SOFT to LOCAL — the existing, proven native-danger
@@ -39,7 +42,12 @@ pytestmark = pytest.mark.unit
 
 _TENANT_ID = "tenant-x"
 _NORMAL_TOOL = "read_file"  # NORMAL delicacy, native, never needs owner MFA
-_MOST_DELICATE_TOOL = "cronjob"  # MOST_DELICATE — Enterprise-eligible by delicacy
+# MOST_DELICATE by delicacy() (blocks unconditionally at hook_mfa_block) but
+# explicitly carved OUT of the MFA tier (owner decision 2026-06-25) — a plain
+# click suffices, so it must NEVER escalate to ENTERPRISE regardless of the
+# tenant gate. Distinguishes the delicacy() axis from is_mfa_required().
+_MOST_DELICATE_TOOL = "cronjob"
+_MFA_TIER_TOOL = "skill_manage"  # MOST_DELICATE AND MFA-tier — the real Enterprise-eligible case
 
 
 class _FakeAccessScopeRepo:
@@ -168,7 +176,7 @@ class TestFlagOffStaysLocal:
 
 
 class TestFlagOnRoutesEnterprise:
-    def test_eligible_cloud_managed_action_routes_enterprise(self) -> None:
+    def test_mfa_tier_cloud_managed_action_routes_enterprise(self) -> None:
         set_current_cycle_agent("agent-a")
         hook = _make_hook(_FakeAccessScopeRepo(scope=_cloud_scope()))
 
@@ -182,7 +190,7 @@ class TestFlagOnRoutesEnterprise:
                 return_value="pending Enterprise approval",
             ) as mock_native_danger,
         ):
-            result = _run_hook(hook, _MOST_DELICATE_TOOL, {})
+            result = _run_hook(hook, _MFA_TIER_TOOL, {})
 
         mock_native_danger.assert_called_once()
         assert mock_native_danger.call_args.kwargs["route"] is ApprovalRoute.ENTERPRISE
@@ -190,6 +198,32 @@ class TestFlagOnRoutesEnterprise:
         # STILL blocks on the SAME local Event path — routing never bypasses HITL.
         assert result is not None
         assert result.get("action") == "block"
+
+    def test_most_delicate_but_simple_mfa_tier_tool_stays_local_even_with_flag_on(
+        self,
+    ) -> None:
+        """cronjob is MOST_DELICATE by delicacy() (hook_mfa_block ALWAYS fires)
+        but is explicitly carved out of the MFA tier (is_mfa_required ==
+        False) — routing must follow is_mfa_required, not the coarser
+        delicacy() axis, even with the tenant fully gated. The worker
+        approves it alone with a plain click; Enterprise is never involved."""
+        set_current_cycle_agent("agent-a")
+        hook = _make_hook(_FakeAccessScopeRepo(scope=_cloud_scope()))
+
+        with (
+            patch(
+                "hermes.runtime.security_hook._tenant_remote_approval_enabled",
+                return_value=True,
+            ),
+            patch(
+                "hermes.runtime.security_hook._resolve_native_danger_approval",
+                return_value="pending owner approval",
+            ) as mock_native_danger,
+        ):
+            _run_hook(hook, _MOST_DELICATE_TOOL, {})
+
+        mock_native_danger.assert_called_once()
+        assert mock_native_danger.call_args.kwargs["route"] is ApprovalRoute.LOCAL
 
     def test_flag_on_but_not_cloud_managed_stays_local(self) -> None:
         """Tenant gate requires BOTH agent_managed_by=='cloud' AND the flag —

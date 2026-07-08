@@ -50,19 +50,20 @@ class SqliteAgentAccessScopeRepo:
                 INSERT INTO agent_access_scopes (
                     tenant_id, agent_id, scope_id, native_tools, policy_overlay,
                     views, cerebro_unrestricted, enforced, updated_by, managed_by,
-                    approval_tier, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    approval_tier, authorized_mcp_servers, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(tenant_id, agent_id) DO UPDATE SET
-                    scope_id             = excluded.scope_id,
-                    native_tools         = excluded.native_tools,
-                    policy_overlay       = excluded.policy_overlay,
-                    views                = excluded.views,
-                    cerebro_unrestricted = excluded.cerebro_unrestricted,
-                    enforced             = excluded.enforced,
-                    updated_by           = excluded.updated_by,
-                    managed_by           = excluded.managed_by,
-                    approval_tier        = excluded.approval_tier,
-                    updated_at           = excluded.updated_at
+                    scope_id                = excluded.scope_id,
+                    native_tools            = excluded.native_tools,
+                    policy_overlay          = excluded.policy_overlay,
+                    views                   = excluded.views,
+                    cerebro_unrestricted    = excluded.cerebro_unrestricted,
+                    enforced                = excluded.enforced,
+                    updated_by              = excluded.updated_by,
+                    managed_by              = excluded.managed_by,
+                    approval_tier           = excluded.approval_tier,
+                    authorized_mcp_servers  = excluded.authorized_mcp_servers,
+                    updated_at              = excluded.updated_at
                 """,
                 (
                     scope.tenant_id,
@@ -76,6 +77,7 @@ class SqliteAgentAccessScopeRepo:
                     scope.updated_by,
                     scope.managed_by,
                     scope.approval_tier,
+                    json.dumps(sorted(scope.authorized_mcp_servers)),
                     scope.updated_at.isoformat(),
                 ),
             )
@@ -112,5 +114,10 @@ class SqliteAgentAccessScopeRepo:
             enforced=bool(row["enforced"]),
             managed_by=row["managed_by"],
             approval_tier=(row["approval_tier"] if "approval_tier" in row.keys() else "standard"),
+            authorized_mcp_servers=frozenset(
+                json.loads(row["authorized_mcp_servers"])
+                if "authorized_mcp_servers" in row.keys()
+                else []
+            ),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )

@@ -452,8 +452,9 @@ function AgentDrawer({ agent, departments, isWorking, open, onClose, onClone, on
   const { startNewWithAgent } = useOutletContext<ChatOutletContext>()
   const initials = agent.name.charAt(0).toUpperCase()
   const isFactory = agent.source === 'factory'
+  const isColleague = agent.source === 'directory'
   const isDefault = agent.is_default
-  const isEditable = !isFactory && !isDefault
+  const isEditable = !isFactory && !isDefault && !isColleague
   const [showEditModal, setShowEditModal] = useState(false)
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
@@ -533,7 +534,12 @@ function AgentDrawer({ agent, departments, isWorking, open, onClose, onClone, on
             </p>
           )}
 
-          {(isDefault || isFactory) && !isEditable && (
+          {isColleague && (
+            <p className={styles.drawerReadonlyNotice}>
+              {t('agents.drawer.readonly.directory')}
+            </p>
+          )}
+          {!isColleague && (isDefault || isFactory) && !isEditable && (
             <p className={styles.drawerReadonlyNotice}>
               {isDefault
                 ? t('agents.drawer.readonly.default')
@@ -541,22 +547,26 @@ function AgentDrawer({ agent, departments, isWorking, open, onClose, onClone, on
             </p>
           )}
 
-          <div className={styles.drawerStatusRow} aria-live="polite">
-            <StatusDot
-              state={isWorking ? 'warning' : 'success'}
-              label={isWorking ? t('agents.status.working') : t('agents.status.online')}
-            />
-          </div>
+          {!isColleague && (
+            <div className={styles.drawerStatusRow} aria-live="polite">
+              <StatusDot
+                state={isWorking ? 'warning' : 'success'}
+                label={isWorking ? t('agents.status.working') : t('agents.status.online')}
+              />
+            </div>
+          )}
 
           <div className={styles.drawerActions}>
-            <Button
-              type="button"
-              variant="primary"
-              onClick={handleChat}
-              title={t('agents.drawer.chat.title')}
-            >
-              {t('agents.drawer.chat')}
-            </Button>
+            {!isColleague && (
+              <Button
+                type="button"
+                variant="primary"
+                onClick={handleChat}
+                title={t('agents.drawer.chat.title')}
+              >
+                {t('agents.drawer.chat')}
+              </Button>
+            )}
 
             {(isFactory || isDefault) && (
               <Button
@@ -628,6 +638,7 @@ function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
   const reduced = useReducedMotion()
   const initials = agent.name.charAt(0).toUpperCase()
   const isFactory = agent.source === 'factory'
+  const isColleague = agent.source === 'directory'
   const deptLabel = departmentDisplayLabel(agent)
 
   const cardClasses = [
@@ -666,10 +677,15 @@ function AgentCard({ agent, isWorking, onClick }: AgentCardProps) {
           {isFactory && (
             <Badge variant="success">{t('agents.badge.factory')}</Badge>
           )}
-          <StatusDot
-            state={isWorking ? 'warning' : 'success'}
-            label={isWorking ? t('agents.status.working') : t('agents.status.online')}
-          />
+          {isColleague && (
+            <Badge variant="default">{t('agents.badge.directory')}</Badge>
+          )}
+          {!isColleague && (
+            <StatusDot
+              state={isWorking ? 'warning' : 'success'}
+              label={isWorking ? t('agents.status.working') : t('agents.status.online')}
+            />
+          )}
         </div>
       </div>
       {agent.description && (

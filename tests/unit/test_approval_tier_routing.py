@@ -1,9 +1,11 @@
-"""Per-role approval tier routing (2026-07-05).
+"""Per-role approval tier routing — NOW INERT (Fase 2 Phase 4c, 2026-07-06).
 
-A COORDINATOR agent self-resolves DELICATE actions at the LOCAL owner gate; a
-STANDARD agent escalates them to a remote ENTERPRISE approver. Restrict-only:
-the tier can only flip LOCAL→ENTERPRISE, only when a remote approver exists
-(tenant gate), and never touches the kernel floor.
+The TOTP-keyed model routes purely on `tool_delicacy.is_mfa_required(tool)`:
+the worker has no TOTP (centralized at Enterprise), so an MFA-tier action on
+a cloud-managed, remote-approval-enabled tenant ALWAYS escalates to
+ENTERPRISE — a COORDINATOR and a STANDARD agent route the SAME tool
+identically. `approval_tier` no longer flips LOCAL<->ENTERPRISE; it is kept
+only for back-compat/observability (see approval_router.route()'s docstring).
 """
 from __future__ import annotations
 
@@ -17,55 +19,52 @@ from hermes.capabilities.infrastructure.schema import ensure_capabilities_schema
 from hermes.capabilities.infrastructure.sqlite_agent_access_scope_repo import (
     SqliteAgentAccessScopeRepo,
 )
-from hermes.capabilities.tool_delicacy import Delicacy
 
-_FZ = frozenset()
+# skill_manage: MOST_DELICATE and MFA-tier (is_mfa_required == True).
+_MFA_TOOL = "skill_manage"
+# send_message: DELICATE (native WRITE) but NOT MFA-tier — the owner's
+# report-review example ("my boss asks my agent for a report — I still
+# review it before it sends").
+_SIMPLE_TOOL = "send_message"
 
 
-def _route(tier: str, delicacy: Delicacy, *, cloud=True, remote=True):
+def _route(tier: str, tool: str, *, cloud=True, remote=True):
     return route(
-        tool="x", delicacy=delicacy, sensitivity_categories=_FZ, irreversible=False,
+        tool=tool,
         agent_managed_by="cloud" if cloud else None,
-        tenant_remote_approval_enabled=remote, approval_tier=tier,
+        tenant_remote_approval_enabled=remote,
+        approval_tier=tier,
     )
 
 
-def test_coordinator_self_resolves_delicate_locally():
-    assert _route("coordinator", Delicacy.DELICATE) is ApprovalRoute.LOCAL
+def test_coordinator_and_standard_route_simple_tool_identically_local():
+    assert _route("coordinator", _SIMPLE_TOOL) is ApprovalRoute.LOCAL
+    assert _route("standard", _SIMPLE_TOOL) is ApprovalRoute.LOCAL
 
 
-def test_standard_escalates_delicate_to_enterprise():
-    assert _route("standard", Delicacy.DELICATE) is ApprovalRoute.ENTERPRISE
+def test_coordinator_and_standard_route_mfa_tool_identically_enterprise():
+    assert _route("coordinator", _MFA_TOOL) is ApprovalRoute.ENTERPRISE
+    assert _route("standard", _MFA_TOOL) is ApprovalRoute.ENTERPRISE
 
 
-def test_most_delicate_escalates_for_both_tiers():
-    assert _route("coordinator", Delicacy.MOST_DELICATE) is ApprovalRoute.ENTERPRISE
-    assert _route("standard", Delicacy.MOST_DELICATE) is ApprovalRoute.ENTERPRISE
+def test_mfa_tool_without_remote_approver_stays_local():
+    # No remote approver configured → cannot escalate; worker gate (LOCAL) still fires.
+    assert _route("standard", _MFA_TOOL, remote=False) is ApprovalRoute.LOCAL
+    assert _route("standard", _MFA_TOOL, cloud=False) is ApprovalRoute.LOCAL
 
 
-def test_normal_stays_local_for_both():
-    assert _route("coordinator", Delicacy.NORMAL) is ApprovalRoute.LOCAL
-    assert _route("standard", Delicacy.NORMAL) is ApprovalRoute.LOCAL
+def test_unknown_tier_does_not_affect_routing():
+    # approval_tier is inert — any value routes identically to "standard"/"coordinator".
+    assert _route("weird", _MFA_TOOL) is ApprovalRoute.ENTERPRISE
+    assert _route("weird", _SIMPLE_TOOL) is ApprovalRoute.LOCAL
 
 
-def test_standard_delicate_without_remote_approver_stays_local():
-    # No remote approver configured → cannot escalate; owner gate (LOCAL) still fires.
-    assert _route("standard", Delicacy.DELICATE, remote=False) is ApprovalRoute.LOCAL
-    assert _route("standard", Delicacy.DELICATE, cloud=False) is ApprovalRoute.LOCAL
-
-
-def test_unknown_tier_fails_closed_like_standard():
-    # Fail-closed: any non-"coordinator" tier escalates DELICATE (max gating).
-    assert _route("weird", Delicacy.DELICATE) is ApprovalRoute.ENTERPRISE
-
-
-def test_default_tier_preserves_pre_feature_behaviour():
-    # A caller that omits approval_tier gets today's base routing (back-compat).
+def test_default_tier_preserves_totp_keyed_behaviour():
+    # A caller that omits approval_tier still routes on is_mfa_required alone.
     r = route(
-        tool="x", delicacy=Delicacy.DELICATE, sensitivity_categories=_FZ,
-        irreversible=False, agent_managed_by="cloud", tenant_remote_approval_enabled=True,
+        tool=_MFA_TOOL, agent_managed_by="cloud", tenant_remote_approval_enabled=True,
     )
-    assert r is ApprovalRoute.LOCAL
+    assert r is ApprovalRoute.ENTERPRISE
 
 
 def _fresh_repo() -> SqliteAgentAccessScopeRepo:

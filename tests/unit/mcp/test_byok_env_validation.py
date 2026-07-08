@@ -285,14 +285,18 @@ class TestAddMcpServerEnv:
         assert "env inválido" in result["error"]
 
     def test_no_env_field_works_as_before(self, tmp_path, monkeypatch) -> None:
-        """Serena and other servers without env still install normally."""
+        """A draft without an env field still installs normally.
+
+        Uses a PUBLISHED package (npx open-design-mcp) — a git+https argv is
+        rejected by design (unvettable build-from-source; use npm/pypi), so the
+        old serena/git example no longer exercises the happy path this test is
+        about (the absence of an env field, not the runner).
+        """
         wiring = _make_wiring_with_mcp()
         draft = {
-            "server_id": "serena",
-            "label": "Serena",
-            "argv": ["uvx", "--from",
-                     "git+https://github.com/oraios/serena",
-                     "serena", "start-mcp-server"],
+            "server_id": "open-design",
+            "label": "Open Design",
+            "argv": ["npx", "-y", "open-design-mcp"],
         }
         neus_writes: list[dict] = []
 

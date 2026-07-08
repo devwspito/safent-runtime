@@ -17,6 +17,7 @@ from hermes.config_sync.applier import (
 from hermes.config_sync.policy_document import (
     AgentSpec,
     ConsentSpec,
+    DirectorySpec,
     EgressSpec,
     FeaturesSpec,
     IntegrationSpec,
@@ -870,6 +871,128 @@ class TestAgentAccessScopeApplier:
 
 
 # ---------------------------------------------------------------------------
+# 2026-07-07 confused-deputy fix: MCP capabilities travel via AgentAccessScope,
+# NOT via bind_capability_to_agent (D-Bus-denied for config-sync's uid).
+# ---------------------------------------------------------------------------
+
+
+class TestMcpCapabilityViaAccessScope:
+    @pytest.mark.asyncio
+    async def test_mcp_capability_not_bound_via_bind_capability_to_agent(self) -> None:
+        proxy = FakeDbusProxy(existing_agents=[])
+        payload = _empty_payload(
+            agents=[
+                {
+                    "agent_id": "cerebro",
+                    "name": "CEO",
+                    "capabilities": [
+                        {"kind": "mcp", "id": "safent-control", "version": "1"}
+                    ],
+                    "access_scope": {"enforced": True, "cerebro_unrestricted": False},
+                }
+            ]
+        )
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[], tenant_id="t")
+
+        assert "bind_capability_to_agent" not in proxy.called_verbs()
+        assert result.ok
+
+    @pytest.mark.asyncio
+    async def test_mcp_capability_ids_land_in_access_scope_json(self) -> None:
+        import json  # noqa: PLC0415
+
+        proxy = FakeDbusProxy(existing_agents=[])
+        payload = _empty_payload(
+            agents=[
+                {
+                    "agent_id": "cerebro",
+                    "name": "CEO",
+                    "capabilities": [
+                        {"kind": "mcp", "id": "safent-control", "version": "1"},
+                        {"kind": "mcp", "id": "other-mcp", "version": "1"},
+                    ],
+                    "access_scope": {"enforced": True, "cerebro_unrestricted": False},
+                }
+            ]
+        )
+
+        await PolicyApplier(proxy).apply(payload, current_agents=[], tenant_id="t")
+
+        calls = [(v, args) for v, args in proxy.calls if v == "set_agent_access_scope"]
+        assert len(calls) == 1
+        scope = json.loads(calls[0][1][1])
+        assert scope["mcp_servers"] == ["other-mcp", "safent-control"]
+
+    @pytest.mark.asyncio
+    async def test_non_mcp_capability_still_bound_via_bind_capability_to_agent(
+        self,
+    ) -> None:
+        proxy = FakeDbusProxy(existing_agents=[])
+        payload = _empty_payload(
+            agents=[
+                {
+                    "agent_id": "a1",
+                    "name": "Sales",
+                    "capabilities": [
+                        {"kind": "mcp", "id": "safent-control", "version": "1"},
+                        {"kind": "skill", "id": "web-search", "version": "1"},
+                    ],
+                }
+            ]
+        )
+
+        await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        bind_calls = [args for verb, args in proxy.calls if verb == "bind_capability_to_agent"]
+        assert len(bind_calls) == 1
+        assert bind_calls[0][1:3] == ("skill", "web-search")
+
+    @pytest.mark.asyncio
+    async def test_bind_capability_failure_does_not_fail_agent_apply(self) -> None:
+        """bind_capability_to_agent is D-Bus-denied for config-sync's uid in
+        production — its failure must never block last_applied_version."""
+        proxy = FakeDbusProxy(existing_agents=[])
+        proxy.fail_verb("bind_capability_to_agent")
+        payload = _empty_payload(
+            agents=[
+                {
+                    "agent_id": "a1",
+                    "name": "Sales",
+                    "capabilities": [{"kind": "skill", "id": "web-search", "version": "1"}],
+                }
+            ]
+        )
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert result.ok
+        assert not result.failed
+
+    @pytest.mark.asyncio
+    async def test_mcp_capabilities_without_access_scope_do_not_fail_apply(self) -> None:
+        """No access_scope in the bundle → nowhere allowed to land the MCP
+        authorization this sync; logged, but must not block version advancement."""
+        proxy = FakeDbusProxy(existing_agents=[])
+        payload = _empty_payload(
+            agents=[
+                {
+                    "agent_id": "a1",
+                    "name": "Sales",
+                    "capabilities": [
+                        {"kind": "mcp", "id": "safent-control", "version": "1"}
+                    ],
+                }
+            ]
+        )
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert result.ok
+        assert "set_agent_access_scope" not in proxy.called_verbs()
+
+
+# ---------------------------------------------------------------------------
 # ApplyResult
 # ---------------------------------------------------------------------------
 
@@ -892,6 +1015,93 @@ class TestApplyResult:
         r = ApplyResult(applied=0, failed=[], rejected=["skill:x:scan_blocked"])
         assert r.ok is True
         assert len(r.rejected) == 1
+
+
+# ---------------------------------------------------------------------------
+# Fase 3 — directory (department-scoped visibility)
+# ---------------------------------------------------------------------------
+
+
+class FakeDirectoryStore:
+    """Records update_directory() calls; satisfies _DirectoryStoreProtocol."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict | None] = []
+
+    def update_directory(self, directory: dict | None) -> None:
+        self.calls.append(directory)
+
+
+_DIRECTORY_ENTRY = {
+    "employee_id": "emp-1",
+    "agent_id": "agent-1",
+    "name": "Ada",
+    "department": "ventas",
+}
+
+
+class TestDirectoryApplier:
+    @pytest.mark.asyncio
+    async def test_directory_present_is_stored(self) -> None:
+        proxy = FakeDbusProxy()
+        store = FakeDirectoryStore()
+        payload = _empty_payload(directory={"entries": [_DIRECTORY_ENTRY]})
+
+        result = await PolicyApplier(proxy, directory_store=store).apply(
+            payload, current_agents=[]
+        )
+
+        assert result.ok is True
+        assert store.calls == [{"entries": [_DIRECTORY_ENTRY]}]
+
+    @pytest.mark.asyncio
+    async def test_directory_absent_clears_previously_stored_one(self) -> None:
+        """A subsequent bundle with directory=None must clear the store."""
+        proxy = FakeDbusProxy()
+        store = FakeDirectoryStore()
+
+        await PolicyApplier(proxy, directory_store=store).apply(
+            _empty_payload(directory={"entries": [_DIRECTORY_ENTRY]}),
+            current_agents=[],
+        )
+        await PolicyApplier(proxy, directory_store=store).apply(
+            _empty_payload(), current_agents=[]
+        )
+
+        assert store.calls == [{"entries": [_DIRECTORY_ENTRY]}, None]
+
+    @pytest.mark.asyncio
+    async def test_no_directory_store_injected_is_a_no_op(self) -> None:
+        """Existing single-arg PolicyApplier(proxy) callers are unaffected."""
+        proxy = FakeDbusProxy()
+        payload = _empty_payload(directory={"entries": [_DIRECTORY_ENTRY]})
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert result.ok is True  # never raises, never marks the section failed
+
+    @pytest.mark.asyncio
+    async def test_directory_persist_failure_does_not_block_version_advancement(
+        self,
+    ) -> None:
+        """Presentation-only data: a persistence error must not fail apply()."""
+        proxy = FakeDbusProxy()
+
+        class _BoomStore:
+            def update_directory(self, directory: dict | None) -> None:
+                raise RuntimeError("disk full")
+
+        payload = _empty_payload(directory={"entries": [_DIRECTORY_ENTRY]})
+        result = await PolicyApplier(proxy, directory_store=_BoomStore()).apply(
+            payload, current_agents=[]
+        )
+
+        assert result.ok is True
+
+    def test_directory_spec_parses_from_payload_dict(self) -> None:
+        payload = _empty_payload(directory={"entries": [_DIRECTORY_ENTRY]})
+        assert isinstance(payload.directory, DirectorySpec)
+        assert payload.directory.entries[0].employee_id == "emp-1"
 
 
 # ---------------------------------------------------------------------------
@@ -1094,3 +1304,208 @@ class TestManagedByApplier:
         assert "update_agent" in proxy.called_verbs()
         assert "create_agent" not in proxy.called_verbs()
         assert result.ok
+
+
+# ---------------------------------------------------------------------------
+# R15: bundle-sourced MCP WARN must not permanently stall version advancement
+# ---------------------------------------------------------------------------
+
+
+class TestMcpBundleWarnOverride:
+    """A Security-Center discretionary WARN on a bundle-sourced MCP server
+    must not be classified as a transitory failure — the tenant Ed25519
+    signature on the bundle is the owner's authority, so it is retried with
+    the daemon's own force=True override plumbing instead of stalling
+    last_applied_version forever."""
+
+    @pytest.mark.asyncio
+    async def test_warn_verdict_is_retried_with_force_and_applied(self) -> None:
+        """First call WARN-blocked; retried call (force=True) succeeds → applied."""
+        import json as _json
+        from typing import Any
+
+        class WarnThenForceOkProxy(FakeDbusProxy):
+            async def call_mutator(self, member: str, *args: Any) -> dict:
+                self.calls.append((member, args))
+                if member == "add_mcp_server":
+                    draft = _json.loads(args[0])
+                    if draft["force"]:
+                        return {"ok": True, "tool_count": 3}
+                    return {
+                        "ok": False, "blocked": True, "warn": True,
+                        "scan_id": "scan-1", "score": 45,
+                    }
+                return {"ok": True}
+
+        proxy = WarnThenForceOkProxy()
+        payload = _empty_payload(
+            mcp=[{"server_id": "safent-control", "argv": ["npx", "-y", "mcp-remote"]}]
+        )
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert result.ok is True
+        assert not any("safent-control" in f for f in result.failed)
+        assert not any("safent-control" in r for r in result.rejected)
+        mcp_calls = [(v, args) for v, args in proxy.calls if v == "add_mcp_server"]
+        assert len(mcp_calls) == 2
+        assert _json.loads(mcp_calls[0][1][0])["force"] is False
+        assert _json.loads(mcp_calls[1][1][0])["force"] is True
+
+    @pytest.mark.asyncio
+    async def test_first_attempt_always_uses_force_false(self) -> None:
+        """_apply_mcp never starts with force=True — the bypass is earned
+        only after the daemon's own scan confirms a discretionary WARN (see
+        _is_discretionary_warn_block), never assumed up front. The WARN/FAIL
+        gate itself (add_mcp_server, force=False) is exercised end-to-end by
+        tests/unit/agents_os/test_mcp_neus_single_source.py — untouched by
+        this fix; locally/agent-initiated installs still go through it."""
+        import json as _json
+        from typing import Any
+
+        class RecordingProxy(FakeDbusProxy):
+            async def call_mutator(self, member: str, *args: Any) -> dict:
+                self.calls.append((member, args))
+                return {"ok": True}
+
+        proxy = RecordingProxy()
+        payload = _empty_payload(
+            mcp=[{"server_id": "safent-control", "argv": ["npx", "-y", "mcp-remote"]}]
+        )
+
+        await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        mcp_calls = [(v, args) for v, args in proxy.calls if v == "add_mcp_server"]
+        assert len(mcp_calls) == 1
+        assert _json.loads(mcp_calls[0][1][0])["force"] is False
+
+    @pytest.mark.asyncio
+    async def test_fail_verdict_on_bundle_mcp_is_rejected_not_installed(self) -> None:
+        """A genuine FAIL/hard block (no 'warn' key) is NEVER force-retried —
+        it is a permanent rejection: surfaced/logged, server stays
+        uninstalled, but version advancement is not stalled."""
+        import json as _json
+        from typing import Any
+
+        class FailBlockingProxy(FakeDbusProxy):
+            async def call_mutator(self, member: str, *args: Any) -> dict:
+                self.calls.append((member, args))
+                if member == "add_mcp_server":
+                    return {
+                        "ok": False, "blocked": True, "verdict": "FAIL",
+                        "scan_id": "scan-2", "score": 12,
+                    }
+                return {"ok": True}
+
+        proxy = FailBlockingProxy()
+        payload = _empty_payload(
+            mcp=[{"server_id": "malicious-mcp", "argv": ["npx", "-y", "evil"]}]
+        )
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert result.ok is True  # version can still advance
+        assert any("malicious-mcp" in r for r in result.rejected)
+        assert not any("malicious-mcp" in f for f in result.failed)
+        mcp_calls = [(v, args) for v, args in proxy.calls if v == "add_mcp_server"]
+        # No force=True retry for a non-WARN block.
+        assert len(mcp_calls) == 1
+        assert _json.loads(mcp_calls[0][1][0])["force"] is False
+
+    @pytest.mark.asyncio
+    async def test_scanner_error_block_on_bundle_mcp_is_rejected_not_retried(self) -> None:
+        """A scanner-error block (blocked=True, no 'warn' key, no 'verdict')
+        is fail-closed the same way as FAIL — rejected, never force-retried."""
+        from typing import Any
+
+        class ScannerErrorProxy(FakeDbusProxy):
+            async def call_mutator(self, member: str, *args: Any) -> dict:
+                self.calls.append((member, args))
+                if member == "add_mcp_server":
+                    return {"ok": False, "blocked": True, "error": "scan failed"}
+                return {"ok": True}
+
+        proxy = ScannerErrorProxy()
+        payload = _empty_payload(
+            mcp=[{"server_id": "unscannable-mcp", "argv": ["npx", "-y", "x"]}]
+        )
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert result.ok is True
+        assert any("unscannable-mcp" in r for r in result.rejected)
+        mcp_calls = [(v, args) for v, args in proxy.calls if v == "add_mcp_server"]
+        assert len(mcp_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_warn_still_blocked_after_force_retry_is_rejected(self) -> None:
+        """Edge case: the force=True retry itself comes back blocked (e.g. the
+        override could not clear it) — must be classified as a permanent
+        rejection, not a transitory failure."""
+        import json as _json
+        from typing import Any
+
+        class WarnAlwaysBlockedProxy(FakeDbusProxy):
+            async def call_mutator(self, member: str, *args: Any) -> dict:
+                self.calls.append((member, args))
+                if member == "add_mcp_server":
+                    return {"ok": False, "blocked": True, "warn": True, "score": 45}
+                return {"ok": True}
+
+        proxy = WarnAlwaysBlockedProxy()
+        payload = _empty_payload(
+            mcp=[{"server_id": "stubborn-mcp", "argv": ["npx", "-y", "x"]}]
+        )
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert result.ok is True
+        assert any("stubborn-mcp" in r for r in result.rejected)
+        mcp_calls = [(v, args) for v, args in proxy.calls if v == "add_mcp_server"]
+        assert len(mcp_calls) == 2  # first attempt + force retry, both blocked
+
+    @pytest.mark.asyncio
+    async def test_existing_mcp_server_skips_scan_entirely(self) -> None:
+        """Idempotency: a server already in list_mcp_servers is never re-scanned
+        (no add_mcp_server call at all) — the short-circuit that keeps this
+        fix from re-triggering the WARN gate on every sync tick."""
+        proxy = FakeDbusProxy()
+        proxy._existing_mcp = [{"server_id": "safent-control"}]
+        payload = _empty_payload(
+            mcp=[{"server_id": "safent-control", "argv": ["npx", "-y", "mcp-remote"]}]
+        )
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert result.ok is True
+        assert "add_mcp_server" not in proxy.called_verbs()
+
+
+class TestIsDiscretionaryWarnBlock:
+    """Unit coverage for the classifier itself (no D-Bus/applier involved)."""
+
+    def test_warn_block_shape_is_discretionary(self) -> None:
+        from hermes.config_sync.applier import _is_discretionary_warn_block
+
+        assert _is_discretionary_warn_block(
+            {"ok": False, "blocked": True, "warn": True, "score": 45}
+        ) is True
+
+    def test_fail_block_shape_is_not_discretionary(self) -> None:
+        from hermes.config_sync.applier import _is_discretionary_warn_block
+
+        assert _is_discretionary_warn_block(
+            {"ok": False, "blocked": True, "verdict": "FAIL"}
+        ) is False
+
+    def test_transitory_failure_is_not_discretionary(self) -> None:
+        from hermes.config_sync.applier import _is_discretionary_warn_block
+
+        assert _is_discretionary_warn_block({"ok": False, "error": "x"}) is False
+
+    def test_none_and_bool_are_not_discretionary(self) -> None:
+        from hermes.config_sync.applier import _is_discretionary_warn_block
+
+        assert _is_discretionary_warn_block(None) is False
+        assert _is_discretionary_warn_block(True) is False
+        assert _is_discretionary_warn_block(False) is False

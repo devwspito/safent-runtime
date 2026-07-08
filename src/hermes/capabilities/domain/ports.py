@@ -91,6 +91,16 @@ class ConsentContext:
     tenant_id: UUID
     operator_id: UUID | None
     derived_from_untrusted_content: bool = False  # threat-model CTRL-5 (taint)
+    # EXPLICIT agent identity for THIS cycle (Fase 2 Phase 4e — broker Enterprise
+    # routing fix). NEVER resolve this via a threading.local at the broker: the
+    # cycle stamps conversation_task_registry's thread-locals on the executor
+    # thread (run_in_executor), but CapabilityBroker.dispatch() runs the
+    # coroutine on the EVENT-LOOP thread (run_coroutine_threadsafe) — a
+    # DIFFERENT OS thread that can never see them. `agent_id` is resolved on
+    # the event-loop thread BEFORE the executor dispatch (nous_engine.run_cycle,
+    # same place per_cycle_consent is built) and rides along on this frozen,
+    # already-flowing object instead — structurally immune to the thread split.
+    agent_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

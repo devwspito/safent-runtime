@@ -239,11 +239,23 @@ class TestHookIntegration:
             return hook(tool_name=tool_name, args={"command": command})
 
     def test_hook_blocks_systemctl_stop_hermes_runtime(self) -> None:
+        from hermes.runtime.security_hook import _SELF_JAILBREAK_MSG
+
         hook, loop = self._make_hook()
         result = self._run_hook(hook, loop, "terminal", "systemctl stop hermes-runtime")
         assert result is not None
         assert result.get("action") == "block"
-        assert "anti-autopirateo" in result.get("message", "")
+        # The block must be the self-jailbreak guard's message (Step 3), not any
+        # other block path — this asserts the command was routed to and rejected by
+        # the self-jailbreak guard specifically. The message evolved (commit
+        # fd665d9) from a terse "anti-autopirateo" note to an explicit, non-appealable
+        # hard-block that instructs the model to stop and stay honest; assert against
+        # the source constant so the routing invariant holds without pinning wording.
+        message = result.get("message", "")
+        assert message == _SELF_JAILBREAK_MSG
+        # Security intent preserved: an inapelable (non-appealable) hard security block.
+        assert "inapelable" in message
+        assert "kernel de seguridad" in message
 
     def test_hook_blocks_pkill_hermes_runtime(self) -> None:
         hook, loop = self._make_hook()

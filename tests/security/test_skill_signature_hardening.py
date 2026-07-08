@@ -111,9 +111,12 @@ class TestV1SignatureRejectedAtPromotion:
 
         db = tmp_path / "shell-state.db"
         init_schema(db)
-        pkg_id = self._insert_v1_signed_composio_skill(db)
-
+        # SkillGovernanceService owns the skill_packages_view governance schema;
+        # init_schema no longer creates it (governance moved off the audit view
+        # into the service's own schema + SKILL.md frontmatter). Construct the
+        # service first so the adversarial v1 row can be injected into the table.
         governance = SkillGovernanceService(db_path=db)
+        pkg_id = self._insert_v1_signed_composio_skill(db)
 
         with _fake_vault_patch():
             with pytest.raises(SkillSignatureVerificationFailed) as exc_info:
@@ -136,8 +139,10 @@ class TestV1SignatureRejectedAtPromotion:
 
         db = tmp_path / "shell-state.db"
         init_schema(db)
-        pkg_id = self._insert_v1_signed_composio_skill(db)
+        # SkillGovernanceService ensures the skill_packages_view governance table
+        # (init_schema no longer creates it). Construct before injecting the row.
         governance = SkillGovernanceService(db_path=db)
+        pkg_id = self._insert_v1_signed_composio_skill(db)
 
         with _fake_vault_patch():
             with pytest.raises(SkillSignatureVerificationFailed):
@@ -177,6 +182,9 @@ class TestSignatureVerificationGateAtPromotion:
 
         db = tmp_path / "shell-state.db"
         init_schema(db)
+        # SkillGovernanceService ensures the skill_packages_view governance table
+        # (init_schema no longer creates it). Construct before injecting the row.
+        governance = SkillGovernanceService(db_path=db)
         pkg_id = str(uuid4())
         conn = sqlite3.connect(str(db))
         conn.execute(
@@ -192,7 +200,6 @@ class TestSignatureVerificationGateAtPromotion:
         conn.commit()
         conn.close()
 
-        governance = SkillGovernanceService(db_path=db)
         with _fake_vault_patch():
             with pytest.raises(SkillSignatureVerificationFailed):
                 import asyncio  # noqa: PLC0415
@@ -218,6 +225,9 @@ class TestSignatureVerificationGateAtPromotion:
 
         db = tmp_path / "shell-state.db"
         init_schema(db)
+        # SkillGovernanceService ensures the skill_packages_view governance table
+        # (init_schema no longer creates it). Construct before injecting the row.
+        governance = SkillGovernanceService(db_path=db)
         pkg_id = str(uuid4())
         skill_id = "tampered-composio"
         signed_at = "2026-06-03T00:00:00+00:00"
@@ -245,7 +255,6 @@ class TestSignatureVerificationGateAtPromotion:
         conn.commit()
         conn.close()
 
-        governance = SkillGovernanceService(db_path=db)
         with _fake_vault_patch():
             with pytest.raises(SkillSignatureVerificationFailed):
                 import asyncio  # noqa: PLC0415
@@ -403,6 +412,9 @@ class TestSigningMethodDowngradeRejected:
 
         db = tmp_path / "shell-state.db"
         init_schema(db)
+        # SkillGovernanceService ensures the skill_packages_view governance table
+        # (init_schema no longer creates it). Construct before injecting the row.
+        governance = SkillGovernanceService(db_path=db)
         pkg_id = str(uuid4())
         skill_id = "downgrade-skill"
         signed_at = "2026-06-03T00:00:00+00:00"
@@ -442,7 +454,6 @@ class TestSigningMethodDowngradeRejected:
         conn.commit()
         conn.close()
 
-        governance = SkillGovernanceService(db_path=db)
         with _fake_vault_patch():
             with pytest.raises(SkillSignatureVerificationFailed) as exc_info:
                 import asyncio  # noqa: PLC0415

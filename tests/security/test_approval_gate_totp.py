@@ -5,10 +5,18 @@ re-verified with ``mfa_factors=None`` → always failed → the error crossed D-
 generic fault and surfaced to the owner as "el agente no está disponible". A correct TOTP
 could never approve anything.
 
-The fix threads the owner's TOTP to ``gate.approve(mfa_factors=...)``. TOTP-only model:
-a valid TOTP mints a single-use token; an invalid or absent factor fails CLOSED (the gate
-never mints a token without the owner's fresh code). The TOTP secret is owner-only (0600),
-out of the caged agent's reach, so the agent cannot self-approve.
+The fix threads the owner's TOTP to ``gate.approve(mfa_factors=...)``. Escalated MFA model
+(owner decision 2026-06-25, commit f765c1b): the per-action HITL gate enforces TOTP for
+*mfa-tier* tools — the cage-widening / destructive actions the caged agent must never be
+able to self-authorize (``install_app``, ``disable_mfa``, ``set_policy``, ``skill_manage``,
+… — see ``tool_delicacy.is_mfa_required``). For those tools a valid owner TOTP mints a
+single-use token while an invalid or absent factor fails CLOSED (the gate never mints a
+token without the owner's fresh code). The TOTP secret is owner-only (0600), out of the
+caged agent's reach, so the agent cannot self-approve a self-widening action.
+
+These tests register the proposal against an mfa-tier tool so the TOTP gate is actually
+exercised; simple-tier tools mint on a plain click by design (the cage is their control)
+and are covered elsewhere.
 """
 
 from __future__ import annotations
@@ -34,6 +42,13 @@ _SIGNING_KEY = os.urandom(32)
 _TENANT_ID = uuid4()
 _OPERATOR_ID = uuid4()
 _APPROVED_BY = uuid4()
+
+# An mfa-tier tool (cage-widening — installs software). Under the escalated MFA model
+# (tool_delicacy.is_mfa_required) approving this REQUIRES the owner's fresh TOTP, so the
+# gate exercises the TOTP fail-closed path this suite guards. A simple-tier / empty
+# tool_name would skip the TOTP check entirely (mint on a plain click) and make the
+# fail-closed assertions vacuous.
+_MFA_TIER_TOOL = "install_app"
 
 
 def _make_gate(tmp_path) -> tuple[SqliteApprovalGate, str]:
@@ -61,12 +76,14 @@ async def _register(gate: SqliteApprovalGate, proposal_id) -> None:
         risk=RiskLevel.HIGH,
         justification="A1 regression",
         parameters_redacted={"path": "/tmp/out.txt"},
+        tool_name=_MFA_TIER_TOOL,
     )
 
 
 @pytest.mark.asyncio
 async def test_valid_totp_reaches_gate_and_mints_token(tmp_path) -> None:
-    """A correct owner TOTP forwarded to the gate mints an approval token (A1 fixed)."""
+    """A correct owner TOTP forwarded to the gate mints an approval token for an
+    mfa-tier tool (A1 fixed)."""
     gate, secret = _make_gate(tmp_path)
     pid = uuid4()
     await _register(gate, pid)
@@ -93,7 +110,8 @@ async def test_wrong_totp_fails_closed(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_absent_factors_fail_closed(tmp_path) -> None:
-    """The pre-fix behaviour (no factors) must REJECT, never silently mint."""
+    """For an mfa-tier tool the pre-fix behaviour (no factors) must REJECT, never
+    silently mint — the caged agent supplies no TOTP and must not self-approve."""
     gate, _ = _make_gate(tmp_path)
     pid = uuid4()
     await _register(gate, pid)

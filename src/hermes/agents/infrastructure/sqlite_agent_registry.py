@@ -88,8 +88,9 @@ def _now_iso() -> str:
 class SqliteAgentRegistry:
     """Registro de agentes en SQLite WAL, propiedad del daemon."""
 
-    def __init__(self, *, db_path: Path) -> None:
+    def __init__(self, *, db_path: Path, seed_default_roster: bool = True) -> None:
         self._db_path = db_path
+        self._seed_default_roster = seed_default_roster
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
@@ -166,7 +167,29 @@ class SqliteAgentRegistry:
         Gated por flag (no por COUNT): si el dueño borra un especialista, NO reaparece
         en el siguiente arranque. INSERT OR IGNORE por PK fija = race-safe entre daemon
         y shell-server.
+
+        Inc 5' (2026-07-07): early-return cuando seed_default_roster=False —
+        Community NO debe sembrar los 27 roster-* templates (owner: "not
+        seeded", no meramente ocultos vía set_default_roster_enabled). El
+        agente `default` sigue sembrándose siempre por _ensure_default,
+        llamado ANTES que este método — Community conserva exactamente un
+        agente. Reversible a nivel de FILAS: emparejar (edition→associate) y
+        reabrir el registro con seed_default_roster=True vuelve a crear las
+        27 filas roster-*. La VISIBILIDAD es un eje aparte: el flag
+        default_roster_enabled es sticky por diseño (RC-3, defense-in-depth,
+        ver abajo) — no se re-activa solo; si el dueño quiere verlas tras
+        emparejar, usa set_default_roster_enabled(True) (verbo D-Bus ya
+        existente).
+
+        Defense-in-depth: también apaga el flag de visibilidad en cada boot
+        Community — un `list_agents` nunca expone roster-* aunque el DB sea
+        de una instalación previa a este fix (upgrade path con filas ya
+        sembradas). Idempotente y barato; no reemplaza el no-seed de arriba,
+        lo refuerza.
         """
+        if not self._seed_default_roster:
+            self.set_default_roster_enabled(False)
+            return
         with self._connect() as conn:
             seeded = conn.execute(
                 "SELECT value FROM agent_settings WHERE key = ?", (_ROSTER_SEEDED_KEY,)

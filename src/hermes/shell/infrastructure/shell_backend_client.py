@@ -170,7 +170,7 @@ class ShellBackendClient:
         return ProviderDTO.from_dict(data)
 
     # ------------------------------------------------------------------
-    # Audit / Skills / Consents
+    # Audit / Skills
     # ------------------------------------------------------------------
     def list_audit(self, *, limit: int = 200) -> list[dict]:
         return self._request(path=f"/api/v1/audit?limit={limit}") or []
@@ -257,21 +257,14 @@ class ShellBackendClient:
             or {}
         )
 
-    def list_consents(self, *, include_revoked: bool = False) -> list[dict]:
-        suffix = "?include_revoked=true" if include_revoked else ""
-        return self._request(path=f"/api/v1/consents{suffix}") or []
-
-    def grant_consent(
-        self, *, capability: str, scope: str = "session"
-    ) -> dict:
-        return self._request(
-            path="/api/v1/consents",
-            method="POST",
-            body={"capability": capability, "scope": scope},
-        ) or {}
-
-    def revoke_consent(self, *, consent_id: str) -> None:
-        self._request(path=f"/api/v1/consents/{consent_id}", method="DELETE")
+    # NOTE: no list_consents/grant_consent/revoke_consent here. The REST
+    # consents endpoints were removed (commit 0bca2c0) — that was an
+    # unsigned parallel consent store that bypassed the native, signed
+    # ConsentManager gate. Consent is single-sourced over D-Bus
+    # (org.hermes.Runtime1 GrantConsent/RevokeConsent/ListConsents — see
+    # hermes.lumen.dbus_client.runtime1_client.Runtime1Client, used by
+    # hermes.lumen.apps.security.__main__). Do not re-add an HTTP consent
+    # client method here.
 
     # ------------------------------------------------------------------
     # Remote control (F11)

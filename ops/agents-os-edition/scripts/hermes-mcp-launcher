@@ -244,16 +244,30 @@ _ALLOWED_RUNNERS: frozenset[str] = frozenset({"npx", "uvx", "node", "python3"})
 # SEGURIDAD: PATH NO se permite — el runner (argv[0]) se resuelve con el PATH del
 # unit (systemd), no con uno del caller. Si el caller pudiera fijar PATH,
 # redirigiría el binario `npx`/`node` a uno arbitrario fuera del sandbox (el
-# launcher corre SIN SystemCallFilter). El resto son dirs de caché/HOME que el
+# launcher corre SIN SystemCallFilter). El resto son dirs de caché que el
 # daemon necesita redirigir a /var/lib/hermes (ProtectHome enmascara el HOME real).
+#
+# HOME NO está en esta lista (R16, 2026-07-07) — mismo razonamiento que PATH:
+# el launcher unit fija HOME=/var/lib/hermes/mcp-home (group hermes-work,
+# g+rwX — el ÚNICO HOME escribible por hermes-sandbox dentro de la unit
+# netns-jailed; ProtectHome=yes + InaccessiblePaths bloquean todo lo demás
+# bajo /home y /var/lib/hermes/hermes-home). El daemon ANTES reenviaba su
+# PROPIO HOME (=/var/lib/hermes/hermes-home, un InaccessiblePath para el
+# hijo MCP) como override — al estar HOME en esta lista, ese valor SIEMPRE
+# ganaba sobre el default correcto del launcher → EACCES en cualquier MCP
+# que escribiera bajo $HOME (mcp-remote/safent-control fue el primero en
+# necesitar escribir ahí; excel/word/powerpoint nunca tocan HOME en runtime,
+# por eso el bug estaba latente). Un servidor MCP que necesite un directorio
+# de config propio usa MCP_REMOTE_CONFIG_DIR (BYOK, ver dbus_runtime_service.
+# _MCP_BYOK_ENV_KEYS) — pero esa clave tampoco se reenvía aquí a propósito:
+# cae a $HOME/.mcp-auth, que con el HOME correcto ya es escribible.
 _ALLOWED_ENV_KEYS: frozenset[str] = frozenset({
-    # Runtime cache / home dirs (redirigidos a /var/lib/hermes por el daemon).
+    # Runtime cache dirs (redirigidos a /var/lib/hermes por el daemon).
     "npm_config_cache",
     "UV_CACHE_DIR",
     "npm_config_prefix",
     "UV_TOOL_DIR",
     "UV_PYTHON_INSTALL_DIR",
-    "HOME",
     "XDG_DATA_HOME",
     "XDG_CACHE_HOME",
     "TMPDIR",
@@ -288,9 +302,18 @@ _ALLOWED_ENV_KEYS: frozenset[str] = frozenset({
 # caller-overridable key. We deliberately do NOT forward all of os.environ (that would
 # leak the launcher's systemd-private vars, e.g. INVOCATION_ID/NOTIFY_SOCKET/LISTEN_*,
 # into the child). The egress proxy vars are appended separately (caller cannot set).
+#
+# HOME joins PATH/NODE_OPTIONS here (R16): forwarded from `sanitised` (== the
+# launcher unit's OWN env — HOME is NOT in _ALLOWED_ENV_KEYS, so the caller can
+# never override it) rather than from _ALLOWED_ENV_KEYS. Without this, removing
+# HOME from _ALLOWED_ENV_KEYS would leave the netns-jailed unit with NO --setenv
+# for HOME at all — systemd-run does not inherit it — and the runner would fall
+# back to whatever HOME systemd resolves for hermes-sandbox (unset/unwritable),
+# reproducing the exact EACCES this fix closes.
 _FORWARDED_ENV_KEYS: frozenset[str] = _ALLOWED_ENV_KEYS | frozenset({
     "PATH",            # runner resolves its own helpers (npm, node) inside the unit
     "NODE_OPTIONS",    # --dns-result-order=ipv4first (unit-set; reliable npm download)
+    "HOME",            # ALWAYS the launcher unit's own value — never caller-set
 })
 
 # ── Logging ───────────────────────────────────────────────────────────────────

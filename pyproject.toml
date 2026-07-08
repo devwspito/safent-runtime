@@ -1,6 +1,6 @@
 [project]
 name = "hermes-runtime"
-version = "0.8.21"
+version = "0.8.27"
 description = "Hermes: runtime agentico LLM reutilizable. ReasoningEngine + CapturingToolHost + PII tokenization + policy layer. Reemplaza dependencia de hermes-agent NousResearch por loop propio sobre LiteLLM."
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
@@ -86,7 +86,6 @@ tui = [
 ]
 
 [project.scripts]
-hermes-shell = "hermes.shell.presentation.gtk4.app:main"
 hermes-shell-server = "hermes.shell_server.main:main"
 agents-os-remote-control = "hermes.shell_server.remote_control.service:main"
 hermes-evolution = "hermes.training.evolution.__main__:main"
@@ -100,7 +99,6 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"hermes.shell.presentation.gtk4" = ["css/*.css"]
 "hermes.lumen" = ["qml/*.qml", "qml/*.js", "qml/icons/*.svg", "qml/qmldir", "qml/fonts/*.ttf"]
 # spec 014: el overlay y las 6 capability apps reusan/llevan sus .qml; deben
 # horneárse en el wheel o QQmlApplicationEngine no los encuentra (file not found).

@@ -27,6 +27,14 @@ Invariants:
   lives in the caller (nous_engine / security_hook), never in this aggregate.
 - updated_by is the sender_uid (D-Bus peer cred), NEVER from payload —
   mirrors AgentCapabilityBinding.bound_by.
+- authorized_mcp_servers is a frozenset[str] of MCP server slugs the agent's
+  SIGNED bundle authorizes (2026-07-07: confused-deputy fix). config-sync
+  (uid=hermes) is D-Bus-denied BindCapabilityToAgent by design, so it cannot
+  create an AgentCapabilityBinding for MCP servers; it instead lands the
+  bundle's MCP allow-set HERE via the (allowed) set_agent_access_scope verb.
+  nous_engine._filter_mcp_skill reads this set as an ADDITIONAL source for
+  its fail-closed MCP admission — a slug absent from BOTH this set and the
+  agent's capability bindings is still denied.
 """
 
 from __future__ import annotations
@@ -57,10 +65,14 @@ class AgentAccessScope:
     cerebro_unrestricted: bool = True
     enforced: bool = False
     managed_by: str | None = None
-    # Per-role approval tier (2026-07-05): "coordinator" self-resolves DELICATE
-    # actions at the LOCAL owner gate; "standard" (default, fail-closed) escalates
-    # them to a remote ENTERPRISE approver. Cloud-authored, lands from the signed
-    # bundle. Consumed ONLY by approval_router.route() — never widens the floor.
+    # MCP server slugs the bundle authorizes for this agent (module docstring).
+    authorized_mcp_servers: frozenset[str] = field(default_factory=frozenset)
+    # Per-role approval tier (2026-07-05; INERT for routing since Fase 2 Phase
+    # 4c's TOTP-keyed model, 2026-07-06): "coordinator" | "standard" no longer
+    # changes WHO resolves an approval — approval_router.route() now decides
+    # purely on tool_delicacy.is_mfa_required(tool), the same for every tier.
+    # Cloud-authored, lands from the signed bundle. Kept for back-compat/
+    # observability only — never widens the floor.
     approval_tier: str = "standard"
     updated_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
 
@@ -77,6 +89,10 @@ class AgentAccessScope:
             raise TypeError("AgentAccessScope.policy_overlay must be a dict")
         if not isinstance(self.views, tuple):
             raise TypeError("AgentAccessScope.views must be a tuple[str, ...]")
+        if not isinstance(self.authorized_mcp_servers, frozenset):
+            raise TypeError(
+                "AgentAccessScope.authorized_mcp_servers must be a frozenset[str]"
+            )
 
     @classmethod
     def create(
@@ -92,6 +108,7 @@ class AgentAccessScope:
         enforced: bool = False,
         managed_by: str | None = None,
         approval_tier: str = "standard",
+        authorized_mcp_servers: frozenset[str] = frozenset(),
     ) -> AgentAccessScope:
         """Factory: create a new scope with a generated id."""
         return cls(
@@ -106,6 +123,7 @@ class AgentAccessScope:
             enforced=enforced,
             managed_by=managed_by,
             approval_tier=approval_tier,
+            authorized_mcp_servers=frozenset(authorized_mcp_servers),
         )
 
     def allows_native_tool(self, tool_name: str) -> bool:
@@ -135,5 +153,6 @@ class AgentAccessScope:
             "updated_by": self.updated_by,
             "managed_by": self.managed_by,
             "approval_tier": self.approval_tier,
+            "authorized_mcp_servers": sorted(self.authorized_mcp_servers),
             "updated_at": self.updated_at.isoformat(),
         }

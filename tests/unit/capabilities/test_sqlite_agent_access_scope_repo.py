@@ -44,6 +44,22 @@ class TestUpsertGetRoundtrip:
         assert fetched.managed_by == "cloud"
         assert fetched.updated_by == 1001
 
+    def test_authorized_mcp_servers_roundtrip(self, tmp_path: Path) -> None:
+        repo = SqliteAgentAccessScopeRepo(db_path=tmp_path / "shell-state.db")
+        repo.upsert(_scope(authorized_mcp_servers=frozenset({"safent-control"})))
+
+        fetched = repo.get_scope("agent-a", "tenant-x")
+        assert fetched is not None
+        assert fetched.authorized_mcp_servers == frozenset({"safent-control"})
+
+    def test_upsert_replaces_authorized_mcp_servers(self, tmp_path: Path) -> None:
+        repo = SqliteAgentAccessScopeRepo(db_path=tmp_path / "shell-state.db")
+        repo.upsert(_scope(authorized_mcp_servers=frozenset({"old-mcp"})))
+        repo.upsert(_scope(authorized_mcp_servers=frozenset({"safent-control"})))
+
+        fetched = repo.get_scope("agent-a", "tenant-x")
+        assert fetched.authorized_mcp_servers == frozenset({"safent-control"})
+
     def test_get_scope_returns_none_when_absent(self, tmp_path: Path) -> None:
         repo = SqliteAgentAccessScopeRepo(db_path=tmp_path / "shell-state.db")
         assert repo.get_scope("nope", "tenant-x") is None

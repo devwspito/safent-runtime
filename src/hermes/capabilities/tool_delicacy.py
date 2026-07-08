@@ -149,11 +149,15 @@ _DESTRUCTIVE: frozenset[str] = frozenset({
 def is_destructive(tool: str) -> bool:
     """True if *tool*'s PRIMARY registered contract is PERMANENT DATA LOSS.
 
-    Single query point over the curated `_DESTRUCTIVE` overlay above — consumed
-    by approval_router.route()'s `irreversible` input (Enterprise governance,
-    Fase 2 Phase 4a). Currently empty (see _DESTRUCTIVE docstring); destructive
-    native tools land here as they're added to the catalog. No re-listing: one
-    edit to `_DESTRUCTIVE` re-aligns both is_mfa_required() and this query.
+    Single query point over the curated `_DESTRUCTIVE` overlay above.
+    `_DESTRUCTIVE` is already unioned into `_MFA_TIER_HITL` (see
+    `is_mfa_required` below), so approval_router.route()'s TOTP-keyed model
+    (Fase 2 Phase 4c) does not need a separate `irreversible` input — a
+    destructive tool is already MFA-tier. This query point remains available
+    for other callers that need the raw destructive/irreversible signal on its
+    own. Currently empty (see _DESTRUCTIVE docstring); destructive native
+    tools land here as they're added to the catalog. No re-listing: one edit
+    to `_DESTRUCTIVE` re-aligns both is_mfa_required() and this query.
     """
     return tool in _DESTRUCTIVE
 

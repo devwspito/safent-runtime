@@ -6,7 +6,14 @@ Covers:
   (c) Unknown server (registry returns None) → REJECTED_BY_POLICY (fail-closed).
   (d) Kill-switch (agent paused) → REJECTED_BY_POLICY before MCP adapter.
   (e) mcp_adapter not configured → REJECTED_BY_POLICY (Constitución IV).
-  (f) Browser's existing MCP path (StdioMcpSession) is unaffected by these changes.
+  (f) The generalized stdio MCP client (StdioMcpClient) the broker routes MCP
+      calls through keeps a clean, non-browser boundary. The old separate browser
+      StdioMcpSession was deliberately removed in the one-browser collapse.
+  (g) MANAGED_REMOTE WRITE binding (LOW risk, auto_executable=False — the
+      classify_mcp_tool() shape for safent-control write verbs): taint decides
+      everything. Tainted → forced HITL (PENDING_APPROVAL), untainted → runs
+      the normal LOW path. This is the anti-prompt-injection control for the
+      whole cloud management surface (see mcp/domain/tool_classifier.py).
 """
 
 from __future__ import annotations
@@ -89,6 +96,7 @@ def _build_broker(
     agent_state=None,
     mcp_adapter=None,
     registry=None,
+    autonomous_default: bool = False,
 ) -> Any:
     from hermes.agents_os.application.audit_hash_chain import AuditHashChainSigner
     from hermes.capabilities.application.capability_broker import CapabilityBroker
@@ -125,6 +133,7 @@ def _build_broker(
         anchor=FakeExternalAnchor(),
         agent_state=agent_state,
         mcp_adapter=mcp_adapter,
+        autonomous_default=autonomous_default,
     )
     broker._audit_entries = audit_entries
     return broker
@@ -401,46 +410,205 @@ class TestMcpAdapterNotConfigured:
 
 
 # ---------------------------------------------------------------------------
-# (f) Browser's existing MCP path (StdioMcpSession) is unaffected
+# (f) The generalized stdio MCP client keeps a clean (non-browser) boundary
+#
+# The browser's old separate stdio session (StdioMcpSession /
+# browser/infrastructure/mcp_session.py) was deliberately DELETED in the
+# "one-browser collapse" (commit d6b74e3): the dupe browser MCP driver was
+# removed because it duplicated hermes-agent's native browser. The sole
+# surviving stdio MCP client — the one the CapabilityBroker routes MCP tool
+# calls through — is StdioMcpClient (mcp/infrastructure/stdio_mcp_client.py).
+# Its documented SRP decision is that it does NOT carry the 7 browser-specific
+# methods; letting browser surface leak back into the generalized client would
+# re-create the very duplication the collapse removed. These tests guard that
+# boundary (and that the collapse stays collapsed), which is the real invariant
+# the old "browser path unaffected" tests were protecting.
 # ---------------------------------------------------------------------------
 
 
-class TestBrowserMcpPathUnaffected:
-    """Verify StdioMcpSession still imports and has its contract unchanged."""
+class TestStdioMcpClientCleanBoundary:
+    """The generalized StdioMcpClient must stay free of browser-specific surface."""
 
-    def test_stdio_mcp_session_importable(self) -> None:
-        """browser/infrastructure/mcp_session.py must import without error."""
-        from hermes.browser.infrastructure.mcp_session import (
-            McpNotInstalledError,
-            McpServerConnectionError,
-            StdioMcpSession,
-        )
-        assert StdioMcpSession is not None
-
-    def test_stdio_mcp_session_default_command(self) -> None:
-        """Default server_command must remain @playwright/mcp (byte-for-byte same)."""
-        from hermes.browser.infrastructure.mcp_session import StdioMcpSession
-
-        session = StdioMcpSession()
-        assert session._server_command == ["npx", "@playwright/mcp", "--headless"], (
-            "browser's StdioMcpSession default command must be byte-for-byte unchanged"
-        )
-
-    def test_stdio_mcp_session_has_browser_methods(self) -> None:
-        """navigate, snapshot, click, type_, press, current_url, screenshot still exist."""
-        from hermes.browser.infrastructure.mcp_session import StdioMcpSession
-
-        for method in ("navigate", "snapshot", "click", "type_", "press", "current_url", "screenshot"):
-            assert hasattr(StdioMcpSession, method), (
-                f"StdioMcpSession.{method}() must remain (browser path unchanged)"
-            )
-
-    def test_new_stdio_mcp_client_is_separate_class(self) -> None:
-        """StdioMcpClient is a distinct class from StdioMcpSession (SRP)."""
-        from hermes.browser.infrastructure.mcp_session import StdioMcpSession
+    def test_stdio_mcp_client_importable(self) -> None:
+        """mcp/infrastructure/stdio_mcp_client.py must import without error."""
         from hermes.mcp.infrastructure.stdio_mcp_client import StdioMcpClient
 
-        assert StdioMcpClient is not StdioMcpSession
-        # StdioMcpClient does NOT have browser-specific methods
-        assert not hasattr(StdioMcpClient, "navigate")
-        assert not hasattr(StdioMcpClient, "snapshot")
+        assert StdioMcpClient is not None
+
+    def test_stdio_mcp_client_has_no_browser_methods(self) -> None:
+        """StdioMcpClient must NOT accrete browser-specific methods (SRP boundary).
+
+        The deleted StdioMcpSession owned navigate/snapshot/click/type_/press/
+        current_url/screenshot. The generalized client must expose none of them —
+        it speaks only the MCP client contract. If any reappears, the collapsed
+        browser MCP driver has been re-duplicated onto the broker's stdio path.
+        """
+        from hermes.mcp.infrastructure.stdio_mcp_client import StdioMcpClient
+
+        for method in (
+            "navigate", "snapshot", "click", "type_", "press",
+            "current_url", "screenshot",
+        ):
+            assert not hasattr(StdioMcpClient, method), (
+                f"StdioMcpClient must NOT carry browser method {method!r} "
+                "(would re-duplicate the collapsed browser MCP driver)"
+            )
+
+    def test_stdio_mcp_client_exposes_mcp_contract(self) -> None:
+        """The generalized client exposes the MCP client contract it routes on."""
+        from hermes.mcp.infrastructure.stdio_mcp_client import StdioMcpClient
+
+        for method in ("initialize", "list_tools", "call_tool", "close"):
+            assert callable(getattr(StdioMcpClient, method, None)), (
+                f"StdioMcpClient.{method}() must remain (MCP client contract)"
+            )
+
+    def test_removed_browser_mcp_session_module_stays_gone(self) -> None:
+        """The dupe browser stdio session was deleted (one-browser collapse).
+
+        Regression guard: re-introducing browser/infrastructure/mcp_session.py
+        would re-create the duplicate browser MCP driver the collapse removed.
+        """
+        import importlib
+
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("hermes.browser.infrastructure.mcp_session")
+
+
+# ---------------------------------------------------------------------------
+# (g) MANAGED_REMOTE WRITE binding — taint decides everything (CTRL-5)
+#
+# classify_mcp_tool(trust_level=MANAGED_REMOTE) gives write verbs
+# risk=LOW, auto_executable=False (mcp/domain/tool_classifier.py). This is
+# the shape a real safent-control write binding (e.g. create_employee,
+# delete_agent) resolves to. The test below is the load-bearing assertion
+# for the whole anti-prompt-injection control: a poisoned safent-control
+# read (or any other MCP response, tagged "mcp" and therefore untrusted per
+# CapturingToolHost._is_untrusted_read) taints the cycle, and that taint —
+# not consent, not autonomy level — is what stops the write from
+# auto-executing.
+# ---------------------------------------------------------------------------
+
+
+def _managed_remote_write_registry() -> Any:
+    from hermes.agents_os.domain.surface_kind import SurfaceKind
+    from hermes.capabilities.domain.ports import CapabilityBinding, RiskLevel
+    from hermes.capabilities.testing.fake_capability_registry import FakeCapabilityRegistry
+
+    registry = FakeCapabilityRegistry()
+    registry.register(CapabilityBinding(
+        tool_name="mcp__safent-control__create_employee",
+        surface_kind=SurfaceKind.MCP_CALL,
+        required_capability=None,
+        risk=RiskLevel.LOW,
+        auto_executable=False,
+        executor="mcp",
+    ))
+    return registry
+
+
+class TestMcpManagedRemoteWriteTaintFullAutonomous:
+    """Cerebro runs with HERMES_AUTONOMOUS_DEFAULT=1 (autonomous_default=True):
+    needs_hitl collapses to `effective_risk is HIGH` — auto_executable and
+    autonomy_level stop mattering entirely. Taint is the ONLY thing left
+    that can turn effective_risk HIGH for a LOW binding (requires_forced_hitl).
+    """
+
+    @pytest.mark.asyncio
+    async def test_tainted_managed_remote_write_forces_pending_approval(self) -> None:
+        mcp_adapter = _RecordingMcpAdapter()
+        broker = _build_broker(
+            agent_state=_RunningAgentState(),
+            mcp_adapter=mcp_adapter,
+            registry=_managed_remote_write_registry(),
+            autonomous_default=True,
+        )
+
+        from hermes.capabilities.domain.ports import ExecutionStatus
+
+        proposal = _mcp_proposal("mcp__safent-control__create_employee")
+        outcome = await broker.dispatch(proposal, _clean_consent(tainted=True))
+
+        assert outcome.status is ExecutionStatus.PENDING_APPROVAL, (
+            "MANAGED_REMOTE write (LOW, not-auto) under a tainted cycle must be "
+            "forced to HITL — an injected safent-control response cannot drive "
+            f"a management write autonomously. Got: {outcome}"
+        )
+        assert len(mcp_adapter.calls) == 0, "Adapter must NOT run without HITL approval"
+
+    @pytest.mark.asyncio
+    async def test_untainted_managed_remote_write_executes(self) -> None:
+        mcp_adapter = _RecordingMcpAdapter()
+        broker = _build_broker(
+            agent_state=_RunningAgentState(),
+            mcp_adapter=mcp_adapter,
+            registry=_managed_remote_write_registry(),
+            autonomous_default=True,
+        )
+
+        from hermes.capabilities.domain.ports import ExecutionStatus
+
+        proposal = _mcp_proposal("mcp__safent-control__create_employee")
+        outcome = await broker.dispatch(proposal, _clean_consent(tainted=False))
+
+        assert outcome.status is ExecutionStatus.EXECUTED, (
+            "The SAME MANAGED_REMOTE write, untainted, must execute under the "
+            f"full-autonomous default — taint is the deciding factor. Got: {outcome}"
+        )
+        assert len(mcp_adapter.calls) == 1
+
+
+class TestMcpManagedRemoteWriteTaintDefaultPolicy:
+    """Default (non-autonomous, BALANCED) policy: LOW+non-auto already asks for
+    HITL regardless of taint (the normal consented-write path). Taint must
+    still force HITL when no policy relaxation would otherwise apply, and a
+    real human approval (valid HITL token) can still clear a tainted write —
+    forced HITL means "ask the human", not "silently deny forever".
+    """
+
+    @pytest.mark.asyncio
+    async def test_tainted_managed_remote_write_pending_without_token(self) -> None:
+        from hermes.capabilities.domain.ports import ExecutionStatus
+
+        mcp_adapter = _RecordingMcpAdapter()
+        broker = _build_broker(
+            agent_state=_RunningAgentState(),
+            mcp_adapter=mcp_adapter,
+            registry=_managed_remote_write_registry(),
+        )
+
+        proposal = _mcp_proposal("mcp__safent-control__create_employee")
+        outcome = await broker.dispatch(proposal, _clean_consent(tainted=True))
+
+        assert outcome.status is ExecutionStatus.PENDING_APPROVAL
+        assert len(mcp_adapter.calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_tainted_managed_remote_write_executes_after_human_approval(self) -> None:
+        """A forced-HITL write is not a dead end: a real approval token clears it."""
+        from hermes.capabilities.domain.ports import ExecutionStatus
+
+        mcp_adapter = _RecordingMcpAdapter()
+        broker = _build_broker(
+            agent_state=_RunningAgentState(),
+            mcp_adapter=mcp_adapter,
+            registry=_managed_remote_write_registry(),
+        )
+
+        proposal = _mcp_proposal("mcp__safent-control__create_employee")
+        tainted_consent = _clean_consent(tainted=True)
+
+        first = await broker.dispatch(proposal, tainted_consent)
+        assert first.status is ExecutionStatus.PENDING_APPROVAL
+
+        token = await broker._approval_gate.approve(
+            proposal_id=proposal.proposal_id, approved_by=_OPERATOR
+        )
+        second = await broker.dispatch(
+            proposal, tainted_consent, hitl_approval_token=token
+        )
+
+        assert second.status is ExecutionStatus.EXECUTED, (
+            f"A validly-approved token must clear the forced HITL: {second}"
+        )
+        assert len(mcp_adapter.calls) == 1

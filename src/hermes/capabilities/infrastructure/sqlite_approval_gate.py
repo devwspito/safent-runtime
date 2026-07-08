@@ -70,6 +70,14 @@ _MAX_VALUE_LEN: int = 64
 # re-enqueue, así que no detiene un loop que cruza varios re-encolados.
 _MAX_DURABLE_PENDING_ATTEMPTS: int = 20
 
+# Sentinel `approved_by`/audit-actor marker for approve_enterprise_decision()
+# (Fase 2 Phase 4e) — NEVER a real local UUID identity, since a route=
+# 'enterprise' row is approved ONLY by a verified signed cloud decision
+# (I-1/I-3), never a local worker. `approved_by` is plain TEXT (see schema.py),
+# so a descriptive non-UUID string is intentional here — it is unambiguous in
+# the audit trail that this was a remote, not a local, decision.
+_ENTERPRISE_CLOUD_APPROVER: str = "enterprise:cloud-decision"
+
 
 class ApprovalGateError(RuntimeError):
     """Error irrecuperable del ApprovalGate — no degradar.
@@ -441,6 +449,103 @@ class SqliteApprovalGate:
             proposal_id=proposal_id,
             actor=str(approved_by),
             description=f"HITL approved proposal {proposal_id}",
+        )
+        return token
+
+    async def approve_enterprise_decision(self, *, proposal_id: UUID) -> str:
+        """Mints an approval token for a route='enterprise' row from a
+        VERIFIED cloud decision (Fase 2 Phase 4e — Part B).
+
+        This is the CLOUD-decision counterpart of `approve()`: the worker has
+        no TOTP for an enterprise-routed row and `approve()` deliberately
+        fails closed on one (I-1/I-3, `reason="enterprise_route_requires_
+        cloud_decision"`) — this method is the ONLY other path that mints a
+        token for such a row, and it is reachable ONLY from
+        `hermes.config_sync.remote_approvals._verify_and_apply_decision`,
+        AFTER that caller's Ed25519 signature verification already passed
+        (I-1). This method does NOT verify anything itself — it trusts the
+        caller has already verified — and it does NOT check MFA (a cloud
+        decision carries no local TOTP factor; the verified signature IS the
+        authorization for this route).
+
+        Defense-in-depth: REQUIRES route='enterprise' on the row (the
+        opposite guard from `approve()`, which REQUIRES route!='enterprise')
+        — together the two methods partition every row: a LOCAL row can ONLY
+        ever be minted by `approve()`; an 'enterprise' row can ONLY ever be
+        minted by this method. Neither can cross into the other's territory.
+
+        Returns:
+            Token de aprobación (opaco, HMAC-SHA256, single-use) — idéntico
+            en forma al que produce `approve()`; el broker/hook lo consume
+            exactamente igual vía `verify_token()`.
+
+        Raises:
+            ApprovalGateError: la propuesta no existe/ya fue resuelta, o NO
+                está enrutada a Enterprise (fail-closed — este método nunca
+                debe usarse para aprobar una fila LOCAL).
+        """
+        row = self._fetch_pending(proposal_id)
+        if row is None:
+            raise ApprovalGateError(
+                f"proposal_id={proposal_id} no existe o ya fue resuelta."
+            )
+        if row["status"] != "pending":
+            raise ApprovalGateError(
+                f"proposal_id={proposal_id} ya tiene status={row['status']!r}. "
+                "Solo se puede aprobar una propuesta en estado 'pending'."
+            )
+
+        _row_route = row["route"] if "route" in row.keys() else ""
+        if _row_route != "enterprise":
+            raise ApprovalGateError(
+                f"proposal_id={proposal_id} no está enrutada a Enterprise "
+                f"(route={_row_route!r}) — approve_enterprise_decision() solo "
+                "aplica a filas route='enterprise' (fail-closed, defensa en "
+                "profundidad: una fila LOCAL solo la aprueba approve()).",
+                reason="not_enterprise_route",
+            )
+
+        capability = row["risk"]
+        token = self._minter.mint(
+            proposal_id=proposal_id,
+            capability=capability,
+            ttl=self._token_ttl,
+        )
+        expiry = datetime.now(tz=UTC) + timedelta(seconds=self._token_ttl)
+        now = datetime.now(tz=UTC).isoformat()
+        nonce = _extract_nonce_from_token(token)
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE pending_approvals
+                SET status='approved', approved_by=?, token_hmac=?,
+                    nonce=?, expires_at=?, resolved_at=?
+                WHERE proposal_id=?
+                  AND status='pending'
+                """,
+                (
+                    _ENTERPRISE_CLOUD_APPROVER,
+                    token,
+                    nonce,
+                    expiry.isoformat(),
+                    now,
+                    str(proposal_id),
+                ),
+            )
+            if cursor.rowcount == 0:
+                # TOCTOU — mirrors approve()'s own guard: the row stopped being
+                # 'pending' between _fetch_pending and this UPDATE.
+                raise ApprovalGateError(
+                    f"proposal_id={proposal_id} dejó de estar 'pending' "
+                    "(resuelta en paralelo) — aprobación abortada."
+                )
+
+        await self._audit_hitl(
+            kind=AuditKind.HITL_APPROVED,
+            proposal_id=proposal_id,
+            actor=_ENTERPRISE_CLOUD_APPROVER,
+            description=f"Enterprise cloud-verified approval for proposal {proposal_id}",
         )
         return token
 

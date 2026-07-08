@@ -51,7 +51,7 @@ class _RaisingAccessScopeRepo:
         raise RuntimeError("db unavailable")
 
 
-def _make_hook(access_scope_repo, tenant_id: str = _TENANT_ID):
+def _make_hook(access_scope_repo, tenant_id: str = _TENANT_ID, agent_registry=None):
     agent_state = MagicMock()
     agent_state.is_paused = AsyncMock(return_value=False)
     loop = asyncio.new_event_loop()
@@ -64,6 +64,7 @@ def _make_hook(access_scope_repo, tenant_id: str = _TENANT_ID):
         broker=broker,
         access_scope_repo=access_scope_repo,
         tenant_id=tenant_id,
+        agent_registry=agent_registry,
     )
     return hook
 
@@ -152,14 +153,18 @@ class TestFailOpen:
         hook = _make_hook(_FakeAccessScopeRepo(scope=scope))
         assert _run_hook(hook, "terminal", {"command": "ls"}) is None
 
-    def test_non_native_tool_is_never_governed_by_this_floor(self) -> None:
+    def test_non_native_tool_passes_when_scope_is_unenforced(self) -> None:
         set_current_cycle_agent("agent-a")
         scope = AgentAccessScope.create(
             tenant_id=_TENANT_ID, agent_id="agent-a", updated_by=1,
-            enforced=True, native_tools=frozenset(),
+            enforced=False, native_tools=frozenset(),
         )
         hook = _make_hook(_FakeAccessScopeRepo(scope=scope))
-        # An external/capability tool name unknown to classify_nous_tool.
+        assert _run_hook(hook, "gmail_send_email", {}) is None
+
+    def test_non_native_tool_passes_when_no_scope_row(self) -> None:
+        set_current_cycle_agent("agent-a")
+        hook = _make_hook(_FakeAccessScopeRepo(scope=None))
         assert _run_hook(hook, "gmail_send_email", {}) is None
 
 
@@ -204,6 +209,155 @@ class TestFailClosedOnRepoError:
         assert result is not None
         assert result.get("action") == "block"
         assert "fail-closed" in result.get("message", "")
+
+
+# ---------------------------------------------------------------------------
+# H-1 (2026-07-07, security review) — dispatch-time backstop for the THIRD
+# tool class (os_surface). The PRIMARY fix is presentation-time
+# (nous_engine._filter_mcp_skill, see test_nous_engine_agent_access_scope.py
+# TestOsSurfaceLockdownH1); this is the belt-and-suspenders floor.
+# ---------------------------------------------------------------------------
+
+
+class TestNonNativeToolBackstopH1:
+    def _locked_repo(self, authorized_mcp: frozenset[str] = frozenset()) -> _FakeAccessScopeRepo:
+        scope = AgentAccessScope.create(
+            tenant_id=_TENANT_ID, agent_id=DEFAULT_AGENT_ID, updated_by=1,
+            enforced=True, native_tools=frozenset(), cerebro_unrestricted=False,
+            authorized_mcp_servers=authorized_mcp,
+        )
+        return _FakeAccessScopeRepo(scope=scope)
+
+    def test_os_surface_tool_blocked_under_locked_scope(self) -> None:
+        set_current_cycle_agent(DEFAULT_AGENT_ID)
+        hook = _make_hook(self._locked_repo())
+        result = _run_hook(hook, "delegate_to_colleague", {})
+        assert result is not None
+        assert result.get("action") == "block"
+
+    def test_lo_write_text_blocked_under_locked_scope(self) -> None:
+        set_current_cycle_agent(DEFAULT_AGENT_ID)
+        hook = _make_hook(self._locked_repo())
+        result = _run_hook(hook, "lo_write_text", {})
+        assert result is not None
+
+    def test_authorized_mcp_tool_still_passes_under_locked_scope(self) -> None:
+        """The dispatch-time backstop must never collaterally block a
+        legitimately bundle-authorized MCP tool — SC-002 requires management
+        tools to keep working for the locked Cerebro."""
+        set_current_cycle_agent(DEFAULT_AGENT_ID)
+        hook = _make_hook(self._locked_repo(authorized_mcp=frozenset({"safent-control"})))
+        result = _run_hook(hook, "mcp__safent-control__list_employees", {})
+        assert result is None
+
+    def test_unauthorized_mcp_slug_blocked_under_locked_scope(self) -> None:
+        set_current_cycle_agent(DEFAULT_AGENT_ID)
+        hook = _make_hook(self._locked_repo(authorized_mcp=frozenset({"safent-control"})))
+        result = _run_hook(hook, "mcp__evil-server__steal", {})
+        assert result is not None
+        assert result.get("action") == "block"
+
+
+# ---------------------------------------------------------------------------
+# H-1 residual (2026-07-07, security review, Medium) — a managed/cloud
+# DEFAULT_AGENT_ID with a MISSING scope row must be LOCKED, not omnipotent.
+# ---------------------------------------------------------------------------
+
+
+class _CloudManagedAgent:
+    managed_by = "cloud"
+
+
+class _LocalAgent:
+    managed_by = None
+
+
+class _FakeAgentRegistry:
+    def __init__(self, agent) -> None:
+        self._agent = agent
+
+    def get_agent(self, agent_id: str):
+        return self._agent
+
+
+class _RaisingAgentRegistry:
+    def get_agent(self, agent_id: str):
+        raise RuntimeError("registry unavailable")
+
+
+class TestMissingScopeRowFailClosedForCloudManagedCerebro:
+    def test_managed_default_agent_missing_scope_is_locked(self) -> None:
+        """End-to-end through the real hook (agent_registry threaded through
+        register_security_hooks/make_pre_tool_call_hook)."""
+        set_current_cycle_agent(DEFAULT_AGENT_ID)
+        hook = _make_hook(
+            _FakeAccessScopeRepo(scope=None),
+            agent_registry=_FakeAgentRegistry(_CloudManagedAgent()),
+        )
+        result = _run_hook(hook, "delegate_to_colleague", {})
+        assert result is not None, (
+            "a managed/cloud Cerebro with no resolvable scope row must be "
+            "LOCKED — reverting to omnipotence is exactly the H-1 residual"
+        )
+        assert result.get("action") == "block"
+
+    def test_ordinary_ce_default_agent_missing_scope_stays_open(self) -> None:
+        """Zero regression: an unmanaged CE install (no registry signal, or
+        managed_by is None) keeps today's fail-open behaviour."""
+        from hermes.runtime.security_hook import _check_agent_access_scope
+
+        set_current_cycle_agent(DEFAULT_AGENT_ID)
+        result = _check_agent_access_scope(
+            "delegate_to_colleague",
+            _FakeAccessScopeRepo(scope=None),
+            _TENANT_ID,
+            _FakeAgentRegistry(_LocalAgent()),
+        )
+        assert result is None
+
+    def test_no_agent_registry_wired_stays_open(self) -> None:
+        """agent_registry is optional (None) — every existing call site that
+        doesn't pass it keeps today's fail-open behaviour unchanged."""
+        from hermes.runtime.security_hook import _check_agent_access_scope
+
+        set_current_cycle_agent(DEFAULT_AGENT_ID)
+        result = _check_agent_access_scope(
+            "delegate_to_colleague", _FakeAccessScopeRepo(scope=None), _TENANT_ID, None
+        )
+        assert result is None
+
+    def test_non_default_agent_missing_scope_stays_open_even_if_cloud_managed(
+        self,
+    ) -> None:
+        """The fail-closed residual is scoped to DEFAULT_AGENT_ID only — a
+        cloud-managed CUSTOM agent with no scope row is unaffected (it was
+        already fail-closed by _filter_mcp_skill's per-kind gate for
+        non-native tools; this residual is specifically the Cerebro-
+        omnipotence-bypass gap)."""
+        from hermes.runtime.security_hook import _check_agent_access_scope
+
+        set_current_cycle_agent("custom-agent-1")
+        result = _check_agent_access_scope(
+            "delegate_to_colleague",
+            _FakeAccessScopeRepo(scope=None),
+            _TENANT_ID,
+            _FakeAgentRegistry(_CloudManagedAgent()),
+        )
+        assert result is None
+
+    def test_registry_lookup_error_stays_open_not_widened_block(self) -> None:
+        """_agent_is_cloud_managed fails soft to False on a registry error —
+        this only NARROWS the fail-closed branch, never widens a block."""
+        from hermes.runtime.security_hook import _check_agent_access_scope
+
+        set_current_cycle_agent(DEFAULT_AGENT_ID)
+        result = _check_agent_access_scope(
+            "delegate_to_colleague",
+            _FakeAccessScopeRepo(scope=None),
+            _TENANT_ID,
+            _RaisingAgentRegistry(),
+        )
+        assert result is None
 
 
 # ---------------------------------------------------------------------------

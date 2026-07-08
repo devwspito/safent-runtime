@@ -83,7 +83,7 @@ class DelegationSurfaceAdapter:
         tenant_id: Any,
         human_operator_id: Any,
     ) -> CapturedAction:
-        employee_id, task, error = _validate_params(params)
+        employee_id, task, error = _validate_params(params, self._directory_employee_ids())
         result = (
             {}
             if error
@@ -117,7 +117,9 @@ class DelegationSurfaceAdapter:
                     f"got {action.surface_kind}"
                 ),
             )
-        employee_id, task, error = _validate_params(action.payload)
+        employee_id, task, error = _validate_params(
+            action.payload, self._directory_employee_ids()
+        )
         if error:
             return ReplayOutcome.failed(action.action_id, error=error)
 
@@ -158,6 +160,27 @@ class DelegationSurfaceAdapter:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _directory_employee_ids(self) -> set[str] | None:
+        """Fail-soft read of the Fase-3 directory's employee_id set.
+
+        None means "no directory pushed" (visibility_scope="all", the
+        default) — callers must skip the UX pre-check entirely then (zero
+        regression). This is a faster/clearer LOCAL signal only: the cloud
+        already enforces the department gate authoritatively (404 on the
+        outbox POST) regardless of what this returns.
+        """
+        try:
+            assoc = self._store.get()
+            directory = getattr(assoc, "directory", None) if assoc else None
+            if not isinstance(directory, dict):
+                return None
+            entries = directory.get("entries", [])
+            if not isinstance(entries, list):
+                return None
+            return {e.get("employee_id", "") for e in entries if isinstance(e, dict)}
+        except Exception:  # noqa: BLE001
+            return None
 
     def _resolve_conversation_id(self, work_item_id: Any) -> str | None:
         """Best-effort: reads `agent_tasks.conversation_id` for the CURRENT
@@ -218,14 +241,25 @@ class DelegationSurfaceAdapter:
         return {"ok": True, "correlation_id": correlation_id}
 
 
-def _validate_params(params: dict[str, Any]) -> tuple[str, str, str]:
-    """Returns (employee_id, task, error) — error is "" when valid."""
+def _validate_params(
+    params: dict[str, Any], visible_employee_ids: set[str] | None = None
+) -> tuple[str, str, str]:
+    """Returns (employee_id, task, error) — error is "" when valid.
+
+    visible_employee_ids: the Fase-3 directory's employee_id set, when a
+    directory is present for this instance. None means no directory was
+    pushed (visibility_scope="all", the default) — skip the check entirely
+    (zero regression, opt-in). This is a UX PRE-CHECK ONLY: the cloud
+    enforces the department gate authoritatively regardless of this result.
+    """
     employee_id = str(params.get("employee_id") or "").strip()
     task = str(params.get("task") or "").strip()
     if not employee_id or not task:
         return "", "", (
             "delegate_to_colleague requiere 'employee_id' y 'task' no vacíos"
         )
+    if visible_employee_ids is not None and employee_id not in visible_employee_ids:
+        return "", "", "Ese compañero no está en tu directorio de departamento."
     return employee_id, task, ""
 
 
