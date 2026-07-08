@@ -229,8 +229,10 @@ function reducer(state: ChatState, action: Action): ChatState {
         messages: updateAssistant(state.messages, action.id, m => ({
           ...m,
           toolSteps: [...m.toolSteps, action.step],
-          // Reset the activity segment on each tool call (matches vanilla segmentStart logic)
-          activityText: '',
+          // Do NOT reset activityText: a tool call mid-answer must not discard the
+          // answer text streamed before it. Keeping it accumulating means STREAM_DONE
+          // renders the WHOLE multi-segment answer, not just the fragment after the
+          // last tool call (that dropped table rows / stranded a "¿?" tail bubble).
         })),
       }
 
@@ -268,7 +270,7 @@ function reducer(state: ChatState, action: Action): ChatState {
 
     case 'BATCH_UPDATE': {
       // Single immutable update covering all accumulated WS frames from one flush tick.
-      // toolSteps reset activityText per the TOOL_CALL semantics (matches segmentStart).
+      // activityText accumulates across tool calls (never reset) so the full answer survives.
       const { id, thinkingChunk, deltaChunk, newToolSteps, thinkingDone, statusText } = action
       const nextStatus: ChatState['status'] = statusText !== null
         ? { phase: 'streaming', statusText }
@@ -285,8 +287,9 @@ function reducer(state: ChatState, action: Action): ChatState {
         messages: updateAssistant(state.messages, id, m => {
           let next = m
           if (newToolSteps.length > 0) {
-            // Each TOOL_CALL resets activityText (matches vanilla segmentStart logic)
-            next = { ...next, toolSteps: [...next.toolSteps, ...newToolSteps], activityText: '' }
+            // Do NOT reset activityText (see TOOL_CALL): earlier answer segments must
+            // survive so the finalized bubble is the full answer, not just the tail.
+            next = { ...next, toolSteps: [...next.toolSteps, ...newToolSteps] }
           }
           if (thinkingChunk) {
             // thinkingText is capped — it's a transient trace only shown in a collapsed

@@ -162,14 +162,36 @@ export default function ProvidersView() {
         const cfg = Array.isArray(configured) ? configured : []
         // Native-configured providers live in a separate store from the repo;
         // surface the active one in the configured list so a just-added native
-        // catalogue provider is actually visible + marked active.
-        const merged = nativeActive && !cfg.some(p => p.provider_id === nativeActive.provider_id)
+        // catalogue provider is actually visible + marked active. But when a
+        // *custom* provider is active, the daemon mirrors it into the native
+        // store under a generic id (e.g. "openai-api") that points at the SAME
+        // base_url — that mirror is not a distinct provider, so skip it (else
+        // the one provider renders as two "Activo" cards).
+        const sameEndpoint = (u?: string) => (u ?? '').trim().replace(/\/+$/, '')
+        const nativeAlreadyShown = !!nativeActive && cfg.some(p =>
+          p.provider_id === nativeActive.provider_id ||
+          (p.is_active === true &&
+            sameEndpoint(p.base_url) !== '' &&
+            sameEndpoint(p.base_url) === sameEndpoint(nativeActive.base_url) &&
+            (!nativeActive.default_model || !p.default_model ||
+              nativeActive.default_model === p.default_model)))
+        const merged = nativeActive && !nativeAlreadyShown
           ? [nativeActive, ...cfg]
           : cfg
+        // If we collapsed the native mirror (same endpoint as an active custom
+        // provider, not a distinct one), also drop it from the catalogue — else it
+        // reappears as an "add" option that writes to the SAME shared native slot
+        // and clobbers the active provider.
+        const nativeList = Array.isArray(native) ? native : []
+        const mirrorCollapsed = !!nativeActive && nativeAlreadyShown &&
+          !cfg.some(p => p.provider_id === nativeActive.provider_id)
+        const filteredNative = mirrorCollapsed
+          ? nativeList.filter(n => n.provider_id !== nativeActive!.provider_id)
+          : nativeList
         dispatch({
           type: 'LOADED',
           configured: merged,
-          native: Array.isArray(native) ? native : [],
+          native: filteredNative,
         })
       })
       .catch((err: unknown) => {

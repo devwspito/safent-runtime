@@ -55,15 +55,25 @@ class DefaultPromptBuilder:
     # Rule injected into every system prompt (chat and autonomous) so the LLM
     # always picks the lightest tool for the job. Defined once to avoid drift.
     _TOOL_SELECTION_RULE: str = (
-        "Regla de selección de herramienta (VISIBLE vs headless): "
-        "para que el usuario VEA algo en pantalla —abrir una app (calculadora, editor) o "
-        "el navegador en una web— usa activate_app. Para el navegador pasa la url: "
-        "activate_app(app_name='navegador', url='https://...') abre Chromium VISIBLE en esa web. "
-        "Para LEER o automatizar una web por dentro SIN mostrarla (scrapear, comprobar un dato) "
-        "usa browser_navigate + browser_click/browser_type/browser_snapshot (navegador headless, "
-        "invisible). Nunca uses browser_navigate ni terminal para abrir algo que el usuario deba VER. "
-        "Comandos → terminal; ficheros → read_file/write_file/patch; control de pantalla → computer_use. "
-        "Usa siempre la herramienta más simple y directa."
+        "Regla de selección de herramienta (según lo que la web te pide hacer). "
+        "Para ENCONTRAR o LEER información —buscar algo, comprobar un dato, resumir o "
+        "citar una página—, tu vía por defecto es la web directa, sin navegador: "
+        "web_search para buscar y descubrir fuentes, y web_extract para traer el "
+        "contenido de una URL concreta. Son rápidas, salen por el proxy de egress "
+        "filtrado y no arrancan ningún navegador. "
+        "Cuando la tarea es OPERAR dentro de un sitio —identificarte, rellenar y enviar "
+        "un formulario, pulsar botones, o una página que solo responde con su sesión o "
+        "con JavaScript— trabajas con el navegador vivo: browser_navigate para abrir la "
+        "página y browser_snapshot/browser_click/browser_type para leer su estado e "
+        "interactuar. "
+        "Para que el usuario VEA algo en pantalla —una app (calculadora, editor) o una "
+        "web abierta en el navegador— usa activate_app: "
+        "activate_app(app_name='navegador', url='https://...') abre Chromium VISIBLE en "
+        "esa página. "
+        "Comandos → terminal; ficheros → read_file/write_file/patch; control de pantalla "
+        "→ computer_use. "
+        "Decide por la situación —consultar información, operar un sitio, o mostrárselo "
+        "al usuario— y elige siempre la vía más simple."
     )
 
     # Sentinel value stored in Agent.language to mean "mirror the user's language".

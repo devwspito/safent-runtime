@@ -36,13 +36,21 @@ function buildSet(views: unknown): Set<string> {
 }
 
 function isAllowed(views: Set<string>, viewId: string, edition: Edition): boolean {
-  // Community edition: no restrictions.
-  if (edition === 'community') return true
-  // Always-on view: chat (core). Tablero was removed from the product (owner
-  // decision: not useful). Keep in sync with shell_server/instance/api.py:_ALL_VIEWS.
+  // Always-on view: chat (core) — never gated, any edition. Tablero was removed
+  // from the product. Keep in sync with shell_server/instance/api.py:_ALL_VIEWS.
   if (viewId === 'chat') return true
-  // Empty set signals a failed fetch (fail-open) — allow everything.
+  // En Vivo is a pure-UI live-watch surface, deliberately OUTSIDE the backend view
+  // vocabulary (never in _ALL_VIEWS). Keep it on for Community so hiding the agents
+  // module does not also remove live-view. Community-only: associate governance is
+  // unchanged (En Vivo stays hidden there).
+  if (edition === 'community' && viewId === 'en-vivo') return true
+  // Empty set signals a failed fetch (fail-open) — allow everything so a transient
+  // error never blanks the UI. Applies to every edition.
   if (views.size === 0) return true
+  // Honor the backend's granted set for BOTH community and associate (single source
+  // of truth): community = _ALL_VIEWS minus the excluded agents/org surface;
+  // associate = license.views. (The old `edition === 'community' return true`
+  // short-circuit discarded this set and wrongly exposed the 'agentes' module.)
   return views.has(viewId)
 }
 
