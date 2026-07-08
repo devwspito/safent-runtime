@@ -61,6 +61,17 @@ _ALL_VIEWS: list[str] = [
 # Minimum view set for an associate instance before Fase 4 cloud policies arrive.
 _ASSOCIATE_DEFAULT_VIEWS: list[str] = ["chat", "coste", "tablero"]
 
+# Inc 5' (2026-07-07): Community drops the agents/org surface entirely — the
+# 27-template roster is not seeded (sqlite_agent_registry.py) and its view is
+# not granted. Associate/Enterprise is unchanged: `agentes` travels (or is
+# omitted) via license.views, authored by the cloud console.
+_COMMUNITY_EXCLUDED_VIEWS: frozenset[str] = frozenset({"agentes"})
+
+
+def _community_views() -> list[str]:
+    """Community's granted view set — `_ALL_VIEWS` minus the agents/org surface."""
+    return [v for v in _ALL_VIEWS if v not in _COMMUNITY_EXCLUDED_VIEWS]
+
 
 # ------------------------------------------------------------------
 # Pydantic schemas
@@ -182,8 +193,8 @@ def create_instance_router(db_path: Path, vault: "SecretsVault") -> APIRouter:
     async def instance_features() -> FeaturesResponse:
         """Return the edition and the list of enabled views.
 
-        CE: all views (full-featured community edition).
-        Associate (no cloud policy yet): minimum placeholder set.
+        CE: all views except the agents/org surface (Inc 5' — not seeded, not
+        granted). Associate (no cloud policy yet): minimum placeholder set.
         Fail-soft: returns CE defaults on storage errors.
         """
         try:
@@ -191,10 +202,10 @@ def create_instance_router(db_path: Path, vault: "SecretsVault") -> APIRouter:
             edition = store.edition()
         except Exception as exc:  # noqa: BLE001
             logger.warning("hermes.instance.features.error", extra={"reason": str(exc)})
-            return FeaturesResponse(edition="community", views=list(_ALL_VIEWS))
+            return FeaturesResponse(edition="community", views=_community_views())
 
         if edition == "community":
-            return FeaturesResponse(edition=edition, views=list(_ALL_VIEWS))
+            return FeaturesResponse(edition=edition, views=_community_views())
 
         # Associate: the granted views travel in license.views (LicenseSpec),
         # persisted by config_sync via store.update_license(). The sidebar MUST

@@ -36,6 +36,11 @@ class TestAgentAccessScopeCreate:
         assert scope.policy_overlay == {}
         assert scope.views == ()
         assert scope.managed_by is None
+        assert scope.authorized_mcp_servers == frozenset()
+
+    def test_authorized_mcp_servers_from_factory(self):
+        scope = _make_scope(authorized_mcp_servers=frozenset({"safent-control"}))
+        assert scope.authorized_mcp_servers == frozenset({"safent-control"})
 
     def test_scope_id_generated_and_unique(self):
         s1 = _make_scope()
@@ -84,6 +89,16 @@ class TestAgentAccessScopeCreate:
                 views=["dashboard"],
             )
 
+    def test_authorized_mcp_servers_must_be_frozenset(self):
+        with pytest.raises(TypeError, match="frozenset"):
+            AgentAccessScope(
+                scope_id="sid",
+                tenant_id="t",
+                agent_id="a",
+                updated_by=1,
+                authorized_mcp_servers={"safent-control"},  # a plain set
+            )
+
 
 # ---------------------------------------------------------------------------
 # allows_native_tool — the enforcement floor
@@ -124,6 +139,7 @@ class TestToDict:
         assert d["enforced"] is False
         assert d["cerebro_unrestricted"] is True
         assert d["updated_by"] == 1001
+        assert d["authorized_mcp_servers"] == []
 
     def test_to_dict_does_not_contain_credentials(self):
         scope = _make_scope()

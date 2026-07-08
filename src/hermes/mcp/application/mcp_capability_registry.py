@@ -47,36 +47,46 @@ class McpCapabilityRegistry:
     def resolve(self, tool_name: str) -> CapabilityBinding | None:
         """Resolve tool_name → CapabilityBinding.
 
-        1. Delegate to static registry first (it wins on collision).
-        2. If name looks like mcp__<slug>__<tool>, look up in the manager.
-        3. Unknown / not-connected server → None (broker fail-closes).
+        An ``mcp__<slug>__<tool>`` name belongs to THIS registry's namespace, so
+        it is resolved here FIRST — before delegating to the inner (static /
+        Composio) registry. Delegating first was a latent bug: an inner
+        catch-all matcher hijacks the name. Concretely,
+        ``ComposioCapabilityRegistry._looks_like_composio_slug`` fires on ANY
+        name with an underscore, and ``mcp__<slug>__<tool>`` is full of them, so
+        every MCP tool got a Composio WRITE binding (HIGH, not-auto, api_call,
+        executor=composio) — which forced even pure MCP reads (list_/get_) to
+        HITL and mis-routed execution to the Composio adapter.
+
+        Resolution order:
+          1. ``mcp__`` name → look up in the manager. Found → MCP binding.
+             Not found → None (fail-closed). We do NOT fall back to the inner
+             registry for an ``mcp__`` name — that is exactly what let the
+             hijack in.
+          2. Non-``mcp__`` name → delegate to the inner registry, which owns
+             its own tools and wins for them.
         """
-        static = self._static.resolve(tool_name)
-        if static is not None:
-            return static
+        if _is_mcp_qualified_name(tool_name):
+            slug_str, bare_tool = _parse_qualified_name(tool_name)
+            if slug_str is None or bare_tool is None:
+                return None
 
-        if not _is_mcp_qualified_name(tool_name):
-            return None
+            tool = self._find_tool(slug_str, bare_tool)
+            if tool is None:
+                logger.debug(
+                    "hermes.mcp.registry.tool_not_found: qualified_name=%s", tool_name
+                )
+                return None
 
-        slug_str, bare_tool = _parse_qualified_name(tool_name)
-        if slug_str is None or bare_tool is None:
-            return None
-
-        tool = self._find_tool(slug_str, bare_tool)
-        if tool is None:
-            logger.debug(
-                "hermes.mcp.registry.tool_not_found: qualified_name=%s", tool_name
+            return CapabilityBinding(
+                tool_name=tool_name,
+                surface_kind=SurfaceKind.MCP_CALL,
+                required_capability=None,
+                risk=tool.risk,
+                auto_executable=tool.auto_executable,
+                executor="mcp",
             )
-            return None
 
-        return CapabilityBinding(
-            tool_name=tool_name,
-            surface_kind=SurfaceKind.MCP_CALL,
-            required_capability=None,
-            risk=tool.risk,
-            auto_executable=tool.auto_executable,
-            executor="mcp",
-        )
+        return self._static.resolve(tool_name)
 
     def _find_tool(self, slug_str: str, bare_tool: str):  # type: ignore[return]
         """Search all active servers for a matching slug+tool."""

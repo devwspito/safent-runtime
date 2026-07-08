@@ -63,6 +63,44 @@ P1-4 — deletes after upserts:
   have completed without failures.  If any upsert fails, deletes are skipped
   and last_applied_version is NOT advanced.
 
+2026-07-07 — MCP capability authorization via AgentAccessScope, not binding:
+  bind_capability_to_agent is D-Bus-DENIED for config-sync's uid=hermes by
+  design (CWE-441 confused-deputy fix, org.hermes.Runtime1.conf) — it can
+  never succeed from this process. An agent's kind="mcp" capabilities are
+  therefore never bound via that verb; instead they land on the agent's
+  AgentAccessScope (authorized_mcp_servers) through the ALLOWED
+  set_agent_access_scope verb — see _bind_non_mcp_capabilities and
+  _apply_access_scope. nous_engine._filter_mcp_skill reads that set for its
+  fail-closed MCP admission. Non-MCP capabilities (skill, ...) still attempt
+  bind_capability_to_agent for back-compat, but a failure there is logged and
+  NEVER blocks version advancement (the verb is structurally unreachable from
+  config-sync, so requiring its success would deadlock every sync forever).
+
+2026-07-07 — bundle-sourced MCP servers vs the Security Center WARN gate:
+  Every MCP server _apply_mcp processes comes from the Ed25519 tenant-signed
+  bundle (config-sync only ever calls apply() with a verified PolicyPayload)
+  — the tenant signature IS the authority, so it is owner-authored and
+  trusted by construction, unlike an interactive/agent-initiated add_mcp_server
+  call from inside the instance. add_mcp_server's Security-Center gate treats
+  a discretionary WARN verdict (score 40-69) the same as a hard FAIL by
+  default: {"ok": False, "blocked": True, "warn": True, ...}. Previously
+  _apply_mcp classified that shape as a transitory `failed`, which meant
+  hermes.config_sync.partial_failure fired forever and last_applied_version
+  never advanced — the WHOLE bundle got stuck, not just the MCP section.
+
+  Fix: _apply_mcp distinguishes the WARN shape (_is_discretionary_warn_block,
+  keyed on the "warn" flag that only that branch sets) from a genuine FAIL /
+  scanner-error block (_is_permanent_rejection — no "warn" key). Only the
+  WARN case is retried with the daemon's existing owner-override plumbing
+  (add_mcp_server(force=True), the same mechanism the interactive UI uses
+  after an MFA-approved override) — the signed bundle stands in for that
+  approval. A FAIL / scanner-error block is NEVER retried with force=True;
+  it is recorded in `result.rejected` (permanent, like _apply_skills) so it
+  is surfaced/logged and does not stall version advancement, but the server
+  stays uninstalled. Locally/agent-initiated MCP installs never go through
+  this code path — add_mcp_server's own default (force=False, entered
+  directly by the UI/D-Bus caller) keeps blocking WARN for that path.
+
 P2 — strict _is_ok for sensitive sections:
   For egress, consents, and integrations, "ok" must be explicitly True.
   An empty dict / None is treated as failure (not silent success).
@@ -214,6 +252,11 @@ _HIGH_RISK_CONSENT_PREFIXES: frozenset[str] = frozenset(
 )
 
 _CLOUD_MANAGED = "cloud"
+
+# Capability kind that is authorized via AgentAccessScope.authorized_mcp_servers
+# (set_agent_access_scope), NOT via bind_capability_to_agent — see
+# PolicyApplier._bind_non_mcp_capabilities / _apply_access_scope.
+_MCP_CAPABILITY_KIND = "mcp"
 
 # ---------------------------------------------------------------------------
 # Result type
@@ -442,7 +485,13 @@ class PolicyApplier:
     async def _apply_mcp(
         self, servers: list[McpSpec], result: ApplyResult
     ) -> None:
-        """Upsert MCP servers.  No delete in Fase 4 (follow-up: managed_by)."""
+        """Upsert MCP servers.  No delete in Fase 4 (follow-up: managed_by).
+
+        See the module-level 2026-07-07 note for why a discretionary Security-
+        Center WARN on a bundle-sourced server is retried with force=True
+        instead of stalling last_applied_version — _apply_one_mcp_server does
+        the classification.
+        """
         existing = await self._proxy.call_list("list_mcp_servers")
         existing_ids = {s.get("server_id", "") for s in existing}
 
@@ -451,18 +500,65 @@ class PolicyApplier:
                 # No update verb for MCP; skip (idempotent).
                 result.applied += 1
                 continue
-            draft = {
-                "server_id": spec.server_id,
-                "label": spec.label or spec.server_id,
-                "argv": spec.argv,
-                "env": spec.env,
-                "force": False,
-            }
-            resp = await self._call_mutator("add_mcp_server", json.dumps(draft))
+            await self._apply_one_mcp_server(spec, result)
+
+    async def _apply_one_mcp_server(self, spec: McpSpec, result: ApplyResult) -> None:
+        """Install one bundle-sourced MCP server, classifying the verdict.
+
+        - ok                              → applied.
+        - discretionary WARN block        → retried with force=True (bundle
+                                             signature stands in for the
+                                             owner's MFA override); ok on
+                                             retry → applied, still blocked
+                                             on retry → falls through below.
+        - FAIL / scanner-error block       → rejected (permanent, logged,
+                                             does NOT stall version advance).
+        - anything else (network, daemon
+          down, unknown error)             → failed (transitory, retried
+                                             next sync tick).
+        """
+        resp = await self._add_mcp_server(spec, force=False)
+        if _is_ok_lenient(resp):
+            result.applied += 1
+            return
+        if _is_discretionary_warn_block(resp):
+            resp = await self._retry_mcp_bundle_warn_override(spec, resp)
             if _is_ok_lenient(resp):
                 result.applied += 1
-            else:
-                result.failed.append(f"mcp:{spec.server_id}")
+                return
+        if _is_permanent_rejection(resp):
+            logger.warning(
+                "hermes.config_sync.applier.mcp_permanently_rejected",
+                extra={"server_id": spec.server_id, "warn": bool(resp.get("warn"))},
+            )
+            result.rejected.append(f"mcp:{spec.server_id}:scan_blocked")
+            return
+        result.failed.append(f"mcp:{spec.server_id}")
+
+    async def _retry_mcp_bundle_warn_override(
+        self, spec: McpSpec, warn_resp: dict
+    ) -> dict:
+        """Bundle-sourced MCP + discretionary WARN: retry via the daemon's
+        existing owner-override plumbing (force=True). Only reached when the
+        first response was specifically a WARN block (see
+        _is_discretionary_warn_block) — a genuine FAIL/hard verdict never
+        enters this path.
+        """
+        logger.warning(
+            "hermes.config_sync.applier.mcp_bundle_warn_override",
+            extra={"server_id": spec.server_id, "score": warn_resp.get("score")},
+        )
+        return await self._add_mcp_server(spec, force=True)
+
+    async def _add_mcp_server(self, spec: McpSpec, *, force: bool) -> dict:
+        draft = {
+            "server_id": spec.server_id,
+            "label": spec.label or spec.server_id,
+            "argv": spec.argv,
+            "env": spec.env,
+            "force": force,
+        }
+        return await self._call_mutator("add_mcp_server", json.dumps(draft))
 
     async def _apply_skills(
         self, skills: list[SkillSpec], result: ApplyResult
@@ -643,35 +739,74 @@ class PolicyApplier:
             return False
 
         created_id = (resp or {}).get("agent_id") or (resp or {}).get("id") or spec.agent_id
-        # Bind capabilities through the guarded mutator too: bind_capability may be
-        # bus-denied for the config-sync uid, and a raw call would abort the sync.
-        # Fail-soft — a bind failure marks the agent partially-applied (caller
-        # records it) without taking down the rest of the bundle.
-        bind_ok = True
-        for cap in spec.capabilities:
-            resp_bind = await self._call_mutator(
+        await self._bind_non_mcp_capabilities(created_id, spec.capabilities)
+        return await self._apply_access_scope(created_id, spec, tenant_id)
+
+    async def _bind_non_mcp_capabilities(
+        self, agent_id: str, capabilities: list[dict[str, str]]
+    ) -> None:
+        """Best-effort bind for non-MCP capabilities (skill, platform, ...).
+
+        MCP-kind capabilities are deliberately SKIPPED here: BindCapabilityToAgent
+        is D-Bus-denied for config-sync's uid by design (CWE-441 confused-deputy
+        fix — org.hermes.Runtime1.conf line ~300). MCP authorization instead
+        travels through the agent's AgentAccessScope (_apply_access_scope), which
+        is the ALLOWED path and the one nous_engine._filter_mcp_skill reads.
+
+        A binding failure here is logged but NEVER fails the agent's apply: the
+        verb is structurally unreachable from this process, so treating it as
+        fatal would block last_applied_version from ever advancing.
+        """
+        for cap in capabilities:
+            if cap.get("kind") == _MCP_CAPABILITY_KIND:
+                continue
+            resp = await self._call_mutator(
                 "bind_capability_to_agent",
-                created_id,
+                agent_id,
                 cap.get("kind", "skill"),
                 cap.get("id", ""),
                 cap.get("version", ""),
             )
-            if not _is_ok_lenient(resp_bind):
-                bind_ok = False
+            if not _is_ok_lenient(resp):
+                logger.info(
+                    "hermes.config_sync.applier.capability_bind_best_effort_failed",
+                    extra={"agent_id": agent_id, "kind": cap.get("kind"), "id": cap.get("id")},
+                )
 
-        # Enterprise Fase 2 Phase 3: land the cloud-pushed AgentAccessScope, if
-        # the bundle carries one. Reconcile is ADDITIVE ONLY in this phase — a
-        # bundle with no access_scope for a cloud-managed agent leaves any
-        # existing local scope untouched (no clear_agent_access_scope call here).
-        if spec.access_scope is not None:
-            scope_json = json.dumps(spec.access_scope.model_dump())
-            resp_scope = await self._call_mutator(
-                "set_agent_access_scope", created_id, scope_json, tenant_id
-            )
-            if not _is_ok_lenient(resp_scope):
-                bind_ok = False
+    async def _apply_access_scope(
+        self, agent_id: str, spec: AgentSpec, tenant_id: str
+    ) -> bool:
+        """Land the bundle's AgentAccessScope, including bundle-authorized MCP
+        servers (kind="mcp" capabilities) via the allowed set_agent_access_scope
+        verb — the replacement for the forbidden BindCapabilityToAgent for MCP
+        admission (see nous_engine._filter_mcp_skill).
 
-        return bind_ok
+        Reconcile is ADDITIVE ONLY when the bundle carries no access_scope for
+        this agent: any existing local scope is left untouched (no
+        clear_agent_access_scope call here). In that case, MCP-kind capabilities
+        (if any) have nowhere allowed to land this sync — logged, never fatal.
+        """
+        mcp_servers = sorted(
+            {
+                cap.get("id", "")
+                for cap in spec.capabilities
+                if cap.get("kind") == _MCP_CAPABILITY_KIND and cap.get("id")
+            }
+        )
+        if spec.access_scope is None:
+            if mcp_servers:
+                logger.warning(
+                    "hermes.config_sync.applier.mcp_capabilities_without_access_scope",
+                    extra={"agent_id": agent_id, "mcp_servers": mcp_servers},
+                )
+            return True
+
+        scope = spec.access_scope.model_dump()
+        scope["mcp_servers"] = mcp_servers
+        resp = await self._call_mutator(
+            "set_agent_access_scope", agent_id, json.dumps(scope), tenant_id
+        )
+        return _is_ok_lenient(resp)
 
     async def _delete_agent(self, agent_id: str) -> bool:
         try:
@@ -856,6 +991,29 @@ def _is_permanent_rejection(result: dict | bool | None) -> bool:
     if not isinstance(result, dict):
         return False
     return result.get("ok") is False and result.get("blocked") is True
+
+
+def _is_discretionary_warn_block(result: dict | bool | None) -> bool:
+    """True when result is a Security-Center discretionary WARN block.
+
+    Shape: {"ok": False, "blocked": True, "warn": True, "score": ..., ...} —
+    produced EXCLUSIVELY by _scan_install_target's `if verdict == "WARN" and
+    not allow_warn` branch (dbus_runtime_service.py). This is the only
+    "warn": True shape the daemon emits: a genuine FAIL (ScanBlockedError
+    path) or a scanner error carry no "warn" key, so this function never
+    matches them — see _is_permanent_rejection for those.
+
+    Used by _apply_one_mcp_server to gate the bundle-sourced auto-trust
+    override to ONLY the discretionary WARN case: a hard FAIL/scanner-error
+    block on a bundle MCP is never force-retried, it is rejected instead.
+    """
+    if not isinstance(result, dict):
+        return False
+    return (
+        result.get("ok") is False
+        and result.get("blocked") is True
+        and result.get("warn") is True
+    )
 
 
 def _agent_draft(spec: AgentSpec) -> dict:

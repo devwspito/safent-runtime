@@ -2643,18 +2643,40 @@ class NousReasoningEngine:
         agent_id: str,
         tenant_id: str,
     ) -> tuple[ToolSpec, ...]:
-        """Filtra specs MCP y skill según los bindings del agente.
+        """Filtra specs MCP y skill según los bindings + el bundle del agente.
 
-        FAIL-CLOSED por kind: si el agente no tiene ningún binding de un kind
-        (mcp o skill), NO se expone ninguna capability de ese kind. Solo las
-        capabilities cuyo id aparece en los bindings del agente sobreviven al
-        filtro. Las specs que no son ni MCP ni skill pasan sin tocar (su control
-        de acceso vive en otra capa: Composio por conexión, os_surface por
-        policy/broker).
+        FAIL-CLOSED por kind: si el agente no tiene ninguna autorización de un
+        kind (mcp o skill), NO se expone ninguna capability de ese kind. Solo
+        las capabilities cuyo id aparece en las autorizaciones del agente
+        sobreviven al filtro. Las specs que no son ni MCP ni skill (Composio,
+        os_surface) pasan sin tocar SALVO que el agente esté bajo un scope
+        LOCKED (enforced + no cerebro_unrestricted) — ver H-1 más abajo.
+
+        H-1 (2026-07-07): un agente LOCKED (enforced=True,
+        cerebro_unrestricted=False — el Cerebro soberano tras la provisión
+        management-only, u otro agente con el mismo scope) recibía TODAS las
+        tools os_surface (delegate_to_colleague, lo_*, activate_app, ...) sin
+        filtrar — ni el floor nativo (solo gobierna el catálogo nativo de
+        Nous) ni este filtro (solo miraba mcp/skill) las tocaban. Un agente
+        LOCKED ahora recibe CERO tools os_surface — no hay allow-set hoy; el
+        default es vacío, así que delegate_to_colleague nunca es admisible
+        por esta vía. Un agente NO locked (omnipotente/sin gestionar) sigue
+        viendo todas sus os_surface tools — cero regresión.
 
         Rationale (confused-deputy): una capability MCP o una skill da al agente
         acceso lateral (red, FS, ejecución). El default debe ser denegar — un
         agente sin asignación explícita no hereda el catálogo completo del SO.
+
+        bound_mcp (2026-07-07) es la UNIÓN de dos fuentes independientes:
+          - AgentCapabilityBinding (D-Bus BindCapabilityToAgent) — el camino
+            del operador humano interactivo (hermes-user).
+          - AgentAccessScope.authorized_mcp_servers — el camino del bundle
+            firmado por la nube, aplicado por config-sync vía
+            set_agent_access_scope (BindCapabilityToAgent está D-Bus-denegado
+            para uid=hermes por diseño; ver
+            hermes/config_sync/applier.py y org.hermes.Runtime1.conf).
+          Ninguna fuente por sí sola amplía lo que la otra ya deniega: ambas
+          son ADITIVAS al allow-set, nunca lo reducen.
         """
         if self._capability_binding_repo is None:
             return specs
@@ -2664,28 +2686,89 @@ class NousReasoningEngine:
             b.capability.capability_id
             for b in bindings
             if b.capability.kind == "mcp"
-        }
+        } | self._bundle_authorized_mcp(agent_id, tenant_id)
         bound_skill = {
             b.capability.capability_id
             for b in bindings
             if b.capability.kind == "skill"
         }
+        os_surface_locked = self._agent_os_surface_locked(agent_id, tenant_id)
 
         result = []
         for spec in specs:
             tags = set(spec.tags or ())
             if "mcp" in tags:
-                # FAIL-CLOSED: sin bindings mcp → ninguna tool mcp.
+                # FAIL-CLOSED: sin autorización mcp → ninguna tool mcp.
                 if self._mcp_spec_is_bound(spec, bound_mcp):
                     result.append(spec)
             elif spec.entity_type == "skill":
                 # FAIL-CLOSED: sin bindings skill → ninguna skill.
                 if self._skill_spec_is_bound(spec, bound_skill):
                     result.append(spec)
+            elif spec.entity_type == "os_surface":
+                # H-1: FAIL-CLOSED para un agente LOCKED — sin allow-set hoy,
+                # el default es CERO tools os_surface (ver docstring arriba).
+                if not os_surface_locked:
+                    result.append(spec)
             else:
                 result.append(spec)
 
         return tuple(result)
+
+    def _agent_os_surface_locked(self, agent_id: str, tenant_id: str) -> bool:
+        """True cuando el scope de *agent_id* está LOCKED (H-1, 2026-07-07).
+
+        LOCKED = enforced=True y cerebro_unrestricted=False. Generaliza
+        _cerebro_bypasses_filtering a CUALQUIER agent_id — el agregado
+        AgentAccessScope es agnóstico de quién es "el CEO" (ver su docstring
+        de módulo); aquí solo decidimos si el gate os_surface debe aplicarse.
+
+        Fail-open (no locked) sin repo o ante un error de lectura — un repo
+        roto nunca debe dejar a TODO agente sin sus tools os_surface. El caso
+        "agente cloud gestionado sin scope resoluble" se trata aparte y
+        fail-CLOSED en el floor de despacho (security_hook._check_agent_access_
+        scope / _agent_is_cloud_managed) — aquí basta con no aplicar el gate.
+        """
+        if self._access_scope_repo is None:
+            return False
+        try:
+            scope = self._access_scope_repo.get_scope(agent_id, tenant_id)
+        except Exception as exc:  # noqa: BLE001 — fail-open: repo roto no debe bloquear
+            logger.error(
+                "hermes.nous_engine.os_surface_lock_lookup_failed: %s — os_surface "
+                "queda sin filtrar",
+                exc,
+            )
+            return False
+        if scope is None:
+            return False
+        return bool(scope.enforced) and not bool(scope.cerebro_unrestricted)
+
+    def _bundle_authorized_mcp(self, agent_id: str, tenant_id: str) -> frozenset[str]:
+        """Slugs de servidor MCP que el bundle FIRMADO del agente autoriza.
+
+        config-sync (uid=hermes) tiene D-Bus-denegado BindCapabilityToAgent por
+        diseño (CWE-441 confused-deputy fix — org.hermes.Runtime1.conf), así que
+        no puede crear un AgentCapabilityBinding para servidores MCP. En su
+        lugar, el applier deja el allow-set MCP del bundle en el
+        AgentAccessScope del agente vía el verbo PERMITIDO
+        set_agent_access_scope (ver hermes/config_sync/applier.py); este método
+        lo lee de vuelta. FAIL-CLOSED: sin repo, sin scope, o un error de
+        lectura → set vacío (nunca amplía el acceso).
+        """
+        if self._access_scope_repo is None:
+            return frozenset()
+        try:
+            scope = self._access_scope_repo.get_scope(agent_id, tenant_id)
+        except Exception as exc:  # noqa: BLE001 — fail-closed: error → sin autorización extra
+            logger.error(
+                "hermes.nous_engine.bundle_mcp_lookup_failed: %s — 0 MCP autorizado por bundle",
+                exc,
+            )
+            return frozenset()
+        if scope is None:
+            return frozenset()
+        return frozenset(getattr(scope, "authorized_mcp_servers", ()) or ())
 
     @staticmethod
     def _mcp_spec_is_bound(spec: ToolSpec, bound_mcp: set[str]) -> bool:

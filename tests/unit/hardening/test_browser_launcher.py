@@ -16,6 +16,8 @@ import json
 import re
 import struct
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]  # this repo (lumen-runtime), portable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -256,10 +258,7 @@ class TestDaemonNotInBrowserNetns:
     """
 
     def test_runtime_service_has_no_network_namespace_path(self) -> None:
-        service_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/systemd/hermes-runtime.service"
-        )
+        service_path = (_REPO_ROOT / "ops/agents-os-edition/systemd/hermes-runtime.service")
         content = service_path.read_text()
         # Check that no [Service] directive line (non-comment) sets NetworkNamespacePath=.
         # Comments may mention the directive name for documentation purposes.
@@ -276,10 +275,7 @@ class TestDaemonNotInBrowserNetns:
 
     def test_launcher_service_has_correct_cap_bounding_set(self) -> None:
         """Launcher has minimal caps: NET_ADMIN + SYS_ADMIN + SYS_RESOURCE only."""
-        service_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/systemd/hermes-browser-launcher.service"
-        )
+        service_path = (_REPO_ROOT / "ops/agents-os-edition/systemd/hermes-browser-launcher.service")
         content = service_path.read_text()
         assert "CAP_NET_ADMIN" in content
         assert "CAP_SYS_ADMIN" in content
@@ -287,28 +283,19 @@ class TestDaemonNotInBrowserNetns:
 
     def test_runtime_service_has_no_ambient_caps(self) -> None:
         """Daemon must have empty CapabilityBoundingSet."""
-        service_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/systemd/hermes-runtime.service"
-        )
+        service_path = (_REPO_ROOT / "ops/agents-os-edition/systemd/hermes-runtime.service")
         content = service_path.read_text()
         assert "CapabilityBoundingSet=" in content
 
     def test_runtime_service_has_browser_jail_env(self) -> None:
         """HERMES_BROWSER_JAIL=1 must be explicit in the unit (auditable)."""
-        service_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/systemd/hermes-runtime.service"
-        )
+        service_path = (_REPO_ROOT / "ops/agents-os-edition/systemd/hermes-runtime.service")
         content = service_path.read_text()
         assert "HERMES_BROWSER_JAIL=1" in content
 
     def test_shell_server_service_has_browser_jail_env(self) -> None:
         """HERMES_BROWSER_JAIL=1 must be explicit in the shell-server unit too."""
-        service_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/systemd/hermes-shell-server.service"
-        )
+        service_path = (_REPO_ROOT / "ops/agents-os-edition/systemd/hermes-shell-server.service")
         content = service_path.read_text()
         assert "HERMES_BROWSER_JAIL=1" in content
 
@@ -319,18 +306,12 @@ class TestPropertyTemplateIsHardcoded:
     """Verify the launcher script contains hardcoded -p= flags and no caller input."""
 
     def test_launcher_script_has_hardcoded_no_new_privileges(self) -> None:
-        launcher_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/scripts/hermes-browser-launcher"
-        )
+        launcher_path = (_REPO_ROOT / "ops/agents-os-edition/scripts/hermes-browser-launcher")
         content = launcher_path.read_text()
         assert "NoNewPrivileges=yes" in content
 
     def test_launcher_script_has_hardcoded_netns(self) -> None:
-        launcher_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/scripts/hermes-browser-launcher"
-        )
+        launcher_path = (_REPO_ROOT / "ops/agents-os-edition/scripts/hermes-browser-launcher")
         content = launcher_path.read_text()
         # The netns path is embedded in the _SCOPE_PROPERTIES constant or _NETNS_PATH.
         assert "/run/netns/hermes-browser" in content, (
@@ -338,45 +319,33 @@ class TestPropertyTemplateIsHardcoded:
         )
 
     def test_launcher_script_has_hardcoded_protect_system(self) -> None:
-        launcher_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/scripts/hermes-browser-launcher"
-        )
+        launcher_path = (_REPO_ROOT / "ops/agents-os-edition/scripts/hermes-browser-launcher")
         content = launcher_path.read_text()
         assert "ProtectSystem=strict" in content
 
     def test_launcher_script_has_hardcoded_empty_cap_bounding_set(self) -> None:
-        launcher_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/scripts/hermes-browser-launcher"
-        )
+        launcher_path = (_REPO_ROOT / "ops/agents-os-edition/scripts/hermes-browser-launcher")
         content = launcher_path.read_text()
         assert "CapabilityBoundingSet=" in content
 
     def test_launcher_script_validates_session_regex(self) -> None:
         """The launcher validates session_name server-side (caller cannot bypass)."""
-        launcher_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/scripts/hermes-browser-launcher"
-        )
+        launcher_path = (_REPO_ROOT / "ops/agents-os-edition/scripts/hermes-browser-launcher")
         content = launcher_path.read_text()
         assert "exec-[a-z0-9]" in content
 
     def test_launcher_script_checks_peercred(self) -> None:
         """SO_PEERCRED is checked in the launcher (gid validation)."""
-        launcher_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/scripts/hermes-browser-launcher"
-        )
+        launcher_path = (_REPO_ROOT / "ops/agents-os-edition/scripts/hermes-browser-launcher")
         content = launcher_path.read_text()
         assert "SO_PEERCRED" in content or "getsockopt" in content
 
     def test_jail_script_path_matches_code_constant(self) -> None:
         """Finding A: COPY target must be /usr/libexec/hermes/browser-jail (no hermes- prefix)."""
-        containerfile_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/containerfiles/Containerfile.base"
-        )
+        # This repo's delivery Containerfile (ops/container/Containerfile) — the
+        # sibling ops/agents-os-edition/containerfiles/Containerfile.base layout
+        # belongs to the old hermes-runtime tree, not lumen-runtime.
+        containerfile_path = (_REPO_ROOT / "ops/container/Containerfile")
         content = containerfile_path.read_text()
         # Must install as browser-jail (matches _JAIL_SCRIPT constant in code).
         assert "/usr/libexec/hermes/browser-jail" in content
@@ -390,10 +359,7 @@ class TestDeadUnitRemoved:
     """hermes-netns-setup.service must not be in the active systemd directory."""
 
     def test_netns_setup_service_not_in_systemd_dir(self) -> None:
-        active_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/systemd/hermes-netns-setup.service"
-        )
+        active_path = (_REPO_ROOT / "ops/agents-os-edition/systemd/hermes-netns-setup.service")
         assert not active_path.exists(), (
             "hermes-netns-setup.service must be removed from the active systemd/ "
             "directory (it confines the wrong PID and references a deleted nft file). "
@@ -401,10 +367,7 @@ class TestDeadUnitRemoved:
         )
 
     def test_netns_setup_in_disabled_dir(self) -> None:
-        disabled_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/systemd.disabled/hermes-netns-setup.service"
-        )
+        disabled_path = (_REPO_ROOT / "ops/agents-os-edition/systemd.disabled/hermes-netns-setup.service")
         assert disabled_path.exists(), (
             "hermes-netns-setup.service should be preserved in systemd.disabled/ "
             "for reference (not deleted, just disabled)."
@@ -417,10 +380,7 @@ class TestDNSViaProxy:
     """Browser resolves DNS through proxy CONNECT, not direct :53."""
 
     def test_browser_ns_nft_has_no_direct_dns_rule(self) -> None:
-        nft_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/netns/browser-ns.nft"
-        )
+        nft_path = (_REPO_ROOT / "ops/agents-os-edition/netns/browser-ns.nft")
         content = nft_path.read_text()
         # Direct DNS rules on port 53 must be removed (DNS goes via proxy CONNECT).
         # Presence of 'dport 53' in an accept rule would be wrong.
@@ -435,10 +395,7 @@ class TestDNSViaProxy:
         )
 
     def test_browser_host_nft_has_no_direct_dns_forward_rule(self) -> None:
-        nft_path = Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime"
-            "/ops/agents-os-edition/netns/browser-host.nft"
-        )
+        nft_path = (_REPO_ROOT / "ops/agents-os-edition/netns/browser-host.nft")
         content = nft_path.read_text()
         lines_with_53 = [
             line for line in content.splitlines()

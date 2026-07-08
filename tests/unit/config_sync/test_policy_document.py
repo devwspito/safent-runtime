@@ -690,6 +690,80 @@ class TestVisibilityScopeBackCompat:
         }
 
 
+class TestIntegrationToolkitsRoundTrip:
+    """Cerebro Enterprise Increment 0 (R-B): AccessScopeSpec.integration_toolkits
+    — per-agent composio toolkit allow-list. Wire-contract only here:
+    enforcement (_expand_composio / composio_skill_service) is a SEPARATE
+    later task."""
+
+    def test_default_is_empty_list(self) -> None:
+        assert AccessScopeSpec().integration_toolkits == []
+
+    def test_round_trips_through_signing_bytes(self) -> None:
+        scope = AccessScopeSpec(integration_toolkits=["gmail", "googledrive"])
+        agent = AgentSpec(agent_id="a1", name="Agent", access_scope=scope)
+        payload = PolicyPayload(agents=[agent])
+
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-07-07T00:00:00Z", payload=payload)
+        parsed_payload = PolicyPayload.model_validate(json.loads(b)["payload"])
+
+        assert parsed_payload.agents[0].access_scope.integration_toolkits == ["gmail", "googledrive"]
+
+    def test_sorted_and_deduplicated(self) -> None:
+        scope = AccessScopeSpec(integration_toolkits=["slack", "gmail", "slack", "googledrive"])
+        assert scope.integration_toolkits == ["gmail", "googledrive", "slack"]
+
+    def test_over_256_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AccessScopeSpec(integration_toolkits=[f"toolkit{i}" for i in range(257)])
+
+
+class TestIntegrationToolkitsBackCompat:
+    """A scope with integration_toolkits=[] (the default) must parse + sign
+    BYTE-IDENTICALLY to before this field existed — it must never appear
+    (not even as []) in the serialized dict when unset/empty."""
+
+    def test_key_absent_from_dump_when_empty(self) -> None:
+        scope = AccessScopeSpec(enforced=True)
+        agent = AgentSpec(agent_id="a1", name="Agent", access_scope=scope)
+        payload = PolicyPayload(agents=[agent])
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-07-07T00:00:00Z", payload=payload)
+        parsed_scope = json.loads(b)["payload"]["agents"][0]["access_scope"]
+        assert "integration_toolkits" not in parsed_scope
+
+    def test_key_present_when_non_empty(self) -> None:
+        scope = AccessScopeSpec(integration_toolkits=["gmail"])
+        agent = AgentSpec(agent_id="a1", name="Agent", access_scope=scope)
+        payload = PolicyPayload(agents=[agent])
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-07-07T00:00:00Z", payload=payload)
+        parsed_scope = json.loads(b)["payload"]["agents"][0]["access_scope"]
+        assert parsed_scope["integration_toolkits"] == ["gmail"]
+
+    def test_signing_bytes_unaffected_by_the_new_field_existing(self) -> None:
+        """The committed TestAccessScopeSigningVector vector (no
+        integration_toolkits key at all) must sign to the exact same bytes
+        now that the field exists — it never appears when empty."""
+        scope = AccessScopeSpec(
+            enforced=True, cerebro_unrestricted=False,
+            native_tools=["execute_code", "terminal"],
+            policy_overlay={"send_message": {"enabled": False}},
+            views=["calendar"],
+        )
+        agent = AgentSpec(agent_id="cloud-agent-1", name="Support", access_scope=scope)
+        payload = PolicyPayload(agents=[agent])
+        b = signing_bytes(
+            version=1, tenant_id="test-tenant", issued_at="2026-06-26T10:00:00Z", payload=payload,
+        )
+        parsed = json.loads(b)
+        assert parsed["payload"]["agents"][0]["access_scope"] == {
+            "cerebro_unrestricted": False,
+            "enforced": True,
+            "native_tools": ["execute_code", "terminal"],
+            "policy_overlay": {"send_message": {"enabled": False}},
+            "views": ["calendar"],
+        }
+
+
 class TestDirectorySpecRoundTrip:
     def test_entries_round_trip_through_signing_bytes(self) -> None:
         from hermes.config_sync.policy_document import DirectoryEntrySpec, DirectorySpec

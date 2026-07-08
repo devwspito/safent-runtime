@@ -3,12 +3,16 @@
 Lógica pura — sin ejecutar el agente real de Nous ni el broker real.
 No requiere hermes-agent instalado.
 
-Cobertura de los 6 requisitos del diseño F2:
-  (a) WRITE → ToolCallProposal construido + broker.dispatch llamado;
-              handler nativo de Nous NO invocado.
+Cobertura de los 6 requisitos del diseño F2, con el MODELO HERMES-NATIVE (W20):
+  (a) WRITE EXTERNA (Composio/MCP) → ToolCallProposal construido + broker.dispatch
+              llamado; handler nativo de Nous NO invocado. Las WRITE NATIVAS
+              enjauladas (write_file/terminal/…) NO usan el broker: colapsan en la
+              jaula (chokepoint), que es la frontera real — nunca corren in-daemon.
   (b) Tool desconocida → BLOCKED fail-closed; nada ejecuta.
-  (c) READ → ejecuta nativo; broker NO invocado.
-  (d) EXECUTED_OK → devuelve resultado real como JSON.
+  (c) READ → ejecuta (nativo, o en la jaula para read_file/search_files);
+              el broker NO se invoca para tools nativas.
+  (d) Mapeo de outcome del broker (ruta EXTERNA):
+      EXECUTED_OK → devuelve resultado real como JSON.
       REJECTED_BY_POLICY / REJECTED_BY_CONSENT → "BLOCKED" en el resultado.
       PENDING_APPROVAL → "BLOCKED" + proposal acumulada en _pending_proposals.
   (e) Puente async: broker en otro loop → resultado correcto sin deadlock.
@@ -29,10 +33,12 @@ import pytest
 
 from hermes.capabilities.domain.ports import ExecutionOutcome, ExecutionStatus
 from hermes.domain.proposal import ToolCallProposal
+from hermes.domain.tool_spec import ToolRisk, ToolSpec
 from hermes.runtime.nous_engine import (
     GovernedAIAgent,
     _build_proposal,
     _dispatch_via_bridge,
+    _ExternalToolCatalog,
     _is_external_content_tool,
 )
 from hermes.runtime.nous_tool_risk_map import (
@@ -95,14 +101,42 @@ def _make_governed_agent(
     return agent
 
 
+def _external_write_spec(name: str) -> ToolSpec:
+    """ToolSpec WRITE externo (Composio/MCP) — la ruta que HOY pasa por el broker.
+
+    En el modelo hermes-native (W20) las tools nativas ejecutan en la jaula/nativo
+    (el broker las rechazaba como 'no registrado'); el broker gatea SOLO las tools
+    externas. Estos specs ejercen esa ruta viva: _dispatch_external_write →
+    _dispatch_via_bridge → _handle_outcome → _pending_proposals.
+    """
+    return ToolSpec(
+        name=name,
+        description=f"external write tool {name}",
+        parameters_schema={"type": "object"},
+        risk=ToolRisk.WRITE_PROPOSAL,
+    )
+
+
+def _register_external_writes(agent: GovernedAIAgent, *names: str) -> None:
+    """Inyecta specs WRITE externos en el catálogo del ciclo del agente."""
+    agent._external_catalog = _ExternalToolCatalog(
+        tuple(_external_write_spec(n) for n in names)
+    )
+
+
 # ---------------------------------------------------------------------------
 # (a) WRITE → proposal construida + broker llamado; handler nativo NO invocado
 # ---------------------------------------------------------------------------
 
 
 class TestWritePathDispatchesToBroker:
-    def test_write_tool_builds_proposal_and_calls_broker(self) -> None:
-        """Una tool WRITE construye ToolCallProposal y llama broker.dispatch."""
+    def test_external_write_builds_proposal_and_calls_broker(self) -> None:
+        """Una WRITE EXTERNA construye ToolCallProposal y llama broker.dispatch.
+
+        Modelo hermes-native (W20): el broker gatea las tools EXTERNAS (Composio/MCP),
+        no las nativas (esas van a la jaula/nativo). Esta es la ruta que hoy construye
+        la proposal y despacha al broker; el handler nativo de Nous NUNCA se invoca.
+        """
         broker_outcome = _outcome(ExecutionStatus.EXECUTED, result={"ok": True})
         mock_broker = MagicMock()
 
@@ -115,21 +149,33 @@ class TestWritePathDispatchesToBroker:
 
         loop = asyncio.new_event_loop()
         agent = _make_governed_agent(broker=mock_broker, engine_loop=loop)
+        _register_external_writes(agent, "crm_create_lead")
 
-        with patch("hermes.runtime.nous_engine._dispatch_via_bridge", side_effect=fake_dispatch_bridge):
-            result_str = agent._invoke_tool(
-                "write_file",
-                {"path": "/tmp/test.txt", "content": "hello"},
-                "task-001",
-                "call-001",
-            )
+        native_called: list[int] = []
+        with patch(
+            "hermes.runtime.nous_engine._dispatch_via_bridge",
+            side_effect=fake_dispatch_bridge,
+        ):
+            with patch.object(
+                agent, "_call_native_invoke",
+                side_effect=lambda *a, **kw: native_called.append(1) or "",
+            ):
+                result_str = agent._invoke_tool(
+                    "crm_create_lead",
+                    {"name": "Acme", "email": "hi@acme.co"},
+                    "task-001",
+                    "call-001",
+                )
 
-        # Proposal construida correctamente.
+        # Proposal construida correctamente y despachada UNA vez.
         assert len(dispatch_calls) == 1
         proposal = dispatch_calls[0]
-        assert proposal.tool_name == "write_file"
+        assert proposal.tool_name == "crm_create_lead"
         assert proposal.tenant_id == _TENANT
-        assert proposal.parameters == {"path": "/tmp/test.txt", "content": "hello"}
+        assert proposal.parameters == {"name": "Acme", "email": "hi@acme.co"}
+
+        # El handler nativo de Nous NUNCA se invoca para una WRITE externa.
+        assert not native_called
 
         # Resultado: EXECUTED → JSON con resultado real.
         parsed = json.loads(result_str)
@@ -221,16 +267,50 @@ class TestUnknownToolFailClosed:
 
 
 class TestReadPathExecutesNative:
-    def test_read_tool_calls_native_invoke(self) -> None:
-        """Una tool READ ejecuta el handler nativo de Nous."""
+    def test_read_file_routes_through_cage_not_broker(self) -> None:
+        """read_file (READ enjaulada) colapsa en la jaula — NUNCA in-daemon ni broker.
+
+        SECURITY (red-team 2026-06-19): el read_file nativo corría en el proceso del
+        daemon (User=hermes, dueño de master.key 0600) y podía leer secretos. El
+        chokepoint lo enruta a la jaula (uid 999, secretos InaccessiblePaths). El
+        broker no gatea nativas. Defense-in-depth: el handler nativo in-daemon NO se
+        invoca para una tool enjaulada.
+        """
         loop = asyncio.new_event_loop()
         agent = _make_governed_agent(engine_loop=loop)
 
-        native_result = json.dumps({"content": "file content"})
+        cage_result = "exit_code=0\nstdout:\nfile content"
+
+        with patch.object(agent, "_run_caged_tool", return_value=cage_result) as mock_cage:
+            with patch.object(
+                agent, "_call_native_invoke", side_effect=AssertionError("in-daemon!")
+            ) as mock_native:
+                with patch(
+                    "hermes.runtime.nous_engine._dispatch_via_bridge",
+                    side_effect=AssertionError("broker!"),
+                ) as mock_bridge:
+                    result = agent._invoke_tool(
+                        "read_file", {"path": "/etc/hermes/config.yaml"}, "task-001"
+                    )
+
+        mock_cage.assert_called_once()
+        mock_native.assert_not_called()
+        mock_bridge.assert_not_called()
+        assert result == cage_result
+        loop.close()
+
+    def test_noncaged_read_executes_native_not_broker(self) -> None:
+        """Una READ NO enjaulada (ha_get_state) ejecuta el handler nativo; broker NO."""
+        loop = asyncio.new_event_loop()
+        agent = _make_governed_agent(engine_loop=loop)
+
+        native_result = json.dumps({"state": "on"})
 
         with patch.object(agent, "_call_native_invoke", return_value=native_result) as mock_native:
-            with patch("hermes.runtime.nous_engine._dispatch_via_bridge", side_effect=AssertionError) as mock_bridge:
-                result = agent._invoke_tool("read_file", {"path": "/etc/hermes/config.yaml"}, "task-001")
+            with patch(
+                "hermes.runtime.nous_engine._dispatch_via_bridge", side_effect=AssertionError
+            ) as mock_bridge:
+                result = agent._invoke_tool("ha_get_state", {"entity": "light.x"}, "task-001")
 
         mock_native.assert_called_once()
         mock_bridge.assert_not_called()
@@ -285,25 +365,35 @@ class TestReadPathExecutesNative:
 class TestOutcomeMapping:
     """Los tests de esta clase parchean _dispatch_via_bridge para controlar el outcome.
 
-    Todos los agentes se construyen CON broker + consent + loop para que el
-    guard "broker not wired" no se dispare antes de llegar al bridge.
+    Modelo hermes-native (W20): el broker gatea las tools EXTERNAS (Composio/MCP); las
+    nativas van a la jaula/nativo. El mapeo de outcome (EXECUTED→JSON, PENDING→BLOCKED
+    + acumular, REJECTED→BLOCKED) vive en _dispatch_external_write → _handle_outcome, así
+    que estos tests usan tools EXTERNAS WRITE — la ruta que HOY llega al broker.
+
+    Todos los agentes se construyen CON broker + consent + loop para que el guard
+    "broker not wired" no se dispare antes de llegar al bridge. effective_task_id sin
+    conversación registrada → _handle_outcome (no _await_owner_and_resume).
     """
 
-    def _wired_agent(self) -> tuple[GovernedAIAgent, asyncio.AbstractEventLoop]:
-        """Agente completamente cableado (broker mock, consent, loop)."""
+    def _wired_agent(
+        self, *external_write_tools: str
+    ) -> tuple[GovernedAIAgent, asyncio.AbstractEventLoop]:
+        """Agente cableado (broker mock, consent, loop) con WRITE externas registradas."""
         loop = asyncio.new_event_loop()
         agent = _make_governed_agent(
             broker=MagicMock(), consent_ctx=_consent_ctx(), engine_loop=loop
         )
+        if external_write_tools:
+            _register_external_writes(agent, *external_write_tools)
         return agent, loop
 
     def test_executed_ok_returns_result_json(self) -> None:
         """EXECUTED → devuelve el resultado real del broker como JSON."""
         outcome = _outcome(ExecutionStatus.EXECUTED, result={"created": True, "id": "abc"})
-        agent, loop = self._wired_agent()
+        agent, loop = self._wired_agent("crm_create_lead")
 
         with patch("hermes.runtime.nous_engine._dispatch_via_bridge", return_value=outcome):
-            result_str = agent._invoke_tool("write_file", {}, "task-001")
+            result_str = agent._invoke_tool("crm_create_lead", {}, "task-001")
 
         parsed = json.loads(result_str)
         assert parsed["created"] is True
@@ -313,10 +403,10 @@ class TestOutcomeMapping:
     def test_rejected_by_policy_returns_blocked(self) -> None:
         """REJECTED_BY_POLICY → resultado contiene BLOCKED con razón."""
         outcome = _outcome(ExecutionStatus.REJECTED_BY_POLICY, error="denylist hit")
-        agent, loop = self._wired_agent()
+        agent, loop = self._wired_agent("notion_create_page")
 
         with patch("hermes.runtime.nous_engine._dispatch_via_bridge", return_value=outcome):
-            result_str = agent._invoke_tool("terminal", {"command": ["ls"]}, "task-001")
+            result_str = agent._invoke_tool("notion_create_page", {"title": "x"}, "task-001")
 
         parsed = json.loads(result_str)
         assert "BLOCKED" in parsed["error"]
@@ -325,10 +415,10 @@ class TestOutcomeMapping:
     def test_rejected_by_consent_returns_blocked(self) -> None:
         """REJECTED_BY_CONSENT → resultado contiene BLOCKED."""
         outcome = _outcome(ExecutionStatus.REJECTED_BY_CONSENT, error="operator_id ausente")
-        agent, loop = self._wired_agent()
+        agent, loop = self._wired_agent("slack_post_message")
 
         with patch("hermes.runtime.nous_engine._dispatch_via_bridge", return_value=outcome):
-            result_str = agent._invoke_tool("write_file", {}, "task-001")
+            result_str = agent._invoke_tool("slack_post_message", {}, "task-001")
 
         parsed = json.loads(result_str)
         assert "BLOCKED" in parsed["error"]
@@ -337,38 +427,38 @@ class TestOutcomeMapping:
     def test_pending_approval_returns_blocked_and_accumulates(self) -> None:
         """PENDING_APPROVAL → BLOCKED en result + proposal acumulada en _pending_proposals."""
         outcome = _outcome(ExecutionStatus.PENDING_APPROVAL)
-        agent, loop = self._wired_agent()
+        agent, loop = self._wired_agent("asana_create_task")
 
         with patch("hermes.runtime.nous_engine._dispatch_via_bridge", return_value=outcome):
-            result_str = agent._invoke_tool("skill_manage", {"action": "create"}, "task-001")
+            result_str = agent._invoke_tool("asana_create_task", {"title": "do"}, "task-001")
 
         parsed = json.loads(result_str)
         assert "BLOCKED" in parsed["error"]
         assert len(agent._pending_proposals) == 1
-        assert agent._pending_proposals[0].tool_name == "skill_manage"
+        assert agent._pending_proposals[0].tool_name == "asana_create_task"
         loop.close()
 
     def test_multiple_pending_proposals_accumulated(self) -> None:
         """Varias calls PENDING_APPROVAL acumulan proposals en orden."""
         outcome = _outcome(ExecutionStatus.PENDING_APPROVAL)
-        agent, loop = self._wired_agent()
+        agent, loop = self._wired_agent("hubspot_create_deal", "linear_create_issue")
 
         with patch("hermes.runtime.nous_engine._dispatch_via_bridge", return_value=outcome):
-            agent._invoke_tool("write_file", {"path": "/a"}, "task-001")
-            agent._invoke_tool("terminal", {"command": "ls"}, "task-001")
+            agent._invoke_tool("hubspot_create_deal", {"amount": 100}, "task-001")
+            agent._invoke_tool("linear_create_issue", {"title": "bug"}, "task-001")
 
         assert len(agent._pending_proposals) == 2
-        assert agent._pending_proposals[0].tool_name == "write_file"
-        assert agent._pending_proposals[1].tool_name == "terminal"
+        assert agent._pending_proposals[0].tool_name == "hubspot_create_deal"
+        assert agent._pending_proposals[1].tool_name == "linear_create_issue"
         loop.close()
 
     def test_executed_proposals_not_accumulated(self) -> None:
         """EXECUTED proposals no se acumulan (ya resueltas in-loop)."""
         outcome = _outcome(ExecutionStatus.EXECUTED, result={"ok": True})
-        agent, loop = self._wired_agent()
+        agent, loop = self._wired_agent("stripe_create_invoice")
 
         with patch("hermes.runtime.nous_engine._dispatch_via_bridge", return_value=outcome):
-            agent._invoke_tool("write_file", {}, "task-001")
+            agent._invoke_tool("stripe_create_invoice", {}, "task-001")
 
         assert len(agent._pending_proposals) == 0
         loop.close()

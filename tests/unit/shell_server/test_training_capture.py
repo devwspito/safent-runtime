@@ -492,12 +492,28 @@ class TestApiWiring:
         r = client.post(f"/api/v1/training/{sid}/sign")
         assert r.json()["state"] == "validated"
 
-    def test_version_increments_on_second_sign(self, tmp_path: Path) -> None:
-        """Signing twice creates version 1 then version 2."""
-        import sqlite3  # noqa: PLC0415
+    def test_resigning_same_skill_overwrites_single_native_skill_md(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-teaching an already-signed skill re-persists it in place.
 
+        Design evolution (commit fabf0fa, "Neus — single source of truth"):
+        voice-trained skills are now stored as name-keyed SKILL.md files in the
+        native skills dir — the SAME store as agent-created skills — not as
+        versioned rows in skill_packages_view (that table + next_version_atomic
+        are dead code now). So signing the same skill_name twice must:
+          (a) succeed both times (validated),
+          (b) land as exactly ONE native skill dir (name-keyed, no forking),
+          (c) leave the SECOND demonstration on disk (a fresh package_id),
+              superseding the first.
+        This replaces the old "version increments 1 → 2 in skill_packages_view"
+        assertion, which encoded the removed persistence mechanism.
+        """
+        import yaml as _yaml  # noqa: PLC0415
+
+        # _persist_as_skill_md() writes to $HERMES_HOME/skills/<name>/SKILL.md.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         db_path = tmp_path / "training.db"
-        orch = _get_real_orchestrator(db_path)
 
         def _build_client():
             from hermes.shell_server.training.api import _ORCHESTRATORS  # noqa: PLC0415
@@ -528,23 +544,45 @@ class TestApiWiring:
             _capture_one_step(orch_local, UUID(sid))
             client.post(f"/api/v1/training/{sid}/stop")
             with _fake_vault_patch():
-                client.post(f"/api/v1/training/{sid}/sign")
+                r = client.post(f"/api/v1/training/{sid}/sign")
+            assert r.status_code == 200
+            assert r.json()["state"] == "validated"
 
+        skill_md_path = tmp_path / "skills" / "same-skill" / "SKILL.md"
+
+        def _read_meta() -> dict:
+            text = skill_md_path.read_text()
+            end = text.find("---", 3)
+            fm = _yaml.safe_load(text[3:end]) or {}
+            return fm.get("metadata") or {}
+
+        # First teaching → native SKILL.md is minted and signed.
         client1, orch1 = _build_client()
         _sign_one_session(client1, orch1, "same-skill")
+        assert skill_md_path.exists(), "first sign must write the native SKILL.md"
+        meta1 = _read_meta()
+        assert meta1.get("package_id"), "package_id must be present after first sign"
+        assert meta1.get("signature_hex"), "signed skill must carry a signature"
 
+        # Second teaching of the SAME skill_name → overwrites in place.
         client2, orch2 = _build_client()
         _sign_one_session(client2, orch2, "same-skill")
+        meta2 = _read_meta()
 
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT version FROM skill_packages_view "
-            "WHERE skill_id = 'same-skill' ORDER BY version"
-        ).fetchall()
-        conn.close()
-        versions = [r["version"] for r in rows]
-        assert versions == [1, 2]
+        # Single source of truth: exactly ONE native skill dir for this name
+        # (name-keyed — re-teaching updates in place, it does not fork).
+        skill_dirs = sorted(
+            p.name for p in (tmp_path / "skills").iterdir() if p.is_dir()
+        )
+        assert skill_dirs == ["same-skill"], (
+            f"re-teaching must not fork the skill; found {skill_dirs}"
+        )
+        # The second demonstration superseded the first: a fresh package was
+        # minted and written over the old SKILL.md.
+        assert meta2.get("package_id") != meta1.get("package_id"), (
+            "second sign must overwrite the SKILL.md with a fresh package"
+        )
+        assert meta2.get("signature_hex"), "re-signed skill must carry a signature"
 
 
 # ---------------------------------------------------------------------------

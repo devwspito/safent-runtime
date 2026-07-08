@@ -72,7 +72,17 @@ SupplementaryGroups=hermes hermes-work
 # intenta IPv6 primero y muere con EAFNOSUPPORT al descargar de registry.npmjs.org
 # → el MCP nunca arranca. Forzar ipv4first hace fiable la descarga. Va en el env
 # BASE del launcher (lo heredan todos los spawns; el caller no lo puede sobreescribir).
-Environment=NODE_OPTIONS=--dns-result-order=ipv4first
+#
+# --use-env-proxy (R16, 2026-07-07): Node's native fetch()/undici does NOT honour
+# http_proxy/https_proxy env vars by default — it resolves DNS and dials directly.
+# Under the MCP netns's default-deny plane (DNS closed except via the proxy — see
+# _build_jailed_cmd's http(s)_proxy=… below), a fetch()-based MCP (mcp-remote, the
+# safent-control OAuth bridge) got `getaddrinfo EAI_AGAIN` and died before the JSON-RPC
+# handshake even started — every OTHER runner (npm/uvx registry clients, curl-based
+# tools) already honours these vars, so this was invisible until the first fetch()-based
+# MCP. This flag makes Node's fetch actually route through http(s)_proxy, matching the
+# jail's existing (proxy-only) network model — it does not widen any host's egress.
+Environment="NODE_OPTIONS=--dns-result-order=ipv4first --use-env-proxy"
 # Cache + HOME for the spawned MCP runners (npx/uvx/node). Under
 # ProtectSystem=strict + ProtectHome=yes the runner's default HOME
 # (/var/home/hermes) is READ-ONLY, so `npx` mkdir on $HOME/.npm dies with EACCES.

@@ -670,7 +670,7 @@ class TestRealDbusInterfaceAdapter:
                 return {"state": "idle", "pending": 0, "in_progress": 0,
                         "pending_approval": 0, "last_audit_head": ""}
 
-            async def call_enqueue(self, trigger_kind, text, priority, dedup_key, conversation_id, operator_token=""):
+            async def call_enqueue(self, trigger_kind, text, priority, dedup_key, conversation_id, operator_token="", agent_id=""):
                 captured.append((trigger_kind, text, priority, dedup_key, conversation_id))
                 return ("t1", "/ws/tasks/t1")
 

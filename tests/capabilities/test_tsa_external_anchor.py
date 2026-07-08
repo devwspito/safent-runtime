@@ -18,6 +18,7 @@ Fixtures:
 from __future__ import annotations
 
 import json
+from importlib import resources
 from pathlib import Path
 
 import pytest
@@ -31,11 +32,13 @@ _WRONG_HASH_HEX = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
 _FIXTURE_BIN = Path(__file__).parent / "fixtures" / "fixture_tst.bin"
 _FIXTURE_TSR_BIN = Path(__file__).parent / "fixtures" / "fixture_tsr.bin"
-_CA_CERT_PATH = (
-    Path(__file__).parent.parent.parent
-    / "ops"
-    / "audit"
-    / "freetsa_tsa.crt"
+# The freeTSA CA cert ships as package-data inside the product package
+# (hermes.capabilities.infrastructure/*.crt, see pyproject) and the anchor
+# loads it via importlib.resources. The former ops/audit/freetsa_tsa.crt
+# location no longer exists on host or in the baked image; read the cert from
+# the same source the product does.
+_CA_CERT_PATH = Path(
+    str(resources.files("hermes.capabilities.infrastructure") / "freetsa_tsa.crt")
 )
 
 

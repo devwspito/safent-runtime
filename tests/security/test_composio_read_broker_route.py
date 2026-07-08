@@ -328,8 +328,12 @@ class TestExportDownloadIsWriteProposal:
         import pathlib
         import re
 
-        src = pathlib.Path(
-            "/home/luiscorrea-dev/Desktop/hermes-runtime/src/hermes/runtime/composio_tool_specs.py"
+        # Read THIS repo's source (portable, relative to this test file) — NOT a
+        # hardcoded absolute path to a sibling checkout, which only passed because
+        # that sibling happened to exist and would silently test the wrong tree.
+        src = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "src/hermes/runtime/composio_tool_specs.py"
         ).read_text()
 
         match = re.search(r"_READ_VERBS\s*=\s*frozenset\s*\(\s*\{([^}]+)\}", src, re.DOTALL)
@@ -474,11 +478,16 @@ class TestComposioSurfaceAdapterExecution:
         outcome = await adapter.replay(action)
 
         assert outcome.status is ReplayStatus.EXECUTED_OK
+        # replay delegates to _execute with the full call contract, including the
+        # connected_account_id (None here) that binds the HMAC audit (CTRL-9) to the
+        # concrete account that acted. The invariant enforced: replay never bypasses
+        # _execute — every Composio I/O goes through the single execution choke-point.
         adapter._execute.assert_called_once_with(
             action.action_id,
             "GMAIL_GET_EMAIL",
             {"email_id": "msg-001"},
             "ent-1",
+            connected_account_id=None,
         )
 
     @pytest.mark.asyncio
@@ -551,18 +560,36 @@ class TestComposioCapabilityRegistry:
         assert binding.auto_executable is True
         assert binding.executor == "composio"
 
-    def test_write_slug_returns_none(self) -> None:
-        """WRITE Composio slugs → None (broker fail-closed)."""
+    def test_write_slug_resolves_to_high_not_auto(self) -> None:
+        """WRITE Composio slugs → HIGH + NOT auto-executable (routed to HITL).
+
+        Design evolution (commit 65bc386): a WRITE slug used to return None, which
+        structurally blocked the write BEFORE it could reach an HITL card — the agent
+        could never send/create/delete on any integration, even with owner approval.
+        The sovereign-write model now binds WRITE slugs to risk=HIGH +
+        auto_executable=False so the broker REQUIRES HITL (approval card + TOTP) and
+        executes only after the owner approves. Security invariant preserved:
+        a WRITE is NEVER auto-executed — no auto path exists.
+        """
         from hermes.capabilities.application.composio_capability_registry import (
             ComposioCapabilityRegistry,
         )
         from hermes.capabilities.application.capability_registry import CapabilityRegistry
+        from hermes.capabilities.domain.ports import RiskLevel
 
         registry = ComposioCapabilityRegistry(static_registry=CapabilityRegistry())
         binding = registry.resolve("gmail_send_email")
-        assert binding is None, (
-            "WRITE Composio slug debe devolver None — broker fail-closed"
+
+        assert binding is not None, (
+            "WRITE Composio slug debe resolverse a un binding HITL (no None)"
         )
+        assert binding.auto_executable is False, (
+            "WRITE Composio slug NUNCA debe auto-ejecutarse — exige HITL"
+        )
+        assert binding.risk is RiskLevel.HIGH, (
+            "WRITE Composio slug debe ser HIGH → el broker exige aprobación del dueño"
+        )
+        assert binding.executor == "composio"
 
     def test_static_tools_take_priority(self) -> None:
         """Static registry bindings are not overridden by Composio dynamic resolution."""
@@ -580,29 +607,47 @@ class TestComposioCapabilityRegistry:
             "Herramienta en la registry estática no debe ser sobreescrita por Composio"
         )
 
-    def test_export_slug_returns_none_from_composio_registry(self) -> None:
-        """EXPORT slugs are WRITE_PROPOSAL → dynamic registry returns None."""
+    def test_export_slug_resolves_to_high_not_auto(self) -> None:
+        """KC-4 (b): EXPORT is a WRITE verb → HIGH + NOT auto-executable (HITL only).
+
+        EXPORT/DOWNLOAD are exfiltration vectors: they are classified WRITE, never
+        READ, so they never auto-execute. Post-65bc386 the dynamic registry binds them
+        to risk=HIGH + auto_executable=False (routed to an owner-approval card) instead
+        of returning None. The security invariant is unchanged: no auto path exists.
+        """
         from hermes.capabilities.application.composio_capability_registry import (
             ComposioCapabilityRegistry,
         )
         from hermes.capabilities.application.capability_registry import CapabilityRegistry
+        from hermes.capabilities.domain.ports import RiskLevel
 
         registry = ComposioCapabilityRegistry(static_registry=CapabilityRegistry())
         binding = registry.resolve("googledrive_export_file")
-        assert binding is None, (
-            "KC-4 (b): EXPORT slug → None (WRITE_PROPOSAL, no se auto-ejecuta)"
-        )
 
-    def test_download_slug_returns_none_from_composio_registry(self) -> None:
-        """DOWNLOAD slugs are WRITE_PROPOSAL → dynamic registry returns None."""
+        assert binding is not None
+        assert binding.auto_executable is False, (
+            "KC-4 (b): EXPORT NUNCA se auto-ejecuta — es vector de exfiltración"
+        )
+        assert binding.risk is RiskLevel.HIGH
+        assert binding.executor == "composio"
+
+    def test_download_slug_resolves_to_high_not_auto(self) -> None:
+        """DOWNLOAD is a WRITE verb → HIGH + NOT auto-executable (HITL only)."""
         from hermes.capabilities.application.composio_capability_registry import (
             ComposioCapabilityRegistry,
         )
         from hermes.capabilities.application.capability_registry import CapabilityRegistry
+        from hermes.capabilities.domain.ports import RiskLevel
 
         registry = ComposioCapabilityRegistry(static_registry=CapabilityRegistry())
         binding = registry.resolve("dropbox_download_file")
-        assert binding is None
+
+        assert binding is not None
+        assert binding.auto_executable is False, (
+            "DOWNLOAD NUNCA se auto-ejecuta — mismo vector de exfiltración que EXPORT"
+        )
+        assert binding.risk is RiskLevel.HIGH
+        assert binding.executor == "composio"
 
 
 # ---------------------------------------------------------------------------

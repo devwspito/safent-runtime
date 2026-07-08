@@ -243,27 +243,56 @@ class TestApplyUnknownAction:
 
 class TestSystemctlHelper:
     def test_disable_now_calls_correct_args(self) -> None:
+        # _disable_remote_access issues TWO systemctl calls: first
+        # `disable --now <remote services>`, then `restart <shell service>` to
+        # drop the compositor back to local render. Assert on the disable call
+        # (not call_args, which is the trailing restart) and on the restart.
         mock_result = MagicMock()
         mock_result.returncode = 0
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             mod._disable_remote_access()
 
-        args = mock_run.call_args[0][0]
-        assert "disable" in args
-        assert "--now" in args
-        assert "hermes-remote-tunnel.service" in args
-        assert "hermes-novnc.service" in args
-        assert "hermes-tunnel-url.service" in args
+        all_args = [c[0][0] for c in mock_run.call_args_list]
+        disable_args = next(a for a in all_args if "disable" in a)
+        assert "--now" in disable_args
+        # Single-origin gateway + noVNC are the fixed remote services; the tunnel
+        # is selected at runtime (named vs quick), so assert its family loosely.
+        assert "hermes-remote-gateway.service" in disable_args
+        assert "hermes-novnc.service" in disable_args
+        assert any("tunnel" in s for s in disable_args)
+        # The disabled set must be exactly the module's remote services.
+        for svc in mod._remote_services():
+            assert svc in disable_args
+        # Returning to local render restarts the shell/compositor service.
+        assert any("restart" in a and mod._SHELL_SERVICE in a for a in all_args)
 
-    def test_enable_now_calls_correct_args(self) -> None:
+    def test_enable_now_calls_correct_args(self, tmp_path: Path) -> None:
+        # _enable_remote_access first writes the VNC-mirror display flag and
+        # restarts the shell, THEN `enable --now`s the remote services. Redirect
+        # the flag paths into tmp_path so the non-root test can reach systemctl.
         mock_result = MagicMock()
         mock_result.returncode = 0
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
+        display_env = tmp_path / "remote-display.env"
+        active_file = tmp_path / "remote-active"
+        with (
+            patch("subprocess.run", return_value=mock_result) as mock_run,
+            patch.object(mod, "_REMOTE_DISPLAY_ENV", display_env),
+            patch.object(mod, "_REMOTE_ACTIVE_FILE", active_file),
+        ):
             mod._enable_remote_access()
 
-        args = mock_run.call_args[0][0]
-        assert "enable" in args
-        assert "--now" in args
+        all_args = [c[0][0] for c in mock_run.call_args_list]
+        enable_args = next(a for a in all_args if "enable" in a)
+        assert "--now" in enable_args
+        assert "hermes-remote-gateway.service" in enable_args
+        assert "hermes-novnc.service" in enable_args
+        assert any("tunnel" in s for s in enable_args)
+        for svc in mod._remote_services():
+            assert svc in enable_args
+        # VNC mirror mode: the shell/compositor is restarted and the flags written.
+        assert any("restart" in a and mod._SHELL_SERVICE in a for a in all_args)
+        assert display_env.read_text(encoding="utf-8") == mod._REMOTE_DISPLAY_CONTENT
+        assert active_file.read_text(encoding="utf-8") == "1"
 
 
 # ---------------------------------------------------------------------------

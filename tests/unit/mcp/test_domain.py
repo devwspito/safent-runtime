@@ -92,11 +92,15 @@ class TestClassifyMcpToolDefaults:
     """(c) Default risk is HIGH unless provably read-only."""
 
     def test_no_hints_returns_high(self) -> None:
+        # USER_TRUSTED (not BUILTIN): BUILTIN is frictionless (LOW+auto — the jail
+        # is the control, see classify_mcp_tool + test_builtin_excel_style_tool_
+        # unchanged), so it never exercises the "default HIGH" path this class
+        # covers. USER_TRUSTED runs the hint→risk logic without short-circuiting.
         cls = classify_mcp_tool(
             "do_something",
             read_only_hint=None,
             destructive_hint=None,
-            trust_level=TrustLevel.BUILTIN,
+            trust_level=TrustLevel.USER_TRUSTED,
         )
         assert cls.risk is RiskLevel.HIGH
         assert cls.auto_executable is False
@@ -109,10 +113,11 @@ class TestClassifyMcpToolDefaults:
         assert cls.risk is RiskLevel.HIGH
 
     def test_read_only_hint_false_stays_high(self) -> None:
+        # USER_TRUSTED so the readOnlyHint logic applies (BUILTIN is frictionless).
         cls = classify_mcp_tool(
             "list_items",
             read_only_hint=False,
-            trust_level=TrustLevel.BUILTIN,
+            trust_level=TrustLevel.USER_TRUSTED,
         )
         assert cls.risk is RiskLevel.HIGH
 
@@ -139,31 +144,39 @@ class TestClassifyMcpToolReadOnly:
         assert cls.auto_executable is True
 
     def test_read_hint_but_write_suffix_still_high(self) -> None:
+        # USER_TRUSTED so the name-suffix logic applies (BUILTIN is frictionless).
         cls = classify_mcp_tool(
             "email_send",
             read_only_hint=True,
-            trust_level=TrustLevel.BUILTIN,
+            trust_level=TrustLevel.USER_TRUSTED,
         )
         assert cls.risk is RiskLevel.HIGH
 
     def test_read_hint_with_no_suffix_match_stays_high(self) -> None:
+        # USER_TRUSTED so the name-suffix logic applies (BUILTIN is frictionless).
         cls = classify_mcp_tool(
             "process_data",
             read_only_hint=True,
-            trust_level=TrustLevel.BUILTIN,
+            trust_level=TrustLevel.USER_TRUSTED,
         )
         assert cls.risk is RiskLevel.HIGH
 
 
 class TestClassifyMcpToolDestructive:
-    """(e) destructiveHint=True → always HIGH regardless of other hints."""
+    """(e) destructiveHint=True → always HIGH regardless of other hints.
+
+    (For non-frictionless tiers. BUILTIN is frictionless — LOW+auto — and
+    MANAGED_REMOTE is purely name-driven; both ignore destructiveHint. See the
+    MANAGED_REMOTE class below and test_builtin_excel_style_tool_unchanged.)
+    """
 
     def test_destructive_overrides_read_hint(self) -> None:
+        # USER_TRUSTED so destructiveHint is consulted (BUILTIN is frictionless).
         cls = classify_mcp_tool(
             "resource_list",
             read_only_hint=True,
             destructive_hint=True,
-            trust_level=TrustLevel.BUILTIN,
+            trust_level=TrustLevel.USER_TRUSTED,
         )
         assert cls.risk is RiskLevel.HIGH
         assert cls.auto_executable is False
@@ -205,14 +218,22 @@ class TestClassifyMcpToolManagedRemote:
         assert cls.risk is RiskLevel.LOW
         assert cls.auto_executable is False
 
-    def test_destructive_hint_forces_high_even_for_managed_remote(self) -> None:
+    def test_destructive_hint_is_irrelevant_for_managed_remote(self) -> None:
+        """MANAGED_REMOTE is purely name-driven: an untrusted remote's
+        destructiveHint (like readOnlyHint) is IGNORED — it cannot flip our
+        verdict. A read verb stays LOW+auto so reads flow; a write verb stays
+        LOW+not-auto, and CTRL-5 (requires_forced_hitl) still forces HITL the
+        instant the cycle is tainted. Honouring the hint would let a
+        misconfigured/hostile remote gate our reads (a self-inflicted DoS)
+        while adding nothing — writes already gate via not-auto.
+        """
         cls = classify_mcp_tool(
             "list_agents",
             destructive_hint=True,
             trust_level=TrustLevel.MANAGED_REMOTE,
         )
-        assert cls.risk is RiskLevel.HIGH
-        assert cls.auto_executable is False
+        assert cls.risk is RiskLevel.LOW
+        assert cls.auto_executable is True
 
     def test_read_only_hint_is_irrelevant_for_managed_remote(self) -> None:
         """Unlike BUILTIN/USER_TRUSTED, MANAGED_REMOTE never consults read_only_hint."""

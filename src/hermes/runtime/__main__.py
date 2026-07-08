@@ -1340,7 +1340,23 @@ async def _run(*, systemd_notify: bool) -> None:
         SqliteAgentRegistry,
     )
 
-    agent_registry = SqliteAgentRegistry(db_path=_DB_PATH)
+    # Inc 5' (2026-07-07): Community seeds only the native `default` agent —
+    # the 27 roster-* templates are never created (owner: "not seeded", not
+    # merely hidden). Same store/vault pattern as _build_delegation_surface_
+    # adapter; a store error defaults to "community" (fail to the SMALLER
+    # surface, not the larger one).
+    try:
+        from hermes.instance.association_store import SQLiteAssociationStore  # noqa: PLC0415
+        from hermes.shell_server.security.secrets import SecretsVault  # noqa: PLC0415
+
+        _edition = SQLiteAssociationStore(
+            db_path=_DB_PATH, vault=SecretsVault()
+        ).edition()
+    except Exception:  # noqa: BLE001
+        _edition = "community"
+    agent_registry = SqliteAgentRegistry(
+        db_path=_DB_PATH, seed_default_roster=(_edition != "community")
+    )
 
     # Componentes del loop
     from hermes.tasks.infrastructure.sqlite_work_queue import SqliteWorkQueue  # noqa: PLC0415
@@ -1480,6 +1496,7 @@ async def _run(*, systemd_notify: bool) -> None:
             audit_repo=audit_repo,
             access_scope_repo=_access_scope_repo,
             tenant_id=str(_resolve_tenant_id()),
+            agent_registry=agent_registry,
         )
     else:
         logger.warning(
@@ -1599,8 +1616,10 @@ async def _run(*, systemd_notify: bool) -> None:
             logger.debug("hermes.runtime.tool_retrieval_skipped: %s", _ret_exc)
         # spec 014 inc. 3: capability_specs are static (built once, always
         # present).  Included BEFORE composio + mcp so they appear first in
-        # the LLM schema and are not filtered by _resolve_external_specs
-        # (their names are NOT in the Nous native catalog).
+        # the LLM schema. Their names are NOT in the Nous native catalog, so
+        # they DO enter _resolve_external_specs' `external` tuple and (H-1,
+        # 2026-07-07) ARE now subject to nous_engine._filter_mcp_skill's
+        # os_surface gate for a LOCKED agent — see that function's docstring.
         return (native_tool_specs or ()) + (capability_specs or ()) + tuple(integration)
 
     # B4: construir repos de filtrado runtime ANTES del engine.

@@ -86,12 +86,19 @@ def _make_server_manager_with_server(
     *,
     read_tool_name: str = "resource_list",
     write_tool_name: str = "write_file",
+    trust_level: TrustLevel = TrustLevel.BUILTIN,
 ) -> McpServerManager:
     """Build a McpServerManager with one connected server having two tools.
 
     read_tool_name must end with a verb in _READ_SUFFIXES (e.g. "resource_list"
-    → last segment "list" is in the set) AND have readOnlyHint=True for
-    classify_mcp_tool to produce auto_executable=True (READ_ONLY risk).
+    → last segment "list" is in the set).
+
+    Trust matters for the read/write split: BUILTIN is frictionless (BOTH tools
+    become LOW+auto → READ_ONLY specs — the jail is the control), so to exercise
+    the WRITE_PROPOSAL path (a write that gates via HITL) callers pass a
+    non-frictionless tier. MANAGED_REMOTE is the realistic one: it classifies
+    purely by NAME — read verb → LOW+auto (READ_ONLY+handler), write verb →
+    LOW+not-auto (WRITE_PROPOSAL, no handler).
 
     The client is _NeverCalledMcpClient — any direct call to it fails the test,
     proving that build_mcp_tool_specs and the READ handler route through the broker.
@@ -103,7 +110,7 @@ def _make_server_manager_with_server(
         name=read_tool_name,
         description="List resources (read-only)",
         slug=slug,
-        trust_level=TrustLevel.BUILTIN,
+        trust_level=trust_level,
         read_only_hint=True,
         destructive_hint=False,
     )
@@ -111,7 +118,7 @@ def _make_server_manager_with_server(
         name=write_tool_name,
         description="Write file (write operation)",
         slug=slug,
-        trust_level=TrustLevel.BUILTIN,
+        trust_level=trust_level,
         read_only_hint=False,
         destructive_hint=False,
     )
@@ -120,7 +127,7 @@ def _make_server_manager_with_server(
         server_id=server_id,
         slug=slug,
         transport=Transport.stdio(["npx", "test-mcp"]),
-        trust_level=TrustLevel.BUILTIN,
+        trust_level=trust_level,
     )
     server.mark_healthy([read_tool, write_tool])
 
@@ -193,7 +200,12 @@ class TestBuildMcpToolSpecs:
     async def test_write_tool_has_write_proposal_risk_and_no_handler(self) -> None:
         from hermes.runtime.mcp_tool_specs import build_mcp_tool_specs
 
-        manager = _make_server_manager_with_server("srv", write_tool_name="write_file")
+        # MANAGED_REMOTE (not the default BUILTIN): BUILTIN is frictionless, so a
+        # BUILTIN write auto-executes (LOW+auto → READ_ONLY). MANAGED_REMOTE gates
+        # writes by name → WRITE_PROPOSAL, which is what this test verifies.
+        manager = _make_server_manager_with_server(
+            "srv", write_tool_name="write_file", trust_level=TrustLevel.MANAGED_REMOTE
+        )
         broker = _RecordingBroker()
         specs = await build_mcp_tool_specs(
             manager, broker=broker, consent_context=_fake_consent_context()

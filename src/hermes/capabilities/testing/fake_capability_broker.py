@@ -48,6 +48,7 @@ class FakeCapabilityBroker:
         hitl_approval_token: str | None = None,  # noqa: ARG002
         work_item_id: UUID | None = None,  # noqa: ARG002
         autonomy_level: object | None = None,  # noqa: ARG002
+        conversation_id: str = "",  # noqa: ARG002
     ) -> ExecutionOutcome:
         self.dispatched.append((proposal, consent_context))
         if proposal.proposal_id in self._scripted:

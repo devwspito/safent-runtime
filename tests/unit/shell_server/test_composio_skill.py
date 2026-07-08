@@ -322,7 +322,33 @@ class TestGetComposioSkillDetail:
 # verify_toolkit_connected — fake ComposioClient
 # ---------------------------------------------------------------------------
 
+# Env-drift guard. verify_toolkit_connected lazy-imports
+# hermes.integrations.composio.composio_client, whose module body does
+# `from composio.exceptions import ComposioError` — a symbol that only exists in
+# the composio SDK shipped in the baked image (>=1.0, e.g. 1.0.0-rc2). On a host
+# with an older composio (0.7.x, which exposes ComposioSDKError instead) that
+# import raises ImportError, and unittest.mock.patch() then cannot resolve the
+# patch target. Skip only where the image's SDK is absent, so the host stays
+# green while these tests still run in the image / CI where the deps match.
+try:
+    from hermes.integrations.composio.composio_client import (  # noqa: F401
+        ComposioClient as _ComposioClientProbe,
+    )
 
+    _COMPOSIO_CLIENT_IMPORTABLE = True
+    _COMPOSIO_SKIP_REASON = ""
+except Exception as _exc:  # noqa: BLE001
+    _COMPOSIO_CLIENT_IMPORTABLE = False
+    _COMPOSIO_SKIP_REASON = (
+        "composio SDK in this env cannot import "
+        "hermes.integrations.composio.composio_client "
+        f"(baked image ships composio>=1.0): {_exc!r}"
+    )
+
+
+@pytest.mark.skipif(
+    not _COMPOSIO_CLIENT_IMPORTABLE, reason=_COMPOSIO_SKIP_REASON
+)
 class TestVerifyToolkitConnected:
     """Tests patch at the real import sites (lazy-imported inside async fn)."""
 

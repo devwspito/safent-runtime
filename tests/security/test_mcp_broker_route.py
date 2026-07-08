@@ -6,7 +6,9 @@ Covers:
   (c) Unknown server (registry returns None) → REJECTED_BY_POLICY (fail-closed).
   (d) Kill-switch (agent paused) → REJECTED_BY_POLICY before MCP adapter.
   (e) mcp_adapter not configured → REJECTED_BY_POLICY (Constitución IV).
-  (f) Browser's existing MCP path (StdioMcpSession) is unaffected by these changes.
+  (f) The generalized stdio MCP client (StdioMcpClient) the broker routes MCP
+      calls through keeps a clean, non-browser boundary. The old separate browser
+      StdioMcpSession was deliberately removed in the one-browser collapse.
   (g) MANAGED_REMOTE WRITE binding (LOW risk, auto_executable=False — the
       classify_mcp_tool() shape for safent-control write verbs): taint decides
       everything. Tainted → forced HITL (PENDING_APPROVAL), untainted → runs
@@ -408,49 +410,69 @@ class TestMcpAdapterNotConfigured:
 
 
 # ---------------------------------------------------------------------------
-# (f) Browser's existing MCP path (StdioMcpSession) is unaffected
+# (f) The generalized stdio MCP client keeps a clean (non-browser) boundary
+#
+# The browser's old separate stdio session (StdioMcpSession /
+# browser/infrastructure/mcp_session.py) was deliberately DELETED in the
+# "one-browser collapse" (commit d6b74e3): the dupe browser MCP driver was
+# removed because it duplicated hermes-agent's native browser. The sole
+# surviving stdio MCP client — the one the CapabilityBroker routes MCP tool
+# calls through — is StdioMcpClient (mcp/infrastructure/stdio_mcp_client.py).
+# Its documented SRP decision is that it does NOT carry the 7 browser-specific
+# methods; letting browser surface leak back into the generalized client would
+# re-create the very duplication the collapse removed. These tests guard that
+# boundary (and that the collapse stays collapsed), which is the real invariant
+# the old "browser path unaffected" tests were protecting.
 # ---------------------------------------------------------------------------
 
 
-class TestBrowserMcpPathUnaffected:
-    """Verify StdioMcpSession still imports and has its contract unchanged."""
+class TestStdioMcpClientCleanBoundary:
+    """The generalized StdioMcpClient must stay free of browser-specific surface."""
 
-    def test_stdio_mcp_session_importable(self) -> None:
-        """browser/infrastructure/mcp_session.py must import without error."""
-        from hermes.browser.infrastructure.mcp_session import (
-            McpNotInstalledError,
-            McpServerConnectionError,
-            StdioMcpSession,
-        )
-        assert StdioMcpSession is not None
-
-    def test_stdio_mcp_session_default_command(self) -> None:
-        """Default server_command must remain @playwright/mcp (byte-for-byte same)."""
-        from hermes.browser.infrastructure.mcp_session import StdioMcpSession
-
-        session = StdioMcpSession()
-        assert session._server_command == ["npx", "@playwright/mcp", "--headless"], (
-            "browser's StdioMcpSession default command must be byte-for-byte unchanged"
-        )
-
-    def test_stdio_mcp_session_has_browser_methods(self) -> None:
-        """navigate, snapshot, click, type_, press, current_url, screenshot still exist."""
-        from hermes.browser.infrastructure.mcp_session import StdioMcpSession
-
-        for method in ("navigate", "snapshot", "click", "type_", "press", "current_url", "screenshot"):
-            assert hasattr(StdioMcpSession, method), (
-                f"StdioMcpSession.{method}() must remain (browser path unchanged)"
-            )
-
-    def test_new_stdio_mcp_client_is_separate_class(self) -> None:
-        """StdioMcpClient is a distinct class from StdioMcpSession (SRP)."""
-        from hermes.browser.infrastructure.mcp_session import StdioMcpSession
+    def test_stdio_mcp_client_importable(self) -> None:
+        """mcp/infrastructure/stdio_mcp_client.py must import without error."""
         from hermes.mcp.infrastructure.stdio_mcp_client import StdioMcpClient
 
-        assert StdioMcpClient is not StdioMcpSession
-        # StdioMcpClient does NOT have browser-specific methods
-        assert not hasattr(StdioMcpClient, "navigate")
-        assert not hasattr(StdioMcpClient, "snapshot")
+        assert StdioMcpClient is not None
+
+    def test_stdio_mcp_client_has_no_browser_methods(self) -> None:
+        """StdioMcpClient must NOT accrete browser-specific methods (SRP boundary).
+
+        The deleted StdioMcpSession owned navigate/snapshot/click/type_/press/
+        current_url/screenshot. The generalized client must expose none of them —
+        it speaks only the MCP client contract. If any reappears, the collapsed
+        browser MCP driver has been re-duplicated onto the broker's stdio path.
+        """
+        from hermes.mcp.infrastructure.stdio_mcp_client import StdioMcpClient
+
+        for method in (
+            "navigate", "snapshot", "click", "type_", "press",
+            "current_url", "screenshot",
+        ):
+            assert not hasattr(StdioMcpClient, method), (
+                f"StdioMcpClient must NOT carry browser method {method!r} "
+                "(would re-duplicate the collapsed browser MCP driver)"
+            )
+
+    def test_stdio_mcp_client_exposes_mcp_contract(self) -> None:
+        """The generalized client exposes the MCP client contract it routes on."""
+        from hermes.mcp.infrastructure.stdio_mcp_client import StdioMcpClient
+
+        for method in ("initialize", "list_tools", "call_tool", "close"):
+            assert callable(getattr(StdioMcpClient, method, None)), (
+                f"StdioMcpClient.{method}() must remain (MCP client contract)"
+            )
+
+    def test_removed_browser_mcp_session_module_stays_gone(self) -> None:
+        """The dupe browser stdio session was deleted (one-browser collapse).
+
+        Regression guard: re-introducing browser/infrastructure/mcp_session.py
+        would re-create the duplicate browser MCP driver the collapse removed.
+        """
+        import importlib
+
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("hermes.browser.infrastructure.mcp_session")
 
 
 # ---------------------------------------------------------------------------

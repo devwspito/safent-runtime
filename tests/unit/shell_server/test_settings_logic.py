@@ -359,10 +359,18 @@ class TestThemeManagerPureLogic:
         for var in required_vars:
             assert var in css, f"Variable @{var} ausente del CSS de acento"
 
-    def test_accent_presets_tienen_8_entradas(self) -> None:
-        from hermes.shell.presentation.gtk4.theme_manager import ACCENT_PRESETS
+    def test_accent_presets_tienen_9_entradas(self) -> None:
+        from hermes.shell.presentation.gtk4.theme_manager import (
+            ACCENT_PRESETS,
+            _DEFAULT_ACCENT,
+        )
 
-        assert len(ACCENT_PRESETS) == 8
+        # El catálogo de acentos son los 8 del copy-deck + "Índigo",
+        # el acento de marca por defecto (_DEFAULT_ACCENT).
+        assert len(ACCENT_PRESETS) == 9
+        # El acento por defecto DEBE existir en el catálogo, o el arranque
+        # rompería en apply_accent (que valida preset_name in ACCENT_PRESETS).
+        assert _DEFAULT_ACCENT in ACCENT_PRESETS
 
     def test_accent_presets_todos_con_hex_valido(self) -> None:
         from hermes.shell.presentation.gtk4.theme_manager import ACCENT_PRESETS

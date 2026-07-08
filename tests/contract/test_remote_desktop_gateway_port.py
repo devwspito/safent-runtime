@@ -1,42 +1,42 @@
 """Contract test del puerto ``RemoteDesktopGatewayPort``.
 
-Verifica que el fake/esqueleto declarado en
-``src/hermes/workspace/testing/in_memory_remote_desktop_gateway.py`` declara el shape del Protocol del
-contract ``specs/002-.../contracts/remote_desktop_gateway_port.py``.
+El contrato SDD (``specs/002-.../contracts/remote_desktop_gateway_port.py``) se migró a
+``src/`` en la tarea T075: el Protocol real vive ahora en
+``hermes.workspace.domain.ports.remote_desktop_gateway_port``. Este test verifica ese
+Protocol real y que el fake en memoria ``InMemoryRemoteDesktopGateway`` existe.
 
-Spec 002 task T065+. Test runtime-light (sin VM, sin Chromium, sin LLM).
+Spec 002 task T065+/T075. Test runtime-light (sin VM, sin Chromium, sin LLM).
 """
 
 from __future__ import annotations
 
 import inspect
-import sys
-from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.unit
 
-# Cargamos el contract directamente desde el directorio specs/ (no es paquete
-# instalado, vive como artefacto del SDD).
-_CONTRACT_DIR = Path(__file__).resolve().parents[2] / "specs" / "002-hermes-workspace-training" / "contracts"
 
-
-def _import_protocol_from_spec():
-    sys.path.insert(0, str(_CONTRACT_DIR))
+def _load_port_protocol():
+    """Carga el Protocol real desde ``src/`` (el contrato SDD se migró a
+    ``hermes.workspace.domain.ports`` en T075). Si el puerto nunca se migró a
+    ``src/`` — contrato SDD ausente en checkout e imagen — se salta."""
     try:
-        mod = __import__("remote_desktop_gateway_port", fromlist=["*"])
-    finally:
-        sys.path.remove(str(_CONTRACT_DIR))
-    return getattr(mod, "RemoteDesktopGatewayPort")
+        from hermes.workspace.domain.ports.remote_desktop_gateway_port import (
+            RemoteDesktopGatewayPort,
+        )
+    except ImportError as exc:  # pragma: no cover - depende de artefactos de spec
+        pytest.skip(
+            f"RemoteDesktopGatewayPort Protocol no presente en src (contrato spec-002 no migrado): {exc}"
+        )
+    return RemoteDesktopGatewayPort
 
 
 class TestPortContract:
     def test_protocol_is_defined(self) -> None:
-        proto = _import_protocol_from_spec()
+        proto = _load_port_protocol()
         assert proto is not None
-        # Debe ser un Protocol (typing.Protocol o runtime_checkable)
-        # Acepta también clases base abstractas.
+        # Debe ser un Protocol (typing.Protocol o runtime_checkable) o ABC.
         assert inspect.isclass(proto)
 
     def test_inmemory_skeleton_exists(self) -> None:

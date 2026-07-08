@@ -1,6 +1,6 @@
 [project]
 name = "hermes-runtime"
-version = "0.8.21"
+version = "0.8.24"
 description = "Hermes: runtime agentico LLM reutilizable. ReasoningEngine + CapturingToolHost + PII tokenization + policy layer. Reemplaza dependencia de hermes-agent NousResearch por loop propio sobre LiteLLM."
 requires-python = ">=3.12"
 license = { file = "LICENSE" }

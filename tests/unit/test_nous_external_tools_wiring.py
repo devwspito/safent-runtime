@@ -8,8 +8,11 @@ Verifies deterministically (no real LLM, no real broker, no hermes-agent):
   (d) CLASSIFICATION: a MCP qualified name routes correctly.
   (e) GATE: every external effectful call MUST pass through the broker (no bypass).
   (f) GATE: READ handler is called via the engine_loop bridge — no direct adapter call.
-  (g) GATE: zero_tools_source logs LOUD when tools_source is None.
-  (h) ZERO_TOOLS: 0 external specs → LOUD warning log.
+  (g) GATE: tools_source=None is fail-safe at resolve time (returns ()) with NO
+      per-cycle warning; the LOUD wiring-gap warning fires ONCE at build time
+      (__main__._build_nous_engine → 'nous_engine_no_tools_source').
+  (h) ZERO_TOOLS: 0 external specs is a legitimate B4 outcome (fresh instance /
+      access-scope-locked agent) → returns () with NO per-cycle warning.
   (i) WRITE: external WRITE proposal has correct entity_type (composio/mcp).
   (j) BUILD PROPOSAL: _build_external_proposal shapes composio parameters correctly.
   (k) BUILD PROPOSAL: _build_external_proposal shapes mcp parameters correctly.
@@ -208,8 +211,14 @@ class TestDiscovery:
         assert "gmail_get_email" in names
 
     @pytest.mark.asyncio
-    async def test_resolve_external_specs_count_logged(self, caplog) -> None:
-        """INFO log when external specs count > 0."""
+    async def test_resolve_external_specs_returns_injected_specs(self) -> None:
+        """External specs from tools_source are discovered and returned (count > 0).
+
+        Per-cycle count observability lives at BUILD time (__main__._build_nous_engine
+        logs 'engine_kind=nous ... tools_source_wired=%s'); _resolve_external_specs runs
+        on every reasoning cycle and stays silent to avoid log spam. The engine-level
+        invariant is the RETURN VALUE: wired specs surface for the model.
+        """
         async def _source() -> tuple:
             return (_read_spec("gmail_get_email"),)
 
@@ -217,11 +226,11 @@ class TestDiscovery:
             persona=_persona(),
             tools_source=_source,
         )
-        with caplog.at_level(logging.INFO, logger="hermes.runtime.nous_engine"):
-            specs = await engine._resolve_external_specs()
+        specs = await engine._resolve_external_specs()
 
         assert len(specs) == 1
-        assert any("external_tools_injected" in r.message for r in caplog.records)
+        assert specs[0].name == "gmail_get_email"
+        assert specs[0].entity_type == "composio"
 
 
 # ---------------------------------------------------------------------------
@@ -518,8 +527,18 @@ class TestReadHandlerBridgedViaLoop:
 
 class TestZeroToolsSourceLog:
     @pytest.mark.asyncio
-    async def test_none_tools_source_logs_warning(self, caplog) -> None:
-        """tools_source=None emits a LOUD warning on _resolve_external_specs."""
+    async def test_none_tools_source_is_failsafe_without_percycle_warning(
+        self, caplog
+    ) -> None:
+        """tools_source=None → () fail-safe, with NO per-cycle warning.
+
+        The LOUD wiring-gap warning is emitted ONCE at build time
+        (__main__._build_nous_engine → 'nous_engine_no_tools_source', covered by
+        TestBuildNousEngineToolsSourceWiring). _resolve_external_specs runs on every
+        reasoning cycle, so warning here would spam the journal on each message —
+        the resolve path must return () silently. This guards both invariants: the
+        None case never raises, and the per-cycle path never re-introduces the spam.
+        """
         engine = NousReasoningEngine(
             persona=_persona(),
             tools_source=None,
@@ -529,8 +548,8 @@ class TestZeroToolsSourceLog:
 
         assert specs == ()
         warning_msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any("no_tools_source" in m for m in warning_msgs), (
-            f"Expected 'no_tools_source' warning, got: {warning_msgs}"
+        assert not any("no_tools_source" in m for m in warning_msgs), (
+            f"no_tools_source warning belongs at build time, not per-cycle; got: {warning_msgs}"
         )
 
 
@@ -541,8 +560,18 @@ class TestZeroToolsSourceLog:
 
 class TestZeroExternalSpecsLog:
     @pytest.mark.asyncio
-    async def test_empty_tools_source_logs_warning(self, caplog) -> None:
-        """tools_source returning 0 external specs emits LOUD warning."""
+    async def test_empty_tools_source_returns_empty_without_warning(
+        self, caplog
+    ) -> None:
+        """tools_source yielding 0 external specs → () with NO per-cycle warning.
+
+        Zero external tools is a LEGITIMATE steady state, not an anomaly: (1) a
+        fresh instance with no Composio connections, and (2) a B4 access-scope-locked
+        custom agent whose per-agent filtering (commit e9e26ea, _apply_agent_filter)
+        strips every external tool BY DESIGN. A per-cycle WARNING would fire on every
+        message for every restricted agent, so the resolve path stays silent; the
+        only wiring-gap warning lives at build time (tools_source is None).
+        """
         async def _empty_source() -> tuple:
             return ()
 
@@ -555,8 +584,9 @@ class TestZeroExternalSpecsLog:
 
         assert specs == ()
         warning_msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any("zero_external_tools" in m for m in warning_msgs), (
-            f"Expected 'zero_external_tools' warning, got: {warning_msgs}"
+        assert not any("zero_external_tools" in m for m in warning_msgs), (
+            f"zero external tools is a legitimate B4 outcome — must not warn per-cycle; "
+            f"got: {warning_msgs}"
         )
 
 
@@ -738,7 +768,11 @@ class TestBuildNousEngineToolsSourceWiring:
         import os
         captured: list[Any] = []
 
-        def fake_build_nous(*, broker, consent_context, tenant_id, tools_source=None, capability_consent_ref=None):
+        # _build_nous_engine grew B4 (agent_registry, *_repo) + dual-browser
+        # (cerebro/jailed browser managers) kwargs since this test was written;
+        # accept **kwargs so the assertion stays focused on the tools_source
+        # forwarding contract, not the full evolving signature.
+        def fake_build_nous(*, broker, consent_context, tenant_id, tools_source=None, **kwargs):
             captured.append(tools_source)
             return MagicMock()
 

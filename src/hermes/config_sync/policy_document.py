@@ -29,8 +29,8 @@ SIGNING FORMAT (P0-1):
 CARDINALIY CAPS (P1-3, enforced at Pydantic parse time):
   agents ≤ 200, providers ≤ 50, mcp ≤ 100, skills ≤ 200, consents ≤ 200,
   egress.allow_domains ≤ 500, mcp.env ≤ 100 keys, access_scope.native_tools/
-  views ≤ 256 each, access_scope.policy_overlay ≤ 256 keys,
-  directory.entries ≤ 200 (Fase 3).
+  views/integration_toolkits ≤ 256 each, access_scope.policy_overlay ≤ 256
+  keys, directory.entries ≤ 200 (Fase 3).
 """
 
 from __future__ import annotations
@@ -87,6 +87,15 @@ class AccessScopeSpec(BaseModel):
     # NOTE: consumption (filtering the local roster / OfficeView by this
     # value) is a SEPARATE later task — this field is wire-contract only here.
     visibility_scope: str = Field(default="all", max_length=32)
+    # Cerebro Enterprise Increment 0 (R-B): per-agent composio toolkit
+    # allow-list. [] (default) == unrestricted (today's behavior, zero
+    # regression). Non-empty == deny every toolkit outside this set — gated
+    # by NON-EMPTINESS, an axis independent of `enforced` (which only gates
+    # native_tools). Dropped-when-empty so an agent that never sets it
+    # verifies BYTE-IDENTICALLY to a pre-C1 bundle. MUST match the cloud
+    # mirror. NOTE: enforcement (_expand_composio / composio_skill_service)
+    # is a SEPARATE later task — this field is wire-contract only here.
+    integration_toolkits: list[str] = Field(default_factory=list, max_length=256)
 
     @field_validator("native_tools")
     @classmethod
@@ -95,6 +104,13 @@ class AccessScopeSpec(BaseModel):
         wire). MUST match the cloud mirror's _sorted_unique_native_tools so
         signing_bytes are byte-identical regardless of the authoring order — the
         byte-mirror must not depend on the signer happening to pre-sort."""
+        return sorted(set(v))
+
+    @field_validator("integration_toolkits")
+    @classmethod
+    def _sorted_unique_integration_toolkits(cls, v: list[str]) -> list[str]:
+        """Canonicalise the allow-set: sorted + de-duplicated (it is a set on the
+        wire). MUST match the cloud mirror's _sorted_unique_integration_toolkits."""
         return sorted(set(v))
 
     @field_validator("policy_overlay")
@@ -106,14 +122,17 @@ class AccessScopeSpec(BaseModel):
 
     @model_serializer(mode="wrap")
     def _serialize_scope(self, handler: Any) -> dict[str, Any]:
-        """Drop approval_tier when "standard" and visibility_scope when "all"
-        — byte-identical to a pre-per-role / pre-Fase-3 bundle. MUST match
-        the cloud mirror's _serialize_scope exactly."""
+        """Drop approval_tier when "standard", visibility_scope when "all",
+        and integration_toolkits when empty — byte-identical to a pre-per-role
+        / pre-Fase-3 / pre-C1 bundle. MUST match the cloud mirror's
+        _serialize_scope exactly."""
         data = handler(self)
         if self.approval_tier == "standard":
             data.pop("approval_tier", None)
         if self.visibility_scope == "all":
             data.pop("visibility_scope", None)
+        if not self.integration_toolkits:
+            data.pop("integration_toolkits", None)
         return data
 
 

@@ -5,12 +5,21 @@ UX:
   - Razón (text del agente)
   - Scope: Once | Session | Persistent
   - Botones: Conceder | Denegar
+
+NOTE: this dialog only surfaces the decision via `on_decision`; it does not
+call a consent backend itself. The old wiring posted to the now-removed
+REST consents endpoints (commit 0bca2c0 deleted them — unsigned parallel
+store bypassing the signed ConsentManager gate). The single source of
+truth for consent is the native ConsentManager over D-Bus
+(org.hermes.Runtime1 GrantConsent — see
+hermes.lumen.dbus_client.runtime1_client.Runtime1Client, used by
+hermes.lumen.apps.security.__main__). Callers of this dialog are
+responsible for persisting the decision through that D-Bus path.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
 from typing import Callable
 
 import gi
@@ -18,10 +27,6 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
-
-from hermes.shell.infrastructure.shell_backend_client import (
-    ShellBackendClient,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +68,6 @@ class HermesConsentDialog(Adw.Window):
         capability: str,
         requestor: str,
         reason: str | None = None,
-        client: ShellBackendClient | None = None,
         on_decision: Callable[[bool, str], None] | None = None,
     ) -> None:
         super().__init__()
@@ -71,8 +75,6 @@ class HermesConsentDialog(Adw.Window):
         self.set_modal(True)
         self.set_default_size(520, 400)
         self.set_title("Solicitud de consentimiento")
-        self._capability = capability
-        self._client = client or ShellBackendClient()
         self._on_decision = on_decision
 
         toolbar = Adw.ToolbarView()
@@ -130,16 +132,8 @@ class HermesConsentDialog(Adw.Window):
     def _decide(self, granted: bool) -> None:
         scopes = ["once", "session", "persistent"]
         scope = scopes[self._scope_row.get_selected()] if granted else "once"
-        if granted:
-            def runner() -> None:
-                try:
-                    self._client.grant_consent(
-                        capability=self._capability, scope=scope
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("grant consent: %s", exc)
-
-            threading.Thread(target=runner, daemon=True).start()
+        # Persisting the grant is the caller's job (via the native
+        # ConsentManager D-Bus path) — see module docstring.
         if self._on_decision is not None:
             self._on_decision(granted, scope)
         self.close()

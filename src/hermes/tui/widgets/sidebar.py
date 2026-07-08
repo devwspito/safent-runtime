@@ -102,6 +102,12 @@ class Sidebar(Vertical):
     # -- event handlers ---------------------------------------------------
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        # The hidden "Avanzado" list (#nav-list-adv) auto-highlights its first
+        # item (security) on mount and fires Highlighted even though it is not
+        # displayed; ignoring highlights from a non-displayed list stops that
+        # spurious Navigate from clobbering the chat default at boot.
+        if not event.list_view.display:
+            return
         if event.item is not None and event.item.id:
             self.post_message(self.Navigate(event.item.id.removeprefix("nav-")))
 

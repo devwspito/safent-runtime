@@ -17,6 +17,7 @@ Each test MUST FAIL before the fix and PASS after.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -82,7 +83,14 @@ class _RecordingEngine:
 
 
 class _InMemoryConversationRepo:
-    """Minimal in-memory conversation store that mimics the production interface."""
+    """Minimal in-memory conversation store that mimics the production interface
+    (hermes.tasks.infrastructure.sqlite_conversation_repo.SQLiteConversationRepository).
+
+    The assistant turn is persisted via ``upsert_assistant_message`` (one row per
+    conversation+task, insert-or-update), matching the real collaborator; the older
+    ``append_message`` fake persisted the assistant reply, which no longer reflects
+    how the orchestrator writes it.
+    """
 
     def __init__(self) -> None:
         self._messages: list[dict] = []
@@ -90,10 +98,52 @@ class _InMemoryConversationRepo:
     def create_or_touch(self, *, conversation_id, first_user_message, agent_id=None):
         pass  # not needed for these tests
 
-    def append_message(self, *, conversation_id, role: str, content: str) -> None:
+    def append_message(
+        self, *, conversation_id, role: str, content: str, task_id=None
+    ) -> None:
         self._messages.append(
-            {"conversation_id": str(conversation_id), "role": role, "content": content}
+            {
+                "conversation_id": str(conversation_id),
+                "role": role,
+                "content": content,
+                "task_id": str(task_id) if task_id is not None else None,
+                "status": None,
+            }
         )
+
+    def upsert_assistant_message(
+        self, *, conversation_id, task_id, content: str, status: str
+    ) -> None:
+        """Insert-or-update THE assistant row keyed by (conversation_id, task_id)."""
+        conv = str(conversation_id)
+        tid = str(task_id)
+        for m in self._messages:
+            if (
+                m["conversation_id"] == conv
+                and m["role"] == "assistant"
+                and m.get("task_id") == tid
+            ):
+                m["content"] = content
+                m["status"] = status
+                return
+        self._messages.append(
+            {
+                "conversation_id": conv,
+                "role": "assistant",
+                "content": content,
+                "task_id": tid,
+                "status": status,
+            }
+        )
+
+    def get_detail(self, *, conversation_id):
+        """Return an object exposing ``.messages`` (used for history load)."""
+        msgs = [
+            SimpleNamespace(role=m["role"], content=m["content"])
+            for m in self._messages
+            if m["conversation_id"] == str(conversation_id)
+        ]
+        return SimpleNamespace(conversation_id=conversation_id, messages=msgs)
 
     def messages_for(self, conversation_id: str) -> list[dict]:
         return [m for m in self._messages if m["conversation_id"] == conversation_id]

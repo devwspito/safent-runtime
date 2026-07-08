@@ -97,9 +97,13 @@ class ComposioCapabilityRegistry:
         """Resuelve tool_name a binding.
 
         Prioriza la registry estática. Si no está y parece slug Composio
-        (contiene '_' con al menos 2 segmentos) → binding dinámico.
-        Solo devuelve binding para READ slugs de Composio. WRITE slugs
-        devuelven None (fail-closed en el broker).
+        (contiene '_' con al menos 2 segmentos) → binding dinámico:
+          - READ slug  → LOW + auto_executable (fluye tras taint + kill-switch).
+          - WRITE slug (incl. export/download) → HIGH + auto_executable=False:
+            el broker EXIGE HITL (tarjeta + TOTP) antes de despachar vía
+            ComposioSurfaceAdapter. NUNCA auto-ejecuta. (El diseño anterior
+            devolvía None, que bloqueaba TODA escritura incluso con aprobación
+            del dueño — corregido para habilitar writes gobernados por HITL.)
         """
         static = self._static.resolve(tool_name)
         if static is not None:

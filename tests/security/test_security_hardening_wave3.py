@@ -267,7 +267,10 @@ class TestSniEnforcement:
         reader = _make_stream_reader(connect + tls)
         writer = _make_writer(transport)
 
+        opened: list[tuple[str, int]] = []
+
         async def _fake_connect(host, port):
+            opened.append((host, port))
             r = asyncio.StreamReader()
             r.feed_eof()
             return r, _make_writer(_CollectingTransport())
@@ -280,8 +283,16 @@ class TestSniEnforcement:
         handler = ProxyConnectionHandler(policy_engine=engine, audit_sink=sink)
         await handler.handle(reader, writer)
 
-        assert b"403" in bytes(transport.written)
+        # Fix-4 (evolved design): an HTTP client emits its TLS ClientHello only AFTER
+        # the CONNECT 200, so the proxy must send 200 up front, then VERIFY the real
+        # SNI. A mismatched/denied SNI tears the tunnel down (no upstream opened, no
+        # bytes forwarded) — a late 403 can no longer be carried once past the 200.
+        # Security invariant preserved: the SNI (evil.com), NOT the whitelisted CONNECT
+        # host (safe.com), is what gets denied + audited, and NO upstream tunnel to it
+        # is ever opened.
         assert "evil.com" in sink.denied_domains()
+        assert opened == [], "denied SNI must NOT open any upstream connection"
+        assert transport.is_closing(), "denied SNI must tear down the client tunnel"
 
     @pytest.mark.asyncio
     async def test_ip_literal_connect_denied_in_default_deny(
@@ -328,7 +339,13 @@ class TestSniEnforcement:
         handler = ProxyConnectionHandler(policy_engine=engine, audit_sink=sink)
         await handler.handle(reader, writer)
 
-        assert b"403" in bytes(transport.written)
+        # Fix-4 (evolved design): with no ClientHello (EOF right after CONNECT), the
+        # proxy tears the tunnel down after the CONNECT 200 instead of a late 403 it
+        # can no longer carry. Security invariant preserved: an absent/empty SNI in
+        # DEFAULT_DENY is DENIED — the client tunnel is closed (the browser's TLS
+        # handshake fails) and the connection is NEVER recorded as allowed.
+        assert transport.is_closing(), "empty ClientHello must close the tunnel (deny)"
+        assert sink.allowed_domains() == [], "no-SNI CONNECT must never be allowed"
 
 
 # ---------------------------------------------------------------------------

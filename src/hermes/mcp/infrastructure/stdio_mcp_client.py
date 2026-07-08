@@ -448,12 +448,21 @@ def _import_mcp_session() -> Any:
 
 
 def _build_mcp_env() -> dict[str, str]:
-    """Build the env dict to forward to the launcher (whitelisted keys only)."""
+    """Build the env dict to forward to the launcher (whitelisted keys only).
+
+    HOME is deliberately EXCLUDED (R16, 2026-07-07): this daemon's own HOME
+    (/var/lib/hermes/hermes-home, set on hermes-runtime.service) is an
+    InaccessiblePath for the netns-jailed MCP child unit — forwarding it here
+    used to silently override the launcher's own correct, writable HOME
+    (/var/lib/hermes/mcp-home) for EVERY MCP spawn, and the launcher no longer
+    honours a caller-supplied HOME override at all (see hermes-mcp-launcher's
+    _ALLOWED_ENV_KEYS). The launcher's own unit env is now the sole source of
+    HOME for MCP children.
+    """
     keys = (
         "npm_config_cache",
         "UV_CACHE_DIR",
         "npm_config_prefix",
-        "HOME",
         "XDG_DATA_HOME",
         "XDG_CACHE_HOME",
         "UV_TOOL_DIR",

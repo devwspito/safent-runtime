@@ -185,16 +185,43 @@ class TestBrokerUsesComposioCapabilityRegistry:
             "W2: static registry binding must not be overridden by ComposioCapabilityRegistry"
         )
 
-    def test_composio_write_slug_returns_none(self) -> None:
-        """WRITE Composio slugs → None (fail-closed in broker)."""
+    def test_composio_write_slug_requires_hitl_never_auto_executes(self) -> None:
+        """WRITE Composio slugs → HIGH + non-auto-executable binding (HITL-gated).
+
+        Sovereign-write model (commit 65bc386): a WRITE slug that is NOT in the
+        static registry resolves to a Composio binding with risk=HIGH and
+        auto_executable=False. The broker's _needs_hitl treats HIGH as an
+        unconditional HITL requirement (no autonomy level can exempt it), so the
+        write can NEVER auto-execute — it only runs after the owner approves the
+        HITL card + TOTP. Previously WRITE slugs resolved to None, which
+        structurally blocked EVERY integration write even with owner approval.
+
+        The security invariant enforced here: a WRITE Composio slug must never be
+        auto-executable and must be HIGH risk (fail-closed against silent
+        execution).
+        """
         from hermes.capabilities.application.composio_capability_registry import (
             ComposioCapabilityRegistry,
         )
         from hermes.capabilities.application.capability_registry import CapabilityRegistry
+        from hermes.capabilities.domain.ports import RiskLevel
 
         registry = ComposioCapabilityRegistry(static_registry=CapabilityRegistry())
-        assert registry.resolve("gmail_send_email") is None, (
-            "W2: WRITE Composio slug must resolve to None (fail-closed)"
+        binding = registry.resolve("gmail_send_email")
+
+        assert binding is not None, (
+            "W2: WRITE Composio slug must resolve to a binding so it can reach an "
+            "HITL approval card (not be structurally blocked before approval)"
+        )
+        assert binding.executor == "composio", (
+            "W2: WRITE Composio binding must dispatch via the composio executor"
+        )
+        assert binding.risk is RiskLevel.HIGH, (
+            "W2: WRITE Composio binding must be HIGH risk (forces HITL, no exemption)"
+        )
+        assert binding.auto_executable is False, (
+            "W2: WRITE Composio binding must NEVER be auto-executable — it requires "
+            "owner HITL approval (card + TOTP) before executing"
         )
 
 
@@ -675,10 +702,13 @@ class TestOsNativeDispatcherWiring:
 
         fake_consent = MagicMock()
 
-        # resolve_model_config is imported locally inside _build_os_native_dispatcher;
-        # patch it at its definition site so the local import picks up the mock.
+        # _build_os_native_dispatcher reads the model from
+        # ActiveProviderService(db_path=_DB_PATH).resolve() (NOT resolve_model_config).
+        # Patch THAT to None so "no model configured" is deterministic and independent
+        # of whatever provider the ambient shell-state.db (_DB_PATH) happens to hold —
+        # otherwise an earlier test that seeds a provider leaks in and _cu_model != "".
         with patch(
-            "hermes.runtime.provider_config_source.resolve_model_config",
+            "hermes.runtime.active_provider.ActiveProviderService.resolve",
             return_value=None,
         ):
             dispatcher = _build_os_native_dispatcher(

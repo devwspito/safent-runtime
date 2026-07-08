@@ -210,28 +210,79 @@ def _check_kill_switch(
         return True
 
 
+def _is_authorized_mcp_tool(tool_name: str, authorized_mcp_servers: Any) -> bool:
+    """True if *tool_name* is `mcp__<slug>__<tool>` for a slug the scope admits.
+
+    Mirrors NousReasoningEngine._mcp_spec_is_bound's slug-extraction exactly —
+    kept as a small local duplicate (different input shape: raw dispatch
+    `tool_name: str` here vs. a `ToolSpec` there, and a different layer:
+    runtime hook vs. application filter). Do not let the two drift on the
+    NAMING CONVENTION (`mcp__<slug>__<tool>`), only on the input type.
+    """
+    if not authorized_mcp_servers:
+        return False
+    parts = tool_name.split("__")
+    slug = parts[1] if len(parts) >= 2 else ""
+    return bool(slug) and slug in authorized_mcp_servers
+
+
+def _agent_is_cloud_managed(agent_registry: Any, agent_id: str) -> bool:
+    """Best-effort: does the AGENT record itself say `managed_by == "cloud"`?
+
+    Deliberately independent of AgentAccessScope — used exactly when the scope
+    row is the thing that's MISSING (H-1 residual, 2026-07-07), so it must read
+    a DIFFERENT source of truth: the agent registry entity's own `managed_by`
+    field (stamped by config_sync.applier._upsert_agent on every cloud-owned
+    agent — see dbus_runtime_service.py's own `managed_by=="cloud"` filters).
+    Fail-soft to False (today's fail-open path) on any error or missing
+    registry — this function only ever NARROWS the fail-closed branch below,
+    never widens a block onto every agent everywhere.
+    """
+    if agent_registry is None:
+        return False
+    try:
+        agent = agent_registry.get_agent(agent_id)
+    except Exception:  # noqa: BLE001
+        return False
+    return getattr(agent, "managed_by", None) == "cloud"
+
+
 def _check_agent_access_scope(
     tool_name: str,
     access_scope_repo: Any,
     tenant_id: str,
+    agent_registry: Any = None,
 ) -> str | None:
-    """Native per-agent floor (Enterprise governance, Fase 2 Phase 1).
+    """Native + non-native per-agent floor (Enterprise governance, Fase 2 Phase 1;
+    hardened H-1, 2026-07-07).
 
-    Blocks a native Nous tool call that falls outside the CALLING agent's
-    declared AgentAccessScope. Fail-OPEN (returns None, i.e. allow) whenever
-    the scope does not govern this call — no repo wired, no ambient agent_id,
-    no scope row for the agent, or `enforced=False` — so every existing/local
-    install is completely unaffected (zero regression). Fail-CLOSED (blocks)
-    ONLY on an unexpected repo error: this function never raises, since a
-    raise here would be swallowed by invoke_hook into ALLOW.
+    Blocks a tool call that falls outside the CALLING agent's declared
+    AgentAccessScope. Fail-OPEN (returns None, i.e. allow) whenever the scope
+    does not govern this call — no repo wired, no ambient agent_id, no scope
+    row for an ORDINARY (non-cloud-managed) agent, or `enforced=False` — so
+    every existing/local install is completely unaffected (zero regression).
+    Fail-CLOSED (blocks) on an unexpected repo error, AND on a missing scope
+    row for a managed/cloud DEFAULT_AGENT_ID (see `_agent_is_cloud_managed`) —
+    this function never raises, since a raise here would be swallowed by
+    invoke_hook into ALLOW.
 
     The CEO/Cerebro is exempt from an enforced scope UNLESS that scope
     explicitly sets `cerebro_unrestricted=False` — mirrors
     NousReasoningEngine._cerebro_bypasses_filtering so the same governance
     decision applies consistently to native tools (this floor) and external
     MCP/skill tools (the engine's per-cycle filter).
+
+    H-1 (2026-07-07): this floor used to return None (allow) for EVERY
+    non-native tool unconditionally — `os_surface` capability tools
+    (delegate_to_colleague, lo_*, activate_app, ...) are not in the native
+    Nous catalog, so a locked Cerebro's `native_tools=[]` never touched them.
+    The primary fix is presentation-time (nous_engine._filter_mcp_skill no
+    longer admits os_surface specs for a locked agent); THIS is the
+    dispatch-time backstop — a non-native tool under a LOCKED scope is now
+    denied unless it is a bundle-authorized MCP tool the SAME scope admits.
     """
     try:
+        from hermes.agents.domain.agent import DEFAULT_AGENT_ID  # noqa: PLC0415
         from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
             get_current_cycle_agent,
         )
@@ -240,17 +291,39 @@ def _check_agent_access_scope(
         if not agent_id or access_scope_repo is None:
             return None  # unscoped cycle or no repo wired — today's behaviour
 
-        if not _is_native_nous_tool(tool_name):
-            return None  # this floor only governs native Nous tools
-
         scope = access_scope_repo.get_scope(agent_id, tenant_id)
-        if scope is None or not scope.enforced:
+
+        if scope is None:
+            # H-1 residual: a managed/cloud Cerebro caught between "provisioned"
+            # and "config-sync's first set_agent_access_scope landed" (or one
+            # whose scope row was later deleted/errored) must stay LOCKED, not
+            # revert to omnipotence. An ordinary unmanaged CE agent (no
+            # registry signal, or managed_by != "cloud") keeps today's
+            # fail-open behaviour untouched.
+            if agent_id == DEFAULT_AGENT_ID and _agent_is_cloud_managed(
+                agent_registry, agent_id
+            ):
+                return (
+                    "El agente de gestión aún no tiene una política de acceso "
+                    "aplicada — bloqueado hasta que config-sync sincronice."
+                )
             return None  # no cloud policy for this agent yet — unrestricted
 
-        from hermes.agents.domain.agent import DEFAULT_AGENT_ID  # noqa: PLC0415
+        if not scope.enforced:
+            return None  # scope exists but governs nothing yet
 
         if agent_id == DEFAULT_AGENT_ID and scope.cerebro_unrestricted:
             return None  # CEO/Cerebro omnipotence — the only field that parks it
+
+        if not _is_native_nous_tool(tool_name):
+            # H-1: dispatch-time backstop for non-native (os_surface/MCP) tools
+            # under a locked scope — see docstring above.
+            if _is_authorized_mcp_tool(tool_name, scope.authorized_mcp_servers):
+                return None
+            return (
+                f"'{tool_name}' no está en el ámbito de acceso de este agente. "
+                "Pide al dueño que amplíe sus permisos si lo necesitas."
+            )
 
         if scope.allows_native_tool(tool_name):
             return None
@@ -1450,6 +1523,7 @@ def make_pre_tool_call_hook(
     broker: Any,
     access_scope_repo: Any | None = None,
     tenant_id: str = "",
+    agent_registry: Any | None = None,
 ) -> Any:
     """Build and return the pre_tool_call hook callback.
 
@@ -1467,6 +1541,10 @@ def make_pre_tool_call_hook(
             zero regression) — matches how composio/capability repos degrade.
         tenant_id: The daemon's resolved tenant_id, used to look up the
             calling agent's scope. Ignored when access_scope_repo is None.
+        agent_registry: Optional agent registry (H-1, 2026-07-07) — used ONLY
+            to detect a managed/cloud DEFAULT_AGENT_ID with a missing scope
+            row (see `_agent_is_cloud_managed`). None => today's fail-open
+            behaviour for a missing scope row, unchanged.
     """
     from hermes.capabilities.tool_delicacy import hook_mfa_block  # noqa: PLC0415
     from hermes.capabilities.tool_policy import ToolPolicyStore  # noqa: PLC0415
@@ -1490,11 +1568,15 @@ def make_pre_tool_call_hook(
                 )
                 return _block("agent paused — kill-switch active (CTRL-12)")
 
-            # Step 1.1: Native per-agent access-scope floor (Enterprise governance,
-            # Fase 2 Phase 1). Fail-OPEN when unscoped (no repo, no ambient
-            # agent_id, no scope row, or enforced=False) — zero regression for
-            # every existing/local install. Fail-CLOSED only on a repo error.
-            scope_block = _check_agent_access_scope(tool_name, access_scope_repo, tenant_id)
+            # Step 1.1: Per-agent access-scope floor (Enterprise governance, Fase 2
+            # Phase 1; hardened H-1). Fail-OPEN when unscoped (no repo, no ambient
+            # agent_id, no scope row for an ORDINARY agent, or enforced=False) —
+            # zero regression for every existing/local install. Fail-CLOSED on a
+            # repo error, and on a missing scope row for a managed/cloud default
+            # agent (H-1 residual).
+            scope_block = _check_agent_access_scope(
+                tool_name, access_scope_repo, tenant_id, agent_registry
+            )
             if scope_block is not None:
                 logger.warning(
                     "hermes.security_hook.pre.access_scope_blocked tool=%s", tool_name
@@ -1934,6 +2016,7 @@ def register_security_hooks(
     audit_repo: "SignedAuditRepositoryPort",
     access_scope_repo: Any | None = None,
     tenant_id: str = "",
+    agent_registry: Any | None = None,
 ) -> None:
     """Register both pre_tool_call and post_tool_call hooks on the global PluginManager.
 
@@ -1948,6 +2031,7 @@ def register_security_hooks(
     access_scope_repo/tenant_id: optional Enterprise Fase 2 Phase 1 wiring for
     the native per-agent access-scope floor. None/"" => fail-open, unchanged
     from before this parameter existed.
+    agent_registry: optional (H-1, 2026-07-07) — see make_pre_tool_call_hook.
     """
     try:
         from hermes_cli.plugins import get_plugin_manager  # noqa: PLC0415
@@ -1966,6 +2050,7 @@ def register_security_hooks(
         broker=broker,
         access_scope_repo=access_scope_repo,
         tenant_id=tenant_id,
+        agent_registry=agent_registry,
     )
     post_hook = make_post_tool_call_hook(
         signer=signer,

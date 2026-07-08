@@ -324,6 +324,7 @@ CREATE TABLE IF NOT EXISTS agent_access_scopes (
     updated_by           INTEGER NOT NULL,
     managed_by           TEXT,
     approval_tier        TEXT NOT NULL DEFAULT 'standard',
+    authorized_mcp_servers TEXT NOT NULL DEFAULT '[]',
     updated_at           TEXT NOT NULL,
     PRIMARY KEY (tenant_id, agent_id)
 );
@@ -356,6 +357,15 @@ def ensure_capabilities_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE agent_access_scopes "
             "ADD COLUMN approval_tier TEXT NOT NULL DEFAULT 'standard'"
+        )
+    except sqlite3.OperationalError:
+        pass
+    # EXPAND (bundle-authorized MCP admission, 2026-07-07): authorized_mcp_servers
+    # column for DBs created before it existed. Idempotent — no-op if present.
+    try:
+        conn.execute(
+            "ALTER TABLE agent_access_scopes "
+            "ADD COLUMN authorized_mcp_servers TEXT NOT NULL DEFAULT '[]'"
         )
     except sqlite3.OperationalError:
         pass
