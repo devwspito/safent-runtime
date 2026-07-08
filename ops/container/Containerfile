@@ -67,9 +67,17 @@ RUN python3 -m pip install --no-cache-dir \
 # content changed, baking old backend code / launcher into a "fresh" image.
 ARG APP_CACHEBUST=0
 RUN echo "app-cachebust ${APP_CACHEBUST}" > /tmp/.app_cachebust
-COPY pyproject.toml README.md /tmp/whlbuild/
+COPY pyproject.toml README.md VERSION /tmp/whlbuild/
 COPY src /tmp/whlbuild/src
-RUN cd /tmp/whlbuild && python3 -m pip wheel . --no-deps -w /tmp/whl \
+# Sync the wheel + runtime version from the repo-root VERSION file (single source of
+# truth) BEFORE building. build.sh does this for local builds, but CI builds via this
+# Containerfile directly and skipped it — so every published image baked a stale
+# __version__ (the UI showed 0.8.27 forever + a perpetual "update available").
+RUN cd /tmp/whlbuild \
+    && V="$(tr -d ' \t\n\r' < VERSION)" \
+    && sed -i -E "s/^version = \".*\"/version = \"${V}\"/" pyproject.toml \
+    && sed -i -E "s|^__version__ = .*|__version__ = \"${V}\"  # synced from repo-root VERSION at build|" src/hermes/__init__.py \
+    && python3 -m pip wheel . --no-deps -w /tmp/whl \
     && python3 -m pip install --no-cache-dir --no-deps /tmp/whl/hermes_runtime-*.whl \
     && python3 -m pip install --no-cache-dir \
       aiohttp composio==0.13.1 dbus-fast rfc3161ng structlog tenacity \
