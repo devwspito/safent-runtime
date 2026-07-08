@@ -408,10 +408,13 @@ RUN echo "${GIT_SHA}" > /usr/share/hermes/build
 LABEL org.opencontainers.image.revision="${GIT_SHA}"
 # Cloud config-sync: enable it UNCONDITIONALLY (both editions). The unit's
 # ConditionPathExists=/var/lib/hermes/instance/.enterprise keeps it inert in
-# community edition (no pairing marker) and auto-starts it the moment an instance
-# is paired — the CE image runs in associate mode, so gating on build-time
-# SAFENT_EDITION would (and did) leave paired CE instances without policy sync.
-RUN systemctl enable hermes-config-sync.service 2>&1 | tail -3 || true
+# community edition (no pairing marker). The companion hermes-config-sync.path
+# unit watches that marker and STARTS the service the moment pairing creates it
+# (PairingService.pair → write_enterprise_marker) — systemd will not retroactively
+# start a condition-skipped service, so the .path unit is what makes pairing take
+# effect without a reboot. The CE image runs in associate mode, so gating on
+# build-time SAFENT_EDITION would (and did) leave paired CE instances without sync.
+RUN systemctl enable hermes-config-sync.service hermes-config-sync.path 2>&1 | tail -3 || true
 
 # podman-machine (macOS) compat: systemd's per-unit MemoryPressureWatch tries to bind the
 # unit's cgroup memory.pressure into its namespace; in the Mac podman VM's cgroup view this

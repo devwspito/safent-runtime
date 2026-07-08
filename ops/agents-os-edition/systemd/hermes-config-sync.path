@@ -1,0 +1,27 @@
+# hermes-config-sync.path — watches for the .enterprise marker written by the
+# pairing flow (PairingService.pair → write_enterprise_marker) and starts
+# hermes-config-sync.service the instant an instance becomes an associate.
+#
+# Why this unit exists: hermes-config-sync.service is gated by
+# ConditionPathExists=/var/lib/hermes/instance/.enterprise. On a Community
+# (unpaired) instance that marker does not exist at boot, so the service is
+# condition-skipped — and systemd does NOT retroactively start a
+# condition-skipped service when the condition later becomes true. Pairing
+# creates the marker at RUNTIME, so without this .path unit the Enterprise
+# governance loop (policy pull + remote approvals + A2A) would not start until
+# the next reboot. This unit turns "pairing created the marker" into an
+# immediate config-sync start (PathExists is level-triggered: it also fires if
+# the marker already exists when the unit starts, e.g. reboot of a paired box).
+#
+# Root-owned, so the triggered service starts with the right privileges.
+
+[Unit]
+Description=Hermes — watch for the .enterprise marker and start config-sync on pair
+Documentation=man:systemd.path(5)
+
+[Path]
+PathExists=/var/lib/hermes/instance/.enterprise
+Unit=hermes-config-sync.service
+
+[Install]
+WantedBy=hermes-workspace.target

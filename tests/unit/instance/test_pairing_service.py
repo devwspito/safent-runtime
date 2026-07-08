@@ -254,6 +254,38 @@ class TestPairHappyPath:
         assert assoc.state == "active"
         assert assoc.tenant_id == str(_TENANT_ID)
 
+    def test_pair_creates_enterprise_marker(
+        self, store: SQLiteAssociationStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: pairing MUST create the .enterprise marker that gates
+        hermes-config-sync.service — otherwise a freshly-paired instance never
+        pulls its signed policy and the Enterprise governance loop never starts.
+        """
+        marker = tmp_path / "instance" / ".enterprise"
+        monkeypatch.setenv("HERMES_ENTERPRISE_MARKER", str(marker))
+        assert not marker.exists()
+
+        _make_service(store).pair(code=_PAIR_CODE, cloud_endpoint="https://fake.cloud")
+
+        assert marker.exists(), "pairing must create the config-sync gate marker"
+
+    def test_marker_helpers_are_idempotent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hermes.instance.pairing_service import (
+            remove_enterprise_marker,
+            write_enterprise_marker,
+        )
+
+        marker = tmp_path / "instance" / ".enterprise"
+        monkeypatch.setenv("HERMES_ENTERPRISE_MARKER", str(marker))
+        write_enterprise_marker()
+        write_enterprise_marker()  # idempotent — no raise
+        assert marker.exists()
+        remove_enterprise_marker()
+        remove_enterprise_marker()  # idempotent — no raise on missing
+        assert not marker.exists()
+
     def test_pair_persists_association(self, store: SQLiteAssociationStore) -> None:
         svc = _make_service(store)
         svc.pair(code=_PAIR_CODE, cloud_endpoint="https://fake.cloud")
