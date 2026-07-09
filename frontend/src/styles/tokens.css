@@ -112,5 +112,7 @@
 
   /* ── Layout ──────────────────────────────────────────────────────────────── */
   --sidebar-width: 220px;
-  --topbar-height: 48px;
+  /* Single header height shared by the 3 column headers (left rail, chat topbar,
+     context panel) so their bottom borders line up perfectly across columns. */
+  --topbar-height: 52px;
 }

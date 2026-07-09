@@ -325,6 +325,8 @@ interface UseChatReturn {
   reconnecting: boolean
   /** Sticky: the in-flight turn's task is using the browser → chat can show live view. */
   liveBrowserActive: boolean
+  /** Bumped after a turn finishes (conversation persisted) → RecentsSection refetches. */
+  conversationsTick: number
   sendMessage(text: string): Promise<void>
   startNew(): void
   /** Start a new conversation pre-bound to a specific agent. */
@@ -357,6 +359,11 @@ export function useChat(): UseChatReturn {
   // another conversation left a page open. A failed browser_navigate / a web_search
   // never opens a real page → browser_live=false → no chip.
   const [liveBrowserActive, setLiveBrowserActive] = useState(false)
+  // Bumped after a turn FINISHES (onDone / ADOPT_FINAL) — i.e. AFTER the daemon has
+  // persisted the conversation to the mirror — so the sidebar re-fetches and a brand-new
+  // chat appears without a full reload. (The list's only other refresh trigger fires on
+  // the client-side convId change, which happens pre-persist and always misses the row.)
+  const [conversationsTick, setConversationsTick] = useState(0)
   // Per-conversation: true once THIS conversation issued a browser_* tool call. Reset
   // on conversation switch (startNew / loadConversation). Necessary-but-not-sufficient
   // for the chip — browser_live provides the "there is a real live page" sufficiency.
@@ -527,6 +534,7 @@ export function useChat(): UseChatReturn {
               id: currentAssistantId,
               renderedHtml: renderMarkdown((finalRow.content ?? '').trim()),
             })
+            setConversationsTick(t => t + 1) // turn persisted → refresh the recents list
             streamRef.current?.close()
             streamRef.current = null
             activeAssistantIdRef.current = null
@@ -792,6 +800,7 @@ export function useChat(): UseChatReturn {
               clearFlushTimer()
               clearPoll()
               dispatch({ type: 'STREAM_DONE', id: assistantMsgId })
+              setConversationsTick(t => t + 1) // turn persisted → refresh the recents list
               streamRef.current = null
               activeAssistantIdRef.current = null
               currentTaskIdRef.current = null
@@ -962,6 +971,7 @@ export function useChat(): UseChatReturn {
         clearFlushTimer()
         clearPoll()
         dispatch({ type: 'STREAM_DONE', id: assistantMsgId })
+        setConversationsTick(t => t + 1) // turn persisted → refresh the recents list
         streamRef.current = null
         activeAssistantIdRef.current = null
         currentTaskIdRef.current = null
@@ -1029,6 +1039,7 @@ export function useChat(): UseChatReturn {
     status: state.status,
     reconnecting,
     liveBrowserActive,
+    conversationsTick,
     sendMessage,
     startNew,
     startNewWithAgent,

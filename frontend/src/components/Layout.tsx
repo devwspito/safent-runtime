@@ -222,6 +222,8 @@ export interface ChatOutletContext {
   stopStream(): void
   /** Incremented each time the user sends a message — signals PendingApprovalsInChat to poll immediately. */
   approvalRefreshTick: number
+  /** Incremented after a turn finishes (conversation persisted) — signals RecentsSection to refetch. */
+  conversationsTick: number
   /** Call after a provider is connected/activated to trigger an immediate re-check of the nudge state. */
   reloadProvider(): void
   /** True while re-attaching to a stream that was in-flight before a page refresh. */
@@ -232,10 +234,11 @@ export interface ChatOutletContext {
 
 interface RecentsSectionProps {
   activeConvId: string | null
+  conversationsTick: number
   loadConversation(id: string): Promise<void>
 }
 
-function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps) {
+function RecentsSection({ activeConvId, conversationsTick, loadConversation }: RecentsSectionProps) {
   const t = useT()
   const navigate = useNavigate()
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
@@ -259,10 +262,12 @@ function RecentsSection({ activeConvId, loadConversation }: RecentsSectionProps)
     }
   }, [load])
 
-  // Re-load when the active conversation changes (new conversation started)
+  // Re-load when the active conversation changes (new conversation started) AND when a
+  // turn finishes (conversationsTick) — the latter is when a brand-new chat is finally
+  // persisted to the mirror, so this is what makes it appear without a full reload.
   useEffect(() => {
     if (hasMounted.current) load()
-  }, [activeConvId, load])
+  }, [activeConvId, conversationsTick, load])
 
   async function handleSelect(id: string) {
     navigate('/chat')
@@ -424,6 +429,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
           {/* Recientes — reads activeConvId directly from the lifted chat state */}
           <RecentsSection
             activeConvId={chat.convId}
+            conversationsTick={chat.conversationsTick}
             loadConversation={chat.loadConversation}
           />
 
@@ -523,6 +529,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
           status: chat.status,
           stopStream: chat.stopStream,
           approvalRefreshTick,
+          conversationsTick: chat.conversationsTick,
           reloadProvider: activeProviderReload,
           reconnecting: chat.reconnecting,
           liveBrowserActive: chat.liveBrowserActive,

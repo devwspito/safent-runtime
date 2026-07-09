@@ -127,6 +127,13 @@ export function VncView({
         .catch(() => { /* transient */ })
     }
 
+    // Keep the noVNC canvas focused so the device keyboard reaches the jailed browser.
+    // noVNC binds keydown to its internal <canvas tabIndex=-1> and only focuses it on a
+    // direct mousedown on the video — so typing was dead until you clicked EXACTLY on it.
+    // We focus on connect and re-assert on pointerdown (NOT hover: that would steal focus
+    // from the skill-name input while typing).
+    const onPointerDown = () => { try { rfb?.focus() } catch { /* noop */ } }
+
     // On focus: presync the local clipboard to the jail so any later paste is correct.
     const onFocus = () => {
       if (canRead && document.hasFocus()) {
@@ -151,7 +158,10 @@ export function VncView({
         rfb.resizeSession = false
         rfb.focusOnClick = !viewOnly
         rfb.background = '#0a0a0a'
-        rfb.addEventListener('connect', () => setStatus('connected'))
+        rfb.addEventListener('connect', () => {
+          setStatus('connected')
+          if (!viewOnly) { try { rfb?.focus() } catch { /* noop */ } }
+        })
         rfb.addEventListener('disconnect', () => {
           setStatus('disconnected')
           retry = setTimeout(() => { try { rfb?.disconnect() } catch { /* noop */ } connect() }, 2500)
@@ -164,6 +174,7 @@ export function VncView({
 
     if (!viewOnly) {
       el.addEventListener('keydown', onKeyDownCapture, true)
+      el.addEventListener('pointerdown', onPointerDown, true)
       window.addEventListener('focus', onFocus)
       poll = setInterval(pullFromJail, 1500)
     }
@@ -173,6 +184,7 @@ export function VncView({
       if (poll) clearInterval(poll)
       if (!viewOnly) {
         el.removeEventListener('keydown', onKeyDownCapture, true)
+        el.removeEventListener('pointerdown', onPointerDown, true)
         window.removeEventListener('focus', onFocus)
       }
       try { rfb?.disconnect() } catch { /* noop */ }
