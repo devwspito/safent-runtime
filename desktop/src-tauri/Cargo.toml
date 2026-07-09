@@ -7,10 +7,10 @@ edition = "2021"
 rust-version = "1.77"
 
 [build-dependencies]
-tauri-build = { version = "2" }
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2" }
+tauri = { version = "2", features = [] }
 
 # Smaller, faster release binaries for the shipped desktop shell.
 [profile.release]
