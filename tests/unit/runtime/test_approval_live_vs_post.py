@@ -75,28 +75,46 @@ class TestSignalLiveVsPost:
         finally:
             self._remove_slot(pid)
 
-    def test_B_non_matching_proposal_id_returns_false(self) -> None:
-        """POST: signal with a proposal_id that has no waiting slot → False."""
-        from hermes.runtime.security_hook import signal_native_danger_approval
-
-        result = signal_native_danger_approval(str(uuid4()), "approved")
-        assert result is False, (
-            "Expected False (POST — no blocked thread) but got True. "
-            "A ghost approval must not masquerade as success."
+    def test_B_non_matching_proposal_id_buffers(self) -> None:
+        """Fast-approval race: a proposal_id with no waiting slot BUFFERS the decision
+        (TTL-bounded) and returns True so the imminently-registering waiter consumes
+        it. Returning False here was the false "La acción caducó" toast on a valid
+        ~2s approval; the real-flow safety is gate.approve (only a still-pending
+        proposal reaches signal) + the 2s TTL that drops an unclaimed buffer."""
+        from hermes.runtime.security_hook import (
+            _pending_events_lock,
+            _presignals,
+            signal_native_danger_approval,
         )
 
-    def test_B2_returns_false_after_slot_cleaned_up(self) -> None:
-        """POST: after the hook's timeout cleans up the slot, signal returns False."""
-        from hermes.runtime.security_hook import signal_native_danger_approval
+        pid = str(uuid4())
+        try:
+            assert signal_native_danger_approval(pid, "approved") is True
+            with _pending_events_lock:
+                assert _presignals.get(pid, (None,))[0] == "approved"
+        finally:
+            with _pending_events_lock:
+                _presignals.pop(pid, None)
+
+    def test_B2_buffers_after_slot_cleaned_up(self) -> None:
+        """After the slot is cleaned up, signal buffers (TTL-bounded) and returns True.
+        A genuinely timed-out proposal never reaches signal in the real flow
+        (gate.approve raises first); an unclaimed buffer expires within the 2s TTL and
+        so cannot resume a dead turn."""
+        from hermes.runtime.security_hook import (
+            _pending_events_lock,
+            _presignals,
+            signal_native_danger_approval,
+        )
 
         pid = str(uuid4())
         self._inject_slot(pid)
         self._remove_slot(pid)  # simulate timeout cleanup
-        result = signal_native_danger_approval(pid, "approved")
-        assert result is False, (
-            "Slot was cleaned up (timeout) but signal returned True — "
-            "would wrongly report the action executed."
-        )
+        try:
+            assert signal_native_danger_approval(pid, "approved") is True
+        finally:
+            with _pending_events_lock:
+                _presignals.pop(pid, None)
 
 
 # ────────────────────────────────────────────────────────────────────────────

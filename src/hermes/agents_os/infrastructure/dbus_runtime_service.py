@@ -3041,11 +3041,14 @@ class DbusRuntimeServiceWiring:
                         },
                     )
                 except ValueError as exc:
-                    # La tarea ya fue re-encolada (idempotente) o no existe.
-                    # No fatal: el token ya fue emitido; el loop lo encontrará
-                    # si la tarea aparece de nuevo.
-                    logger.warning(
-                        "hermes.dbus.hitl_reenqueue_skipped: %s", exc
+                    # Expected for a CHAT block-and-resume approval: the chat item is
+                    # 'in_progress' (never 'pending_approval'), so re_enqueue is a no-op
+                    # by design — the resume is driven by the signal path, not the queue.
+                    # debug (not warning): it fired on EVERY chat approval and looked like
+                    # a fault while diagnosing the "caducado" bug.
+                    logger.debug(
+                        "hermes.dbus.hitl_reenqueue_skipped (expected for chat "
+                        "block-and-resume; resume is via the signal path): %s", exc
                     )
             else:
                 logger.debug(

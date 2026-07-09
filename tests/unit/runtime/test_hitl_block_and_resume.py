@@ -73,12 +73,27 @@ class TestSignalNativeDangerApproval:
         finally:
             self._remove_slot(pid)
 
-    def test_returns_false_when_no_slot(self) -> None:
-        """signal_native_danger_approval returns False for an unknown proposal_id."""
-        from hermes.runtime.security_hook import signal_native_danger_approval
+    def test_buffers_and_returns_true_when_no_slot(self) -> None:
+        """Fast-approval race: with no waiter yet, the decision is BUFFERED
+        (TTL-bounded) and signal returns True so the imminently-registering waiter
+        consumes it instead of the signal being lost — the old False here was the
+        false "La acción caducó" toast on a valid ~2s approval. Real-flow safety:
+        gate.approve only lets a still-pending proposal reach signal, and the 2s TTL
+        drops any buffer no waiter claims (see test_stale_presignal_not_consumed)."""
+        from hermes.runtime.security_hook import (
+            _pending_events_lock,
+            _presignals,
+            signal_native_danger_approval,
+        )
 
-        result = signal_native_danger_approval(str(uuid4()), "approved")
-        assert result is False
+        pid = str(uuid4())
+        try:
+            assert signal_native_danger_approval(pid, "approved") is True
+            with _pending_events_lock:
+                assert pid in _presignals and _presignals[pid][0] == "approved"
+        finally:
+            with _pending_events_lock:
+                _presignals.pop(pid, None)
 
     def test_denied_choice_propagates(self) -> None:
         """signal_native_danger_approval sets choice='denied' correctly."""
@@ -92,15 +107,66 @@ class TestSignalNativeDangerApproval:
         finally:
             self._remove_slot(pid)
 
-    def test_returns_false_after_slot_cleaned_up(self) -> None:
-        """After the hook removes its slot, signal returns False (no double-signal)."""
-        from hermes.runtime.security_hook import signal_native_danger_approval
+    def test_buffers_after_slot_removed(self) -> None:
+        """With the slot removed, signal buffers the decision (TTL-bounded) and
+        returns True. This unit calls signal directly; in the real flow a genuinely
+        timed-out proposal never reaches signal (gate.approve raises first), and a
+        buffer no waiter claims within the 2s TTL is dropped — so this cannot resume
+        a dead turn (see test_stale_presignal_not_consumed)."""
+        from hermes.runtime.security_hook import (
+            _pending_events_lock,
+            _presignals,
+            signal_native_danger_approval,
+        )
 
         pid = str(uuid4())
         self._inject_slot(pid)
-        self._remove_slot(pid)  # simulate hook timeout cleanup
-        result = signal_native_danger_approval(pid, "approved")
-        assert result is False
+        self._remove_slot(pid)
+        try:
+            assert signal_native_danger_approval(pid, "approved") is True
+        finally:
+            with _pending_events_lock:
+                _presignals.pop(pid, None)
+
+    def test_stale_presignal_not_consumed(self) -> None:
+        """SECURITY / fail-closed: a TTL-EXPIRED buffered decision is NOT applied when
+        a waiter registers later. Because proposal_id is deterministic (uuid5 of
+        tool+args), a stale 'approved' buffer must never auto-resume a LATER identical
+        action. A FRESH buffer, by contrast, IS consumed by the imminent waiter."""
+        import threading
+
+        from hermes.runtime.security_hook import (
+            _pending_events_lock,
+            _presignals,
+            _register_pending_event,
+            signal_native_danger_approval,
+        )
+
+        # (a) stale buffer → dropped, waiter does NOT get the choice
+        pid_stale = str(uuid4())
+        assert signal_native_danger_approval(pid_stale, "approved") is True
+        with _pending_events_lock:
+            choice, _ = _presignals[pid_stale]
+            _presignals[pid_stale] = (choice, 0.0)  # force the deadline into the past
+        stale_slot = {"event": threading.Event(), "choice": None}
+        _register_pending_event(pid_stale, stale_slot)
+        assert stale_slot["choice"] is None and not stale_slot["event"].is_set()
+        with _pending_events_lock:
+            assert pid_stale not in _presignals  # stale entry popped, never applied
+
+        # (b) fresh buffer → consumed by the imminent waiter
+        pid_fresh = str(uuid4())
+        assert signal_native_danger_approval(pid_fresh, "approved") is True
+        fresh_slot = {"event": threading.Event(), "choice": None}
+        _register_pending_event(pid_fresh, fresh_slot)
+        assert fresh_slot["choice"] == "approved" and fresh_slot["event"].is_set()
+        with _pending_events_lock:
+            assert pid_fresh not in _presignals  # consumed once, popped
+        # cleanup
+        from hermes.runtime.security_hook import _pending_events
+        with _pending_events_lock:
+            _pending_events.pop(pid_stale, None)
+            _pending_events.pop(pid_fresh, None)
 
 
 # ---------------------------------------------------------------------------

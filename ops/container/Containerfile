@@ -85,6 +85,10 @@ RUN cd /tmp/whlbuild \
       mcp fastapi 'uvicorn[standard]' python-multipart PyJWT websockets httpx croniter \
       rich textual \
       fastembed \
+      ddgs \
+      # ^ keyless DuckDuckGo backend for web_search — the web-ddgs plugin does
+      #   `from ddgs import DDGS`; without it web_search has NO zero-config backend
+      #   (all others need an API key) so the agent falls back to the flaky browser.
     # pydantic LAST word (determinism; matches the OS build's pin order)
     && python3 -m pip install --no-cache-dir 'pydantic==2.10.6' 'pydantic-core==2.27.2' \
     && rm -rf /tmp/whlbuild /tmp/whl

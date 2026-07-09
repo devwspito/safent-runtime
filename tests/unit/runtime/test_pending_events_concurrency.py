@@ -8,6 +8,8 @@ import threading
 import pytest
 
 from hermes.runtime.security_hook import (
+    _pending_events_lock,
+    _presignals,
     _register_pending_event,
     _unregister_pending_event,
     signal_native_danger_approval,
@@ -44,5 +46,7 @@ def test_unregister_only_removes_own_slot():
     assert signal_native_danger_approval(pid, "denied") is True
     assert b["choice"] == "denied" and not a["event"].is_set()
     _unregister_pending_event(pid, b)
-    # now empty → signal finds nothing
-    assert signal_native_danger_approval(pid, "approved") is False
+    # now empty → signal BUFFERS the decision (fast-approval race) and returns True.
+    assert signal_native_danger_approval(pid, "approved") is True
+    with _pending_events_lock:
+        _presignals.pop(pid, None)  # deterministic pid — don't leak the buffer

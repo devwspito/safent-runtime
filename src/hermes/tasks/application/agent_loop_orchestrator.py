@@ -413,6 +413,19 @@ class AgentLoopOrchestrator:
                     prior_emit_count=_prior_emit_count,
                 )
                 return
+            # A tool was EXECUTED inline this cycle (e.g. a block-and-resume HITL
+            # approval ran the exact call) but the model emitted no closing narrative.
+            # The turn DID act — persist the steps and close cleanly instead of the
+            # spurious no_actions FAILURE ("La respuesta falló: no_actions" — the red
+            # chat-error notification the owner saw after approving in 2s). tool_steps
+            # are call descriptors {tool,label,target} with no per-step outcome; a
+            # denied tool almost always yields an explanatory narrative and so never
+            # reaches this no-narrative branch, making presence the right signal here.
+            if is_chat and output.tool_steps:
+                self._persist_tool_steps(item, output.tool_steps)
+                await self._safe_close_stream(effective_sink, item, "completed")
+                await self._do_mark_completed(item, None)
+                return
             logger.info(
                 "hermes.tasks.loop.no_actions",
                 extra={"task_id": str(item.id)},

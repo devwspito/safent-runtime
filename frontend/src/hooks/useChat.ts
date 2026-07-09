@@ -492,22 +492,27 @@ export function useChat(): UseChatReturn {
         .then(detail => {
           if (activeAssistantIdRef.current !== currentAssistantId) return
 
-          const mirrorMessages = (detail.messages ?? []).filter(
-            m => m.role === 'assistant',
+          // Adopt THIS turn's mirror row ONLY once it flips to a terminal status.
+          // Keyed on the in-flight task_id (not a fragile count of assistant rows):
+          // the daemon upserts the growing answer as status='streaming' every 12
+          // deltas, and the old count heuristic adopted that IN-FLIGHT partial as
+          // "final" — sealing the live bubble mid-sentence and tearing down the
+          // stream on any turn slow enough that the WS `done` frame hadn't arrived
+          // within a 2s tick (slow LLM / long browser tool). A row with
+          // status !== 'streaming' (complete, or the ⚠ engine-error / ⏹ cancel note)
+          // is the real end of THIS turn.
+          const finalRow = (detail.messages ?? []).find(
+            m => m.role === 'assistant'
+              && m.task_id === currentTaskIdRef.current
+              && m.status !== 'streaming',
           )
-          // A new finalized assistant message has appeared in the mirror beyond baseline
-          if (mirrorMessages.length > baselineAssistantCountRef.current) {
-            // Pick the last one (chronological order not guaranteed, but last is
-            // the most recent reply). Fall back to empty string if content missing.
-            const last = mirrorMessages[mirrorMessages.length - 1]
-            const content = last?.content ?? ''
-
+          if (finalRow) {
             // ADOPT_FINAL has an isStreaming guard in the reducer — if the WS already
             // produced STREAM_DONE for this turn, the action is a no-op (no double-render).
             dispatch({
               type: 'ADOPT_FINAL',
               id: currentAssistantId,
-              renderedHtml: renderMarkdown(content.trim()),
+              renderedHtml: renderMarkdown((finalRow.content ?? '').trim()),
             })
             streamRef.current?.close()
             streamRef.current = null

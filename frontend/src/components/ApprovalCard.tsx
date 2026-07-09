@@ -172,25 +172,17 @@ export default function ApprovalCard({
         live?: boolean
         decision?: string
       } | null | undefined
-      // live=true  → LIVE block-and-resume: the blocked thread was signalled and the
-      //              exact tool call is executing now → honest "ran" feedback.
-      // live=false → POST: the turn had already ended or timed out before this approval
-      //              arrived → the action did NOT run; tell the owner to ask again.
-      // live=undefined (old server / non-D-Bus path) → treat as live (keep existing UX).
+      // A successful approve (no throw) means the card was STILL PENDING and got
+      // approved — the tool executes via the resume backstop regardless of `live`.
+      // `live` only tells whether the blocked thread was ALSO signalled at this exact
+      // instant; on a FAST approval the waiter may not be registered yet (live=false)
+      // but the action STILL runs. So live=false is NOT "caducó" — that false toast
+      // fired even when the owner approved in ~2s. A GENUINE expiry throws an approve
+      // error (proposal no longer pending), handled in the catch below.
       const isLive = res == null || res.live !== false
-      if (isLive) {
-        // i18n key to add: 'approval.toast.executed' → 'Acción aprobada y ejecutada.'
-        // Using inline until i18n.ts is updated (reserved effort).
-        sileo.success({ title: 'Acción aprobada y ejecutada.' })
-      } else {
-        sileo.warning({
-          title: 'La acción caducó antes de aprobarla — no se ejecutó nada.',
-          description: 'El agente describió el plan pero esperaba tu permiso; la acción NO corrió. Pídeselo de nuevo para ejecutarla.',
-        })
-        setCardState({ phase: 'expired' })
-        onResolved()
-        return
-      }
+      sileo.success({
+        title: isLive ? 'Acción aprobada y ejecutada.' : 'Acción aprobada.',
+      })
       onResolved()
     } catch (err) {
       const msg = err instanceof Error ? err.message : ''

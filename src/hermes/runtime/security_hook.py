@@ -52,6 +52,7 @@ import logging
 import re
 import shlex
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 from hermes.runtime.nous_tool_risk_map import classify_nous_tool
@@ -107,11 +108,34 @@ _ASYNC_BRIDGE_TIMEOUT_S: float = 5.0
 _pending_events: dict[str, list[dict]] = {}  # proposal_id → [{"event": Event, "choice": str|None}]
 _pending_events_lock = threading.Lock()
 
+# Fast-approval race buffer. A decision can arrive in the sub-ms gap between
+# register_pending (card visible) and the block-and-resume waiter calling
+# _register_pending_event. Without buffering that signal is LOST: the native-danger
+# hook then waits the full timeout and the chat path reports live=false -> the false
+# "La acción caducó antes de aprobarla" toast even when the owner approved in ~2s.
+# Keyed proposal_id -> (choice, deadline); consumed ONCE by the imminently-registering
+# waiter, and TTL-bounded (short) so a deterministic proposal_id (uuid5 of tool+args)
+# can NEVER auto-resume a LATER identical action with a stale decision — fail-closed.
+_presignals: dict[str, tuple[str, float]] = {}
+# 2s covers the sub-ms register race with margin while keeping the stale-buffer window
+# tiny: a later identical action would have to be proposed within 2s of an orphaned
+# approval whose cycle died exactly in the register gap — near-impossible and bounded.
+_PRESIGNAL_TTL_S: float = 2.0
+
 
 def _register_pending_event(proposal_id_str: str, slot: dict) -> None:
-    """Append a waiter slot for proposal_id (concurrency-safe)."""
+    """Append a waiter slot for proposal_id (concurrency-safe).
+
+    Consume any FRESH buffered decision (fast-approval race) so the waiter resumes
+    immediately instead of losing the signal. TTL-guarded + popped: a stale buffer
+    entry is dropped, never applied, and never consumed twice.
+    """
     with _pending_events_lock:
         _pending_events.setdefault(proposal_id_str, []).append(slot)
+        buffered = _presignals.pop(proposal_id_str, None)
+        if buffered is not None and buffered[1] >= time.monotonic():
+            slot["choice"] = buffered[0]
+            slot["event"].set()
 
 
 def _unregister_pending_event(proposal_id_str: str, slot: dict) -> None:
@@ -135,16 +159,32 @@ def signal_native_danger_approval(proposal_id: str, choice: str) -> bool:
     """Signal a pending native-danger gate to resume with *choice*.
 
     Called from approve_action / reject_action after the gate has minted/rejected
-    the token. Returns True if a waiting thread was found and signalled, False if
-    no thread is waiting (e.g. the hook already timed out).
+    the token. Returns True when the decision was delivered — either signalled to a
+    live waiter, OR buffered for the imminently-registering waiter (fast-approval
+    race, TTL-bounded, fail-closed). The gate only reaches here for a still-pending
+    proposal, so a buffered decision WILL be consumed by that proposal's waiter; a
+    genuinely-expired card fails earlier in gate.approve (never here), so this never
+    returns True for an expired approval.
 
     Thread-safe. choice ∈ {"approved", "denied"}. Wakes EVERY concurrent waiter
     registered under this proposal_id (see _pending_events docstring).
     """
     with _pending_events_lock:
         slots = list(_pending_events.get(str(proposal_id), ()))
-    if not slots:
-        return False
+        if not slots:
+            # Fast-approval race: the block-and-resume waiter has not registered its
+            # slot yet. Buffer the decision (TTL-bounded) so the imminently-registering
+            # waiter consumes it, and report success — the gate only accepted this
+            # approval because the proposal was still pending (a cycle IS holding it),
+            # so the exact call WILL resume. Returning False here was the false
+            # "había caducado" toast on a valid ~2s approval.
+            _presignals[str(proposal_id)] = (choice, time.monotonic() + _PRESIGNAL_TTL_S)
+            logger.info(
+                "hermes.security_hook.native_danger_presignalled: proposal=%s choice=%s "
+                "(waiter not yet registered — buffered, resumes on registration)",
+                proposal_id, choice,
+            )
+            return True
     for slot in slots:
         slot["choice"] = choice
         slot["event"].set()
