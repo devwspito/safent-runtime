@@ -1,0 +1,21 @@
+[package]
+name = "safent-desktop"
+version = "0.1.0"
+description = "Safent desktop — thin native-webview shell over the local Safent web UI"
+authors = ["Safent"]
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2" }
+
+[dependencies]
+tauri = { version = "2" }
+
+# Smaller, faster release binaries for the shipped desktop shell.
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

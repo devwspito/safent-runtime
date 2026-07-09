@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Safent</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      display: grid; place-items: center;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: #0b0d10; color: #e6e8eb;
+    }
+    @media (prefers-color-scheme: light) {
+      body { background: #f6f7f9; color: #1a1d21; }
+      pre { background: #fff !important; color: #b4232c !important; border: 1px solid #eadada; }
+      code { background: #eceef1 !important; }
+    }
+    .box { text-align: center; max-width: 34rem; padding: 2rem; }
+    .spinner {
+      width: 34px; height: 34px; border-radius: 50%;
+      border: 3px solid rgba(128,138,150,.25); border-top-color: #5b8cff;
+      margin: 0 auto 1.25rem; animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+    h1 { font-size: 1.1rem; font-weight: 600; margin: .25rem 0; }
+    p { color: #9aa4af; font-size: .9rem; line-height: 1.5; margin: .5rem 0; }
+    pre {
+      text-align: left; background: #14171c; padding: 1rem; border-radius: 8px;
+      overflow: auto; color: #ff9aa2; font-size: .8rem; white-space: pre-wrap; margin-top: 1rem;
+    }
+    code { background: #14171c; padding: .15rem .4rem; border-radius: 4px; font-size: .85em; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div id="loading">
+      <div class="spinner" aria-hidden="true"></div>
+      <h1>Iniciando Safent…</h1>
+      <p>Arrancando el contenedor local y abriendo tu espacio de trabajo.</p>
+    </div>
+    <div id="error" class="hidden" role="alert">
+      <h1>No pude iniciar Safent</h1>
+      <pre id="error-msg"></pre>
+      <p>Abre una terminal y prueba <code>safent url</code> para ver el detalle,
+         o <code>safent logs</code> para el journal.</p>
+    </div>
+  </div>
+  <script>
+    // Called from the Rust side (window.eval) when the daemon URL can't be resolved.
+    window.__safentError = function (msg) {
+      document.getElementById('loading').classList.add('hidden');
+      document.getElementById('error-msg').textContent = String(msg || 'Error desconocido');
+      document.getElementById('error').classList.remove('hidden');
+    };
+  </script>
+</body>
+</html>

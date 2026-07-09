@@ -188,6 +188,23 @@ cmd_open() {
   _open_and_print
 }
 
+# Ensure Safent is running and print ONLY the URL (with ?k= handshake) to stdout.
+# No browser, no decorative text — machine-readable for the Tauri desktop shell
+# (desktop/) which loads this exact URL in a native webview. Reversible: the
+# desktop shell is optional; this command is additive and harmless for CLI users.
+cmd_url() {
+  _ensure_machine
+  if _exists; then
+    _running || "$RT" start "$NAME" >/dev/null 2>&1 || true
+  else
+    "$RT" pull "$IMAGE" >/dev/null 2>&1 || true
+    _run
+  fi
+  url="$(_url)" || url=""
+  [ -n "$url" ] || { echo "[!] Safent started but no token yet — try: safent logs" >&2; exit 1; }
+  printf '%s\n' "$url"
+}
+
 cmd_start() {
   _ensure_machine
   if _exists; then
@@ -418,6 +435,7 @@ usage() {
 safent - control your local Safent
 
   safent            open Safent in the browser (starts it if stopped)
+  safent url        print the ready URL with ?k= handshake (starts it; no browser)
   safent stop       stop Safent
   safent start      start Safent without opening the browser
   safent restart    restart Safent
@@ -431,6 +449,7 @@ EOF
 
 case "${1:-open}" in
   ""|open|abrir)               cmd_open ;;
+  url)                         cmd_url ;;
   start|arranca)               cmd_start ;;
   stop|para|parar)             cmd_stop ;;
   restart|reinicia)            cmd_restart ;;
