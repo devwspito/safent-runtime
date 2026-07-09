@@ -181,6 +181,7 @@ fn run_and_stream(window: &tauri::WebviewWindow, program: &str, args: &[&str]) -
     let mut child = Command::new(program)
         .args(args)
         .env("PATH", augmented_path())
+        .env("SAFENT_NO_BROWSER", "1") // the app shows the UI itself — don't pop the browser
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -231,6 +232,7 @@ fn run_url(window: &tauri::WebviewWindow, bin: &str) -> Result<String, String> {
         .arg(bin)
         .arg("url")
         .env("PATH", augmented_path())
+        .env("SAFENT_NO_BROWSER", "1") // the app shows the UI itself — don't pop the browser
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

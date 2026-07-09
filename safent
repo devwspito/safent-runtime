@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=3
+_CLI_REV=4
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -154,6 +154,10 @@ _url() {
 }
 
 _open_browser() {
+  # The desktop app (Tauri shell) shows the UI in its OWN native window, so it sets
+  # SAFENT_NO_BROWSER=1 when it drives the curl bootstrap / `safent update` — do NOT
+  # also pop the system browser. Terminal users (unset) still get the browser as before.
+  [ -n "${SAFENT_NO_BROWSER:-}" ] && return 0
   if command -v open >/dev/null 2>&1; then open "$1" >/dev/null 2>&1 || true
   elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$1" >/dev/null 2>&1 || true
   fi
