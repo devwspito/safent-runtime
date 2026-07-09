@@ -888,6 +888,12 @@ export function requestSystemUpdate(): Promise<{ ok: boolean; updating: boolean 
   return request('/system/update', { method: 'POST', body: JSON.stringify({}) })
 }
 
+/** Drops an uninstall marker; the host `safent agent` runs `safent uninstall` (removes the
+ *  container, data volume, CLI and agent — keeps podman/docker). Same mechanism as update. */
+export function requestSystemUninstall(): Promise<{ ok: boolean }> {
+  return request('/system/uninstall', { method: 'POST', body: JSON.stringify({}) })
+}
+
 // ── Usage / Cost ──────────────────────────────────────────────────────────────
 
 export function getUsageSummary(period: UsagePeriod): Promise<UsageSummary> {

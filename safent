@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=4
+_CLI_REV=5
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -429,9 +429,16 @@ cmd_logs() { "$RT" logs -f "$NAME"; }
 # pairing marker; the parent /var/lib/hermes is root:root 0755 and NOT writable by
 # the daemon). The backend's POST /api/v1/system/update touches this exact path.
 _UPDATE_FLAG="/var/lib/hermes/instance/.update-requested"
+_UNINSTALL_FLAG="/var/lib/hermes/instance/.uninstall-requested"
 cmd_agent() {
-  echo "[*] Safent update agent running (watches for UI-triggered updates)."
+  echo "[*] Safent update agent running (watches for UI-triggered updates/uninstall)."
   while :; do
+    # Uninstall wins over update — checked first; it removes everything (incl. this agent).
+    if _running && "$RT" exec "$NAME" test -f "$_UNINSTALL_FLAG" 2>/dev/null; then
+      echo "[*] Uninstall requested from the UI — removing Safent…"
+      cmd_uninstall
+      exit 0
+    fi
     if _running && "$RT" exec "$NAME" test -f "$_UPDATE_FLAG" 2>/dev/null; then
       "$RT" exec "$NAME" rm -f "$_UPDATE_FLAG" 2>/dev/null || true
       echo "[*] Update requested from the UI — applying..."
@@ -439,6 +446,31 @@ cmd_agent() {
     fi
     sleep 20
   done
+}
+
+# Remove Safent from the machine: the container, its data volume, the seccomp cache,
+# the UI-update agent, and the CLI itself. Leaves podman/docker installed (they are
+# general tools you may use elsewhere). Triggerable from the UI (POST /system/uninstall
+# → marker → the agent runs this) or by hand: `safent uninstall`.
+cmd_uninstall() {
+  echo "[*] Uninstalling Safent…"
+  "$RT" rm -f "$NAME" >/dev/null 2>&1 || true
+  "$RT" volume rm "$DATA_VOLUME" >/dev/null 2>&1 || true
+  rm -rf "$SECCOMP_DIR" 2>/dev/null || true
+  case "$OS" in
+    Darwin)
+      launchctl unload "$HOME/Library/LaunchAgents/run.safent.agent.plist" 2>/dev/null || true
+      rm -f "$HOME/Library/LaunchAgents/run.safent.agent.plist" 2>/dev/null || true
+      ;;
+    Linux)
+      systemctl --user disable --now safent-agent.service >/dev/null 2>&1 || true
+      rm -f "$HOME/.config/systemd/user/safent-agent.service" 2>/dev/null || true
+      ;;
+  esac
+  rm -rf "$HOME/.safent" 2>/dev/null || true
+  # Remove the CLI last (safe to unlink a running script on Unix).
+  rm -f /opt/homebrew/bin/safent /usr/local/bin/safent "$HOME/.local/bin/safent" "$HOME/bin/safent" 2>/dev/null || true
+  echo "[ok] Safent uninstalled. (podman/docker were left installed.)"
 }
 
 usage() {
@@ -455,6 +487,7 @@ safent - control your local Safent
   safent logs       follow the container journal
   safent pair <code>   associate with an enterprise tenant (same image, associate mode)
   safent unpair        remove the enterprise association (reverts to community edition)
+  safent uninstall     remove Safent (container + data + CLI + agent; keeps podman/docker)
 EOF
 }
 
@@ -470,6 +503,7 @@ case "${1:-open}" in
   logs|log)                    cmd_logs ;;
   pair|vincular)               cmd_pair "${2:-}" ;;
   unpair|desvincular)          cmd_unpair ;;
+  uninstall|desinstalar)       cmd_uninstall ;;
   -h|--help|help|ayuda)        usage ;;
   *) echo "Unknown command: $1"; echo; usage; exit 1 ;;
 esac

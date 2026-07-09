@@ -26,6 +26,10 @@ logger = logging.getLogger("hermes.shell_server.system_update")
 # 0755). The host `safent agent` watches this exact path.
 _INSTANCE_DIR = "/var/lib/hermes/instance"
 _UPDATE_FLAG = os.path.join(_INSTANCE_DIR, ".update-requested")
+# Uninstall marker — same mechanism as update: the sandboxed UI can't touch the host,
+# so it drops this marker and the host `safent agent` runs `safent uninstall` (removes
+# the container + data volume + the CLI + the agent). podman/docker are left installed.
+_UNINSTALL_FLAG = os.path.join(_INSTANCE_DIR, ".uninstall-requested")
 
 # A CLI update takes ~2-5 min. If the flag is older than this, no host watcher
 # picked it up (agent not installed / dead) — treat it as stale and clear it so
@@ -106,5 +110,17 @@ def create_system_update_router() -> APIRouter:
             logger.warning("hermes.system_update.flag_write_failed: %s", exc)
             raise HTTPException(status_code=500, detail="could not request update")
         return {"ok": True, "updating": True}
+
+    @router.post("/api/v1/system/uninstall")
+    async def system_uninstall_request(request: Request) -> dict:
+        _auth(request)
+        try:
+            os.makedirs(_INSTANCE_DIR, exist_ok=True)
+            with open(_UNINSTALL_FLAG, "w", encoding="utf-8") as fh:
+                fh.write("requested\n")
+        except OSError as exc:
+            logger.warning("hermes.system_update.uninstall_flag_write_failed: %s", exc)
+            raise HTTPException(status_code=500, detail="could not request uninstall")
+        return {"ok": True}
 
     return router

@@ -927,6 +927,12 @@ const translations = {
     'sysupdate.confirm.ok':     'Actualizar',
     'sysupdate.toast.started':  'Actualizando… vuelve en un par de minutos.',
     'sysupdate.err.start':      'No se pudo iniciar la actualización.',
+    'sysuninstall.action':      'Desinstalar',
+    'sysuninstall.confirm.title': '¿Desinstalar Safent?',
+    'sysuninstall.confirm.body': 'Se eliminarán Safent, TODOS tus datos locales (configuración, agentes, habilidades, memoria) y el contenedor. No se puede deshacer. (Podman/Docker se conservan.)',
+    'sysuninstall.confirm.ok':  'Desinstalar',
+    'sysuninstall.toast.started': 'Desinstalando Safent… la ventana se cerrará en breve.',
+    'sysuninstall.err.start':   'No se pudo iniciar la desinstalación.',
   },
 
   en: {
@@ -1833,6 +1839,12 @@ const translations = {
     'sysupdate.confirm.ok':     'Update',
     'sysupdate.toast.started':  'Updating… come back in a couple of minutes.',
     'sysupdate.err.start':      'Could not start the update.',
+    'sysuninstall.action':      'Uninstall',
+    'sysuninstall.confirm.title': 'Uninstall Safent?',
+    'sysuninstall.confirm.body': 'This removes Safent, ALL your local data (config, agents, skills, memory) and the container. It cannot be undone. (Podman/Docker are kept.)',
+    'sysuninstall.confirm.ok':  'Uninstall',
+    'sysuninstall.toast.started': 'Uninstalling Safent… the window will close shortly.',
+    'sysuninstall.err.start':   'Could not start the uninstall.',
   },
 } as const
 

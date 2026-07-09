@@ -5,6 +5,7 @@ import {
   listConversations,
   getSystemUpdate,
   requestSystemUpdate,
+  requestSystemUninstall,
   type SystemUpdateStatus,
 } from '../api/client'
 import { useChat } from '../hooks/useChat'
@@ -141,6 +142,21 @@ function SystemUpdateFooter() {
     }
   }
 
+  async function handleUninstallClick() {
+    const ok = await confirmUpdate({
+      title: t('sysuninstall.confirm.title'),
+      description: t('sysuninstall.confirm.body'),
+      confirmLabel: t('sysuninstall.confirm.ok'),
+    })
+    if (!ok) return
+    try {
+      await requestSystemUninstall()
+      sileo.success({ title: t('sysuninstall.toast.started') })
+    } catch {
+      sileo.error({ title: t('sysuninstall.err.start') })
+    }
+  }
+
   if (!status?.current_version) return null
 
   return (
@@ -180,6 +196,17 @@ function SystemUpdateFooter() {
           {t('sysupdate.action')}
         </button>
       )}
+      <button
+        type="button"
+        className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
+        style={{
+          height: 'auto', padding: `2px var(--space-2)`, fontSize: 'var(--text-xs)',
+        }}
+        onClick={handleUninstallClick}
+        aria-label={t('sysuninstall.action')}
+      >
+        {t('sysuninstall.action')}
+      </button>
       {confirmUpdateDialog}
     </div>
   )
