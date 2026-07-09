@@ -317,38 +317,10 @@ fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![install_podman])
         .setup(|app| {
-            // macOS: build a menu WITHOUT an Edit submenu. Tauri's default menu puts
-            // Cmd+C/V/X/A on the Edit items as key-equivalents, and AppKit resolves those
-            // via performKeyEquivalent: BEFORE the keydown reaches the WKWebView — so the
-            // page never sees Cmd+V and VncView's paste handler (the existing local→jail
-            // xclip → RFB Ctrl+V flow) never fires in Live/Teaching. Dropping the Edit
-            // submenu lets those keydowns reach the web content: WebKit's built-in editing
-            // handles them in normal inputs (chat), and VncView drives the jailed browser.
-            // The app + window submenus stay so Quit and window controls still work.
-            #[cfg(target_os = "macos")]
-            {
-                use tauri::menu::{MenuBuilder, SubmenuBuilder};
-                let app_menu = SubmenuBuilder::new(app, "Safent")
-                    .about(None)
-                    .separator()
-                    .services()
-                    .separator()
-                    .hide()
-                    .hide_others()
-                    .show_all()
-                    .separator()
-                    .quit()
-                    .build()?;
-                let window_menu = SubmenuBuilder::new(app, "Window")
-                    .minimize()
-                    .maximize()
-                    .separator()
-                    .close_window()
-                    .build()?;
-                let menu = MenuBuilder::new(app).item(&app_menu).item(&window_menu).build()?;
-                app.set_menu(menu)?;
-            }
-
+            // NOTE: do NOT replace the default macOS menu. A custom menu that drops the
+            // standard Edit submenu breaks keyboard routing to WKWebView entirely (no
+            // typing anywhere). The Cmd+V-into-Live/Teaching paste must be solved in the
+            // frontend (VncView), not by touching the menu — see the paste TODO there.
             let window = app
                 .get_webview_window("main")
                 .expect("main window must exist (defined in tauri.conf.json)");
