@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=2
+_CLI_REV=3
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -40,7 +40,7 @@ SECCOMP="$SECCOMP_DIR/safent-seccomp.json"
 CLI_URL="${SAFENT_CLI_URL:-https://raw.githubusercontent.com/devwspito/safent-runtime/main/safent}"
 
 RT="$(command -v podman 2>/dev/null || command -v docker 2>/dev/null || true)"
-[ -n "$RT" ] || { echo "[x] You need podman or docker.  ->  https://podman.io/get-started"; exit 1; }
+[ -n "$RT" ] || { echo "[x] You need podman or docker.  ->  https://podman.io/get-started" >&2; exit 1; }
 RTN="$(basename "$RT")"
 OS="$(uname -s 2>/dev/null || echo unknown)"
 
@@ -193,15 +193,22 @@ cmd_open() {
 # (desktop/) which loads this exact URL in a native webview. Reversible: the
 # desktop shell is optional; this command is additive and harmless for CLI users.
 cmd_url() {
-  _ensure_machine
+  # Progress goes to STDERR (human-readable, streamed by the Tauri shell's install
+  # animation); STDOUT carries ONLY the final URL. Diagnostics from the setup helpers
+  # are redirected to stderr too, so stdout stays a clean single line.
+  echo "Preparando el entorno…" >&2
+  _ensure_machine >&2
   if _exists; then
-    _running || "$RT" start "$NAME" >/dev/null 2>&1 || true
+    _running || { echo "Arrancando Safent…" >&2; "$RT" start "$NAME" >/dev/null 2>&1 || true; }
   else
+    echo "Descargando Safent (primera vez, puede tardar unos minutos)…" >&2
     "$RT" pull "$IMAGE" >/dev/null 2>&1 || true
-    _run
+    echo "Arrancando Safent…" >&2
+    _run >&2
   fi
+  echo "Esperando a que Safent esté listo…" >&2
   url="$(_url)" || url=""
-  [ -n "$url" ] || { echo "[!] Safent started but no token yet — try: safent logs" >&2; exit 1; }
+  [ -n "$url" ] || { echo "Safent arrancó pero aún no hay token — prueba: safent logs" >&2; exit 1; }
   printf '%s\n' "$url"
 }
 

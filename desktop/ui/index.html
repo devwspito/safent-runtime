@@ -5,57 +5,114 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Safent</title>
   <style>
-    :root { color-scheme: light dark; }
+    :root {
+      color-scheme: light dark;
+      --bg: #0a0c10;
+      --bg2: #11141b;
+      --fg: #e9ecf1;
+      --muted: #8b95a3;
+      --accent: #5b8cff;
+      --accent2: #8b6bff;
+      --danger: #ff6b6b;
+      --line: rgba(139, 149, 163, .18);
+    }
+    @media (prefers-color-scheme: light) {
+      :root { --bg: #f7f8fa; --bg2: #fff; --fg: #171a1f; --muted: #5c6672; --line: rgba(0,0,0,.08); }
+    }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; }
     body {
       display: grid; place-items: center;
       font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-      background: #0b0d10; color: #e6e8eb;
+      background:
+        radial-gradient(1200px 600px at 50% -10%, rgba(91,140,255,.10), transparent 60%),
+        var(--bg);
+      color: var(--fg);
+      -webkit-user-select: none; user-select: none;
     }
-    @media (prefers-color-scheme: light) {
-      body { background: #f6f7f9; color: #1a1d21; }
-      pre { background: #fff !important; color: #b4232c !important; border: 1px solid #eadada; }
-      code { background: #eceef1 !important; }
+    .card { width: min(440px, 84vw); text-align: center; padding: 2rem; }
+
+    /* Mark */
+    .mark {
+      width: 68px; height: 68px; margin: 0 auto 1.4rem; border-radius: 19px;
+      display: grid; place-items: center;
+      background: linear-gradient(150deg, var(--accent), var(--accent2));
+      box-shadow: 0 12px 40px -12px rgba(91,140,255,.55);
+      color: #fff; font-weight: 800; font-size: 34px; letter-spacing: -1px;
+      animation: bob 3.2s ease-in-out infinite;
     }
-    .box { text-align: center; max-width: 34rem; padding: 2rem; }
-    .spinner {
-      width: 34px; height: 34px; border-radius: 50%;
-      border: 3px solid rgba(128,138,150,.25); border-top-color: #5b8cff;
-      margin: 0 auto 1.25rem; animation: spin .8s linear infinite;
+    @keyframes bob { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-5px) } }
+
+    h1 { font-size: 1.15rem; font-weight: 650; margin: .2rem 0 .35rem; letter-spacing: -.01em; }
+    .sub { color: var(--muted); font-size: .9rem; line-height: 1.5; margin: 0; }
+
+    /* Progress bar (the feature) */
+    .bar {
+      position: relative; height: 7px; margin: 1.5rem 0 .9rem;
+      background: var(--line); border-radius: 999px; overflow: hidden;
     }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
-    h1 { font-size: 1.1rem; font-weight: 600; margin: .25rem 0; }
-    p { color: #9aa4af; font-size: .9rem; line-height: 1.5; margin: .5rem 0; }
-    pre {
-      text-align: left; background: #14171c; padding: 1rem; border-radius: 8px;
-      overflow: auto; color: #ff9aa2; font-size: .8rem; white-space: pre-wrap; margin-top: 1rem;
+    .bar::before {
+      content: ""; position: absolute; inset: 0; width: 42%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, transparent, var(--accent), var(--accent2), transparent);
+      animation: sweep 1.35s cubic-bezier(.65,.05,.36,1) infinite;
     }
-    code { background: #14171c; padding: .15rem .4rem; border-radius: 4px; font-size: .85em; }
-    .hidden { display: none; }
+    @keyframes sweep { 0% { left: -45%; } 100% { left: 103%; } }
+    @media (prefers-reduced-motion: reduce) {
+      .mark { animation: none; }
+      .bar::before { animation: none; left: 0; width: 100%; opacity: .5; }
+    }
+
+    /* Live status line */
+    .status {
+      min-height: 1.3em; color: var(--fg); font-size: .9rem; font-weight: 500;
+      transition: opacity .18s ease;
+    }
+    .hint { color: var(--muted); font-size: .8rem; margin-top: .5rem; }
+
+    /* Error */
+    .err { display: none; }
+    .err pre {
+      text-align: left; background: var(--bg2); border: 1px solid var(--line);
+      padding: 1rem; border-radius: 10px; overflow: auto; color: var(--danger);
+      font-size: .8rem; white-space: pre-wrap; margin: 1rem 0 .5rem; max-height: 40vh;
+    }
+    code { background: var(--bg2); border: 1px solid var(--line); padding: .12rem .4rem; border-radius: 5px; font-size: .85em; }
+    body.error .loading { display: none; }
+    body.error .err { display: block; }
   </style>
 </head>
 <body>
-  <div class="box">
-    <div id="loading">
-      <div class="spinner" aria-hidden="true"></div>
-      <h1>Iniciando Safent…</h1>
-      <p>Arrancando el contenedor local y abriendo tu espacio de trabajo.</p>
+  <div class="card">
+    <div class="mark" aria-hidden="true">S</div>
+
+    <div class="loading">
+      <h1>Preparando Safent</h1>
+      <div class="bar" role="progressbar" aria-label="Progreso de instalación"></div>
+      <div class="status" id="status">Iniciando…</div>
+      <p class="hint" id="hint">La primera vez descarga Safent — puede tardar unos minutos.</p>
     </div>
-    <div id="error" class="hidden" role="alert">
+
+    <div class="err" role="alert">
       <h1>No pude iniciar Safent</h1>
       <pre id="error-msg"></pre>
-      <p>Abre una terminal y prueba <code>safent url</code> para ver el detalle,
+      <p class="hint">Abre una terminal y prueba <code>safent url</code> para ver el detalle,
          o <code>safent logs</code> para el journal.</p>
     </div>
   </div>
+
   <script>
-    // Called from the Rust side (window.eval) when the daemon URL can't be resolved.
+    // Live status from the Rust side (curl bootstrap + `safent url` progress).
+    window.__safentProgress = function (msg) {
+      var el = document.getElementById('status');
+      if (!el) return;
+      el.style.opacity = '0';
+      setTimeout(function () { el.textContent = String(msg || ''); el.style.opacity = '1'; }, 120);
+    };
+    // Terminal error → swap the animation for the error panel.
     window.__safentError = function (msg) {
-      document.getElementById('loading').classList.add('hidden');
+      document.body.classList.add('error');
       document.getElementById('error-msg').textContent = String(msg || 'Error desconocido');
-      document.getElementById('error').classList.remove('hidden');
     };
   </script>
 </body>
