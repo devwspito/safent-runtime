@@ -48,6 +48,29 @@ const SELFTEST_JS: &str = r#"(async () => {
 ///   1. `SAFENT_URL` env — explicit override (dev / testing / advanced users).
 ///   2. `<SAFENT_BIN or "safent"> url` — ensures the container is running and prints
 ///      the `http://localhost:PORT/?k=<secret>` URL.
+/// Locate the `safent` CLI. GUI apps launched from Finder / the dock / a desktop
+/// launcher do NOT inherit the shell PATH, so a bare "safent" fails even when it is
+/// installed — probe the common install locations before falling back to PATH.
+fn find_safent_bin() -> String {
+    if let Ok(b) = std::env::var("SAFENT_BIN") {
+        if !b.trim().is_empty() {
+            return b;
+        }
+    }
+    for c in ["/usr/local/bin/safent", "/opt/homebrew/bin/safent", "/usr/bin/safent"] {
+        if std::path::Path::new(c).is_file() {
+            return c.to_string();
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let p = std::path::Path::new(&home).join(".local/bin/safent");
+        if p.is_file() {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    "safent".to_string() // last resort: rely on PATH (works when launched from a shell)
+}
+
 fn resolve_url() -> Result<String, String> {
     if let Ok(u) = std::env::var("SAFENT_URL") {
         let u = u.trim().to_string();
@@ -56,7 +79,7 @@ fn resolve_url() -> Result<String, String> {
         }
     }
 
-    let bin = std::env::var("SAFENT_BIN").unwrap_or_else(|_| "safent".to_string());
+    let bin = find_safent_bin();
     let output = Command::new(&bin)
         .arg("url")
         .output()

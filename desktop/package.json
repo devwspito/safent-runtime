@@ -1,0 +1,12 @@
+{
+  "name": "safent-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Safent desktop — thin native-webview shell over the local Safent web UI",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
