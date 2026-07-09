@@ -349,11 +349,18 @@ export function useChat(): UseChatReturn {
   // "reconectando…" status while re-attaching a stream after refresh
   const [reconnecting, setReconnecting] = useState(false)
 
-  // Sticky: true once the in-flight turn's task touches the browser (a browser_*
-  // tool), so the chat can offer an inline "Ver en vivo" panel of the jailed
-  // browser. Set from both the WS tool_call frames and the runtime-status poll
-  // (belt-and-suspenders); reset when the turn ends (done / adopt-final / stop).
+  // The "usando el navegador / Ver en vivo" chip. It is driven by the REAL jailed-
+  // browser state (runtime_status.browser_live) AND-ed with a per-CONVERSATION marker
+  // (browserUsedRef) that this conversation actually issued a browser_* tool. The AND
+  // matters: browser_live is a GLOBAL probe of the single jailed Chromium, so a
+  // conversation that never touched the browser must NOT light its chip just because
+  // another conversation left a page open. A failed browser_navigate / a web_search
+  // never opens a real page → browser_live=false → no chip.
   const [liveBrowserActive, setLiveBrowserActive] = useState(false)
+  // Per-conversation: true once THIS conversation issued a browser_* tool call. Reset
+  // on conversation switch (startNew / loadConversation). Necessary-but-not-sufficient
+  // for the chip — browser_live provides the "there is a real live page" sufficiency.
+  const browserUsedRef = useRef(false)
 
   // ── Coalesce / throttle buffer ────────────────────────────────────────────────
   // Instead of dispatching on every WS frame we accumulate here and flush at most
@@ -459,6 +466,13 @@ export function useChat(): UseChatReturn {
         .then(runtimeStatus => {
           if (activeAssistantIdRef.current !== currentAssistantId) return
 
+          // Browser chip = REAL jailed-browser page state (backend probe) AND-ed with
+          // "this conversation used the browser". A failed browser_navigate / web_search
+          // leaves browser_live=false → no false chip; another conversation's open page
+          // does NOT light THIS chat (browserUsedRef gates it). NEVER keyed off a tool
+          // name alone.
+          setLiveBrowserActive(browserUsedRef.current && !!runtimeStatus.browser_live)
+
           if ((runtimeStatus.active_task_count ?? 0) > 0) {
             const thisTaskId = currentTaskIdRef.current
             const activities = runtimeStatus.activity ?? []
@@ -471,7 +485,6 @@ export function useChat(): UseChatReturn {
               : undefined
 
             if (entry?.tool) {
-              if (entry.tool.startsWith('browser')) setLiveBrowserActive(true)
               const humanized = toolLabel(entry.tool)
               if (humanized) {
                 dispatch({ type: 'STATUS_STREAMING', text: `Trabajando… (${humanized.toLowerCase()})` })
@@ -559,6 +572,7 @@ export function useChat(): UseChatReturn {
     sessionStorage.removeItem(SS_TASK_ID)
     sessionStorage.removeItem(SS_AGENT_ID)
     setLiveBrowserActive(false)
+    browserUsedRef.current = false  // new conversation — forget the browser marker
     dispatch({ type: 'RESET' })
   }, [stopStream])
 
@@ -640,6 +654,12 @@ export function useChat(): UseChatReturn {
           })
           .filter((m): m is ChatMessage => m !== null)
         dispatch({ type: 'LOAD_MESSAGES', convId: savedConvId, messages })
+
+        // NOTE: the browser chip is NOT seeded from the global browser_live on mount —
+        // that probe cannot attribute the live page to THIS conversation, so seeding it
+        // would falsely light the chip on reload of a chat that never used the browser
+        // while another one has a page open. If the reattached turn issues a browser_*
+        // frame, browserUsedRef flips and the poll lights the chip honestly.
 
         // If a task stream was in-flight, decide whether to re-attach.
         if (savedTaskId) {
@@ -738,7 +758,10 @@ export function useChat(): UseChatReturn {
               const name = (d.tool as string | undefined) ?? (d.tool_name as string | undefined) ?? 'herramienta'
               const label = (d.label as string | undefined) ?? String(name).replace(/_/g, ' ')
               const target = String((d.target as string | undefined) ?? '').slice(0, 80)
-              if (String(name).startsWith('browser')) setLiveBrowserActive(true)
+              // Mark that THIS conversation used the browser (necessary condition). The
+              // chip lights only when this AND browser_live (a real live page) are true
+              // — a browser_* that fails to launch never lights it.
+              if (String(name).startsWith('browser')) browserUsedRef.current = true
               const step: ToolStep = { name, label, target }
               // Flush any accumulated text before the tool step so the segment boundary
               // is clean (matches vanilla segmentStart behaviour — activityText resets on TOOL_CALL).
@@ -774,8 +797,10 @@ export function useChat(): UseChatReturn {
               currentTaskIdRef.current = null
               sessionStorage.removeItem(SS_TASK_ID)
               setReconnecting(false)
-              // liveBrowserActive intentionally NOT reset — the "Ver en vivo"
-              // chip persists for the rest of the conversation (owner ask).
+              // Turn ended → the cycle reaps its confined-browser session
+              // (cleanup_thread_browser_session), so the chip (the agent is actively
+              // using the browser NOW) goes off, staying coherent with "En vivo".
+              setLiveBrowserActive(false)
             },
             onError(_msg) {
               // On WS error after re-attach, keep the poll running — the task may
@@ -906,9 +931,9 @@ export function useChat(): UseChatReturn {
         const name = (d.tool as string | undefined) ?? (d.tool_name as string | undefined) ?? 'herramienta'
         const label = (d.label as string | undefined) ?? String(name).replace(/_/g, ' ')
         const target = String((d.target as string | undefined) ?? '').slice(0, 80)
-        // A browser tool → the jailed browser is live: turn on "Ver en vivo".
-        // (Must be here in the sendMessage path too, not only the reattach path.)
-        if (String(name).startsWith('browser')) setLiveBrowserActive(true)
+        // Mark that THIS conversation used the browser (necessary condition; the chip
+        // lights only when this AND browser_live are true).
+        if (String(name).startsWith('browser')) browserUsedRef.current = true
         const step: ToolStep = { name, label, target }
         // Flush any accumulated text before the tool step so the segment boundary
         // is clean (matches vanilla segmentStart behaviour — activityText resets on TOOL_CALL).
@@ -941,6 +966,9 @@ export function useChat(): UseChatReturn {
         activeAssistantIdRef.current = null
         currentTaskIdRef.current = null
         sessionStorage.removeItem(SS_TASK_ID)
+        // Turn ended → the cycle reaps its confined-browser session, so the chip (the
+        // agent is actively using the browser NOW) goes off, coherent with "En vivo".
+        setLiveBrowserActive(false)
       },
       onError(_msg) {
         // A terminal error frame (or transient teardown) arrived. Do NOT dispatch
@@ -964,6 +992,7 @@ export function useChat(): UseChatReturn {
   const loadConversation = useCallback(async (id: string) => {
     stopStream()
     setLiveBrowserActive(false) // switching conversations — new live context
+    browserUsedRef.current = false  // new conversation — forget the browser marker
     try {
       const detail = await getConversation(id)
       // Null-guard messages + content (parity with the mount-restore path): the

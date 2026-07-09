@@ -23,9 +23,11 @@ posture as the browser jail's own Chromium shim.
 
 The confinement is NETWORK-agnostic (Landlock does not cover sockets); the controller
 still reaches the jailed Chromium's CDP over the veth, exactly as before. Its session
-socket dir lives in /tmp (AGENT_BROWSER_SOCKET_DIR, set by the caller), which the
-ruleset grants. Verified live: attach + open + snapshot succeed under the ruleset while
-master.key/shell-state.db reads return EACCES.
+socket dir is set by the caller (vendored tools/browser_tool.py) via
+AGENT_BROWSER_SOCKET_DIR = gettempdir()/agent-browser-<session>; with the service's
+TMPDIR=/var/lib/hermes/tmp that resolves under /var/lib/hermes/tmp, which the ruleset
+grants as a SPECIFIC subdir (the sibling keystore stays denied). Verified live: attach +
+open + snapshot succeed under the ruleset while master.key/shell-state.db reads return EACCES.
 """
 import os
 import sys
@@ -50,6 +52,11 @@ def main() -> int:
             f"hermes-agent-browser-shim: Landlock apply failed rc={rc} — fail-closed\n"
         )
         return rc
+    # NOTE on the socket dir: the vendored tools/browser_tool.py computes the socket dir
+    # in the DAEMON as gettempdir()/agent-browser-<session> and passes it explicitly via
+    # AGENT_BROWSER_SOCKET_DIR — so it is NOT overridable from this shim (a setdefault
+    # here would lose to that explicit value). The daemon's TMPDIR is /var/lib/hermes/tmp,
+    # which the BROWSER_CONTROLLER ruleset must therefore grant (see landlock_ruleset_builder).
     # Landlock domain is inherited across execv → binds the real agent-browser image.
     os.execv(_NODE, [_NODE, _REAL, *sys.argv[1:]])
     return 127  # unreachable unless execv fails

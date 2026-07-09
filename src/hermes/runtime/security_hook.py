@@ -1655,6 +1655,30 @@ def make_pre_tool_call_hook(
             except Exception:  # noqa: BLE001 — policy is a usability layer, not the floor
                 pass
 
+            # Step 1.6-browser: per-SESSION browser consent (owner decision 2026-07-09).
+            # "Using the browser" is a per-CONVERSATION consent, NOT the per-danger MFA
+            # hatch of Step 1.6: the FIRST browser_* in a conversation surfaces ONE
+            # approval card; once approved, the rest of that conversation drives the
+            # browser with no re-ask. Always-ask (independent of mfa_on_dangers), so the
+            # owner ALWAYS sees + gates the browser even in full-autonomy mode — this is
+            # WHY it lives here and not in Step 1.6 (which the owner-preapproval
+            # short-circuit clears for enabled DELICATE tools, so browser NEVER produced
+            # a card). browser is not terminal/code/service, so the kernel floor
+            # (Steps 2-6) still runs afterwards as a no-op. FAIL-CLOSED via the resolver.
+            if _is_browser_session_tool(tool_name):
+                browser_block = _resolve_browser_session_consent(
+                    tool_name, safe_args, task_id, broker, engine_loop,
+                    access_scope_repo, tenant_id,
+                )
+                if browser_block is not None:
+                    logger.info(
+                        "hermes.security_hook.pre.browser_session_pending tool=%s", tool_name
+                    )
+                    return _block(browser_block)
+                logger.info(
+                    "hermes.security_hook.pre.browser_session_allowed tool=%s", tool_name
+                )
+
             # Step 1.6: MFA-on-dangers (owner decision 2026-06-19; coherence audit fix).
             # Gates NATIVE dangers that bypass the broker. hook_mfa_block encapsulates the
             # full decision (single source in tool_delicacy): MOST_DELICATE native
@@ -1664,8 +1688,14 @@ def make_pre_tool_call_hook(
             # reads / capability+external tools are handled elsewhere (gateway, cage,
             # broker HITL). SECURITY gate → not swallowed: errors fail-CLOSED via the
             # outer handler; the flag accessor itself fails-safe to ON.
-            _needs_owner_mfa = bool(tool_name) and hook_mfa_block(
-                tool_name, mfa_on_dangers=_effective_policy.mfa_on_dangers()
+            # browser_* is handled by its own per-SESSION gate above (Step 1.6-browser)
+            # — exclude it here so it does not ALSO go through the mfa-on-dangers path.
+            _needs_owner_mfa = (
+                bool(tool_name)
+                and not _is_browser_session_tool(tool_name)
+                and hook_mfa_block(
+                    tool_name, mfa_on_dangers=_effective_policy.mfa_on_dangers()
+                )
             )
             if _needs_owner_mfa:
                 # Owner pre-approval — the Seguridad checkbox has REAL impact: a capability
@@ -1801,6 +1831,124 @@ def make_pre_tool_call_hook(
 _NATIVE_DANGER_GATE_TIMEOUT_S: float = 30.0
 
 
+# ── Per-SESSION browser consent (owner decision 2026-07-09) ──────────────────
+# "Using the browser" is a per-CONVERSATION consent, NOT the per-danger MFA hatch:
+# the FIRST browser_* in a conversation surfaces ONE approval card; once the owner
+# approves, the rest of that conversation drives the browser (navigate/click/type)
+# with no re-ask. Always-ask — decoupled from mfa_on_dangers — so the owner ALWAYS
+# sees + gates the browser, even in full-autonomy mode. State is in-memory (daemon
+# lifetime): a restart fail-safes to re-ask, never a silent grant. Bounded so a
+# long-lived daemon cannot grow it unboundedly; eviction only forces a harmless
+# re-ask. Reuses the native block-and-resume gate verbatim (per-conversation key).
+_browser_approved_conversations: "dict[str, None]" = {}
+_browser_approved_lock = threading.Lock()
+_BROWSER_APPROVED_MAX: int = 1024
+
+
+def _is_browser_session_tool(tool_name: str) -> bool:
+    """True for any agent browser tool (navigate/click/type/snapshot/…).
+
+    ALL browser_* tools drive the single jailed session; the per-session consent
+    gates the FIRST one, then the whole conversation flows. Mirrors the frontend
+    browser-chip predicate so gate and UI stay coherent.
+    """
+    return tool_name.startswith("browser_")
+
+
+def _browser_session_is_approved(conversation_id: str) -> bool:
+    if not conversation_id:
+        return False
+    with _browser_approved_lock:
+        return conversation_id in _browser_approved_conversations
+
+
+def _mark_browser_session_approved(conversation_id: str) -> None:
+    if not conversation_id:
+        return
+    with _browser_approved_lock:
+        _browser_approved_conversations.pop(conversation_id, None)  # re-insert = MRU
+        _browser_approved_conversations[conversation_id] = None
+        while len(_browser_approved_conversations) > _BROWSER_APPROVED_MAX:
+            # Evict oldest insertion first — eviction only re-asks (fail-safe).
+            del _browser_approved_conversations[next(iter(_browser_approved_conversations))]
+
+
+def _resolve_browser_session_consent(
+    tool_name: str, args: dict[str, Any], task_id: str, broker: Any, engine_loop: Any,
+    access_scope_repo: Any, tenant_id: Any,
+) -> str | None:
+    """Per-SESSION browser consent gate. None = ALLOW, str = block message.
+
+    First browser_* in a conversation → ONE approval card (reuses the native
+    block-and-resume gate with a per-conversation proposal key). On approve, the
+    conversation is marked → later browser_* ALLOW with no card. Always-ask
+    (decoupled from mfa_on_dangers). FAIL-CLOSED via _resolve_native_danger_approval.
+    """
+    from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+        get_conversation_for_task,
+        get_current_cycle_agent,
+    )
+    conv_id = get_conversation_for_task(task_id) or ""
+
+    # Non-interactive cycles (autonomous / cron / delegated) have NO conversation and
+    # thus no owner present to approve a card. Gating them on an interactive card would
+    # just time out (30 min) and deny — breaking autonomous browsing that ran ungated
+    # before this gate. The per-SESSION browser consent applies ONLY to interactive
+    # chat (a real conversation with an owner watching). No conv → ALLOW; the cage
+    # (netns/Landlock) still confines the browser and the kernel floor still runs. This
+    # is the pre-gate behaviour for autonomous cycles, so there is no regression.
+    if not conv_id:
+        return None
+
+    # browser_cdp = ARBITRARY CDP (Runtime.evaluate = JS in the page, Network domain,
+    # Target.createTarget). It is far higher-reach than navigate/click/type and must
+    # NEVER fold into the session consent (whose card only describes basic navigation).
+    # It gets its OWN per-action card every time — it neither grants nor consumes the
+    # session approval, even after the session is approved (checked BEFORE that below).
+    # Coherent with "MFA on what widens the agent's power": the most dangerous browser
+    # verb does not inherit the permission of a benign browser_snapshot.
+    if tool_name == "browser_cdp":
+        cdp_route, cdp_sensitivity = _compute_danger_route(
+            tool_name, args, access_scope_repo, tenant_id
+        )
+        return _resolve_native_danger_approval(
+            tool_name, args, broker, engine_loop,
+            conversation_id=conv_id,
+            route=cdp_route,
+            sensitivity_categories=cdp_sensitivity,
+            agent_id=get_current_cycle_agent(),
+            justification_override=(
+                "El agente quiere ejecutar un comando de bajo nivel del navegador (CDP): "
+                "puede correr JavaScript arbitrario en la página, acceder a la red y abrir "
+                "nuevos objetivos. Apruébalo solo si sabes por qué lo necesita."
+            ),
+        )
+
+    if _browser_session_is_approved(conv_id):
+        return None  # already approved for THIS conversation — flow, no card
+
+    route, sensitivity_categories = _compute_danger_route(
+        tool_name, args, access_scope_repo, tenant_id
+    )
+    block_msg = _resolve_native_danger_approval(
+        tool_name, args, broker, engine_loop,
+        conversation_id=conv_id,
+        route=route,
+        sensitivity_categories=sensitivity_categories,
+        # NOTE: keyed by conversation, not (conv_id, agent_id). Multi-agent safety rests
+        # on the Step 1.1 access-scope floor (runs BEFORE this): an agent without
+        # browser_* in its AgentAccessScope is blocked there regardless of this consent.
+        agent_id=get_current_cycle_agent(),
+        session_key=f"browser-session\x00{conv_id}",
+        justification_override=(
+            "El agente quiere usar el navegador web. Al aprobar, podrá navegar, "
+            "hacer clic y escribir en páginas durante esta conversación."
+        ),
+    )
+    if block_msg is None:
+        _mark_browser_session_approved(conv_id)
+    return block_msg
+
 
 def _resolve_native_danger_approval(
     tool_name: str, args: dict[str, Any], broker: Any, engine_loop: Any,
@@ -1808,6 +1956,8 @@ def _resolve_native_danger_approval(
     route: Any = None,
     sensitivity_categories: frozenset = frozenset(),  # noqa: B008 — frozenset() is immutable
     agent_id: str = "",
+    session_key: str = "",
+    justification_override: str = "",
 ) -> str | None:
     """Per-action owner approval for a cage-escaping NATIVE danger.
 
@@ -1853,11 +2003,18 @@ def _resolve_native_danger_approval(
 
     try:
         safe = args if isinstance(args, dict) else {}
-        digest = hashlib.sha256(
-            (tool_name + "\x00" + _json.dumps(safe, sort_keys=True, default=str)).encode(
-                "utf-8", "replace"
-            )
-        ).hexdigest()
+        # session_key (per-SESSION consent, e.g. browser): the proposal is keyed on
+        # the SESSION, not the exact (tool+args) digest — so ONE card covers the whole
+        # session and every concurrent/subsequent action in it resolves on the same
+        # decision. Default (session_key="") = per-action digest, unchanged behaviour.
+        if session_key:
+            digest = hashlib.sha256(session_key.encode("utf-8", "replace")).hexdigest()
+        else:
+            digest = hashlib.sha256(
+                (tool_name + "\x00" + _json.dumps(safe, sort_keys=True, default=str)).encode(
+                    "utf-8", "replace"
+                )
+            ).hexdigest()
         proposal_id = uuid5(NAMESPACE_URL, digest)
         proposal_id_str = str(proposal_id)
 
@@ -1873,7 +2030,7 @@ def _resolve_native_danger_approval(
             work_item_id=UUID(int=0),
             consent_context=ConsentContext(operator_id=None, tenant_id=UUID(int=0)),
             risk=RiskLevel.HIGH,
-            justification=human_summary(tool_name, safe),
+            justification=justification_override or human_summary(tool_name, safe),
             parameters_redacted=safe,
             tool_name=tool_name,
             action_digest=digest,

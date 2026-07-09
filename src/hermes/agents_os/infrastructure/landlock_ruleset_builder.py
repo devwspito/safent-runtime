@@ -394,17 +394,27 @@ _CAPABILITY_PATHS: dict[Capability, tuple[tuple[str, frozenset[AccessRight]], ..
     # stacks (effective = intersection with RUNTIME), so OMITTING `/var`/keystore
     # here DENIES master.key/shell-state.db/keys to the controller while the daemon
     # itself keeps them. Grants exactly what a `--cdp` attach controller needs
-    # (its socket dir lives in /tmp via AGENT_BROWSER_SOCKET_DIR; libs/node in /usr;
-    # certs in /etc) plus the browser-sessions subtree, and NOTHING under
-    # /var/lib/hermes root. A CDP-client 0-day from a popped browser can no longer
-    # read the keystore. See project_safent_agent_browser_go_nogo_fase4.
+    # (libs/node in /usr; certs in /etc) plus the browser-sessions subtree and the
+    # browser SOCKET dir, and NOTHING sensitive under /var/lib/hermes root. A CDP-client
+    # 0-day from a popped browser can no longer read the keystore.
+    # SOCKET DIR (2026-07-09 fix, regression bd88bb4): the vendored tools/browser_tool.py
+    # creates the controller's Unix socket at gettempdir()/agent-browser-<session> and
+    # passes it as AGENT_BROWSER_SOCKET_DIR. The service sets TMPDIR=/var/lib/hermes/tmp,
+    # so gettempdir() resolves THERE — which this ruleset did NOT grant → EACCES on every
+    # browser command → silent invisible-headless fallback (chip lied, "En vivo" empty).
+    # We grant the SPECIFIC subdir /var/lib/hermes/tmp (Landlock is path-prefix, so this
+    # does NOT grant the sibling /var/lib/hermes/master.key / shell-state.db / keys — the
+    # crown jewels stay denied). It holds only ephemeral browser sockets + anchor
+    # typecheck stubs; the daemon MUST NOT write secrets to its TMPDIR.
+    # See project_safent_agent_browser_go_nogo_fase4.
     Capability.BROWSER_CONTROLLER: (
         ("/usr", _RUNTIME_RX), ("/etc", _RUNTIME_RX), ("/bin", _RUNTIME_RX),
         ("/sbin", _RUNTIME_RX), ("/lib", _RUNTIME_RX), ("/lib64", _RUNTIME_RX),
         ("/proc", _RUNTIME_RX), ("/sys", _RUNTIME_RX),
         ("/run", _RUNTIME_RW), ("/tmp", _RUNTIME_RW), ("/dev", _RUNTIME_RW),
-        # narrow: the controller's own session data, NOT the keystore root.
+        # narrow: the controller's own session data + socket dir, NOT the keystore root.
         ("/var/lib/hermes/browser-sessions", _RUNTIME_RW),
+        ("/var/lib/hermes/tmp", _RUNTIME_RW),
     ),
 }
 

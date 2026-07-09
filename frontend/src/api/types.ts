@@ -26,6 +26,12 @@ export interface RuntimeStatus {
   activity?: Array<{ task_id?: string; agent_id: string; tool?: string }>
   ruflo_active?: boolean
   /**
+   * HONEST source of truth for the "usando el navegador / En vivo" chip: true iff
+   * the jailed browser currently has a REAL (non-blank) page open. NOT derived from
+   * tool names — a failed browser_navigate or a web_search never sets it.
+   */
+  browser_live?: boolean
+  /**
    * Recent, still-live delegation edges (orchestrator → specialist), emitted by
    * the backend at the moment a `delegate_task` fires and kept for a short TTL.
    * Drives the real Cerebro→especialista flow in the swarm view — an actual

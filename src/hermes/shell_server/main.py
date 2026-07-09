@@ -980,6 +980,21 @@ def create_app() -> FastAPI:
         try:
             data = await app.state.dbus_proxy.call_dict("get_runtime_status")
             data.setdefault("available", True)
+            # browser_live: HONEST source of truth for the "usando el navegador" chip
+            # and "En vivo". True iff the jailed browser has a REAL (non-blank) page
+            # open — NOT keyed off tool names (a failed browser_navigate or a
+            # web_search must never light the chip). Probed off-loop (TTL-cached,
+            # fail-soft) so it never blocks or 500s the status read.
+            try:
+                import asyncio as _asyncio  # noqa: PLC0415
+                from hermes.browser.infrastructure.browser_liveness import (  # noqa: PLC0415
+                    agent_browser_live,
+                )
+                data["browser_live"] = await _asyncio.get_running_loop().run_in_executor(
+                    None, agent_browser_live
+                )
+            except Exception:  # noqa: BLE001 — additive; never break the status read
+                data["browser_live"] = False
             return data
         except Exception:  # noqa: BLE001 — AgentUnavailable or any transient error
             return {

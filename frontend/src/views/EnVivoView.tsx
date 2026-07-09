@@ -1,8 +1,9 @@
 /**
  * EnVivoView — "En vivo": watch the agents' browser work in real time (sharp, via
  * noVNC) and stop a task if something goes wrong. Teaching now lives in Habilidades.
- * The live browser frame only shows when a running task is actually USING the browser
- * (live_activity tool starts with "browser"), not for every running task.
+ * The live browser frame only shows when the jailed browser actually has a REAL
+ * (non-blank) page open (runtime_status.browser_live), not merely because a tool
+ * whose name starts with "browser" was called (which lies on a failed launch).
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sileo } from 'sileo'
@@ -36,11 +37,11 @@ function ActividadPanel() {
     ])
     const running = (r?.tasks ?? []).filter((t) => t.status === 'in_progress')
     setTasks(running)
-    // The live browser keys on RUNTIME ACTIVITY (covers chat + scheduled tasks),
-    // NOT on the recent-tasks list: chat cycles don't always appear there, which
-    // used to hide the frame while the agent was visibly navigating.
+    // The live frame keys on browser_live (the REAL jailed-browser page state), NOT on
+    // a tool name in activity[] — a failed browser_navigate / a web_search never opens
+    // a real page, so they must not show the frame. Same source as the chat chip.
     const activity = status?.activity ?? []
-    const browserNow = activity.some((a) => (a.tool ?? '').startsWith('browser'))
+    const browserNow = !!status?.browser_live
     const anythingRunning = activity.length > 0
       || (status?.active_task_count ?? 0) > 0
       || running.length > 0
