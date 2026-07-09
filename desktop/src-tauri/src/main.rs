@@ -57,7 +57,7 @@ fn augmented_path() -> String {
             parts.push(p);
         }
     }
-    for p in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+    for p in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/podman/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
         parts.push(p.to_string());
     }
     if let Some(home) = std::env::var_os("HOME") {
@@ -86,6 +86,68 @@ fn installed_safent() -> Option<String> {
         }
     }
     None
+}
+
+/// True if a container engine (podman preferred, docker accepted) is already installed.
+fn has_engine() -> bool {
+    let candidates = [
+        "/opt/podman/bin/podman",
+        "/opt/homebrew/bin/podman",
+        "/usr/local/bin/podman",
+        "/usr/bin/podman",
+        "/opt/homebrew/bin/docker",
+        "/usr/local/bin/docker",
+        "/usr/bin/docker",
+        "/Applications/Docker.app/Contents/Resources/bin/docker",
+    ];
+    candidates.iter().any(|p| std::path::Path::new(p).is_file())
+}
+
+// Install Podman on macOS from the OFFICIAL .pkg (podman.io/docs/installation → macOS
+// installer). Downloads the latest universal .pkg and installs it with ONE native admin
+// password dialog (no terminal). Fedora CoreOS VM + machine are set up later by `safent`.
+#[cfg(target_os = "macos")]
+const PODMAN_INSTALL_MAC: &str = r#"set -e
+echo "Buscando la última versión de Podman…"
+JSON="$(curl -fsSL https://api.github.com/repos/containers/podman/releases/latest)"
+URL="$(printf '%s' "$JSON" | grep -oE 'https://[^"]*podman-installer-macos-universal\.pkg' | head -1)"
+[ -n "$URL" ] || URL="$(printf '%s' "$JSON" | grep -oE 'https://[^"]*podman-installer-macos-[^"]*\.pkg' | head -1)"
+[ -n "$URL" ] || { echo "No encontré el instalador oficial de Podman."; exit 1; }
+echo "Descargando Podman…"
+curl -fsSL "$URL" -o /tmp/safent-podman.pkg
+echo "Instalando Podman (autoriza en la ventana de macOS)…"
+osascript -e 'do shell script "installer -pkg /tmp/safent-podman.pkg -target /" with administrator privileges'
+rm -f /tmp/safent-podman.pkg 2>/dev/null || true
+echo "Podman instalado."
+"#;
+
+/// Install the container engine (Podman) from the UI, then continue to load Safent.
+/// Fire-and-forget: returns immediately; progress + navigation happen via the window.
+#[tauri::command]
+fn install_podman(window: tauri::WebviewWindow) {
+    std::thread::spawn(move || {
+        #[cfg(target_os = "macos")]
+        let res = run_and_stream(&window, "/bin/sh", &["-c", PODMAN_INSTALL_MAC]);
+        #[cfg(not(target_os = "macos"))]
+        let res: Result<(), String> = Err(
+            "La instalación con un clic está disponible en macOS. En este sistema instala \
+             Podman desde https://podman.io/docs/installation y reabre Safent."
+                .to_string(),
+        );
+
+        match res {
+            Ok(()) => match ensure_and_resolve(&window) {
+                Ok(url) => match url.parse::<tauri::Url>() {
+                    Ok(parsed) => {
+                        let _ = window.navigate(parsed);
+                    }
+                    Err(e) => show_error(&window, &format!("URL inválida '{url}': {e}")),
+                },
+                Err(e) => show_error(&window, &e),
+            },
+            Err(e) => show_error(&window, &format!("No pude instalar Podman: {e}")),
+        }
+    });
 }
 
 fn js_escape(s: &str) -> String {
@@ -251,26 +313,35 @@ fn ensure_and_resolve(window: &tauri::WebviewWindow) -> Result<String, String> {
 
 fn main() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![install_podman])
         .setup(|app| {
             let window = app
                 .get_webview_window("main")
                 .expect("main window must exist (defined in tauri.conf.json)");
 
-            // Do the (possibly minutes-long) bootstrap OFF the main thread so the install
-            // animation stays live and the window never freezes.
-            std::thread::spawn(move || match ensure_and_resolve(&window) {
-                Ok(url) => match url.parse::<tauri::Url>() {
-                    Ok(parsed) => {
-                        if let Err(e) = window.navigate(parsed) {
-                            show_error(&window, &format!("no pude abrir '{url}': {e}"));
-                        } else if std::env::var("SAFENT_SELFTEST").is_ok() {
-                            std::thread::sleep(std::time::Duration::from_secs(7));
-                            let _ = window.eval(SELFTEST_JS);
+            // Do everything OFF the main thread so the install animation stays live and the
+            // window never freezes during the (possibly minutes-long) first run.
+            std::thread::spawn(move || {
+                // No container engine yet → show the one-click "Instalar Podman" screen and
+                // wait for the button (which invokes install_podman → continues from there).
+                if std::env::var("SAFENT_URL").is_err() && !has_engine() {
+                    let _ = window.eval("window.__safentNeedsPodman && window.__safentNeedsPodman();");
+                    return;
+                }
+                match ensure_and_resolve(&window) {
+                    Ok(url) => match url.parse::<tauri::Url>() {
+                        Ok(parsed) => {
+                            if let Err(e) = window.navigate(parsed) {
+                                show_error(&window, &format!("no pude abrir '{url}': {e}"));
+                            } else if std::env::var("SAFENT_SELFTEST").is_ok() {
+                                std::thread::sleep(std::time::Duration::from_secs(7));
+                                let _ = window.eval(SELFTEST_JS);
+                            }
                         }
-                    }
-                    Err(e) => show_error(&window, &format!("URL inválida '{url}': {e}")),
-                },
-                Err(e) => show_error(&window, &e),
+                        Err(e) => show_error(&window, &format!("URL inválida '{url}': {e}")),
+                    },
+                    Err(e) => show_error(&window, &e),
+                }
             });
 
             Ok(())
