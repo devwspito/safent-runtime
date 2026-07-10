@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=5
+_CLI_REV=6
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -38,6 +38,19 @@ SECCOMP_DIR="${HOME:-/tmp}/.safent"
 SECCOMP="$SECCOMP_DIR/safent-seccomp.json"
 # Where `safent update` fetches the newest CLI from (same source the installer uses).
 CLI_URL="${SAFENT_CLI_URL:-https://raw.githubusercontent.com/devwspito/safent-runtime/main/safent}"
+
+# GUI-launched contexts hand this script a MINIMAL PATH: a launchd LaunchAgent (the
+# `safent agent` update watcher) and a Finder-launched .app both run with roughly
+# /usr/bin:/bin:/usr/sbin:/sbin — which does NOT include /opt/homebrew/bin, where podman
+# lives. Without this, `command -v podman` below finds nothing, RT ends up empty, and the
+# UI-triggered update/uninstall agent SILENTLY dies (every `"$RT" exec` is a no-op, so the
+# marker is never consumed and the UI hangs forever on "Actualizando…"). Prepend the
+# well-known engine install dirs so RT resolves no matter how we were launched.
+for _d in /opt/homebrew/bin /usr/local/bin /opt/podman/bin "${HOME:-}/.local/bin"; do
+  [ -n "$_d" ] && [ -d "$_d" ] || continue
+  case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH" ;; esac
+done
+export PATH
 
 RT="$(command -v podman 2>/dev/null || command -v docker 2>/dev/null || true)"
 [ -n "$RT" ] || { echo "[x] You need podman or docker.  ->  https://podman.io/get-started" >&2; exit 1; }
@@ -309,6 +322,8 @@ _ensure_agent() {
 <plist version="1.0"><dict>
   <key>Label</key><string>run.safent.agent</string>
   <key>ProgramArguments</key><array><string>$self</string><string>agent</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/opt/podman/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>$HOME/.safent/agent.log</string>

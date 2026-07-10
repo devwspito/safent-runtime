@@ -36,6 +36,8 @@ install_agent() {
 <plist version="1.0"><dict>
   <key>Label</key><string>run.safent.agent</string>
   <key>ProgramArguments</key><array><string>$BIN/safent</string><string>agent</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/opt/podman/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>$HOME/.safent/agent.log</string>
