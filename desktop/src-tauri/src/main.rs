@@ -47,74 +47,6 @@ const SELFTEST_JS: &str = r#"(async () => {
   } catch (err) { b.textContent = 'SSE self-test: ERROR ' + err; b.style.color = '#ff6b6b'; }
 })();"#;
 
-// macOS clipboard shim (init-script, injected on EVERY page — the loader AND the remote
-// web UI). On macOS, wry's main (non-child) WKWebView swallows Cmd+C/V/X/A in
-// performKeyEquivalent (tauri#9426): the Edit-menu `paste:` never reaches the page, so
-// keyboard copy/paste is dead app-wide (mouse right-click still works). This reinstates it
-// with execCommand (copy/cut/selectAll) + navigator.clipboard.readText for paste — the same
-// clipboard API VncView already uses. It self-gates to macOS (navigator.platform) so Linux
-// (WebKitGTK) and Windows (WebView2), where the native shortcuts work, are untouched. Bubble
-// phase + a defaultPrevented guard let the Live/Teaching (VncView) capture-phase jail-
-// clipboard bridge keep priority.
-const CLIPBOARD_SHIM_JS: &str = r#"(function () {
-  if (window.__safentClipboardShim) return;
-  if (!/Mac/i.test(navigator.platform || navigator.userAgent || '')) return;
-  window.__safentClipboardShim = true;
-  function editable(el) {
-    if (!el) return null;
-    var t = el.tagName;
-    if (t === 'INPUT' || t === 'TEXTAREA') return el;
-    if (el.isContentEditable) return el;
-    return null;
-  }
-  function insertText(el, text) {
-    if (!text) return;
-    el.focus();
-    try { if (document.execCommand('insertText', false, text)) return; } catch (x) {}
-    var t = el.tagName;
-    if (t === 'INPUT' || t === 'TEXTAREA') {
-      var s = el.selectionStart == null ? el.value.length : el.selectionStart;
-      var e2 = el.selectionEnd == null ? el.value.length : el.selectionEnd;
-      el.value = el.value.slice(0, s) + text + el.value.slice(e2);
-      var p = s + text.length;
-      try { el.setSelectionRange(p, p); } catch (x) {}
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-    } else {
-      var sel = window.getSelection();
-      if (sel && sel.rangeCount) {
-        var r = sel.getRangeAt(0);
-        r.deleteContents();
-        r.insertNode(document.createTextNode(text));
-        r.collapse(false);
-        sel.removeAllRanges();
-        sel.addRange(r);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-    }
-  }
-  window.addEventListener('keydown', function (e) {
-    if (!(e.metaKey || e.ctrlKey) || e.altKey || e.repeat) return;
-    if (e.defaultPrevented) return;
-    var k = (e.key || '').toLowerCase();
-    if (k === 'a') {
-      if (editable(document.activeElement)) { try { document.execCommand('selectAll'); e.preventDefault(); } catch (x) {} }
-      return;
-    }
-    if (k === 'c' || k === 'x') {
-      try { if (document.execCommand(k === 'c' ? 'copy' : 'cut')) e.preventDefault(); } catch (x) {}
-      return;
-    }
-    if (k === 'v') {
-      var el = editable(document.activeElement);
-      if (!el) return;
-      e.preventDefault();
-      try {
-        navigator.clipboard.readText().then(function (text) { insertText(el, text); }).catch(function () {});
-      } catch (x) {}
-    }
-  }, false);
-})();"#;
-
 /// GUI apps launched from Finder / the dock inherit a MINIMAL PATH (/usr/bin:/bin:…),
 /// so the `safent` script cannot find `podman`/`docker` (installed in /opt/homebrew/bin
 /// or /usr/local/bin). Hand every child an augmented PATH covering the common locations.
@@ -426,13 +358,6 @@ fn start_update_checker(window: &tauri::WebviewWindow) {
 
 fn main() {
     tauri::Builder::default()
-        // Reinstates keyboard copy/paste on macOS WKWebView (tauri#9426). Injected on every
-        // page including the remote web UI; self-gates to macOS, no-op elsewhere.
-        .plugin(
-            tauri::plugin::Builder::<tauri::Wry>::new("safent_clipboard")
-                .js_init_script(CLIPBOARD_SHIM_JS.to_string())
-                .build(),
-        )
         .invoke_handler(tauri::generate_handler![install_podman])
         .setup(|app| {
             // NOTE: do NOT replace the default macOS menu. A custom menu that drops the
