@@ -207,7 +207,9 @@ fn install_podman(window: tauri::WebviewWindow) {
             Ok(()) => match ensure_and_resolve(&window) {
                 Ok(url) => match url.parse::<tauri::Url>() {
                     Ok(parsed) => {
-                        let _ = window.navigate(parsed);
+                        if window.navigate(parsed).is_ok() {
+                            start_update_checker(&window);
+                        }
                     }
                     Err(e) => show_error(&window, &format!("URL inválida '{url}': {e}")),
                 },
@@ -381,6 +383,47 @@ fn ensure_and_resolve(window: &tauri::WebviewWindow) -> Result<String, String> {
     run_url(window, &bin)
 }
 
+const VERSION_URL: &str = "https://raw.githubusercontent.com/devwspito/safent-runtime/main/VERSION";
+
+/// Fetch the latest published version and expose it to the web UI as
+/// `window.__safentLatestVersion`, so the footer can ALERT when a newer build exists. The
+/// sandboxed backend's own version check can be blocked by its egress cage; the desktop
+/// shell runs on the host with normal internet, so it is the reliable source. Best-effort:
+/// any failure (offline, non-version body) is silent and simply shows no alert.
+fn push_latest_version(window: &tauri::WebviewWindow) {
+    let out = Command::new("curl")
+        .args(["-fsSL", "--max-time", "10", VERSION_URL])
+        .env("PATH", augmented_path())
+        .output();
+    if let Ok(o) = out {
+        if o.status.success() {
+            let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            // Accept ONLY a short dotted-numeric string so an HTML error page or redirect
+            // body can never be injected as a "version".
+            let ok = !v.is_empty()
+                && v.len() <= 20
+                && v.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+            if ok {
+                let _ = window.eval(&format!("window.__safentLatestVersion = `{}`;", js_escape(&v)));
+            }
+        }
+    }
+}
+
+/// After the UI has loaded, publish the latest version once (short delay to let the page
+/// settle) and then refresh it every few hours so a long-running session still learns about
+/// a new release.
+fn start_update_checker(window: &tauri::WebviewWindow) {
+    let w = window.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(12));
+        loop {
+            push_latest_version(&w);
+            std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
+        }
+    });
+}
+
 fn main() {
     tauri::Builder::default()
         // Reinstates keyboard copy/paste on macOS WKWebView (tauri#9426). Injected on every
@@ -414,9 +457,12 @@ fn main() {
                         Ok(parsed) => {
                             if let Err(e) = window.navigate(parsed) {
                                 show_error(&window, &format!("no pude abrir '{url}': {e}"));
-                            } else if std::env::var("SAFENT_SELFTEST").is_ok() {
-                                std::thread::sleep(std::time::Duration::from_secs(7));
-                                let _ = window.eval(SELFTEST_JS);
+                            } else {
+                                start_update_checker(&window);
+                                if std::env::var("SAFENT_SELFTEST").is_ok() {
+                                    std::thread::sleep(std::time::Duration::from_secs(7));
+                                    let _ = window.eval(SELFTEST_JS);
+                                }
                             }
                         }
                         Err(e) => show_error(&window, &format!("URL inválida '{url}': {e}")),
