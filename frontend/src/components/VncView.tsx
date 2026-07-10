@@ -18,6 +18,12 @@
  *   COPY   (jail → outside): Ctrl+C is NOT intercepted — it reaches the app normally and
  *     copies to the X CLIPBOARD; a 1.5s poll (+ on focus) reads it back via the bridge
  *     and writes it to the local clipboard. UTF-8 (accents/€/emoji/CJK) works throughout.
+ *   macOS Cmd combos: noVNC forwards a held Cmd to the jail as Alt/Super (RealVNC
+ *     convention), so Cmd+chords die inside the jail. We release those stuck modifiers
+ *     before every injection and translate Cmd+C/X/A into injected Ctrl+chords; Cmd+V is
+ *     the paste flow above. Local clipboard access goes through the Tauri host bridge
+ *     when the UI runs in the desktop shell (no WKWebView paste-permission prompt) and
+ *     falls back to navigator.clipboard in a plain browser.
  */
 import { useEffect, useRef, useState } from 'react'
 import RFB from '@novnc/novnc'
@@ -27,10 +33,22 @@ import { getBrowserClipboard, setBrowserClipboard } from '../api/client'
 
 type Status = 'connecting' | 'connected' | 'disconnected'
 
-// X11 keysyms for the clean, real Ctrl+V injection over RFB.
+// X11 keysyms for the clean, real Ctrl+chord injection over RFB.
 const XK_Control_L = 0xffe3
 const XK_Shift_L = 0xffe1
 const XK_v = 0x0076
+const XK_c = 0x0063
+const XK_x = 0x0078
+const XK_a = 0x0061
+// Meta-ish modifiers the jail may believe are held (see releaseStuckModifiers).
+const XK_Meta_L = 0xffe7
+const XK_Meta_R = 0xffe8
+const XK_Alt_L = 0xffe9
+const XK_Alt_R = 0xffea
+const XK_Super_L = 0xffeb
+const XK_Super_R = 0xffec
+
+const isMacLike = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || '')
 
 function isPasteCombo(e: KeyboardEvent): boolean {
   const v = e.key === 'v' || e.key === 'V' || e.keyCode === 86
@@ -118,9 +136,26 @@ export function VncView({
     let lastPushed: string | null = null // last text we set on the jail clipboard
     let lastSeenFromJail: string | null = null // last text we pulled from the jail
 
+    // noVNC forwards a held Cmd to the jail as Alt_L (left Cmd) / Super_L (right Cmd) —
+    // the RealVNC/TigerVNC modifier convention. So when the user triggers Cmd+V, by
+    // injection time the jail believes Alt/Super is DOWN and would read our Ctrl+V as
+    // Ctrl+Alt+V (not a paste) — the historic reason Cmd+combos "never worked" in Live
+    // while Ctrl+combos did. Release every meta-ish modifier first: spurious keyups are
+    // harmless in X11, and the later physical Cmd release just repeats one.
+    const releaseStuckModifiers = () => {
+      if (!rfb) return
+      rfb.sendKey(XK_Alt_L, 'AltLeft', false)
+      rfb.sendKey(XK_Alt_R, 'AltRight', false)
+      rfb.sendKey(XK_Super_L, 'MetaLeft', false)
+      rfb.sendKey(XK_Super_R, 'MetaRight', false)
+      rfb.sendKey(XK_Meta_L, 'MetaLeft', false)
+      rfb.sendKey(XK_Meta_R, 'MetaRight', false)
+    }
+
     // Inject a clean, REAL Ctrl+V (or Ctrl+Shift+V) to the jailed app over RFB.
     const injectPaste = (withShift: boolean) => {
       if (!rfb) return
+      releaseStuckModifiers()
       rfb.sendKey(XK_Control_L, 'ControlLeft', true)
       if (withShift) rfb.sendKey(XK_Shift_L, 'ShiftLeft', true)
       rfb.sendKey(XK_v, 'KeyV', true)
@@ -129,24 +164,57 @@ export function VncView({
       rfb.sendKey(XK_Control_L, 'ControlLeft', false)
     }
 
+    // Inject Ctrl+<key> — used to translate macOS Cmd+C/X/A into the chord the jailed
+    // LINUX Chromium actually understands.
+    const injectCtrlChord = (keysym: number, code: string) => {
+      if (!rfb) return
+      releaseStuckModifiers()
+      rfb.sendKey(XK_Control_L, 'ControlLeft', true)
+      rfb.sendKey(keysym, code, true)
+      rfb.sendKey(keysym, code, false)
+      rfb.sendKey(XK_Control_L, 'ControlLeft', false)
+    }
+
     // Outside → jail: set the jail clipboard from the local one, THEN inject Ctrl+V so
     // the focused app pastes it. Intercept in capture, before noVNC forwards the key.
+    // Also: on macOS, Cmd+C/X/A are translated to the Ctrl+chord the jailed Linux
+    // Chromium expects (noVNC would forward them as Alt/Super+key — dead keys there).
+    // preventDefault() additionally stops WebKit from re-dispatching the unhandled combo
+    // to the app menu, so the app's Edit menu never fires while Live owns the keys.
     const onKeyDownCapture = (e: KeyboardEvent) => {
-      if (viewOnly || !rfb || !isPasteCombo(e) || !canRead) return
-      e.preventDefault()
-      e.stopImmediatePropagation()
-      const withShift = e.shiftKey
-      readLocalClipboard()
-        .then((text) => {
-          // '' means empty/non-text local clipboard (e.g. a copied image) — don't wipe the
-          // jail's clipboard with it; just fire the paste with whatever the jail has.
-          if (text && text !== lastPushed) {
-            lastPushed = text
-            return setBrowserClipboard(text)
-          }
-        })
-        .catch(() => { /* no permission/empty → paste whatever the jail already has */ })
-        .then(() => injectPaste(withShift))
+      if (viewOnly || !rfb) return
+      if (isPasteCombo(e)) {
+        if (!canRead) return
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        const withShift = e.shiftKey
+        readLocalClipboard()
+          .then((text) => {
+            // '' means empty/non-text local clipboard (e.g. a copied image) — don't wipe
+            // the jail's clipboard with it; paste whatever the jail already has.
+            if (text && text !== lastPushed) {
+              lastPushed = text
+              return setBrowserClipboard(text)
+            }
+          })
+          .catch(() => { /* no permission/empty → paste whatever the jail already has */ })
+          .then(() => injectPaste(withShift))
+        return
+      }
+      if (isMacLike && e.metaKey && !e.ctrlKey && !e.altKey) {
+        const k = (e.key || '').toLowerCase()
+        const chord =
+          k === 'c' ? ([XK_c, 'KeyC'] as const)
+          : k === 'x' ? ([XK_x, 'KeyX'] as const)
+          : k === 'a' ? ([XK_a, 'KeyA'] as const)
+          : null
+        if (chord) {
+          e.preventDefault()
+          e.stopImmediatePropagation()
+          injectCtrlChord(chord[0], chord[1])
+          // Copy/cut results flow back via the existing jail-clipboard poll (pullFromJail).
+        }
+      }
     }
 
     // Jail → outside: mirror the jail clipboard into the local one (dedup vs our push).
