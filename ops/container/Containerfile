@@ -184,6 +184,7 @@ COPY ops/agents-os-edition/dbus/org.hermes.Runtime1.conf /usr/share/dbus-1/syste
 COPY ops/agents-os-edition/netns/          /etc/nftables/hermes/
 COPY ops/agents-os-edition/modules-load.d/ /etc/modules-load.d/
 COPY ops/agents-os-edition/seed/mcp-servers.json /usr/share/hermes/seed/
+COPY ops/agents-os-edition/seed/serena-project.yml /usr/share/hermes/seed/
 # Namespace-pivot seccomp data for the browser-jail shim. The shim reads this exact
 # path; when absent it soft-degrades (no per-process CLONE_NEWUSER backstop). Baking
 # it makes the in-unit defense-in-depth real instead of relying solely on the outer
@@ -392,6 +393,51 @@ RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache /var/lib/hermes/
       /var/lib/hermes/xdg-cache /var/lib/hermes/mcp-home && \
     chmod -R g+rwX /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache \
       /var/lib/hermes/xdg-cache /var/lib/hermes/mcp-home
+
+# ── Serena (seeded code MCP): wheel + language servers baked for OFFLINE runtime ──
+# Serena provisions LSP language servers on first use — a runtime download the MCP cage
+# forbids (default-deny netns, uvx --offline). So EVERYTHING is provisioned here, at
+# build, into the SAME paths the runtime child sees (HOME=/var/lib/hermes/mcp-home →
+# SERENA_HOME=~/.serena; UV_CACHE_DIR from ENV above):
+#   1. warm the EXACT seed spec (pin must byte-match ops/.../seed/mcp-servers.json);
+#   2. jedi-language-server via pip — the ONLY zero-download Python LS (the default
+#      pyright needs a runtime uvx→PyPI→nodeenv→npm chain: dead offline);
+#   3. TypeScript LS pre-provision: `serena project index` on a throwaway TS project
+#      runs the dependency provider → npm-installs the pinned typescript +
+#      typescript-language-server into ~/.serena/language_servers/static;
+#   4. hardened serena_config.yml written LAST (indexing registers throwaway projects —
+#      the rewrite drops them): dashboard/GUI off, shell tool excluded (the caged
+#      terminal with command_guard+HITL is the ONLY exec surface; serena is BUILTIN =
+#      no per-call HITL, so an exec tool here would dodge governance);
+#   5. OFFLINE smoke — fail the BAKE, not the customer, if any of it would die offline.
+RUN python3 -m pip install --no-cache-dir jedi-language-server && \
+    export HOME=/var/lib/hermes/mcp-home && \
+    echo "▸ warming uvx --from serena-agent==1.5.3 serena" && \
+    timeout 600 uvx --from serena-agent==1.5.3 serena --help >/dev/null && \
+    mkdir -p /tmp/serena-warm/ts/.serena /tmp/serena-warm/py/.serena && \
+    printf 'languages: ["typescript"]\n' > /tmp/serena-warm/ts/.serena/project.yml && \
+    printf '{"name":"warm","version":"0.0.0"}\n' > /tmp/serena-warm/ts/package.json && \
+    printf 'export const warm: number = 1;\n' > /tmp/serena-warm/ts/index.ts && \
+    echo "▸ pre-provisioning TypeScript language server (serena project index)" && \
+    timeout 900 uvx --from serena-agent==1.5.3 serena project index /tmp/serena-warm/ts && \
+    printf 'languages: ["python_jedi"]\n' > /tmp/serena-warm/py/.serena/project.yml && \
+    printf 'print("warm")\n' > /tmp/serena-warm/py/app.py && \
+    echo "▸ validating python_jedi language server (serena project index)" && \
+    timeout 600 uvx --from serena-agent==1.5.3 serena project index /tmp/serena-warm/py && \
+    rm -rf /tmp/serena-warm && \
+    mkdir -p /var/lib/hermes/mcp-home/.serena && \
+    printf '%s\n' \
+      'web_dashboard: False' \
+      'web_dashboard_open_on_launch: False' \
+      'gui_log_window: False' \
+      'excluded_tools: ["execute_shell_command"]' \
+      'projects: []' \
+      > /var/lib/hermes/mcp-home/.serena/serena_config.yml && \
+    echo "▸ offline smoke (must resolve from the warm cache with NO network)" && \
+    UV_OFFLINE=1 timeout 240 uvx --offline --from serena-agent==1.5.3 serena --help >/dev/null && \
+    command -v jedi-language-server >/dev/null && \
+    chown -R hermes:hermes-work /var/lib/hermes/mcp-home /var/lib/hermes/uv-cache && \
+    chmod -R g+rwX /var/lib/hermes/mcp-home /var/lib/hermes/uv-cache
 
 # ── enable the same service set the terminal variant runs ────────────────────
 # The individual enables populate hermes-workspace.target.wants/ (each service's

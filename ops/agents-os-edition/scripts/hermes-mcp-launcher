@@ -181,6 +181,13 @@ _MCP_PROPERTIES: tuple[str, ...] = (
     "--property=LockPersonality=yes",
     # The runner caches live under /var/lib/hermes — the child must write there.
     "--property=ReadWritePaths=/var/lib/hermes",
+    # Group-writable creations: workspace + runner caches are setgid hermes-work shared
+    # trees. With the default 0022 umask a file an MCP creates is group-READ-only, so the
+    # daemon/agent (other uid, group hermes-work) cannot edit it back — mixed-writer
+    # friction (e.g. a code file created by the serena MCP that the caged terminal then
+    # cannot modify). 0002 matches the setgid design; the daemon's secret dirs are
+    # InaccessiblePaths regardless.
+    "--property=UMask=0002",
     # Hide the daemon's secrets from the MCP child (defense-in-depth atop cross-uid DAC).
     "--property=InaccessiblePaths=-/var/lib/hermes/master.key -/var/lib/hermes/shell-state.db -/var/lib/hermes/keys -/var/lib/hermes/audit -/var/lib/hermes/hermes-home -/var/lib/hermes/composio-cache -/run/hermes -/run/hermes-mcp",
 )
@@ -314,6 +321,10 @@ _FORWARDED_ENV_KEYS: frozenset[str] = _ALLOWED_ENV_KEYS | frozenset({
     "PATH",            # runner resolves its own helpers (npm, node) inside the unit
     "NODE_OPTIONS",    # --dns-result-order=ipv4first (unit-set; reliable npm download)
     "HOME",            # ALWAYS the launcher unit's own value — never caller-set
+    # Unit-set hardening for the seeded code MCP (serena) — never caller-set:
+    "SERENA_USAGE_REPORTING",  # =false → disables serena's start-up phone-home ping
+    "UV_OFFLINE",      # =1 → serena's INTERNAL uvx spawns (LS provisioning) also stay
+                       # offline; the injected --offline only covers argv[0]
 })
 
 # ── Logging ───────────────────────────────────────────────────────────────────

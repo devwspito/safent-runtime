@@ -13,5 +13,17 @@
     "server_id": "powerpoint",
     "label": "Presentaciones · crea y edita PowerPoint (.pptx) sin clave",
     "argv": ["uvx", "--from", "office-powerpoint-mcp-server", "ppt_mcp_server"]
+  },
+  {
+    "server_id": "serena",
+    "label": "Código · entiende y edita proyectos (Python, TypeScript) sin clave",
+    "argv": [
+      "uvx", "--from", "serena-agent==1.5.3",
+      "serena", "start-mcp-server",
+      "--transport", "stdio",
+      "--context", "agent",
+      "--project", "/var/lib/hermes/workspace",
+      "--enable-web-dashboard", "false"
+    ]
   }
 ]

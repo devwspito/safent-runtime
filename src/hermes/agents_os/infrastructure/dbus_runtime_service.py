@@ -6731,7 +6731,9 @@ def _neus_load_entries() -> list[dict]:
     for sid, cfg in neus_map.items():
         entry: dict = {
             "server_id": sid,
-            "label": sid,
+            # Human label persisted by the seed importer / add path; falls back to the
+            # id for entries written before the label field existed.
+            "label": str(cfg.get("label") or sid),
             "argv": _neus_argv(cfg),
         }
         if cfg.get("env"):
@@ -6740,7 +6742,9 @@ def _neus_load_entries() -> list[dict]:
     return entries
 
 
-def _neus_write_mcp_entry(server_id: str, argv: list[str], *, env: dict | None = None) -> None:
+def _neus_write_mcp_entry(
+    server_id: str, argv: list[str], *, env: dict | None = None, label: str | None = None
+) -> None:
     """Persist a new/updated MCP server entry into Neus's config.yaml.
 
     Gate contract: this function MUST only be called AFTER the Safent security
@@ -6751,6 +6755,7 @@ def _neus_write_mcp_entry(server_id: str, argv: list[str], *, env: dict | None =
       command: argv[0]
       args: argv[1:]
       env: {...}   (omitted when empty)
+      label: "…"   (omitted when empty; Safent-only, Neus ignores it)
     """
     from hermes_cli.config import load_config, save_config  # noqa: PLC0415
 
@@ -6762,6 +6767,8 @@ def _neus_write_mcp_entry(server_id: str, argv: list[str], *, env: dict | None =
     }
     if env:
         entry["env"] = dict(env)
+    if label:
+        entry["label"] = label
     mcp_servers[server_id] = entry
     save_config(cfg)
 
@@ -6790,6 +6797,86 @@ def _neus_remove_mcp_entry(server_id: str) -> None:
         save_config(cfg)
     except Exception as exc:  # noqa: BLE001
         logger.warning("hermes.dbus.neus_remove_failed server=%s: %s", server_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Seed MCP importer — registers the image-baked seeds into Neus at boot.
+#
+# The seed JSON ships INSIDE the image (/usr/share/hermes/seed/, a trusted,
+# owner-vetted build artifact whose runner cache the Containerfile pre-warms),
+# NOT the /var/lib/hermes copy: tmpfiles' copy-if-absent never refreshes an
+# existing customer volume, so reading the volume copy would strand upgrades.
+#
+# Import-once PER server_id (marker file): a seed the owner later REMOVES via
+# remove_mcp_server must never resurrect on the next boot. New seeds added by
+# an image upgrade DO import (their id is not in the marker yet).
+#
+# Gate posture: entries come from the signed image, and reconnect re-validates
+# every entry (runner allow-list + strict argv shape) in the same boot pass
+# right after this import — a tampered seed argv is skipped there (C2).
+# ---------------------------------------------------------------------------
+
+_MCP_SEED_FILE = "/usr/share/hermes/seed/mcp-servers.json"
+_MCP_SEED_MARKER = "/var/lib/hermes/instance/mcp-seeds-imported.json"
+
+
+def _import_seed_mcp_servers() -> None:
+    """Import not-yet-imported seed MCP entries into Neus config (fail-soft)."""
+    try:
+        with open(_MCP_SEED_FILE, encoding="utf-8") as fh:
+            seeds = json.load(fh)
+    except FileNotFoundError:
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.dbus.mcp_seed_unreadable: %s", exc)
+        return
+    if not isinstance(seeds, list):
+        logger.warning("hermes.dbus.mcp_seed_malformed: expected a JSON list")
+        return
+
+    imported: set[str] = set()
+    try:
+        with open(_MCP_SEED_MARKER, encoding="utf-8") as fh:
+            imported = {str(s) for s in json.load(fh)}
+    except FileNotFoundError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes.dbus.mcp_seed_marker_unreadable: %s", exc)
+
+    existing = {e["server_id"] for e in _neus_load_entries()}
+    changed = False
+    for seed in seeds:
+        if not isinstance(seed, dict):
+            continue
+        sid = str(seed.get("server_id") or "")
+        argv = [str(a) for a in (seed.get("argv") or [])]
+        if not sid or not argv or sid in imported:
+            continue
+        imported.add(sid)  # attempted = imported: a bad seed must not retry every boot
+        changed = True
+        if sid in existing:
+            continue
+        try:
+            _neus_write_mcp_entry(
+                sid, argv,
+                env=seed.get("env") or None,
+                label=str(seed.get("label") or "") or None,
+            )
+            logger.info("hermes.dbus.mcp_seed_imported server=%s", sid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.mcp_seed_import_failed server=%s: %s", sid, exc)
+
+    if changed:
+        try:
+            import os  # noqa: PLC0415
+
+            os.makedirs(os.path.dirname(_MCP_SEED_MARKER), exist_ok=True)
+            tmp = _MCP_SEED_MARKER + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(sorted(imported), fh)
+            os.replace(tmp, _MCP_SEED_MARKER)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.mcp_seed_marker_write_failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -7215,7 +7302,7 @@ async def _mcp_connect(
     # en cuanto el ciclo se tainta por una respuesta MCP no confiable (CTRL-5). Cualquier
     # OTRO (añadido por el usuario) = USER_ADDED: DEFAULT_DENY + HITL en cada tool-call
     # (el broker escala, no recorta).
-    _BUILTIN_MCP_SLUGS = frozenset({"excel", "word", "powerpoint"})
+    _BUILTIN_MCP_SLUGS = frozenset({"excel", "word", "powerpoint", "serena"})
     if server_id in _MANAGED_REMOTE_MCP_SLUGS:
         _trust = TrustLevel.MANAGED_REMOTE
     elif server_id in _BUILTIN_MCP_SLUGS:
@@ -7417,6 +7504,9 @@ async def reconnect_persisted_mcp_servers(manager) -> None:
     open-design), se pasa a _mcp_connect para que llegue al launcher y al
     proceso del servidor. Sin esto, servidores BYOK fallan tras reiniciar.
     """
+    # First: land any image-baked seeds not yet registered (first boot / upgrade).
+    # The loop below then re-validates + connects them like any persisted entry.
+    _import_seed_mcp_servers()
     entries = _neus_load_entries()
     if not entries:
         return

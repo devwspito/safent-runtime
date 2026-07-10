@@ -503,3 +503,111 @@ class TestAddMcpServerGateAndNeusWrite:
         )
         server = next(s for s in listed if s["server_id"] == "myserver")
         assert server["tool_count"] == 3
+
+
+# ===========================================================================
+# Unit: _import_seed_mcp_servers — first-boot/upgrade seed importer
+#
+# Regression for the P0 found 2026-07-10: the image bakes + tmpfiles-copies
+# mcp-servers.json but NOTHING registered it into Neus since the single-source
+# migration → 0 seeded MCPs connected at startup (verified live on 0.8.32).
+# ===========================================================================
+
+from hermes.agents_os.infrastructure import dbus_runtime_service as _drs  # noqa: E402
+from hermes.agents_os.infrastructure.dbus_runtime_service import (  # noqa: E402
+    _import_seed_mcp_servers,
+)
+
+
+class TestSeedImporter:
+    SEEDS = [
+        {
+            "server_id": "excel",
+            "label": "Hojas de cálculo · crea y edita Excel (.xlsx) sin clave",
+            "argv": ["uvx", "excel-mcp-server", "stdio"],
+        },
+        {
+            "server_id": "serena",
+            "label": "Código · entiende y edita proyectos (Python, TypeScript) sin clave",
+            "argv": ["uvx", "--from", "serena-agent==1.5.3", "serena", "start-mcp-server"],
+        },
+    ]
+
+    def _wire(self, tmp_path, monkeypatch, *, seeds=None, marker=None, mcp_servers=None):
+        """Point the importer at tmp files + an in-memory Neus store; return the store."""
+        seed_file = tmp_path / "mcp-servers.json"
+        if seeds is not None:
+            seed_file.write_text(json.dumps(seeds), encoding="utf-8")
+        marker_file = tmp_path / "instance" / "mcp-seeds-imported.json"
+        if marker is not None:
+            marker_file.parent.mkdir(parents=True, exist_ok=True)
+            marker_file.write_text(json.dumps(marker), encoding="utf-8")
+        monkeypatch.setattr(_drs, "_MCP_SEED_FILE", str(seed_file))
+        monkeypatch.setattr(_drs, "_MCP_SEED_MARKER", str(marker_file))
+
+        store: dict[str, Any] = {"mcp_servers": dict(mcp_servers or {})}
+        cfg_mod = sys.modules["hermes_cli.config"]
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: store, raising=False)
+        monkeypatch.setattr(cfg_mod, "save_config", store.update, raising=False)
+        tool_mod = sys.modules["tools.mcp_tool"]
+        monkeypatch.setattr(
+            tool_mod, "_load_mcp_config", lambda: store.get("mcp_servers", {}), raising=False
+        )
+        monkeypatch.setattr(tool_mod, "register_mcp_servers", lambda _: [], raising=False)
+        return store, marker_file
+
+    def test_first_boot_imports_all_seeds_with_labels(self, tmp_path, monkeypatch):
+        store, marker_file = self._wire(tmp_path, monkeypatch, seeds=self.SEEDS)
+        _import_seed_mcp_servers()
+        assert set(store["mcp_servers"]) == {"excel", "serena"}
+        serena = store["mcp_servers"]["serena"]
+        assert serena["command"] == "uvx"
+        assert serena["args"][0:2] == ["--from", "serena-agent==1.5.3"]
+        assert serena["label"].startswith("Código")
+        # Marker records both ids so they never re-import.
+        assert set(json.loads(marker_file.read_text())) == {"excel", "serena"}
+
+    def test_second_call_is_idempotent(self, tmp_path, monkeypatch):
+        store, _ = self._wire(tmp_path, monkeypatch, seeds=self.SEEDS)
+        _import_seed_mcp_servers()
+        snapshot = json.dumps(store, sort_keys=True)
+        _import_seed_mcp_servers()
+        assert json.dumps(store, sort_keys=True) == snapshot
+
+    def test_owner_removed_seed_never_resurrects(self, tmp_path, monkeypatch):
+        # Marker says serena was imported once; the owner then removed it from Neus.
+        store, _ = self._wire(
+            tmp_path, monkeypatch, seeds=self.SEEDS, marker=["excel", "serena"],
+        )
+        _import_seed_mcp_servers()
+        assert "serena" not in store["mcp_servers"], (
+            "a seed the owner removed must not resurrect on the next boot"
+        )
+
+    def test_upgrade_adds_only_new_seed(self, tmp_path, monkeypatch):
+        # Existing volume: excel imported long ago (marker) and still configured;
+        # the image upgrade ships the new serena seed → only serena imports.
+        store, marker_file = self._wire(
+            tmp_path, monkeypatch, seeds=self.SEEDS, marker=["excel"],
+            mcp_servers={"excel": {"command": "uvx", "args": ["excel-mcp-server", "stdio"]}},
+        )
+        _import_seed_mcp_servers()
+        assert set(store["mcp_servers"]) == {"excel", "serena"}
+        assert set(json.loads(marker_file.read_text())) == {"excel", "serena"}
+
+    def test_existing_config_entry_is_never_overwritten(self, tmp_path, monkeypatch):
+        # The owner customized the excel argv — the importer must not clobber it.
+        custom = {"command": "uvx", "args": ["excel-mcp-server", "stdio", "--custom"]}
+        store, _ = self._wire(
+            tmp_path, monkeypatch, seeds=self.SEEDS, mcp_servers={"excel": dict(custom)},
+        )
+        _import_seed_mcp_servers()
+        assert store["mcp_servers"]["excel"] == custom
+
+    def test_missing_or_malformed_seed_is_fail_soft(self, tmp_path, monkeypatch):
+        store, _ = self._wire(tmp_path, monkeypatch, seeds=None)  # no file
+        _import_seed_mcp_servers()
+        assert store["mcp_servers"] == {}
+        (tmp_path / "mcp-servers.json").write_text("{not json", encoding="utf-8")
+        _import_seed_mcp_servers()
+        assert store["mcp_servers"] == {}
