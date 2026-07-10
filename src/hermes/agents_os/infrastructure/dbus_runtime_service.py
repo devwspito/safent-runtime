@@ -6820,6 +6820,20 @@ _MCP_SEED_FILE = "/usr/share/hermes/seed/mcp-servers.json"
 _MCP_SEED_MARKER = "/var/lib/hermes/instance/mcp-seeds-imported.json"
 
 
+def _seed_server_ids() -> set[str]:
+    """Return the server_ids shipped in the IMAGE seed file (fail-soft: empty set)."""
+    try:
+        with open(_MCP_SEED_FILE, encoding="utf-8") as fh:
+            seeds = json.load(fh)
+        return {
+            str(s.get("server_id"))
+            for s in seeds
+            if isinstance(s, dict) and s.get("server_id")
+        }
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 def _import_seed_mcp_servers() -> None:
     """Import not-yet-imported seed MCP entries into Neus config (fail-soft)."""
     try:
@@ -7533,6 +7547,36 @@ async def reconnect_persisted_mcp_servers(manager) -> None:
                 sid, len(server.tools), sorted(stored_env.keys()),
             )
         except Exception as exc:  # noqa: BLE001
+            # SELF-HEAL (seeds only): on an EXISTING volume, an image upgrade ships a new
+            # seed whose baked runner cache never reaches the volume (copy-up is first-
+            # boot-only) → the offline spawn dies on a cold cache. Re-warm it through the
+            # SAME trusted-daemon prefetch add_mcp_server uses (network lives here, never
+            # in the MCP runtime) and retry once. Seeds ship in the signed image and were
+            # C2-revalidated above; USER-ADDED entries are excluded — their prefetch
+            # happened at install time and is not ours to silently re-run.
+            if sid in _seed_server_ids():
+                logger.warning(
+                    "hermes.dbus.mcp_reconnect_failed server=%s: %s — seed entry, "
+                    "re-warming cache via trusted-path prefetch and retrying once",
+                    sid, exc,
+                )
+                try:
+                    import asyncio  # noqa: PLC0415
+
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, _prefetch_mcp_package, sid, argv)
+                    server = await _mcp_connect(manager, sid, argv, env=stored_env)
+                    logger.info(
+                        "hermes.dbus.mcp_reconnected_after_prefetch server=%s tools=%d",
+                        sid, len(server.tools),
+                    )
+                    continue
+                except Exception as exc2:  # noqa: BLE001
+                    logger.warning(
+                        "hermes.dbus.mcp_seed_prefetch_retry_failed server=%s: %s "
+                        "(will retry on next boot)", sid, exc2,
+                    )
+                continue
             logger.warning(
                 "hermes.dbus.mcp_reconnect_failed server=%s: %s", sid, exc
             )
