@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-ui",
+  "description": "Safent web UI (served by the local container at http://localhost:<port>). Grants ONLY the host-clipboard bridge used by the Live/Teaching VNC view — WKWebView gates navigator.clipboard.readText behind a paste-permission prompt, so the shell reads/writes the host clipboard instead. No core permissions: the remote page gets no window/event/app control.",
+  "local": false,
+  "remote": {
+    "urls": ["http://localhost:*", "http://127.0.0.1:*"]
+  },
+  "windows": ["main"],
+  "permissions": ["allow-read-host-clipboard", "allow-write-host-clipboard"]
+}

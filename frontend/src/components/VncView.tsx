@@ -37,6 +37,41 @@ function isPasteCombo(e: KeyboardEvent): boolean {
   return v && (e.ctrlKey || e.metaKey) && !e.altKey
 }
 
+// ---- local clipboard access (desktop app vs plain browser) ---------------------------
+// Under the Tauri desktop shell, navigator.clipboard.readText() is gated by the webview
+// (WKWebView pops a paste-permission "Paste" button; WebKitGTK may deny silently), which
+// killed paste-into-Live since the app shipped as a .dmg. The shell exposes the HOST
+// clipboard over IPC (read_host_clipboard / write_host_clipboard — granted to this origin
+// in the shell's capabilities), so when Tauri is present we use that: no prompt, and it is
+// the same clipboard the user actually copied into. In a plain browser (curl install) we
+// keep navigator.clipboard, which works natively there.
+type TauriGlobal = { core?: { invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } }
+
+function tauriInvoke(): ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null {
+  const t = (window as unknown as { __TAURI__?: TauriGlobal }).__TAURI__
+  return t?.core?.invoke ?? null
+}
+
+function readLocalClipboard(): Promise<string> {
+  const invoke = tauriInvoke()
+  if (invoke) {
+    return invoke('read_host_clipboard')
+      .then((v) => (typeof v === 'string' ? v : ''))
+      .catch(() => navigator.clipboard?.readText?.() ?? '')
+  }
+  return navigator.clipboard.readText()
+}
+
+function writeLocalClipboard(text: string): Promise<void> {
+  const invoke = tauriInvoke()
+  if (invoke) {
+    return invoke('write_host_clipboard', { text })
+      .then(() => undefined)
+      .catch(() => navigator.clipboard?.writeText?.(text))
+  }
+  return navigator.clipboard.writeText(text)
+}
+
 /** Framed container around a VncView — used by Actividad and the chat inline live panel
  *  (16:9), and the full-screen teaching modal (fill = grow to fill the flex parent). */
 export function VncFrame({ viewOnly, fill }: { viewOnly?: boolean; fill?: boolean }) {
@@ -79,7 +114,7 @@ export function VncView({
     let retry: ReturnType<typeof setTimeout> | null = null
     let poll: ReturnType<typeof setInterval> | null = null
 
-    const canRead = !!(navigator.clipboard && navigator.clipboard.readText)
+    const canRead = tauriInvoke() != null || !!(navigator.clipboard && navigator.clipboard.readText)
     let lastPushed: string | null = null // last text we set on the jail clipboard
     let lastSeenFromJail: string | null = null // last text we pulled from the jail
 
@@ -101,10 +136,11 @@ export function VncView({
       e.preventDefault()
       e.stopImmediatePropagation()
       const withShift = e.shiftKey
-      navigator.clipboard
-        .readText()
+      readLocalClipboard()
         .then((text) => {
-          if (text != null && text !== lastPushed) {
+          // '' means empty/non-text local clipboard (e.g. a copied image) — don't wipe the
+          // jail's clipboard with it; just fire the paste with whatever the jail has.
+          if (text && text !== lastPushed) {
             lastPushed = text
             return setBrowserClipboard(text)
           }
@@ -120,8 +156,8 @@ export function VncView({
           const t = r?.text
           if (!t || t === lastSeenFromJail || t === lastPushed) return
           lastSeenFromJail = t
-          navigator.clipboard?.writeText(t).catch(() => {
-            setTimeout(() => navigator.clipboard?.writeText(t).catch(() => {}), 0)
+          writeLocalClipboard(t).catch(() => {
+            setTimeout(() => writeLocalClipboard(t).catch(() => {}), 0)
           })
         })
         .catch(() => { /* transient */ })
@@ -137,9 +173,9 @@ export function VncView({
     // On focus: presync the local clipboard to the jail so any later paste is correct.
     const onFocus = () => {
       if (canRead && document.hasFocus()) {
-        navigator.clipboard.readText()
+        readLocalClipboard()
           .then((text) => {
-            if (text != null && text !== lastPushed) {
+            if (text && text !== lastPushed) {
               lastPushed = text
               return setBrowserClipboard(text)
             }

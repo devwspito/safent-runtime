@@ -63,7 +63,8 @@ fn augmented_path() -> String {
     if let Some(home) = std::env::var_os("HOME") {
         parts.push(format!("{}/.local/bin", home.to_string_lossy()));
     }
-    parts.join(":")
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    parts.join(sep)
 }
 
 /// The installed `safent` CLI path, or None if it is not installed yet.
@@ -150,6 +151,99 @@ fn install_podman(window: tauri::WebviewWindow) {
             Err(e) => show_error(&window, &format!("No pude instalar Podman: {e}")),
         }
     });
+}
+
+// ---- host clipboard bridge (for the Live/Teaching VNC view) ----------------------------
+// The jailed browser is a Linux Chromium mirrored over VNC, so its clipboard is the jail's
+// X CLIPBOARD (xclip bridge in VncView). The missing hop is LOCAL clipboard <-> page:
+// navigator.clipboard.readText() under WKWebView pops the paste-permission button, so the
+// web UI (when it detects Tauri) asks the SHELL for the host clipboard instead — no prompt.
+// Exposed to the remote UI origin only via capabilities/remote-ui.json.
+
+/// Return the platform command that prints the clipboard to stdout. Windows is deliberately
+/// absent: PowerShell's Get/Set-Clipboard mangle UTF-8 via OEM codepages while "succeeding",
+/// which would shadow the WebView2 navigator.clipboard path that already works there — the
+/// commands return Err on Windows so the frontend falls back to it (zero regression).
+#[cfg(not(target_os = "windows"))]
+fn clipboard_read_cmd() -> (&'static str, &'static [&'static str]) {
+    #[cfg(target_os = "macos")]
+    return ("pbpaste", &[]);
+    #[cfg(not(target_os = "macos"))]
+    return ("sh", &["-c", "wl-paste --no-newline 2>/dev/null || xclip -selection clipboard -o 2>/dev/null"]);
+}
+
+/// Return the platform command that sets the clipboard from stdin.
+#[cfg(not(target_os = "windows"))]
+fn clipboard_write_cmd() -> (&'static str, &'static [&'static str]) {
+    #[cfg(target_os = "macos")]
+    return ("pbcopy", &[]);
+    #[cfg(not(target_os = "macos"))]
+    return ("sh", &["-c", "wl-copy 2>/dev/null || xclip -selection clipboard -i 2>/dev/null"]);
+}
+
+/// Apply the platform env the clipboard tools need: augmented PATH, and on macOS a UTF-8
+/// LC_CTYPE — Finder-launched apps inherit the C locale, under which pbpaste/pbcopy
+/// transliterate non-ASCII (ñ/€/emoji) to '?'.
+#[cfg(not(target_os = "windows"))]
+fn clipboard_env(cmd: &mut Command) {
+    cmd.env("PATH", augmented_path());
+    #[cfg(target_os = "macos")]
+    cmd.env("LC_CTYPE", "UTF-8");
+}
+
+/// Read the HOST clipboard as text (empty string when empty/non-text). `async` so the
+/// blocking child process runs off the UI thread (a sync #[tauri::command] executes inline
+/// in the webview IPC callback — a hung clipboard tool would freeze the window).
+#[tauri::command]
+async fn read_host_clipboard() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    return Err("host clipboard bridge unavailable on Windows — use navigator.clipboard".into());
+    #[cfg(not(target_os = "windows"))]
+    {
+        let (prog, args) = clipboard_read_cmd();
+        let mut cmd = Command::new(prog);
+        cmd.args(args);
+        clipboard_env(&mut cmd);
+        let out = cmd.output().map_err(|e| format!("clipboard read failed: {e}"))?;
+        if !out.status.success() {
+            return Ok(String::new()); // empty clipboard exits non-zero on some tools — not an error
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+/// Write text to the HOST clipboard (via stdin — no arg-quoting pitfalls). `async` for the
+/// same off-the-UI-thread reason as read_host_clipboard.
+#[tauri::command]
+async fn write_host_clipboard(text: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = text;
+        return Err("host clipboard bridge unavailable on Windows — use navigator.clipboard".into());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::io::Write;
+        let (prog, args) = clipboard_write_cmd();
+        let mut cmd = Command::new(prog);
+        cmd.args(args);
+        clipboard_env(&mut cmd);
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("clipboard write failed: {e}"))?;
+        if let Some(mut sin) = child.stdin.take() {
+            sin.write_all(text.as_bytes()).map_err(|e| format!("clipboard write failed: {e}"))?;
+        }
+        let status = child.wait().map_err(|e| format!("clipboard write failed: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("clipboard write exited with {}", status.code().unwrap_or(-1)))
+        }
+    }
 }
 
 fn js_escape(s: &str) -> String {
@@ -358,7 +452,11 @@ fn start_update_checker(window: &tauri::WebviewWindow) {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![install_podman])
+        .invoke_handler(tauri::generate_handler![
+            install_podman,
+            read_host_clipboard,
+            write_host_clipboard
+        ])
         .setup(|app| {
             // NOTE: do NOT replace the default macOS menu. A custom menu that drops the
             // standard Edit submenu breaks keyboard routing to WKWebView entirely (no

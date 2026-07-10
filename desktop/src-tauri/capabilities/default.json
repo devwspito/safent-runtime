@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Safent desktop — core IPC for the local loader window (install button).",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "allow-install-podman"]
 }
