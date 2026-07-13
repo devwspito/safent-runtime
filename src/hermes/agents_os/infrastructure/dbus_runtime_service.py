@@ -6743,7 +6743,12 @@ def _neus_load_entries() -> list[dict]:
 
 
 def _neus_write_mcp_entry(
-    server_id: str, argv: list[str], *, env: dict | None = None, label: str | None = None
+    server_id: str,
+    argv: list[str],
+    *,
+    env: dict | None = None,
+    label: str | None = None,
+    register: bool = True,
 ) -> None:
     """Persist a new/updated MCP server entry into Neus's config.yaml.
 
@@ -6756,6 +6761,13 @@ def _neus_write_mcp_entry(
       args: argv[1:]
       env: {...}   (omitted when empty)
       label: "…"   (omitted when empty; Safent-only, Neus ignores it)
+
+    register=False writes ONLY the config and skips register_mcp_servers — used by
+    the boot seed importer, because register_mcp_servers() BLOCKS the calling thread
+    (tools.mcp_tool._run_on_mcp_loop → future.result() up to 120s per server). On the
+    daemon's asyncio thread that freezes D-Bus dispatch for minutes at boot (the whole
+    UI goes "agente no disponible"). The boot reconnect loop connects the servers right
+    after, off the critical path — so the importer only needs to persist the entry.
     """
     from hermes_cli.config import load_config, save_config  # noqa: PLC0415
 
@@ -6772,6 +6784,8 @@ def _neus_write_mcp_entry(
     mcp_servers[server_id] = entry
     save_config(cfg)
 
+    if not register:
+        return
     # Notify Neus's live registry so the server is available immediately
     # without restarting the daemon. register_mcp_servers is idempotent for
     # already-connected servers but activates the newly written entry.
@@ -6857,10 +6871,14 @@ def _import_seed_mcp_servers() -> None:
         if sid in existing:
             continue
         try:
+            # register=False: only persist. register_mcp_servers() BLOCKS (up to 120s
+            # per server) and would freeze the daemon's event loop / D-Bus at boot. The
+            # reconnect loop below connects the servers off the critical path.
             _neus_write_mcp_entry(
                 sid, argv,
                 env=seed.get("env") or None,
                 label=str(seed.get("label") or "") or None,
+                register=False,
             )
             logger.info("hermes.dbus.mcp_seed_imported server=%s", sid)
         except Exception as exc:  # noqa: BLE001
@@ -7302,7 +7320,7 @@ async def _mcp_connect(
     # en cuanto el ciclo se tainta por una respuesta MCP no confiable (CTRL-5). Cualquier
     # OTRO (añadido por el usuario) = USER_ADDED: DEFAULT_DENY + HITL en cada tool-call
     # (el broker escala, no recorta).
-    _BUILTIN_MCP_SLUGS = frozenset({"excel", "word", "powerpoint", "serena"})
+    _BUILTIN_MCP_SLUGS = frozenset({"excel", "word", "powerpoint"})
     if server_id in _MANAGED_REMOTE_MCP_SLUGS:
         _trust = TrustLevel.MANAGED_REMOTE
     elif server_id in _BUILTIN_MCP_SLUGS:

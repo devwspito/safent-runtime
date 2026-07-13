@@ -95,13 +95,9 @@ Environment=HOME=/var/lib/hermes/mcp-home
 Environment=npm_config_cache=/var/lib/hermes/npm-cache
 Environment=UV_CACHE_DIR=/var/lib/hermes/uv-cache
 Environment=XDG_CACHE_HOME=/var/lib/hermes/xdg-cache
-# Seeded code MCP (serena) hardening — forwarded to every MCP child (unit-set,
-# never caller-set; see _FORWARDED_ENV_KEYS in the launcher):
-#   SERENA_USAGE_REPORTING=false — disables serena's start-up phone-home ping
-#     (requests.get to oraios-software.de; the proxy blocks it anyway — belt+braces).
-#   UV_OFFLINE=1 — serena provisions language servers via INTERNAL uvx spawns; the
-#     launcher's injected --offline only covers argv[0], this env covers the rest.
-Environment=SERENA_USAGE_REPORTING=false
+# Defense-in-depth for uvx-based MCP children: the launcher already injects `--offline`
+# on argv[0]; UV_OFFLINE=1 also forces any INTERNAL uvx spawn a server makes to stay
+# offline, so nothing in the cage can reach a package registry at runtime.
 Environment=UV_OFFLINE=1
 
 ExecStart=/usr/libexec/hermes/hermes-mcp-launcher

@@ -78,6 +78,13 @@ SupplementaryGroups=hermes-egress hermes-work
 #     [Service]
 #     ExecStartPre=-/usr/bin/hermes-landlock-assert
 ExecStartPre=/usr/bin/hermes-landlock-assert
+# Fill the seeded-MCP offline caches into the volume from the image-baked seed BEFORE the
+# daemon starts (so reconnect finds a COMPLETE cache and every MCP spawns offline). Runs
+# as root (+) — it copies root-owned /opt/hermes/mcp-seed into the volume and chowns to
+# hermes:hermes-work. Fixes the partial first-boot copy-up on podman-machine VMs that left
+# uvx --offline unable to resolve. Fail-soft: the script always exits 0, so a cache problem
+# never blocks the daemon/UI. '-' prefix = don't fail the unit even on a non-zero exit.
+ExecStartPre=-+/usr/libexec/hermes/hermes-mcp-cache-sync
 ExecStart=/usr/bin/hermes-runtime --systemd-notify
 # WorkingDirectory: el Cerebro escribe ficheros relativos (write_file, terminal,
 # documentos generados) aquí por defecto. /var/lib/hermes/workspace está en

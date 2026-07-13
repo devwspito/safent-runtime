@@ -1,0 +1,49 @@
+#!/bin/sh
+# hermes-mcp-cache-sync — fill the seeded-MCP OFFLINE caches into the (writable) data
+# volume from the image-baked seed. Runs as an ExecStartPre of hermes-runtime.
+#
+# WHY: the seeded MCP servers (excel/word/powerpoint/serena) spawn with `uvx/npx
+# --offline` — cache-only, no network (the cage's default-deny netns). Their caches used
+# to live under /var/lib/hermes, which the named data volume shadows, so they reached a
+# customer's FRESH volume only through podman's ONE-SHOT, first-boot-only copy-up. On a
+# resource-constrained podman-machine VM (macOS) that copy-up came up PARTIAL (observed
+# 322 of 540 MB) and podman never retries it → every MCP died with "Connection closed".
+#
+# FIX: the COMPLETE caches are now baked at /opt/hermes/mcp-seed (an image path the volume
+# can NEVER shadow). This copies them into place ourselves — reliable, copy-up-independent.
+# Idempotent via a version marker; the marker is written ONLY on a fully-successful copy,
+# so a partial/interrupted run is retried on the next boot. NEVER fails the daemon: every
+# error is swallowed and we always exit 0 (a broken cache must not block the whole UI).
+set -u
+SEED=/opt/hermes/mcp-seed
+DEST=/var/lib/hermes
+MARKER="$DEST/.mcp-cache-synced-v1"
+
+# Nothing to do if the seed is absent (older image) or we already synced fully.
+[ -d "$SEED" ] || exit 0
+[ -f "$MARKER" ] && exit 0
+
+echo "[cache-sync] filling MCP offline cache from image seed ($SEED -> $DEST)…"
+ok=1
+for d in uv-cache npm-cache xdg-cache mcp-home; do
+    [ -d "$SEED/$d" ] || continue
+    mkdir -p "$DEST/$d" 2>/dev/null || true
+    # Overwrite (no -n) so a partially copied-up file is REPAIRED, not left truncated.
+    # timeout guards against a hung copy stalling the whole boot.
+    if ! timeout 300 cp -a "$SEED/$d/." "$DEST/$d/" 2>/dev/null; then
+        ok=0
+    fi
+done
+
+chown -R hermes:hermes-work \
+    "$DEST/uv-cache" "$DEST/npm-cache" "$DEST/xdg-cache" "$DEST/mcp-home" 2>/dev/null || true
+chmod -R g+rwX \
+    "$DEST/uv-cache" "$DEST/npm-cache" "$DEST/xdg-cache" "$DEST/mcp-home" 2>/dev/null || true
+
+if [ "$ok" = 1 ]; then
+    touch "$MARKER" 2>/dev/null || true
+    echo "[cache-sync] done."
+else
+    echo "[cache-sync] incomplete — will retry next boot."
+fi
+exit 0

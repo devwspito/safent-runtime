@@ -321,10 +321,8 @@ _FORWARDED_ENV_KEYS: frozenset[str] = _ALLOWED_ENV_KEYS | frozenset({
     "PATH",            # runner resolves its own helpers (npm, node) inside the unit
     "NODE_OPTIONS",    # --dns-result-order=ipv4first (unit-set; reliable npm download)
     "HOME",            # ALWAYS the launcher unit's own value — never caller-set
-    # Unit-set hardening for the seeded code MCP (serena) — never caller-set:
-    "SERENA_USAGE_REPORTING",  # =false → disables serena's start-up phone-home ping
-    "UV_OFFLINE",      # =1 → serena's INTERNAL uvx spawns (LS provisioning) also stay
-                       # offline; the injected --offline only covers argv[0]
+    "UV_OFFLINE",      # =1 → any INTERNAL uvx spawn a server makes also stays offline;
+                       # the injected --offline only covers argv[0] (defense-in-depth)
 })
 
 # ── Logging ───────────────────────────────────────────────────────────────────
