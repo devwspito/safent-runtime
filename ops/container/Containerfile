@@ -41,7 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config libdbus-1-dev libssl-dev libseccomp-dev libseccomp2 \
       nftables iproute2 iptables cgroup-tools \
       git curl ca-certificates tini tzdata \
-      openssh-client \
+      openssh-client socat x11vnc xclip \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
     # systemd-in-container hygiene: drop units that hang or are pointless headless
     && rm -f /lib/systemd/system/systemd-firstboot.service \
@@ -315,17 +315,9 @@ COPY ops/agent-cage/systemd/hermes-runtime.service.d/openshell.conf \
 RUN chmod 0755 /usr/libexec/hermes/openshell && \
     chown root:root /usr/libexec/hermes/openshell /usr/lib/hermes/openshell/libz3.so.4
 
-# socat: the browser-jail CDP relay (daemon ⇄ jailed Chromium) needs it. Without it
-# the daemon can't reach the browser's CDP port. (Late layer = cheap rebuild.)
-# x11vnc: the jailed browser runs HEADFUL on an Xvfb display (industry-standard
-# Kasm/neko live-view — sharp + fluid, unlike the CDP screencast). x11vnc streams
-# that real display; the shell-server proxies it to the web UI. (Xvfb ships with
-# the Playwright base image.)
-# xclip: the clipboard bridge (hermes-clipboard-server) uses it as a PROPER X selection
-# owner — it answers the TARGETS request Chromium sends before pasting (which x11vnc's own
-# owner does not → paste hangs) and serves UTF8_STRING, so accents/€/emoji/CJK paste right.
-RUN apt-get update && apt-get install -y --no-install-recommends socat x11vnc xclip \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# socat (CDP relay), x11vnc (live jailed browser) and xclip (clipboard bridge)
+# are installed with the stable base packages above. Keeping a second apt layer
+# after application/ops COPY made every source edit redownload apt metadata.
 
 # Trivy CVE scanner (Security Center CVE slot probes /usr/bin/trivy exactly).
 # Strategy:
