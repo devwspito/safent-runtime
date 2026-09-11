@@ -196,6 +196,18 @@ CREATE INDEX IF NOT EXISTS idx_agent_tasks_conversation
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_worker_active
     ON agent_tasks (worker_id)
     WHERE status = 'in_progress';
+
+-- ── ÍNDICE — GET /api/v1/tasks/dashboard (docs/logica-pendiente-2026-09-11 §1) ──
+
+-- Q: "todas las tareas, más recientes primero, filtrables por dueño/estado"
+--    (SqliteTasksDashboardRepository.list_dashboard_tasks). Sin WHERE parcial
+--    a propósito — el dashboard recorre TODOS los estados, no un subconjunto
+--    como los índices P0 de arriba. owner=operator_id, estado=status,
+--    fecha=created_at (orden de la cláusula deja created_at último a la
+--    derecha para servir tanto "por owner" como "por owner+estado" como
+--    "todas, por fecha" desde el mismo índice).
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_dashboard
+    ON agent_tasks (operator_id, status, created_at);
 """
 
 # Columnas nuevas de P1 (ALTER ADD COLUMN). Cada una en su propio statement

@@ -79,6 +79,17 @@ CREATE INDEX IF NOT EXISTS msg_conv_idx
   ON messages (conversation_id, created_at);
 """
 
+# Q: "último mensaje assistant de esta tarea" — SqliteTasksDashboardRepository
+# (GET /api/v1/tasks/dashboard, docs/logica-pendiente-2026-09-11 §1). `task_id`
+# llegó por ALTER (migración idempotente abajo), así que este índice se crea
+# aparte del bloque _SCHEMA de arriba (no puede referenciar una columna que la
+# migración todavía no añadió en una DB vieja re-abierta).
+_MESSAGES_TASK_ID_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_messages_task_id
+  ON messages (task_id, created_at)
+  WHERE task_id IS NOT NULL;
+"""
+
 
 def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
@@ -142,6 +153,7 @@ class SQLiteConversationRepository:
             # persistencia incremental del asistente (resume mirror-first en refresh).
             if "status" not in mcols:
                 conn.execute("ALTER TABLE messages ADD COLUMN status TEXT")
+            conn.executescript(_MESSAGES_TASK_ID_INDEX)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, isolation_level=None)

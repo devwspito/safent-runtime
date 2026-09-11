@@ -163,6 +163,31 @@ class RecentTaskView:
 
 
 @dataclass(frozen=True, slots=True)
+class DashboardTaskView:
+    """Read-model row for `GET /api/v1/tasks/dashboard` (docs/logica-pendiente
+    2026-09-11 §1). One row = one `agent_tasks` work item, enriched with its
+    durable delegation link and HITL approvals — never payload/credentials.
+
+    `source` is derived ONLY from the durable `pending_delegations.task_id`
+    link (never from label/instruction text — spec requirement).
+
+    `approval_ids`: `None` = not checked (evidence source unavailable for
+    THIS row); `()` = checked, no approvals found. Never conflate the two.
+    """
+
+    task_id: str
+    label: str
+    status: str
+    source: str  # 'local' | 'enterprise'
+    requested_by: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    conversation_id: str | None = None
+    result: str | None = None
+    approval_ids: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AuthenticatedChannel:
     """Identidad del canal autenticado del plano de control (FR-014/NFR-003).
 

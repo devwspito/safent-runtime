@@ -18,6 +18,26 @@ _DEFAULT_COLOR = "#6366f1"
 _FALLBACK_ROLE = "asistente personal que opera el ordenador, el navegador y las apps del usuario"
 _FALLBACK_MISSION = "ayudar al usuario con lo que pida y llevar tareas de principio a fin"
 
+# Retired factory catalog (docs/logica-pendiente-2026-09-11 §2 / SAFENT-PENDIENTES
+# §5 "Retirada de empaquetados"): the ~27 packaged specialists shipped as
+# `default_roster()` are PERMANENTLY retired — no edition seeds them anymore.
+# Rows with this id prefix that already exist on an upgraded install are kept
+# (history must stay resolvable — old chats/tasks keep their attribution) but
+# are NEVER a valid target for a NEW execution. `roster-` alone is sufficient
+# and needs no DB round-trip: every id this prefix was ever minted under
+# (see the now-deleted `default_roster()` seed data) is retired, full stop —
+# there is no "custom" agent that legitimately uses this prefix.
+RETIRED_FACTORY_AGENT_ID_PREFIX = "roster-"
+
+
+def is_retired_factory_agent_id(agent_id: str) -> bool:
+    """True for any id from the retired packaged-specialist catalog.
+
+    Pure/no I/O — a NEW execution against a matching id must be rejected
+    BEFORE any persona/registry lookup (fail-closed, no silent fallback to
+    the default agent, no silent success)."""
+    return agent_id.startswith(RETIRED_FACTORY_AGENT_ID_PREFIX)
+
 
 class AutonomyLevel(StrEnum):
     """Nivel de autonomía del agente — cuánta aprobación humana exige.
@@ -190,19 +210,14 @@ _SHARED_GOLDEN_RULES: tuple[str, ...] = (
     "Sabes crear y coordinar agentes: si el usuario pide 'un equipo con estas "
     "tareas y horarios', planifica el reparto, crea los agentes, asígnales "
     "capacidades/conexiones/permisos y programa sus tareas (el dueño confirma).",
-    # 5b — árbol de decisión de delegación (step 1 = ¿hay especialista?)
-    "TIENES UN EQUIPO de especialistas YA listos: ventas, marketing, finanzas, "
-    "operaciones, investigación, atención al cliente, creatividad/diseño, legal y "
-    "código. Ante cada petición razona en este orden: "
-    "(1) ¿HAY UN ESPECIALISTA del equipo que pueda hacer ESTA tarea? Si SÍ → "
-    "DELÉGALA con delegate_task (objetivo + pasos); el especialista la ejecuta y "
-    "aparece trabajando en vivo en el Office. "
-    "(2) Si NO hay especialista que encaje y aun así es una tarea de trabajo real, "
-    "crea un subagente nuevo para ella. "
-    "(3) Si NO es una tarea sino una consulta tipo chat (una pregunta rápida, "
-    "aclaración o charla), respóndela tú directamente para que sea más rápido. "
+    # 5b — árbol de decisión de delegación (sin catálogo fijo: decide en vivo)
+    "Ante cada petición razona en este orden: "
+    "(1) ¿Es una tarea de trabajo real (no una pregunta rápida)? Créale un "
+    "subagente con delegate_task (objetivo + pasos) y deja que la ejecute. "
+    "(2) Si es una consulta tipo chat (pregunta rápida, aclaración o charla), "
+    "respóndela tú directamente para que sea más rápido. "
     "Tú coordinas y entregas el resultado; no hagas tú solo el trabajo que un "
-    "especialista del equipo hace mejor.",
+    "subagente hace mejor.",
     # 6 — método
     "Método: objetivo → plan → acción con la herramienta adecuada → observa el "
     "resultado → corrige. Pide aclaración SOLO si es imprescindible para no "

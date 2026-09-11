@@ -634,42 +634,13 @@ def _build_tool_call_emitter(
             accumulator.append(descriptor)
         # Record real in-flight tool BEFORE emitting the frame so the registry
         # is always up-to-date by the time the frame reaches the client.
+        # Retired packaged catalog (docs/logica-pendiente-2026-09-11 §2): this
+        # used to re-attribute a `delegate_task` call to a heuristically
+        # matched roster-* specialist so the (now-retired) Office view could
+        # show that "muñeco" as live. The catalog is gone — attribute EVERY
+        # tool call to the real agent that ran it, never a guessed one.
         if live_agent_id:
-            activity_agent = live_agent_id
-            activity_tool = function_name
-            # Delegación: atribuir la actividad EN VIVO al especialista del roster que
-            # mejor encaja, para que el Office muestre a ESE muñeco "trabajando"
-            # (conectado) durante la sub-tarea, no al Cerebro.
-            is_delegation = function_name == "delegate_task"
-            spec_id: str | None = None
-            if is_delegation:
-                from hermes.agents.domain.default_roster import match_specialist  # noqa: PLC0415
-                spec_text = " ".join(
-                    str(function_args.get(k, ""))
-                    for k in ("role", "goal", "context", "task", "instruction")
-                )
-                spec_id = match_specialist(spec_text)
-                if spec_id:
-                    activity_agent = spec_id
-                    activity_tool = "trabajando"
-            live_activity.record(_task_id_str, activity_agent, activity_tool)
-            if is_delegation and spec_id and spec_id != live_agent_id:
-                try:
-                    label = ""
-                    for key in ("goal", "role", "task"):
-                        raw = function_args.get(key)
-                        if raw:
-                            label = str(raw).strip()[:80]
-                            break
-                    live_activity.record_delegation(
-                        _task_id_str, from_id=live_agent_id, to_id=spec_id, label=label
-                    )
-                except Exception:  # noqa: BLE001 — a label/edge failure must never break dispatch
-                    logger.debug(
-                        "hermes.nous_engine.record_delegation_failed task=%s to=%s",
-                        _task_id_str,
-                        spec_id,
-                    )
+            live_activity.record(_task_id_str, live_agent_id, function_name)
         chunk = TaskStreamChunk(kind=StreamChunkKind.TOOL_CALL, tool_call=descriptor)
         try:
             fut = asyncio.run_coroutine_threadsafe(

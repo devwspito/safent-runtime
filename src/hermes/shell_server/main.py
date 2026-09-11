@@ -37,6 +37,10 @@ from hermes.shell_server.providers.domain import (
 from hermes.shell_server.providers.repo import SQLiteProviderRepository
 from hermes.shell_server.security.secrets import SecretsVault
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable, EnqueueBlockedByKillSwitch
+from hermes.tasks.control_plane.infrastructure.sqlite_tasks_dashboard_repository import (
+    SqliteTasksDashboardRepository,
+    TasksDashboardUnavailable,
+)
 
 logger = logging.getLogger("hermes-shell-server")
 
@@ -681,6 +685,25 @@ async def authenticate_websocket(websocket: WebSocket) -> bool:
     return False
 
 
+def _dashboard_task_to_dict(view: Any) -> dict[str, Any]:
+    """Serialize a DashboardTaskView (F007 dashboard). Optional fields are
+    OMITTED (not sent as null) when there is no evidence for them — matches
+    the wire contract's `field?` semantics (frontend/src/api/types.ts)."""
+    out: dict[str, Any] = {
+        "task_id": view.task_id,
+        "label": view.label,
+        "status": view.status,
+        "source": view.source,
+    }
+    for key in ("requested_by", "created_at", "updated_at", "conversation_id", "result"):
+        value = getattr(view, key)
+        if value is not None:
+            out[key] = value
+    if view.approval_ids is not None:
+        out["approval_ids"] = list(view.approval_ids)
+    return out
+
+
 def create_app() -> FastAPI:
     from contextlib import asynccontextmanager  # noqa: PLC0415
 
@@ -927,6 +950,12 @@ def create_app() -> FastAPI:
     )
 
     conv_repo = SQLiteConversationRepository(db_path=_DB_PATH)
+    # F007 dashboard read-model (docs/logica-pendiente-2026-09-11 §1): mirror
+    # read-only over the SAME shell-state.db the daemon writes agent_tasks/
+    # pending_delegations/pending_approvals to. Connection-per-call — safe to
+    # construct before those tables exist (a missing table 503s the route,
+    # it never crashes app startup).
+    tasks_dashboard_repo = SqliteTasksDashboardRepository(db_path=_DB_PATH)
     # Registro de agentes compartido (misma shell-state.db que el daemon). El
     # shell-server SOLO lo LEE (agente activo para taguear la conversación); la
     # gobernanza vive en el daemon vía D-Bus (Principio 0). El seed es race-safe.
@@ -950,6 +979,7 @@ def create_app() -> FastAPI:
     app.state.repo = repo
     app.state.vault = vault
     app.state.conv_repo = conv_repo
+    app.state.tasks_dashboard_repo = tasks_dashboard_repo
     app.state.audit_writer = audit_writer
     app.state.prometheus_exporter = prometheus_exporter
     # T048: ControlPlanePort client (D-Bus → daemon). Populated here so tests
@@ -1102,6 +1132,45 @@ def create_app() -> FastAPI:
                 "available": False,
                 "captured_at": datetime.now(tz=UTC).isoformat(),
             }
+
+    # ------------------------------------------------------------------
+    # Tasks dashboard READ MODEL — GET /api/v1/tasks/dashboard
+    # (docs/logica-pendiente-2026-09-11 §1 / SAFENT-PENDIENTES.md §5)
+    # Fail-HARD: 503 on source failure, NEVER a false empty success — unlike
+    # /configured and /recent below, which pre-date this contract and stay
+    # fail-soft (available=false) for backwards compatibility.
+    # ------------------------------------------------------------------
+
+    @app.get("/api/v1/tasks/dashboard")
+    async def tasks_dashboard(limit: int = 100) -> dict[str, Any]:
+        """Community task dashboard: local `agent_tasks` enriched with the
+        durable delegation `source` and HITL `approval_ids`. Never exposes
+        payload/instruction beyond the truncated label, never credentials.
+
+        `limit` clamped to [1, 500] (CWE-770 — unbounded query depth).
+        """
+        clamped_limit = max(1, min(limit, 500))
+        try:
+            views, has_more = tasks_dashboard_repo.list_dashboard_tasks(
+                limit=clamped_limit
+            )
+        except TasksDashboardUnavailable as exc:
+            logger.warning(
+                "hermes.shell_server.tasks.dashboard.unavailable",
+                extra={"reason": str(exc)},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "tasks_dashboard_unavailable",
+                    "message": "El origen de datos de tareas no está disponible.",
+                },
+            ) from exc
+        return {
+            "available": True,
+            "tasks": [_dashboard_task_to_dict(v) for v in views],
+            "has_more": has_more,
+        }
 
     # ------------------------------------------------------------------
     # Tasks dashboard (F007 — supervision read-only)
@@ -1276,7 +1345,10 @@ def create_app() -> FastAPI:
         Fail-hard: si el daemon no está disponible → 503 agent_unavailable.
         Sin fallback passthrough (CTRL-P1-11, CTRL-P1-26, SC-005, FR-010).
         """
-        from hermes.agents.domain.agent import DEFAULT_AGENT_ID  # noqa: PLC0415
+        from hermes.agents.domain.agent import (  # noqa: PLC0415
+            DEFAULT_AGENT_ID,
+            is_retired_factory_agent_id,
+        )
         from hermes.tasks.control_plane.domain.ports import (  # noqa: PLC0415
             AuthenticatedChannel,
         )
@@ -1288,6 +1360,19 @@ def create_app() -> FastAPI:
         # Resolve agent: honour existing binding first (contract immutability).
         bound_agent = conv_repo.get_bound_agent_id(conversation_id=conv_id_uuid)
         resolved_agent_id = bound_agent or payload.agent_id or DEFAULT_AGENT_ID
+
+        # Retired packaged specialists (docs/logica-pendiente-2026-09-11 §2):
+        # explicit error, NEVER a silent fallback to DEFAULT_AGENT_ID and
+        # NEVER a silent execution — applies to a NEW turn on an OLD bound
+        # conversation too (the history stays readable; it just can't grow).
+        if is_retired_factory_agent_id(resolved_agent_id):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "agent_retired",
+                    "message": "Este especialista de fábrica está retirado y ya no ejecuta tareas nuevas.",
+                },
+            )
 
         # CTRL-P1-27: dedup_key por mensaje de chat (1 ejecución por doble-envío).
         dedup_key = payload.dedup_key or f"chat:{conv_id_str}:{hash(payload.user_message)}"
