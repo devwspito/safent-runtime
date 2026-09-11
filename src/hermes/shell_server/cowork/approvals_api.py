@@ -64,7 +64,6 @@ class RiddleBody(BaseModel):
 
 def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
     router = APIRouter()
-    store = mfa or MfaStore()
 
     @router.get("/api/v1/approvals/pending")
     async def list_pending_approvals(request: Request) -> list[dict]:
@@ -78,34 +77,7 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
                 "code": "approvals_unavailable",
                 "message": "No se pueden consultar las aprobaciones en este momento.",
             }) from exc
-        return [_to_frontend(r, store) for r in rows]
-
-    @router.get("/api/v1/mfa/status")
-    async def mfa_status() -> dict:
-        st = store.state()
-        return {"enrolled": st.enrolled}
-
-    @router.post("/api/v1/mfa/enroll")
-    async def mfa_enroll(body: EnrollBody) -> dict:
-        # First enrollment is open (bootstrap). Re-enrolling (rotating) requires the
-        # CURRENT code, so a compromised caller can't silently swap the secret.
-        if store.is_enrolled():
-            ok, reason = store.verify(level=ProtectionLevel.MFA, totp=body.totp or "")
-            if not ok:
-                raise HTTPException(status_code=401, detail={"code": reason,
-                    "message": "Para rotar el MFA, introduce el código actual."})
-        uri, secret = store.enroll()
-        logger.info("hermes.cowork.mfa.enrolled rotated=%s", store.is_enrolled())
-        return {"otpauth_uri": uri, "secret": secret}
-
-    @router.post("/api/v1/mfa/riddle")
-    async def mfa_set_riddle(body: RiddleBody) -> dict:
-        ok, reason = store.verify(level=ProtectionLevel.MFA, totp=body.totp)
-        if not ok:
-            raise HTTPException(status_code=401, detail={"code": reason,
-                "message": "Código MFA inválido."})
-        store.set_riddle(body.question, body.answer)
-        return {"ok": True}
+        return [_to_frontend(r, mfa) for r in rows]
 
     @router.post("/api/v1/approvals/{proposal_id}", status_code=200)
     async def resolve_approval(request: Request, proposal_id: str, body: ApprovalDecision) -> dict:
@@ -231,7 +203,6 @@ def _parse_proposal_id(raw: str) -> UUID:
 def _to_frontend(row: dict, store: MfaStore) -> dict:
     tool_name = row.get("tool_name", "")
     risk = row.get("risk", "")
-    mfa_state = store.state()
     parameters = row.get("parameters_redacted", {})
     return {
         "proposal_id": row.get("proposal_id", ""),
@@ -253,7 +224,6 @@ def _to_frontend(row: dict, store: MfaStore) -> dict:
         "created_at": row.get("created_at") or None,
         # Escalated MFA model: mfa-tier tools require TOTP; simple-tier do not.
         "required_level": _LEVEL_MFA if is_mfa_required(tool_name) else _LEVEL_SIMPLE,
-        "mfa_enrolled": mfa_state.enrolled,
         # Fase 2 Phase 4b: "enterprise" when only a signed cloud decision can
         # approve this row (Approve here fails with enterprise_route_requires_
         # cloud_decision — see resolve_approval); Deny always still works (I-2).

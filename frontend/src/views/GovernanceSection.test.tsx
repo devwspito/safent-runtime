@@ -1,4 +1,4 @@
-import { act } from 'react-dom/test-utils'
+import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
@@ -9,7 +9,7 @@ import React from 'react'
 // Regression (specs/025-safent-repaso SEG-15): with mfa_on_dangers OFF, the UI
 // used to send totp:'' for the toggle ITSELF too — the owner could never turn
 // verification back ON from the UI (backend 401, no modal shown to fix it).
-// Pins the sovereign rule: the mfa_on_dangers toggle always prompts for TOTP
+// Pins the sovereign rule: the mfa_on_dangers toggle always requires only explicit confirmation
 // while MFA is enrolled — turning it ON or OFF, and REGARDLESS of its current
 // value — and only skips the prompt when MFA was never enrolled at all.
 
@@ -38,17 +38,6 @@ function clickButton(root: ParentNode, matcher: (text: string) => boolean) {
   act(() => { button.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
 }
 
-function typeInto(input: HTMLInputElement, value: string) {
-  const nativeSetter = Object.getOwnPropertyDescriptor(
-    window.HTMLInputElement.prototype,
-    'value',
-  )!.set!
-  act(() => {
-    nativeSetter.call(input, value)
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-  })
-}
-
 async function flush() {
   await act(async () => {
     await Promise.resolve()
@@ -61,10 +50,8 @@ function policiesWith(mfaOnDangers: boolean) {
   return { preset: 'equilibrado', tools: {}, overridden: [], mfa_on_dangers: mfaOnDangers, catalog: [] }
 }
 
-function submitTotpModal(totp: string) {
-  const input = document.body.querySelector<HTMLInputElement>('.mfa-modal input[inputmode="numeric"]')
-  expect(input).not.toBeNull()
-  typeInto(input!, totp)
+function confirmChange() {
+  expect(document.body.querySelector('input[inputmode="numeric"]')).toBeNull()
   clickButton(document.body, t => t.includes('Confirmar'))
 }
 
@@ -91,7 +78,7 @@ describe('GovernanceSection — the mfa_on_dangers toggle is sovereign', () => {
     document.body.querySelectorAll('.mfa-modal-backdrop').forEach(el => el.remove())
   })
 
-  it('MFA enrolled + mfa_on_dangers ON: turning it OFF prompts for TOTP', async () => {
+  it('MFA enrolled + mfa_on_dangers ON: turning it OFF requires only explicit confirmation', async () => {
     mfaStatus.mockResolvedValue({ enrolled: true })
     getPolicies.mockResolvedValue(policiesWith(true))
     setMfaOnDangers.mockResolvedValue({ ok: true, mfa_on_dangers: false })
@@ -105,13 +92,13 @@ describe('GovernanceSection — the mfa_on_dangers toggle is sovereign', () => {
 
     // Modal must be up — no direct call yet.
     expect(setMfaOnDangers).not.toHaveBeenCalled()
-    submitTotpModal('123456')
+    confirmChange()
     await flush()
 
-    expect(setMfaOnDangers).toHaveBeenCalledWith(false, '123456')
+    expect(setMfaOnDangers).toHaveBeenCalledWith(false)
   })
 
-  it('MFA enrolled + mfa_on_dangers OFF: turning it back ON STILL prompts for TOTP (the SEG-15 dead-end)', async () => {
+  it('MFA enrolled + mfa_on_dangers OFF: turning it back ON STILL requires only explicit confirmation (the SEG-15 dead-end)', async () => {
     mfaStatus.mockResolvedValue({ enrolled: true })
     getPolicies.mockResolvedValue(policiesWith(false))
     setMfaOnDangers.mockResolvedValue({ ok: true, mfa_on_dangers: true })
@@ -124,18 +111,18 @@ describe('GovernanceSection — the mfa_on_dangers toggle is sovereign', () => {
     await flush()
 
     // Before the fix this branched on mfaDisabled (true here) and called
-    // setMfaOnDangers(true, '') directly — no modal, backend 401, dead end.
+    // setMfaOnDangers(true) directly — no modal, backend 401, dead end.
     expect(setMfaOnDangers).not.toHaveBeenCalled()
     expect(document.body.querySelector('.mfa-modal')).not.toBeNull()
 
-    submitTotpModal('654321')
+    confirmChange()
     await flush()
 
-    expect(setMfaOnDangers).toHaveBeenCalledWith(true, '654321')
+    expect(setMfaOnDangers).toHaveBeenCalledWith(true)
     expect(sileoSuccess).toHaveBeenCalledTimes(1)
   })
 
-  it('MFA never enrolled: toggling mfa_on_dangers skips the modal entirely', async () => {
+  it('MFA never enrolled: toggling mfa_on_dangers requires confirmation but no enrollment', async () => {
     mfaStatus.mockResolvedValue({ enrolled: false })
     getPolicies.mockResolvedValue(policiesWith(false))
     setMfaOnDangers.mockResolvedValue({ ok: true, mfa_on_dangers: true })
@@ -147,7 +134,9 @@ describe('GovernanceSection — the mfa_on_dangers toggle is sovereign', () => {
     act(() => { toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await flush()
 
-    expect(document.body.querySelector('.mfa-modal')).toBeNull()
-    expect(setMfaOnDangers).toHaveBeenCalledWith(true, '')
+    expect(setMfaOnDangers).not.toHaveBeenCalled()
+    confirmChange()
+    await flush()
+    expect(setMfaOnDangers).toHaveBeenCalledWith(true)
   })
 })

@@ -19,10 +19,10 @@ vi.mock('sileo', () => ({ sileo: { success: sileoSuccess, error: sileoError } })
 // MfaModal opens a portal + full TOTP form; the section under test only
 // needs to know it was asked to sign or cancel — stub it down to two buttons
 // so this file stays focused on SshHostsSection's own logic.
-vi.mock('../components/MfaModal', () => ({
-  default: ({ title, onSign, onCancel }: {
+vi.mock('../components/OwnerConfirmation', () => ({
+  default: ({ title, onConfirm, onCancel }: {
     title: string
-    onSign: (factors: { totp: string }) => void
+    onConfirm: () => void
     onCancel: () => void
   }) =>
     React.createElement(
@@ -31,7 +31,7 @@ vi.mock('../components/MfaModal', () => ({
       React.createElement('span', null, title),
       React.createElement(
         'button',
-        { type: 'button', onClick: () => onSign({ totp: '123456' }) },
+        { type: 'button', onClick: () => onConfirm() },
         'Firmar',
       ),
       React.createElement('button', { type: 'button', onClick: onCancel }, 'Cancelar modal'),
@@ -141,7 +141,7 @@ describe('SshHostsSection', () => {
     clickButton(container, 'Firmar')
     await flush()
 
-    expect(revokeSshHost).toHaveBeenCalledWith('db1.tailxxxx.ts.net', '123456')
+    expect(revokeSshHost).toHaveBeenCalledWith('db1.tailxxxx.ts.net')
     expect(sileoSuccess).toHaveBeenCalledTimes(1)
     expect(container.textContent).not.toContain('db1.tailxxxx.ts.net')
     expect(container.textContent).toContain('build-box.tailxxxx.ts.net')

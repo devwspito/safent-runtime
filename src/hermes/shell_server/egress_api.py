@@ -246,7 +246,7 @@ class _DomainBody(BaseModel):
 
 class _ModeBody(BaseModel):
     mode: str   # "allow" | "deny"
-    totp: str
+    totp: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +257,6 @@ class _ModeBody(BaseModel):
 def create_egress_router(mfa: MfaStore | None = None) -> APIRouter:
     """Router for the owner's network-mode toggle, deny-list, allow-list, and MCP grants."""
     router = APIRouter(prefix="/api/v1/egress", tags=["egress"])
-    mfa_store = mfa or MfaStore()
 
     # ── Network mode ────────────────────────────────────────────────────────────
 
@@ -280,7 +279,6 @@ def create_egress_router(mfa: MfaStore | None = None) -> APIRouter:
                 status_code=422,
                 detail={"code": "invalid_mode", "message": f"mode must be 'allow' or 'deny', got {body.mode!r}"},
             )
-        require_owner_mfa(mfa_store, body.totp, action="cambiar el modo de red")
         _save_mode(body.mode)
         ok = _apply_network_mode(body.mode)
         logger.info("hermes.egress.mode_changed mode=%s pushed=%s", body.mode, ok)

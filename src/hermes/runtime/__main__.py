@@ -1080,14 +1080,12 @@ def _build_real_broker(
 
     # Inject the MFA tier verifier so EVERY approve surface (web + D-Bus) is MFA-gated
     # inside the gate — closes the D-Bus MFA-skip side-door (red-team 2026-06-19).
-    from hermes.shell_server.security.mfa_tool_tier import MfaToolTierVerifier  # noqa: PLC0415
 
     approval_gate = SqliteApprovalGate(
         db_path=db_path,
         minter=minter,
         signer=firmer,
         audit_repo=audit_repo,
-        mfa_verifier=MfaToolTierVerifier(),
     )
 
     # Surface adapters reales (path/host allowlists configurables via env).

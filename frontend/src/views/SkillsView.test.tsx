@@ -6,12 +6,8 @@ import React from 'react'
 // No @testing-library in this project yet — render directly via react-dom
 // (mirrors TailnetSection.test.tsx / InboundDelegationCard.test.tsx).
 
-// Regression (matriz 10-sep, hallazgo A): the skills hub `force` install was
-// unreachable from the UI — approving a FAIL scan spent the owner's ONE TOTP
-// on POST /security/decisions, then the install retry demanded a SECOND
-// code, which would fail anyway (TOTP is single-use, totp_replayed). Pins
-// the fixed flow: exactly ONE recordSecurityDecision (one TOTP) → installSkill
-// is called with the re-auth grant it returns, not a second totp.
+// One recorded owner decision yields one exact-action grant. Community never
+// requests MFA; removing the factor must not remove the approval capability.
 
 const {
   listSkills, searchSkillsHub, listHubSkills, installSkill, getHubOpStatus,
@@ -93,7 +89,7 @@ async function flush() {
   })
 }
 
-describe('SkillsView — hub install force (owner MFA)', () => {
+describe('SkillsView — hub install force (owner confirmation)', () => {
   let container: HTMLDivElement
   let root: Root
 
@@ -108,7 +104,7 @@ describe('SkillsView — hub install force (owner MFA)', () => {
     listHubSkills.mockResolvedValue([])
     searchSkillsHub.mockResolvedValue({ results: [RESULT] })
     scanInstall.mockResolvedValue(FAIL_SCAN)
-    recordSecurityDecision.mockResolvedValue({ ok: true, reauth_grant: 'grant-abc123' })
+    recordSecurityDecision.mockResolvedValue({ ok: true, approval_grant: 'grant-abc123' })
     installSkill.mockResolvedValue({ op_id: 'op-1', status: 'pending' })
 
     container = document.createElement('div')
@@ -121,7 +117,7 @@ describe('SkillsView — hub install force (owner MFA)', () => {
     container.remove()
   })
 
-  it('sends exactly ONE TOTP: approving a FAIL scan installs via the re-auth grant, no second code', async () => {
+  it('approving a FAIL scan installs via a single-use owner grant without MFA', async () => {
     act(() => { root.render(React.createElement(SkillsView)) })
     await flush()
 
@@ -135,25 +131,18 @@ describe('SkillsView — hub install force (owner MFA)', () => {
     await flush()
 
     expect(scanInstall).toHaveBeenCalledWith('skill', 'official/research/gitnexus-explorer')
-    // InstallScanModal + MfaModal render via createPortal(document.body) —
+    // InstallScanModal renders via createPortal(document.body) —
     // outside `container` — so scope those lookups to document.body.
     clickButton(document.body, t => t === 'Aprobar e instalar')
     await flush()
 
-    // MfaModal is now up — type the owner's TOTP and confirm.
-    const totpInput = document.body.querySelector<HTMLInputElement>('.mfa-modal input')
-    if (!totpInput) throw new Error('TOTP input not found')
-    typeInto(totpInput, '123456')
-    clickButton(document.body, t => t === 'Confirmar con código')
-    await flush()
-
-    // Exactly one TOTP left the browser, on /security/decisions.
+    expect(document.body.querySelector('input[inputmode="numeric"]')).toBeNull()
     expect(recordSecurityDecision).toHaveBeenCalledTimes(1)
     expect(recordSecurityDecision).toHaveBeenCalledWith(
-      expect.objectContaining({ totp: '123456', identifier: 'official/research/gitnexus-explorer' }),
+      expect.objectContaining({ identifier: 'official/research/gitnexus-explorer' }),
     )
 
-    // The install retry carries force=true but NO second totp — and it's the
+    // The install retry carries force=true and the approval grant — it is the
     // ONLY installSkill call.
     expect(installSkill).toHaveBeenCalledTimes(1)
     expect(installSkill).toHaveBeenCalledWith(

@@ -18,22 +18,22 @@ from Fase 2 Phase 4a/4b):
   The worker — the local human operating a cloud-managed agent — has NO TOTP
   enrolled; TOTP is CENTRALIZED at Enterprise. Every per-action HITL approval
   is either SIMPLE (no TOTP) or MFA-tier (TOTP required). That split ALREADY
-  EXISTS as the single source of truth `tool_delicacy.is_mfa_required(tool)`
+  EXISTS as the single source of truth `tool_delicacy.requires_enterprise_review(tool)`
   (also consulted by `SqliteApprovalGate.approve()` to gate the LOCAL mint):
 
-    - SIMPLE  (is_mfa_required == False) -> the worker approves ALONE, LOCAL.
+    - SIMPLE  (requires_enterprise_review == False) -> the worker approves ALONE, LOCAL.
       Enterprise is never involved — the agent already has scope permission
       for these; the worker's card is a plain Approve/Deny (e.g. send_message:
       "my boss asks my agent for a report — I still review it before it
       sends").
-    - MFA-TIER (is_mfa_required == True) -> the worker CANNOT approve (no
+    - MFA-TIER (requires_enterprise_review == True) -> the worker CANNOT approve (no
       TOTP) -> routes to ENTERPRISE, resolved ONLY by a signed decision from
       the tenant's centralized TOTP admin (`hermes.config_sync.
       remote_approvals`). The worker can still DENY it locally (I-2 in that
       module) — denial never requires TOTP.
 
       truth table:
-        tenant_gate | is_mfa_required(tool) | route
+        tenant_gate | requires_enterprise_review(tool) | route
         ------------|------------------------|------------
         False       | False                  | LOCAL
         False       | True                   | LOCAL   (Community: the single
@@ -49,7 +49,7 @@ from Fase 2 Phase 4a/4b):
       tenant_gate = agent_managed_by == "cloud" AND tenant_remote_approval_enabled
 
   `_DESTRUCTIVE` (irreversible) tools are already unioned into
-  `_MFA_TIER_HITL` inside tool_delicacy.py, so `is_mfa_required(tool)` alone
+  `_MFA_TIER_HITL` inside tool_delicacy.py, so `requires_enterprise_review(tool)` alone
   is sufficient — no separate `irreversible`/`sensitivity_categories` input is
   needed here (avoids re-deriving a second, driftable eligibility calculus).
 
@@ -72,7 +72,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from hermes.capabilities.tool_delicacy import is_mfa_required
+from hermes.capabilities.tool_delicacy import requires_enterprise_review
 
 _CLOUD_MANAGED = "cloud"
 
@@ -95,11 +95,11 @@ def route(
     """Decide LOCAL vs ENTERPRISE for one already-approvable tool call.
 
     ENTERPRISE requires BOTH the tenant gate AND the tool's MFA/TOTP tier
-    (`tool_delicacy.is_mfa_required`); anything else falls to LOCAL:
+    (`tool_delicacy.requires_enterprise_review`); anything else falls to LOCAL:
 
       tenant_gate = agent_managed_by == "cloud" AND tenant_remote_approval_enabled
 
-      tenant_gate | is_mfa_required(tool) | route
+      tenant_gate | requires_enterprise_review(tool) | route
       ------------|------------------------|------------
       False       | False                  | LOCAL
       False       | True                   | LOCAL       (Community: local owner has TOTP)
@@ -114,6 +114,6 @@ def route(
     worker hold a TOTP for this action", not "how trusted is this agent".
     """
     tenant_gate = agent_managed_by == _CLOUD_MANAGED and tenant_remote_approval_enabled
-    if tenant_gate and is_mfa_required(tool):
+    if tenant_gate and requires_enterprise_review(tool):
         return ApprovalRoute.ENTERPRISE
     return ApprovalRoute.LOCAL

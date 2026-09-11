@@ -481,7 +481,6 @@ export interface InstallDecisionPayload {
   score: number
   verdict: string
   risks_json: string
-  totp: string
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────
@@ -533,17 +532,14 @@ export interface SecurityDecisionPayload {
   score: number
   verdict: string
   risks_json: string
-  totp: string
 }
 
 export interface SecurityDecisionResponse {
   ok?: boolean
   error?: string
-  // Single-use re-auth grant (≤120s, bound to this identifier/action) minted
-  // when this decision already spent the owner's TOTP — lets a chained
-  // sovereign-override call (e.g. POST /skills/hub/install force=true) skip
-  // a second TOTP prompt. See owner_mfa_gate.py.
-  reauth_grant?: string
+  // One-use owner confirmation (≤120s), bound to this session/identifier/action.
+  // Issued only after a recorded decision. Community does not use MFA.
+  approval_grant?: string
 }
 
 // ── Skill details ──────────────────────────────────────────────────────────────

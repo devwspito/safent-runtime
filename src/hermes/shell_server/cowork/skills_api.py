@@ -23,8 +23,8 @@ Security:
     is BLOCKED 422 — no SKILL.md, no row, nothing the agent can discover.
   - install force=True (025 Top-4): a bearer-authenticated operator is NOT
     the same as the OWNER — force overrides a FAIL antivirus verdict, so it
-    requires the owner's TOTP via the SAME require_owner_mfa gate
-    POST /security/decisions uses (401/403 typed on missing/bad code).
+    requires a single-use owner confirmation from POST /security/decisions.
+    Community does not use MFA; an internal daemon token cannot approve.
 """
 
 from __future__ import annotations
@@ -33,10 +33,9 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from hermes.shell_server.security.mfa import MfaStore
-from hermes.shell_server.security.owner_mfa_gate import require_owner_mfa_or_grant
+from hermes.shell_server.security.owner_confirmation import require_owner_approval
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
 logger = logging.getLogger("hermes.shell_server.cowork.skills_api")
@@ -48,10 +47,10 @@ logger = logging.getLogger("hermes.shell_server.cowork.skills_api")
 
 
 class InstallSkillRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     identifier: str = Field(min_length=1, description="Hub skill identifier (e.g. 'pdf-tools')")
-    force: bool = Field(default=False, description="Owner-sovereign override: install despite FAIL verdict")
-    totp: str | None = Field(
-        default=None, description="Owner TOTP code — required when force=True"
+    force: bool = Field(
+        default=False, description="Owner-sovereign override: install despite FAIL verdict"
     )
 
 
@@ -277,26 +276,13 @@ def create_skills_hub_router(db_path: Path) -> APIRouter:
     async def install_hub_skill(request: Request, body: InstallSkillRequest) -> dict:
         """Install a skill from the hub. Returns {op_id, status}.
 
-        When body.force=True the caller is overriding a FAIL antivirus verdict
-        — a bearer-authenticated operator is not necessarily the owner, so this
-        requires owner proof: EITHER a fresh TOTP, OR the single-use re-auth
-        grant minted by POST /security/decisions when that call already spent
-        the owner's TOTP approving the same identifier (see owner_mfa_gate.py
-        — avoids a second TOTP prompt that would fail anyway, TOTP is
-        single-use). The grant travels as a header (`X-Owner-Reauth-Grant`),
-        never in the body. Only after either check passes is force forwarded
-        to the daemon, which records the override via record_install_decision
-        (same mutator /security/decisions calls — WORM install_reviews row +
-        scan_records.decision=ALLOWED).
+        Force requires the owner's authenticated UI session and a single-use
+        approval for this identifier, issued after a recorded security decision.
+        Consuming it before dispatch also prevents retry/replay after an unknown
+        daemon outcome. A failed attempt requires a new explicit confirmation.
         """
         if body.force:
-            require_owner_mfa_or_grant(
-                MfaStore(),
-                body.totp or "",
-                request.headers.get("x-owner-reauth-grant"),
-                identifier=body.identifier,
-                action="install_hub_skill",
-            )
+            require_owner_approval(request, identifier=body.identifier, action="install_hub_skill")
         proxy = request.app.state.dbus_proxy
         try:
             return await proxy.call_mutator("install_hub_skill", body.identifier, body.force)

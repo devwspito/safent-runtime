@@ -92,7 +92,9 @@ function errorCode(body: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined
 }
 
-const FACTOR_ERRORS = new Set(['mfa_required', 'invalid_totp', 'mfa_not_enrolled'])
+const FACTOR_ERRORS = new Set([
+  'mfa_required', 'invalid_totp', 'mfa_not_enrolled', 'invalid_owner_approval',
+])
 
 interface RequestOptions extends RequestInit {
   timeoutMs?: number
@@ -145,8 +147,8 @@ async function request<T>(path: string, options: RequestOptions = {}, _retried =
     try { errorBody = await res.json() } catch { /* non-JSON */ }
   }
 
-  // A rejected MFA code is not an expired session. Replaying that request
-  // silently submits the same factor twice and can disrupt the owner session.
+  // A rejected action approval is not an expired session. Never replay its
+  // single-use grant or disturb the authenticated owner's session.
   // Session token rotated/expired mid-use → renew once and retry, so the user
   // never hits a dead 401 while the tab is active.
   if (res.status === 401 && !FACTOR_ERRORS.has(errorCode(errorBody) ?? '')
@@ -367,14 +369,13 @@ export function listHubSkills(): Promise<HubSkillResult[]> {
 export function installSkill(
   identifier: string,
   force = false,
-  reauthGrant?: string,
+  approvalGrant?: string,
 ): Promise<HubInstallResponse> {
   return request<HubInstallResponse>('/skills/hub/install', {
     method: 'POST',
     body: JSON.stringify({ identifier, force }),
-    // Re-auth grant travels as a header, never in the body — see
-    // POST /security/decisions' reauth_grant (owner_mfa_gate.py).
-    ...(reauthGrant ? { headers: { 'X-Owner-Reauth-Grant': reauthGrant } } : {}),
+    // Exact-action, single-use confirmation from POST /security/decisions.
+    ...(approvalGrant ? { headers: { 'X-Owner-Approval-Grant': approvalGrant } } : {}),
   })
 }
 
@@ -796,10 +797,10 @@ export async function getEgressMode(): Promise<EgressModeResponse> {
 /**
  * Change the egress mode.  Always requires a valid TOTP code (MFA gate).
  */
-export function setEgressMode(mode: EgressMode, totp: string): Promise<unknown> {
+export function setEgressMode(mode: EgressMode): Promise<unknown> {
   return request<unknown>('/egress/mode', {
     method: 'POST',
-    body: JSON.stringify({ mode, totp }),
+    body: JSON.stringify({ mode }),
   })
 }
 
@@ -864,10 +865,10 @@ export function getSshHosts(): Promise<SshHostsResponse> {
 }
 
 /** Revoke a host's governed-SSH approval — requires the owner's TOTP. */
-export function revokeSshHost(host: string, totp: string): Promise<SshHostsResponse> {
+export function revokeSshHost(host: string): Promise<SshHostsResponse> {
   return request<SshHostsResponse>(`/tailnet/ssh-hosts/${encodeURIComponent(host)}`, {
     method: 'DELETE',
-    body: JSON.stringify({ totp }),
+    body: JSON.stringify({}),
   })
 }
 
@@ -892,14 +893,9 @@ export function engageKillSwitch(reason: string): Promise<unknown> {
  * root-helper path as disconnectTailnet. Pass whichever proof applies; the
  * caller decides based on getMfaStatus().enrolled.
  */
-export function releaseKillSwitch(proof: { totp: string } | { devicePassword: string }): Promise<unknown> {
-  const body =
-    'totp' in proof
-      ? { engaged: false, totp: proof.totp }
-      : { engaged: false, device_password: proof.devicePassword }
+export function releaseKillSwitch(): Promise<unknown> {
   return request<unknown>('/security/kill-switch', {
-    method: 'POST',
-    body: JSON.stringify(body),
+    method: 'POST', body: JSON.stringify({ engaged: false }),
   })
 }
 
@@ -912,11 +908,10 @@ export function listPendingApprovals(): Promise<PendingApproval[]> {
 export function resolveApproval(
   proposalId: string,
   decision: 'once' | 'deny',
-  factors: { totp?: string | null } = {},
 ): Promise<unknown> {
   return request<unknown>(`/approvals/${encodeURIComponent(proposalId)}`, {
     method: 'POST',
-    body: JSON.stringify({ decision, totp: factors.totp ?? null }),
+    body: JSON.stringify({ decision }),
   })
 }
 
@@ -957,31 +952,31 @@ export function getPolicies(): Promise<PoliciesResponse> {
   )
 }
 
-export function setPolicyPreset(preset: string, totp: string): Promise<unknown> {
+export function setPolicyPreset(preset: string): Promise<unknown> {
   return request<unknown>('/policies/preset', {
     method: 'POST',
-    body: JSON.stringify({ preset, totp }),
+    body: JSON.stringify({ preset }),
   })
 }
 
-export function setPolicyTool(tool: string, enabled: boolean, totp: string): Promise<unknown> {
+export function setPolicyTool(tool: string, enabled: boolean): Promise<unknown> {
   return request<unknown>('/policies/tool', {
     method: 'POST',
-    body: JSON.stringify({ tool, enabled, totp }),
+    body: JSON.stringify({ tool, enabled }),
   })
 }
 
-export function setPolicyTools(tools: Record<string, boolean>, totp: string): Promise<unknown> {
+export function setPolicyTools(tools: Record<string, boolean>): Promise<unknown> {
   return request<unknown>('/policies/tools', {
     method: 'POST',
-    body: JSON.stringify({ tools, totp }),
+    body: JSON.stringify({ tools }),
   })
 }
 
-export function setMfaOnDangers(enabled: boolean, totp: string): Promise<unknown> {
+export function setMfaOnDangers(enabled: boolean): Promise<unknown> {
   return request<unknown>('/policies/mfa_on_dangers', {
     method: 'POST',
-    body: JSON.stringify({ enabled, totp }),
+    body: JSON.stringify({ enabled }),
   })
 }
 

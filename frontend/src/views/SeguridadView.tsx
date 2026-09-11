@@ -14,7 +14,6 @@ import { useT } from '../lib/i18n'
 import { usePendingApprovals } from '../hooks/usePendingApprovals'
 import {
   listInboundDelegations,
-  mfaStatus,
   getPolicies,
   setPolicyPreset,
   setPolicyTools,
@@ -39,7 +38,6 @@ import {
 import type { EgressMode, EgressModeResponse, KillSwitchStatus } from '../api/types'
 import type {
   InboundDelegation,
-  MfaStatus,
   PoliciesResponse,
   PolicyCatalogEntry,
   SecurityScan,
@@ -49,10 +47,7 @@ import type {
 } from '../api/types'
 import ApprovalCard from '../components/ApprovalCard'
 import InboundDelegationCard from '../components/InboundDelegationCard'
-import MfaEnroll from '../components/MfaEnroll'
-import MfaModal from '../components/MfaModal'
-import type { MfaFactors } from '../components/MfaModal'
-import DevicePasswordModal from '../components/DevicePasswordModal'
+import OwnerConfirmation from '../components/OwnerConfirmation'
 import { Button } from '../components/ui/Button'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
@@ -476,7 +471,6 @@ function PendingChangesBanner({ count, busy, onSave, onDiscard }: PendingChanges
 
 export function GovernanceSection() {
   const t = useT()
-  const [mfa, setMfa] = useState<MfaStatus | null>(null)
   const [pol, setPol] = useState<PoliciesResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -489,8 +483,7 @@ export function GovernanceSection() {
   const mfaDisabled = pol?.mfa_on_dangers === false
 
   const load = useCallback(async () => {
-    const [m, p] = await Promise.all([mfaStatus(), getPolicies()])
-    setMfa(m)
+    const p = await getPolicies()
     setPol(p)
     setLoading(false)
     setToolPending({})
@@ -540,7 +533,7 @@ export function GovernanceSection() {
     })
     setToolPending({})
     try {
-      await setPolicyTools(changes, '')
+      await setPolicyTools(changes)
       sileo.success({ title: t('seg.save.ok') })
       await load()
     } catch (err) {
@@ -551,12 +544,12 @@ export function GovernanceSection() {
     }
   }
 
-  async function handleSign(factors: MfaFactors) {
+  async function handleSign() {
     if (!pendingAction) return
     setBusy(true)
     try {
       if (pendingAction.kind === 'preset') {
-        await setPolicyPreset(pendingAction.preset, factors.totp)
+        await setPolicyPreset(pendingAction.preset)
         sileo.success({ title: t('seg.preset.ok').replace('{preset}', pendingAction.preset) })
         setPendingPreset(null)
         setPendingAction(null)
@@ -573,7 +566,7 @@ export function GovernanceSection() {
         })
         setToolPending({})
         try {
-          await setPolicyTools(pendingAction.changes, factors.totp)
+          await setPolicyTools(pendingAction.changes)
           sileo.success({ title: t('seg.save.ok') })
           setPendingAction(null)
           await load()
@@ -584,7 +577,7 @@ export function GovernanceSection() {
         }
 
       } else if (pendingAction.kind === 'mfa_dangers') {
-        await setMfaOnDangers(pendingAction.enabled, factors.totp)
+        await setMfaOnDangers(pendingAction.enabled)
         sileo.success({
           title: pendingAction.enabled
             ? t('seg.dangers.on.ok')
@@ -605,7 +598,7 @@ export function GovernanceSection() {
     if (!pendingPreset) return
     if (mfaDisabled) {
       setBusy(true)
-      void setPolicyPreset(pendingPreset, '')
+      void setPolicyPreset(pendingPreset)
         .then(() => {
           sileo.success({ title: t('seg.preset.ok').replace('{preset}', pendingPreset) })
           setPendingPreset(null)
@@ -646,26 +639,7 @@ export function GovernanceSection() {
   }
 
   function requestMfaDangersToggle(checked: boolean) {
-    // SOVEREIGN switch (SEG-15): gated on MFA ENROLLMENT, never on the
-    // toggle's own current value — unlike preset/tools below, which
-    // correctly skip the prompt while mfaDisabled. Branching on mfaDisabled
-    // here made turning the switch back ON a dead end: once off, this sent
-    // totp:'' straight through and the backend (rightly) 401'd it, with the
-    // UI never showing a modal to collect a real code.
-    if (!mfa?.enrolled) {
-      setBusy(true)
-      void setMfaOnDangers(checked, '')
-        .then(() => {
-          sileo.success({ title: checked ? t('seg.dangers.on.ok') : t('seg.dangers.off.ok') })
-          setPol(prev => prev ? { ...prev, mfa_on_dangers: checked } : prev)
-        })
-        .catch(err => {
-          sileo.error({ title: t('seg.preset.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
-        })
-        .finally(() => setBusy(false))
-    } else {
-      setPendingAction({ kind: 'mfa_dangers', enabled: checked })
-    }
+    setPendingAction({ kind: 'mfa_dangers', enabled: checked })
   }
 
   function requestLegacyToolToggle(toolName: string, enabled: boolean) {
@@ -675,7 +649,7 @@ export function GovernanceSection() {
   if (loading) {
     return <GovernanceSkeletonBlock />
   }
-  if (!mfa || !pol) return null
+  if (!pol) return null
 
   const hasCatalog = (pol.catalog?.length ?? 0) > 0
   const currentPreset = pendingPreset ?? pol.preset
@@ -686,7 +660,7 @@ export function GovernanceSection() {
   return (
     <>
       {pendingAction && (
-        <MfaModal
+        <OwnerConfirmation
           title={
             pendingAction.kind === 'preset'
               ? t('seg.mfa_modal.preset').replace('{preset}', pendingAction.preset)
@@ -696,7 +670,7 @@ export function GovernanceSection() {
                 : t('seg.mfa_modal.dangers_off')
               : t('seg.mfa_modal.tools')
           }
-          onSign={handleSign}
+          onConfirm={handleSign}
           onCancel={() => {
             setPendingAction(null)
             if (pendingAction?.kind === 'batch') {
@@ -705,19 +679,6 @@ export function GovernanceSection() {
           }}
         />
       )}
-
-      {/* ── Two-step verification ── */}
-      <section className="cv-section">
-        <div className={s.sectionLabel}>{t('seg.mfa.label')}</div>
-        <div className={s.sectionCard}>
-          <p className={s['sectionCard__intro']}>
-            {mfa.enrolled
-              ? t('seg.mfa.enrolled')
-              : t('seg.mfa.not_enrolled')}
-          </p>
-          {!mfa.enrolled && <MfaEnroll onEnrolled={load} />}
-        </div>
-      </section>
 
       {/* ── Permissions ── */}
       <section className="cv-section">
@@ -1150,14 +1111,14 @@ function EgressSection() {
     setPendingMode(next)
   }
 
-  async function handleModeSign(factors: MfaFactors) {
+  async function handleModeSign() {
     if (!pendingMode || !state) return
     const prev = state
     setState(s => s ? { ...s, mode: pendingMode } : s)
     setPendingMode(null)
     setBusy(true)
     try {
-      await setEgressMode(pendingMode, factors.totp)
+      await setEgressMode(pendingMode)
       sileo.success({
         title: pendingMode === 'allow'
           ? t('seg.allow_mode.ok')
@@ -1233,9 +1194,9 @@ function EgressSection() {
       <div className={s.sectionLabel}>{t('seg.network.label')}</div>
 
       {pendingMode && (
-        <MfaModal
+        <OwnerConfirmation
           title={pendingMode === 'allow' ? t('seg.allow_mode.ok') : t('seg.deny_mode.ok')}
-          onSign={handleModeSign}
+          onConfirm={handleModeSign}
           onCancel={() => setPendingMode(null)}
         />
       )}
@@ -1571,13 +1532,13 @@ export function SshHostsSection() {
 
   useEffect(() => { void load() }, [load])
 
-  async function handleRevokeSign(factors: MfaFactors) {
+  async function handleRevokeSign() {
     const host = pendingRevokeHost
     setPendingRevokeHost(null)
     if (!host) return
     setBusy(true)
     try {
-      const res = await revokeSshHost(host, factors.totp)
+      const res = await revokeSshHost(host)
       setHosts(res.hosts)
       sileo.success({ title: `Acceso SSH revocado a «${host}»` })
     } catch (err) {
@@ -1594,9 +1555,9 @@ export function SshHostsSection() {
       <div className={s.sectionLabel}>Equipos con SSH aprobado</div>
 
       {pendingRevokeHost && (
-        <MfaModal
+        <OwnerConfirmation
           title={`Revocar el acceso SSH a «${pendingRevokeHost}»`}
-          onSign={handleRevokeSign}
+          onConfirm={handleRevokeSign}
           onCancel={() => setPendingRevokeHost(null)}
         />
       )}
@@ -1678,7 +1639,7 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
   const name = scan.name ?? scan.identifier ?? scan.scan_id ?? 'Escaneo'
   const target = scan.target ?? scan.identifier
 
-  async function handleAllow(factors: MfaFactors) {
+  async function handleAllow() {
     setBusy(true)
     try {
       await recordInstallDecision({
@@ -1689,7 +1650,7 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
         score: scan.score ?? -1,
         verdict: verdict || '',
         risks_json: '[]',
-        totp: factors.totp.trim(),
+
       })
       sileo.success({ title: 'Instalación permitida (decisión soberana, auditada). Reinténtala.' })
       setAllowed(true)
@@ -1731,9 +1692,9 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
       </div>
 
       {showModal && (
-        <MfaModal
+        <OwnerConfirmation
           title={tNew(t, 'seg.scan.allow_modal_title', 'Permitir instalación')}
-          onSign={handleAllow}
+          onConfirm={handleAllow}
           onCancel={() => setShowModal(false)}
         />
       )}
@@ -1823,7 +1784,6 @@ export function KillSwitchSection() {
   // password otherwise (sovereign fallback — a brake engaged before the
   // owner ever enrolled TOTP used to have NO release path at all). null
   // while loading = don't show the wrong dialog for a beat.
-  const [mfaEnrolled, setMfaEnrolled] = useState<boolean | null>(null)
 
   const load = useCallback(async () => {
     const res = await getKillSwitch()
@@ -1832,9 +1792,6 @@ export function KillSwitchSection() {
   }, [])
 
   useEffect(() => { void load() }, [load])
-  useEffect(() => {
-    mfaStatus().then(s => setMfaEnrolled(!!s.enrolled)).catch(() => setMfaEnrolled(false))
-  }, [])
 
   async function handleEngage() {
     setBusy(true)
@@ -1849,11 +1806,11 @@ export function KillSwitchSection() {
     }
   }
 
-  async function handleReleaseWith(proof: { totp: string } | { devicePassword: string }) {
+  async function handleReleaseWith() {
     setConfirmRelease(false)
     setBusy(true)
     try {
-      await releaseKillSwitch(proof)
+      await releaseKillSwitch()
       sileo.success({ title: tNew(t, 'seg.killswitch.released.ok', 'Freno de emergencia liberado') })
       await load()
     } catch (err) {
@@ -1864,35 +1821,18 @@ export function KillSwitchSection() {
   }
 
   const engaged = !!status?.engaged
-  const releaseLabel = mfaEnrolled === false
-    ? tNew(t, 'seg.killswitch.release.password', 'Liberar (requiere contraseña del dispositivo)')
-    : tNew(t, 'seg.killswitch.release', 'Liberar (requiere TOTP)')
+  const releaseLabel = "Liberar freno"
 
   return (
     <section className="cv-section" aria-label={tNew(t, 'seg.killswitch.label', 'Freno de emergencia')}>
       <div className={s.sectionLabel}>{tNew(t, 'seg.killswitch.label', 'Freno de emergencia')}</div>
 
-      {confirmRelease && mfaEnrolled === false && (
-        <DevicePasswordModal
-          title={tNew(t, 'seg.killswitch.release.title', 'Liberar el freno de emergencia')}
-          description={tNew(
-            t,
-            'seg.killswitch.release.password_hint',
-            'El MFA no está configurado en esta instancia. Si tu dispositivo tampoco tiene ' +
-              'contraseña configurada (instalación nueva), libera el freno desde la terminal ' +
-              'del propio equipo con: safent brake release',
-          )}
-          onSign={password => { void handleReleaseWith({ devicePassword: password }) }}
-          onCancel={() => setConfirmRelease(false)}
-        />
-      )}
-      {confirmRelease && mfaEnrolled !== false && (
-        <MfaModal
-          title={tNew(t, 'seg.killswitch.release.title', 'Liberar el freno de emergencia')}
-          onSign={factors => { void handleReleaseWith({ totp: factors.totp }) }}
-          onCancel={() => setConfirmRelease(false)}
-        />
-      )}
+      {confirmRelease && <OwnerConfirmation
+        title="Liberar el freno de emergencia"
+        description="El agente podrá volver a ejecutar acciones dentro de sus permisos. Las aprobaciones y límites siguen activos."
+        onConfirm={handleReleaseWith}
+        onCancel={() => setConfirmRelease(false)}
+      />}
 
       <div
         className={s.sectionCard}

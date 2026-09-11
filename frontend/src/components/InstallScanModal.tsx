@@ -8,11 +8,10 @@
  */
 
 import { createPortal } from 'react-dom'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { X } from 'lucide-react'
 import type { InstallScanResponse, InstallRisk } from '../api/types'
 import Badge, { type BadgeVariant } from './Badge'
-import MfaModal, { type MfaFactors } from './MfaModal'
 
 function verdictVariant(v: string): BadgeVariant {
   if (v === 'PASS') return 'ok'
@@ -30,7 +29,7 @@ function severityVariant(s: string): BadgeVariant {
 interface InstallScanModalProps {
   scan: InstallScanResponse
   name: string
-  onApprove(factors: MfaFactors): void
+  onApprove(): void | Promise<void>
   onCancel(): void
 }
 
@@ -40,7 +39,6 @@ export default function InstallScanModal({
   onApprove,
   onCancel,
 }: InstallScanModalProps) {
-  const [showMfa, setShowMfa] = useState(false)
   const dialogRef = useRef<HTMLDivElement>(null)
   const cancelBtnRef = useRef<HTMLButtonElement>(null)
 
@@ -53,12 +51,12 @@ export default function InstallScanModal({
 
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape' && !showMfa) {
+      if (e.key === 'Escape') {
         e.stopPropagation()
         onCancel()
         return
       }
-      if (e.key === 'Tab' && !showMfa) {
+      if (e.key === 'Tab') {
         const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
           'button, input, [tabindex]:not([tabindex="-1"])',
         )
@@ -74,14 +72,14 @@ export default function InstallScanModal({
     }
     document.addEventListener('keydown', handleKey, true)
     return () => document.removeEventListener('keydown', handleKey, true)
-  }, [onCancel, showMfa])
+  }, [onCancel])
 
   return createPortal(
     <>
       <div
         className="mfa-modal-backdrop"
         role="presentation"
-        onClick={e => { if (!showMfa && e.target === e.currentTarget) onCancel() }}
+        onClick={e => { if (e.target === e.currentTarget) onCancel() }}
       >
         <div
           ref={dialogRef}
@@ -164,7 +162,7 @@ export default function InstallScanModal({
                   color: '#fff',
                   border: 'none',
                 }}
-                onClick={() => setShowMfa(true)}
+                onClick={() => { void onApprove() }}
               >
                 Aprobar e instalar
               </button>
@@ -173,16 +171,7 @@ export default function InstallScanModal({
         </div>
       </div>
 
-      {showMfa && (
-        <MfaModal
-          title="Confirmar instalación"
-          onSign={factors => {
-            setShowMfa(false)
-            onApprove(factors)
-          }}
-          onCancel={() => setShowMfa(false)}
-        />
-      )}
+
     </>,
     document.body,
   )

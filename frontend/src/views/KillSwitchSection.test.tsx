@@ -1,4 +1,4 @@
-import { act } from 'react-dom/test-utils'
+import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
@@ -42,17 +42,6 @@ function clickButton(container: ParentNode, matcher: (text: string) => boolean) 
   act(() => { button.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
 }
 
-function typeInto(input: HTMLInputElement, value: string) {
-  const nativeSetter = Object.getOwnPropertyDescriptor(
-    window.HTMLInputElement.prototype,
-    'value',
-  )!.set!
-  act(() => {
-    nativeSetter.call(input, value)
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-  })
-}
-
 async function flush() {
   await act(async () => {
     await Promise.resolve()
@@ -83,51 +72,21 @@ describe('KillSwitchSection — release dialog shows which proof is asked', () =
     document.body.querySelectorAll('.mfa-modal-backdrop').forEach(el => el.remove())
   })
 
-  it('MFA not enrolled: release button + dialog ask for the device password, not TOTP', async () => {
+  it.each([false, true])('releases only after owner confirmation, irrespective of legacy enrollment %s', async enrolled => {
     getKillSwitch.mockResolvedValue(ENGAGED)
-    mfaStatus.mockResolvedValue({ enrolled: false })
+    mfaStatus.mockResolvedValue({ enrolled })
     releaseKillSwitch.mockResolvedValue({ ok: true })
-
     act(() => { root.render(React.createElement(KillSwitchSection)) })
     await flush()
-
-    expect(container.textContent).toContain('contraseña del dispositivo')
+    expect(container.textContent).not.toMatch(/TOTP|contraseña/)
     clickButton(container, t => t.includes('Liberar'))
     await flush()
-
-    const passwordInput = document.body.querySelector<HTMLInputElement>('.mfa-modal input[type="password"]')
-    expect(passwordInput).not.toBeNull()
-    expect(document.body.querySelector('input[inputmode="numeric"]')).toBeNull()
-
-    typeInto(passwordInput!, 'mi-contraseña-del-dispositivo')
-    clickButton(document.body, t => t === 'Confirmar con contraseña')
+    expect(releaseKillSwitch).not.toHaveBeenCalled()
+    expect(document.body.querySelector('.mfa-modal input')).toBeNull()
+    clickButton(document.body, t => t === 'Confirmar')
     await flush()
-
-    expect(releaseKillSwitch).toHaveBeenCalledWith({ devicePassword: 'mi-contraseña-del-dispositivo' })
-    expect(sileoSuccess).toHaveBeenCalledTimes(1)
-  })
-
-  it('MFA enrolled: release button + dialog ask for a TOTP code', async () => {
-    getKillSwitch.mockResolvedValue(ENGAGED)
-    mfaStatus.mockResolvedValue({ enrolled: true })
-    releaseKillSwitch.mockResolvedValue({ ok: true })
-
-    act(() => { root.render(React.createElement(KillSwitchSection)) })
-    await flush()
-
-    expect(container.textContent).toContain('TOTP')
-    clickButton(container, t => t.includes('Liberar'))
-    await flush()
-
-    const totpInput = document.body.querySelector<HTMLInputElement>('.mfa-modal input[inputmode="numeric"]')
-    expect(totpInput).not.toBeNull()
-    expect(document.body.querySelector('.mfa-modal input[type="password"]')).toBeNull()
-
-    typeInto(totpInput!, '123456')
-    clickButton(document.body, t => t.includes('Confirmar con código'))
-    await flush()
-
-    expect(releaseKillSwitch).toHaveBeenCalledWith({ totp: '123456' })
+    expect(releaseKillSwitch).toHaveBeenCalledExactlyOnceWith()
+    expect(mfaStatus).not.toHaveBeenCalled()
     expect(sileoSuccess).toHaveBeenCalledTimes(1)
   })
 })

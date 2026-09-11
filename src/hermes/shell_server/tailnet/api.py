@@ -150,7 +150,7 @@ class SshHostsResponse(BaseModel):
 
 
 class RevokeSshHostRequest(BaseModel):
-    totp: str = Field(min_length=1, max_length=32)
+    totp: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +298,6 @@ def create_tailnet_router(
     effective_vault = vault if vault is not None else SecretsVault()
     effective_limiter = rate_limiter if rate_limiter is not None else _rate_limiter
     effective_ssh_allowlist_path = ssh_allowlist_path or DEFAULT_ALLOWLIST_PATH
-    mfa_store = mfa or MfaStore()
 
     router = APIRouter(prefix="/api/v1/tailnet", tags=["tailnet"])
 
@@ -442,7 +441,6 @@ def create_tailnet_router(
         """Revoke a host's governed-SSH approval. Requires the owner's TOTP —
         a HIGHER bar than the egress domain grant/revoke pair (that host had
         REMOTE_EXEC on the owner's tailnet, not just network reach)."""
-        require_owner_mfa(mfa_store, payload.totp, action="revocar el acceso SSH a un equipo")
 
         store = JsonHostAllowlistStore(effective_ssh_allowlist_path)
         store.revoke(host)

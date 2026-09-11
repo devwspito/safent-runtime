@@ -15,7 +15,6 @@ import type { Skill, HubSkillResult, HubInstallResponse, InstallScanResponse, Sk
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import InstallScanModal from '../components/InstallScanModal'
 import SkillDetailsModal from '../components/SkillDetailsModal'
-import type { MfaFactors } from '../components/MfaModal'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
@@ -224,7 +223,7 @@ export default function SkillsView() {
     await doInstallSkill(identifier, name, onBtnUpdate, false)
   }
 
-  async function handleScanApprove(factors: MfaFactors) {
+  async function handleScanApprove() {
     if (!pendingSkillInstall) return
     const { scan, item, onBtnUpdate } = pendingSkillInstall
     setPendingSkillInstall(null)
@@ -239,12 +238,10 @@ export default function SkillsView() {
         score: scan.score,
         verdict: scan.verdict,
         risks_json: JSON.stringify(scan.risks),
-        totp: factors.totp,
+
       })
-      // The decision above already spent the owner's ONE TOTP code for this
-      // identifier — reuse the short-lived re-auth grant it mints instead of
-      // asking for a second code (which would fail anyway: TOTP is single-use).
-      await doInstallSkill(identifier, name, onBtnUpdate, true, decision.reauth_grant)
+      // Only this recorded owner decision authorizes the exact follow-up install.
+      await doInstallSkill(identifier, name, onBtnUpdate, true, decision.approval_grant)
     } catch (e) {
       show(e instanceof Error ? e.message : t('skills.err.decision'), 'error')
       onBtnUpdate('ready')
@@ -256,17 +253,14 @@ export default function SkillsView() {
     name: string,
     onBtnUpdate: (st: 'installing' | 'installed' | 'ready') => void,
     force: boolean,
-    reauthGrant?: string,
+    approvalGrant?: string,
   ) {
     try {
-      const op: HubInstallResponse = await installSkill(identifier, force, reauthGrant)
+      const op: HubInstallResponse = await installSkill(identifier, force, approvalGrant)
 
       if (op && op.blocked) {
-        // A blind confirm() dialog can't collect a TOTP, and force=true
-        // without one is a guaranteed 401 (dead end — hallazgo A). Route
-        // through the SAME InstallScanModal + MfaModal the pre-flight scan
-        // uses: ONE owner prompt, handleScanApprove records the decision and
-        // reuses its re-auth grant for the install retry below.
+        // A blocked install always returns to the risk review. Force requires
+        // the single-use confirmation issued after that owner's decision.
         setPendingSkillInstall({
           scan: {
             scan_id: op.scan_id ?? '',
@@ -805,4 +799,3 @@ function HubResultRow({ item, installedNames, onInstall }: HubResultRowProps) {
     </motion.div>
   )
 }
-

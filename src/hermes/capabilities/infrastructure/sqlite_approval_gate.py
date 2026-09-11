@@ -377,30 +377,8 @@ class SqliteApprovalGate:
                 reason="enterprise_route_requires_cloud_decision",
             )
 
-        _row_tool = row["tool_name"] if "tool_name" in row.keys() else ""
-        if is_mfa_required(_row_tool or ""):
-            # mfa-tier: fail-closed — sin verifier o factores inválidos → rechaza.
-            if self._mfa_verifier is None:
-                raise ApprovalGateError(
-                    f"MFA verifier no configurado para tool mfa-tier '{_row_tool}' "
-                    "— aprobación rechazada (fail-closed).",
-                    reason="mfa_required",
-                )
-            ok, reason = self._mfa_verifier.verify_for_tool(
-                tool_name=_row_tool or "", risk=row["risk"], factors=mfa_factors
-            )
-            if not ok:
-                logger.warning(
-                    "hermes.approval_gate.mfa_denied proposal=%s tool=%s reason=%s",
-                    proposal_id, _row_tool, reason,
-                )
-                raise ApprovalGateError(
-                    f"MFA inválida para aprobar tool mfa-tier '{_row_tool}' "
-                    f"(motivo={reason}).",
-                    reason=reason,
-                )
-        # simple tier — or mfa-tier with valid factors: proceed to mint.
-
+        # Community approves through the authenticated owner channel. Tokens remain
+        # action-bound and single-use; Enterprise routing above stays authoritative.
         capability = row["risk"]  # usamos el risk como capability label
         token = self._minter.mint(
             proposal_id=proposal_id,

@@ -195,7 +195,7 @@ _MFA_TIER_HITL: frozenset[str] = (
 ) | _DESTRUCTIVE
 
 
-def is_mfa_required(tool: str) -> bool:
+def requires_enterprise_review(tool: str) -> bool:
     """True when a per-action HITL approval requires owner TOTP.
 
     Escalated MFA model (owner decision 2026-06-25):
@@ -209,6 +209,11 @@ def is_mfa_required(tool: str) -> bool:
       - ApprovalCard.tsx (conditional MfaModal)
     """
     return tool in _MFA_TIER_HITL
+
+
+def is_mfa_required(tool: str) -> bool:
+    """Community never requires TOTP; Enterprise review is a separate axis."""
+    return False
 
 
 def hook_mfa_block(tool: str, *, mfa_on_dangers: bool) -> bool:

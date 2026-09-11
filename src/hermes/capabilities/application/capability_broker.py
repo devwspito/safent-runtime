@@ -74,7 +74,7 @@ from hermes.capabilities.infrastructure.surface_adapter_dispatcher import (
     SurfaceAdapterDispatcher,
     SurfaceAdapterNotFound,
 )
-from hermes.capabilities.tool_delicacy import is_mfa_required
+from hermes.capabilities.tool_delicacy import requires_enterprise_review
 from hermes.domain.proposal import ToolCallProposal
 
 if TYPE_CHECKING:
@@ -908,7 +908,7 @@ def _needs_hitl(
         construcción, nunca puede saltarse nada.
       - "auto" SOLO ensancha si effective_risk YA ES LOW (el check HIGH de
         arriba corre PRIMERO e incondicionalmente — F-1 nunca se toca) Y el
-        tool NO es MFA-tier (tool_delicacy.is_mfa_required) — defensa en
+        tool NO es MFA-tier (tool_delicacy.requires_enterprise_review) — defensa en
         profundidad para herramientas de gobernanza (install_mcp/set_policy/
         skill_manage/...) que hipotéticamente pudieran clasificar LOW en el
         futuro. Un overlay JAMÁS puede saltarse HIGH/DANGER/MFA-tier.
@@ -921,7 +921,7 @@ def _needs_hitl(
     auto_executable = getattr(binding, "auto_executable", False)
     if approval_override == "hitl":
         auto_executable = False
-    elif approval_override == "auto" and not is_mfa_required(
+    elif approval_override == "auto" and not requires_enterprise_review(
         getattr(binding, "tool_name", "")
     ):
         auto_executable = True

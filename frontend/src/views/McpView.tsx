@@ -10,7 +10,6 @@ import {
 import type { McpServer, McpRegistryEntry, InstallScanResponse } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import InstallScanModal from '../components/InstallScanModal'
-import type { MfaFactors } from '../components/MfaModal'
 import { panelOriginFromMcpUrl } from '../hooks/useAdsPanel'
 import { useAdsAvailability } from '../hooks/useAdsAvailability'
 import { PageHeader } from '../components/ui/PageHeader'
@@ -324,7 +323,7 @@ export default function McpView() {
     }
   }
 
-  async function handleScanApprove(factors: MfaFactors) {
+  async function handleScanApprove() {
     if (!pendingInstall) return
     const { scan, entry, collectedEnv, onDone } = pendingInstall
     setPendingInstall(null)
@@ -337,7 +336,7 @@ export default function McpView() {
         score: scan.score,
         verdict: scan.verdict,
         risks_json: JSON.stringify(scan.risks),
-        totp: factors.totp,
+
       })
       await doAddMcpServer(entry, collectedEnv, onDone, true)
     } catch (e) {
@@ -819,7 +818,7 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
     void doConnect(false)
   }
 
-  async function handleScanApprove(factors: MfaFactors) {
+  async function handleScanApprove() {
     if (!pendingScan) return
     const scan = pendingScan
     setPendingScan(null)
@@ -832,7 +831,7 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
         score: scan.score,
         verdict: scan.verdict,
         risks_json: JSON.stringify(scan.risks),
-        totp: factors.totp,
+
       })
       await doConnect(true)
     } catch (e) {

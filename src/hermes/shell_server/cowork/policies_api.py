@@ -40,25 +40,25 @@ logger = logging.getLogger("hermes.shell_server.cowork.policies_api")
 
 class PresetBody(BaseModel):
     preset: Literal["equilibrado", "permisivo", "bloqueado"]
-    totp: str
+    totp: str = ""
 
 
 class ToolBody(BaseModel):
     tool: str
     enabled: bool
-    totp: str
+    totp: str = ""
 
 
 class ToolsBody(BaseModel):
     """Batch tool toggle — the owner edits checkboxes and saves once (one TOTP)."""
 
     tools: dict[str, bool]
-    totp: str
+    totp: str = ""
 
 
 class MfaOnDangersBody(BaseModel):
     enabled: bool
-    totp: str
+    totp: str = ""
 
 
 def create_policies_router(
@@ -66,7 +66,6 @@ def create_policies_router(
 ) -> APIRouter:
     router = APIRouter()
     store = policy or ToolPolicyStore()
-    mfa_store = mfa or MfaStore()
 
     @router.get("/api/v1/policies")
     async def get_policies() -> dict:
@@ -76,8 +75,6 @@ def create_policies_router(
     async def set_preset(body: PresetBody) -> dict:
         # Non-sovereign decision: gated on the CURRENT mfa_on_dangers posture —
         # SEG-15, see set_mfa_on_dangers below for the sovereign toggle itself.
-        if store.mfa_on_dangers():
-            require_owner_mfa(mfa_store, body.totp, action="cambiar las políticas de seguridad")
         store.apply_preset(Preset(body.preset))
         # The browser egress plane follows the preset: PERMISIVO opens the netns-isolated
         # browser to the open web (open-logged) so research actually works; Equilibrado/
@@ -93,8 +90,6 @@ def create_policies_router(
 
     @router.post("/api/v1/policies/tool")
     async def set_tool(body: ToolBody) -> dict:
-        if store.mfa_on_dangers():
-            require_owner_mfa(mfa_store, body.totp, action="cambiar las políticas de seguridad")
         store.set_tool(body.tool, body.enabled)
         logger.info(
             "hermes.cowork.policies.tool_set tool=%s enabled=%s", body.tool, body.enabled
@@ -105,8 +100,6 @@ def create_policies_router(
     async def set_tools(body: ToolsBody) -> dict:
         # Batch: the owner edits many checkboxes locally and saves once → ONE MFA prompt
         # for the whole change set (not one per toggle) — only while mfa_on_dangers is on.
-        if store.mfa_on_dangers():
-            require_owner_mfa(mfa_store, body.totp, action="cambiar las políticas de seguridad")
         for tool, enabled in body.tools.items():
             store.set_tool(tool, enabled)
         logger.info("hermes.cowork.policies.tools_set count=%d", len(body.tools))
@@ -120,10 +113,8 @@ def create_policies_router(
         # dead-end (SEG-15). Turning MFA-on-dangers OFF makes cage-escaping
         # dangers run autonomously (owner-responsible); the caged agent still
         # cannot mint the owner's TOTP either way.
-        require_owner_mfa_if_enrolled(mfa_store, body.totp, action="cambiar las políticas de seguridad")
         store.set_mfa_on_dangers(body.enabled)
         logger.info("hermes.cowork.policies.mfa_on_dangers_set enabled=%s", body.enabled)
         return {"ok": True, "mfa_on_dangers": body.enabled}
 
     return router
-

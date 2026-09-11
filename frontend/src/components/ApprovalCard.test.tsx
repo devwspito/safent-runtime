@@ -48,36 +48,18 @@ it('submits once under double clicks and never calls approval execution complete
   render()
   await act(async () => { button('Permitir una vez').click(); button('Permitir una vez').click() })
   expect(resolve).toHaveBeenCalledTimes(1)
-  expect(resolve).toHaveBeenCalledWith('proposal-1', 'once', { totp: null })
+  expect(resolve).toHaveBeenCalledWith('proposal-1', 'once')
   expect(onResolved).toHaveBeenCalledTimes(1)
   expect(success.mock.calls[0][0].title).not.toMatch(/ejecutada/)
   expect(container.textContent).toContain('Decisión registrada')
 })
 
-it('keeps MFA in place during submission and refocuses the same field after rejection', async () => {
-  let reject!: (reason: unknown) => void
-  resolve.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail }))
-  render({ ...approval, required_level: 'mfa', mfa_enrolled: true })
-  act(() => button('Permitir una vez').click())
-  expect(resolve).not.toHaveBeenCalled()
-  const input = document.querySelector('input')!
-  act(() => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, '123456')
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-  })
-  await act(async () => button('Confirmar con código').click())
-  expect(resolve).toHaveBeenCalledWith('proposal-1', 'once', { totp: '123456' })
-  expect(document.querySelector('input')).toBe(input)
-  expect(input.disabled).toBe(true)
-  await act(async () => button('Confirmar con código').click())
-  expect(resolve).toHaveBeenCalledTimes(1)
-  await act(async () => reject(new ApiError('Invalid code', 401, { detail: { code: 'invalid_totp' } })))
-  expect(document.querySelector('input')).toBe(input)
-  expect(input.disabled).toBe(false)
-  expect(document.activeElement).toBe(input)
-  expect(document.querySelector('[role="alert"]')?.textContent).toContain('Código incorrecto')
-  expect(document.querySelector('[role="dialog"]')).not.toBeNull()
-  expect(resolve).toHaveBeenCalledTimes(1)
+it('approves Community security actions without any MFA prompt', async () => {
+  render({ ...approval, target: 'set_policy', required_level: 'mfa', mfa_enrolled: false })
+  await act(async () => button('Permitir una vez').click())
+  expect(document.querySelector('[role="dialog"]')).toBeNull()
+  expect(document.querySelector('input')).toBeNull()
+  expect(resolve).toHaveBeenCalledExactlyOnceWith('proposal-1', 'once')
 })
 
 it('cannot approve enterprise-routed requests but can deny them', async () => {
@@ -85,14 +67,14 @@ it('cannot approve enterprise-routed requests but can deny them', async () => {
   expect(container.textContent).toContain('aprobación de tu organización')
   expect(container.textContent).not.toContain('Permitir una vez')
   await act(async () => button('Rechazar').click())
-  expect(resolve).toHaveBeenCalledWith('proposal-1', 'deny', undefined)
+  expect(resolve).toHaveBeenCalledWith('proposal-1', 'deny')
 })
 
-it('does not downgrade missing classification to a simple approval', () => {
+it('requires an explicit human click even without a classification', async () => {
   render({ ...approval, required_level: undefined })
-  act(() => button('Permitir una vez').click())
-  expect(document.querySelector('[role="dialog"]')).not.toBeNull()
   expect(resolve).not.toHaveBeenCalled()
+  await act(async () => button('Permitir una vez').click())
+  expect(resolve).toHaveBeenCalledExactlyOnceWith('proposal-1', 'once')
 })
 
 it('recognizes an expired request from the structured code, not translated copy', async () => {
