@@ -18,6 +18,7 @@ _TERMINAL: frozenset[TaskStatus] = frozenset({
     TaskStatus.COMPLETED,
     TaskStatus.FAILED,
     TaskStatus.REJECTED,
+    TaskStatus.CANCELLED,
 })
 
 

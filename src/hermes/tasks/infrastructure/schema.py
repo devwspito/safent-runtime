@@ -61,6 +61,9 @@ _SCHEMA_VERSION_P3: int = 4
 # user_version=4). P4 es la PRIMERA migración que realmente recrea tablas
 # desde P2, así que avanza a la 5 para no pisar el hueco de P3.
 _SCHEMA_VERSION_P4: int = 5
+# P5 admits the existing domain/queue cancellation outcome as a terminal state.
+# It does not grant execution or relax completion evidence/claim/trigger checks.
+_SCHEMA_VERSION_P5: int = 6
 
 # Pragmas de conexión — afectan a TODOS los procesos que abren el fichero
 # (firma del usuario, data-model §"Decisiones irreversibles" punto 8).
@@ -837,6 +840,70 @@ CREATE INDEX IF NOT EXISTS idx_agent_tasks_external_delegation_completed
     WHERE trigger_kind = 'external_delegation';
 """
 
+# Deliberately derive from the exact previous schema: no copied column list or
+# second implementation of execution invariants. Only the state vocabulary and
+# terminal-claim constraint change. Historical rows/IDs/signatures remain intact.
+_DDL_AGENT_TASKS_NEW_P5 = _DDL_AGENT_TASKS_NEW_P4.replace(
+    "'failed', 'pending_approval', 'rejected'",
+    "'failed', 'pending_approval', 'rejected', 'cancelled'",
+).replace(
+    "('completed','failed','rejected')", "('completed','failed','rejected','cancelled')"
+)
+_DDL_AGENT_TASKS_INDEXES_P5 = _DDL_AGENT_TASKS_INDEXES.replace(
+    "('completed','failed','rejected')", "('completed','failed','rejected','cancelled')"
+)
+
+
+def _recreate_p5_cancellation_if_needed(conn: sqlite3.Connection) -> None:
+    """Atomic cancellation schema upgrade, preserving rows, indexes and triggers.
+
+    Disable FK enforcement only outside the transaction so inbound references
+    survive the official create/copy/drop/rename pattern. Validate all FKs before
+    commit. Unknown extra columns fail rather than being silently discarded.
+    """
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= _SCHEMA_VERSION_P5:
+        return
+    if conn.in_transaction:
+        raise sqlite3.OperationalError("task migration requires an idle connection")
+    foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        # Another process may have migrated while this connection waited.
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= _SCHEMA_VERSION_P5:
+            conn.execute("COMMIT")
+            return
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(agent_tasks)")}
+        if columns != {column.strip() for column in _P2_COLUMNS.split(",")}:
+            raise sqlite3.OperationalError("unrecognized task schema; migration stopped")
+        objects = conn.execute(
+            "SELECT name,sql FROM sqlite_master WHERE tbl_name='agent_tasks' "
+            "AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name"
+        ).fetchall()
+        conn.execute(_DDL_AGENT_TASKS_NEW_P5)
+        conn.execute(
+            f"INSERT INTO agent_tasks_new ({_P2_COLUMNS}) SELECT {_P2_COLUMNS} FROM agent_tasks"
+        )
+        conn.execute("DROP TABLE agent_tasks")
+        conn.execute("ALTER TABLE agent_tasks_new RENAME TO agent_tasks")
+        for name, sql in objects:
+            if name == "agent_tasks_dedup_key_active_unique":
+                sql = sql.replace(
+                    "('completed','failed','rejected')",
+                    "('completed','failed','rejected','cancelled')",
+                )
+            conn.execute(sql)
+        if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise sqlite3.IntegrityError("task migration foreign-key validation failed")
+        conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION_P5}")
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys else 'OFF'}")
+
 
 def _recreate_p4_external_delegation_if_needed(conn: sqlite3.Connection) -> None:
     """🔒 RECREACIÓN FIRMADA P4 — admite 'external_delegation' (A2A cross-human).
@@ -928,11 +995,12 @@ def ensure_tasks_schema(conn: sqlite3.Connection) -> None:
     # RENAME) agent_tasks, lo que borraría cualquier índice creado antes de este
     # punto (bug real detectado en test: los índices P0/P1/P2 desaparecían).
     _recreate_p4_external_delegation_if_needed(conn)
+    _recreate_p5_cancellation_if_needed(conn)
 
     # Los índices (P0 + P1 + P2 + P4) se (re)crean al final: CUALQUIER recreación
     # de tabla de arriba borra los índices al hacer DROP; este bloque los repuebla
     # siempre, en el ÚLTIMO paso, tras la ÚLTIMA recreación posible.
-    conn.executescript(_DDL_AGENT_TASKS_INDEXES)
+    conn.executescript(_DDL_AGENT_TASKS_INDEXES_P5)
     conn.executescript(_DDL_AGENT_TASKS_TRIGGER_INDEX)
     conn.executescript(_DDL_AGENT_TASKS_EXTERNAL_DELEGATION_INDEX)
 

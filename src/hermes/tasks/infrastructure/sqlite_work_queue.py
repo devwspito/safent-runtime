@@ -33,8 +33,6 @@ _LEASE_SECONDS: int = int(os.environ.get("HERMES_TASK_LEASE_SECONDS", "600"))
 _BACKOFF_BASE_SECONDS: int = 30
 _BACKOFF_CAP_SECONDS: int = 3600
 
-_TERMINAL_STATUSES = frozenset({"completed", "failed", "rejected"})
-
 # Identificador por defecto del worker que reclama (data-model 006 §A5). El loop
 # P0 es single-writer; el id es estable dentro de un arranque del daemon. Satisface
 # la invariante I6 ('in_progress' => worker_id NOT NULL) del esquema P1.

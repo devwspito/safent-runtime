@@ -121,6 +121,7 @@ def test_pending_is_not_execution_and_snapshots_survive_reopen(db):
         ("pending_approval", "blocked"),
         ("completed", "completed"),
         ("failed", "failed"),
+        ("cancelled", "cancelled"),
         ("rejected", "rejected"),
     ],
 )

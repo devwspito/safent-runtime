@@ -71,6 +71,7 @@ def collect_status_events(path: Path, *, instance_id: str) -> int:
                         WHEN 'completed' THEN 'completed'
                         WHEN 'failed' THEN 'failed'
                         WHEN 'rejected' THEN 'rejected'
+                        WHEN 'cancelled' THEN 'cancelled'
                     END
                   END AS observed_status
                 FROM pending_delegations d LEFT JOIN agent_tasks t ON t.task_id=d.task_id

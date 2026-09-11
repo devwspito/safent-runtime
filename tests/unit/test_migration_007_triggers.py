@@ -143,7 +143,7 @@ def test_trigger_types_catalog_seeded(conn: sqlite3.Connection) -> None:
             "SELECT trigger_type FROM authorized_trigger_types"
         ).fetchall()
     }
-    assert types == {"timer", "system_event", "self_enqueue"}
+    assert types == {"timer", "system_event", "self_enqueue", "external_delegation"}
 
 
 def test_every_trigger_type_is_default_deny(conn: sqlite3.Connection) -> None:
@@ -442,7 +442,7 @@ def test_p0_p1_indexes_all_survive_recreation(conn: sqlite3.Connection) -> None:
 
 def test_user_version_advanced_to_p2(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == _SCHEMA_VERSION_P2
+    assert version >= _SCHEMA_VERSION_P2
     assert _SCHEMA_VERSION_P2 == _SCHEMA_VERSION_P1 + 1
 
 
@@ -469,7 +469,7 @@ def test_re_running_ensure_is_noop_and_preserves_rows(db_path: Path) -> None:
     manual = c.execute(
         "SELECT trigger_kind FROM agent_tasks WHERE task_id=?", (manual_id,)
     ).fetchone()
-    # El catálogo no se re-sembró (siguen 3 tipos, sin duplicar).
+    # El chain incluye external_delegation (P4); ningún tipo se duplica.
     type_count = c.execute(
         "SELECT COUNT(*) AS n FROM authorized_trigger_types"
     ).fetchone()["n"]
@@ -487,10 +487,10 @@ def test_re_running_ensure_is_noop_and_preserves_rows(db_path: Path) -> None:
     assert auto["trigger_kind"] == "timer"
     assert auto["trigger_instance_id"] == instance_id
     assert manual["trigger_kind"] == "manual_enqueue"
-    assert type_count == 3
+    assert type_count == 4
     assert inst_count == 1
     assert singletons == 1
-    assert version == _SCHEMA_VERSION_P2
+    assert version >= _SCHEMA_VERSION_P2
 
 
 def test_migration_from_p1_db_advances_to_p2(db_path: Path) -> None:
@@ -532,7 +532,7 @@ def test_migration_from_p1_db_advances_to_p2(db_path: Path) -> None:
     assert row["trigger_kind"] == "manual_enqueue"
     assert row["trigger_instance_id"] is None  # legado => sin origen automático
     assert row["kind"] == "autonomous"
-    assert version == _SCHEMA_VERSION_P2
+    assert version >= _SCHEMA_VERSION_P2
 
 
 def test_idempotent_on_fresh_db_advances_to_p2(db_path: Path) -> None:
@@ -541,4 +541,4 @@ def test_idempotent_on_fresh_db_advances_to_p2(db_path: Path) -> None:
         ensure_tasks_schema(c)
         v = c.execute("PRAGMA user_version").fetchone()[0]
         c.close()
-        assert v == _SCHEMA_VERSION_P2
+        assert v >= _SCHEMA_VERSION_P2
