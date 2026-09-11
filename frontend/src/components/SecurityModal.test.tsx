@@ -16,7 +16,11 @@ describe('security review dialogs', () => {
   it('opens on the safe action and retains risks after a failed request', async () => {
     const submit = vi.fn().mockRejectedValue(new Error('private technical detail'))
     await act(async () => root.render(<InstallScanModal scan={scan} name="Prueba" onApprove={submit} onCancel={vi.fn()} />))
-    expect(document.activeElement?.textContent).toBe('Cancelar')
+    // Base UI defers focus until the popup frame is ready. Keep the exact
+    // safety assertion, but wait for the observable focus rather than racing RAF.
+    await act(async () => {
+      await vi.waitFor(() => expect(document.activeElement?.textContent).toBe('Cancelar'))
+    })
     await act(async () => approve().click())
     expect(document.querySelector('[role=dialog]')?.textContent).toContain('Solicita acceso a Internet')
     expect(document.querySelector('[role=alert]')?.textContent).toContain('No se pudo completar')

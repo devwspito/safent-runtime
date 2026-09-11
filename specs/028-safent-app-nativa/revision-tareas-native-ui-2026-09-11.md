@@ -1,5 +1,20 @@
 # Community — Tareas, navegación estrecha y arranque nativo
 
+## Cierre posterior de foco (heartbeat 2026-09-11)
+
+| Before | After | Why |
+| --- | --- | --- |
+| Test comprobaba foco antes del rAF de Base UI | Espera acotada del foco real en Cancelar, misma assertion | Probar el comportamiento observable sin simular el foco ni modificar producción |
+
+Fallo anterior reproducido (1 de 3 focales). Código instalado de Base UI usa
+queueMicrotask + enqueueFocus/rAF. Chrome real en fixture confirmó Cancelar.
+Tras sincronizar la assertion: **203 PASS / 40 archivos**, build TypeScript/Vite
+PASS. No se eliminó ni debilitó el test, no se cambiaron permisos ni componentes
+productivos. Avisos persistentes: scrollTo no implementado en jsdom y chunk
+principal ~792kB. No certifica toda UI/Tauri ni elimina otros pendientes.
+Siguiente bloque UI pendiente: carreras/errores de Memoria y Archivos, además de
+verificación nativa y los módulos nuevos de Enterprise descritos en el plan.
+
 2026-09-11. Checkpoint UI, **no cierre integral de UI ni del producto**.
 
 ## Implementación
