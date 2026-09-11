@@ -1,375 +1,134 @@
-/**
- * ApprovalCard — HITL approval widget.
- *
- * Rendered both inside SeguridadView (full list) and PendingApprovalsInChat
- * (filtered to the active conversation).
- *
- * State machine: idle | awaiting_code | needs_enrollment | resolving | error | expired
- *
- * Tier model (server-side classification via `approval.required_level`):
- *   simple — approve directly; no TOTP.
- *   mfa    — MfaModal collects TOTP before approving; if owner has NOT enrolled
- *             MFA yet, show inline enrollment nudge instead of opening the modal.
- */
-
-import { useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { sileo } from 'sileo'
-import { Info, KeyRound, ShieldAlert } from 'lucide-react'
-import { resolveApproval } from '../api/client'
+import { ChevronDown, KeyRound, ShieldCheck } from 'lucide-react'
+import { ApiError, resolveApproval } from '../api/client'
 import type { PendingApproval } from '../api/types'
 import MfaModal from './MfaModal'
+import { Button } from './ui/Button'
 import { useT, useLocale, approvalTitle } from '../lib/i18n'
+import css from './ApprovalCard.module.css'
 
 export interface ApprovalCardProps {
   approval: PendingApproval
-  /** Legacy compat — no longer the gate; kept for PendingApprovalsInChat. */
-  mfaDisabled?: boolean
   onResolved(): void
 }
 
-// ── Tier helpers ──────────────────────────────────────────────────────────────
+type State = 'idle' | 'code' | 'enroll' | 'allowing' | 'denying' | 'resolved' | 'expired'
 
-type Tier = 'simple' | 'mfa' | 'destructive'
-
-function deriveTier(approval: PendingApproval): Tier {
-  if (approval.required_level === 'mfa') return 'mfa'
-  return 'simple'
-}
-
-// ── Card state machine ────────────────────────────────────────────────────────
-
-type CardState =
-  | { phase: 'idle' }
-  | { phase: 'awaiting_code' }
-  | { phase: 'needs_enrollment' }
-  | { phase: 'resolving'; action: 'allow' | 'deny' }
-  | { phase: 'error'; action: 'allow' | 'deny'; message: string }
-  | { phase: 'expired' }
-
-// ── Sub-components ────────────────────────────────────────────────────────────
-
-function RiskBadge({ tier }: { tier: Tier }) {
-  const t = useT()
-
-  if (tier === 'mfa') {
-    return (
-      <span
-        className="seg-pol-badge seg-approval-card__badge seg-approval-card__badge--manual"
-        aria-label={t('approval.badge.manual')}
-      >
-        <ShieldAlert size={14} aria-hidden="true" />
-        {t('approval.badge.manual')}
-      </span>
-    )
-  }
-
-  if (tier === 'destructive') {
-    return (
-      <span
-        className="seg-pol-badge seg-approval-card__badge seg-approval-card__badge--destructive"
-        aria-label={t('approval.badge.destructive')}
-      >
-        <ShieldAlert size={14} aria-hidden="true" />
-        {t('approval.badge.destructive')}
-      </span>
-    )
-  }
-
-  return (
-    <span
-      className="seg-pol-badge seg-approval-card__badge seg-approval-card__badge--attention"
-      aria-label={t('approval.badge.attention')}
-    >
-      <Info size={14} aria-hidden="true" />
-      {t('approval.badge.attention')}
-    </span>
-  )
-}
-
-function EnrollmentNudge({ onDismiss }: { onDismiss: () => void }) {
-  const t = useT()
-  const navigate = useNavigate()
-
-  return (
-    <div className="seg-approval-card__enroll-nudge" role="status">
-      <p className="seg-approval-card__why" style={{ marginBottom: 'var(--sp-3)' }}>
-        {t('approval.enroll.prompt')}
-      </p>
-      <div className="seg-approval-card__actions">
-        <button
-          type="button"
-          className="cv-btn cv-btn--ghost cv-btn--sm"
-          onClick={onDismiss}
-        >
-          {t('approval.enroll.later')}
-        </button>
-        <button
-          type="button"
-          className="cv-btn cv-btn--primary cv-btn--sm"
-          onClick={() => navigate('/seguridad')}
-        >
-          {t('approval.enroll.cta')}
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ── Main component ────────────────────────────────────────────────────────────
-
-export default function ApprovalCard({
-  approval,
-  onResolved,
-}: ApprovalCardProps) {
+/** A scoped decision, not a grant of general permissions. The server gate
+ * remains authoritative for MFA, enterprise routing and single consumption. */
+export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps) {
   const t = useT()
   const { locale } = useLocale()
-  const [cardState, setCardState] = useState<CardState>({ phase: 'idle' })
-  const detailsRef = useRef<HTMLDetailsElement>(null)
+  const navigate = useNavigate()
+  const id = useId()
+  const [state, setState] = useState<State>('idle')
+  const [error, setError] = useState('')
+  // Guard synchronously: a double click can precede React's next render.
+  const submitted = useRef(false)
+  const trigger = useRef<HTMLButtonElement>(null)
+  const previousState = useRef(state)
+  const requiresCode = approval.required_level !== 'simple'
+  const enterprise = approval.route === 'enterprise'
+  const title = approvalTitle(approval.kind, approval.summary, locale)
+  const parameters = Object.entries(approval.parameters ?? {})
+  const busy = state === 'allowing' || state === 'denying'
+  const terminal = state === 'resolved' || state === 'expired'
 
-  const tier = deriveTier(approval)
-  const isMfaTier = tier === 'mfa'
+  useEffect(() => {
+    if (state === 'idle' && previousState.current !== 'idle') trigger.current?.focus()
+    previousState.current = state
+  }, [state])
 
-  // Derive the human-readable title from `kind`; fall back to `summary`.
-  const humanTitle = approvalTitle(approval.kind, approval.summary, locale)
-  // The `summary` from backend is the "why" body (one sentence of context).
-  const whyBody = approval.summary !== humanTitle ? approval.summary : undefined
-
-  const params = approval.parameters
-  const paramEntries =
-    params && typeof params === 'object' && !Array.isArray(params)
-      ? Object.entries(params).slice(0, 8)
-      : []
-
-  // ── Tier modifier CSS class ─────────────────────────────────────────────
-  const tierMod =
-    tier === 'mfa' ? 'seg-approval-card--manual'
-    : tier === 'destructive' ? 'seg-approval-card--destructive'
-    : 'seg-approval-card--attention'
-
-  // ── Handlers ───────────────────────────────────────────────────────────
-
-  function handleApproveClick() {
-    if (cardState.phase === 'resolving' || cardState.phase === 'expired') return
-
-    if (isMfaTier) {
-      const enrolled = approval.mfa_enrolled ?? true
-      if (!enrolled) {
-        setCardState({ phase: 'needs_enrollment' })
-      } else {
-        setCardState({ phase: 'awaiting_code' })
-      }
-    } else {
-      void doApprove()
-    }
-  }
-
-  async function doApprove(totp?: string) {
-    setCardState({ phase: 'resolving', action: 'allow' })
+  async function decide(decision: 'once' | 'deny', totp?: string) {
+    if (submitted.current || terminal || (enterprise && decision === 'once')) return
+    submitted.current = true
+    setError('')
+    setState(decision === 'once' ? 'allowing' : 'denying')
     try {
-      const res = await resolveApproval(approval.proposal_id, 'once', { totp: totp ?? null }) as {
-        ok?: boolean
-        live?: boolean
-        decision?: string
-      } | null | undefined
-      // A successful approve (no throw) means the card was STILL PENDING and got
-      // approved — the tool executes via the resume backstop regardless of `live`.
-      // `live` only tells whether the blocked thread was ALSO signalled at this exact
-      // instant; on a FAST approval the waiter may not be registered yet (live=false)
-      // but the action STILL runs. So live=false is NOT "caducó" — that false toast
-      // fired even when the owner approved in ~2s. A GENUINE expiry throws an approve
-      // error (proposal no longer pending), handled in the catch below.
-      const isLive = res == null || res.live !== false
-      sileo.success({
-        title: isLive ? 'Acción aprobada y ejecutada.' : 'Acción aprobada.',
-      })
+      await resolveApproval(approval.proposal_id, decision,
+        decision === 'once' ? { totp: totp ?? null } : undefined)
+      setState('resolved')
+      // Approval acknowledgement is not proof of tool execution. The chat's
+      // tool-result event, not `live`, establishes the outcome of the action.
+      sileo.success({ title: t(decision === 'once' ? 'approval.toast.allowed' : 'approval.toast.denied') })
       onResolved()
     } catch (err) {
-      const msg = err instanceof Error ? err.message : ''
-      if (msg.includes('expired') || msg.includes('proposal_invalid')) {
-        setCardState({ phase: 'expired' })
+      submitted.current = false
+      const code = err instanceof ApiError ? err.code : undefined
+      if (code === 'proposal_invalid' || code === 'expired') {
+        setState('expired')
       } else {
-        setCardState({ phase: 'error', action: 'allow', message: t('approval.err.allow') })
-        sileo.error({ title: t('approval.toast.err_allow') })
+        setState('idle')
+        setError(t(code === 'invalid_totp' ? 'mfa.err.invalid'
+          : decision === 'once' ? 'approval.err.allow' : 'approval.err.deny'))
       }
     }
   }
 
-  async function handleDeny() {
-    if (cardState.phase === 'resolving' || cardState.phase === 'expired') return
-    setCardState({ phase: 'resolving', action: 'deny' })
-    try {
-      await resolveApproval(approval.proposal_id, 'deny')
-      sileo.success({ title: t('approval.toast.denied') })
-      onResolved()
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : ''
-      if (msg.includes('expired') || msg.includes('proposal_invalid')) {
-        setCardState({ phase: 'expired' })
-      } else {
-        setCardState({ phase: 'error', action: 'deny', message: t('approval.err.deny') })
-        sileo.error({ title: t('approval.toast.err_deny') })
-      }
-    }
+  function approve() {
+    if (busy || terminal || submitted.current || enterprise) return
+    setError('')
+    if (requiresCode) setState(approval.mfa_enrolled === false ? 'enroll' : 'code')
+    else void decide('once')
   }
-
-  function handleMfaSign({ totp }: { totp: string }) {
-    setCardState({ phase: 'idle' })
-    void doApprove(totp)
-  }
-
-  function handleMfaCancel() {
-    setCardState({ phase: 'idle' })
-  }
-
-  const isResolving = cardState.phase === 'resolving'
-  const isExpired   = cardState.phase === 'expired'
-  const isError     = cardState.phase === 'error'
-  const actionsDisabled = isResolving || isExpired
-
-  // ── Render ──────────────────────────────────────────────────────────────
 
   return (
     <>
-      <div
-        className={`seg-approval-card ${tierMod}`}
-        role="alertdialog"
-        aria-label={humanTitle}
-        aria-busy={isResolving}
-      >
-        {/* Head: title + risk badge */}
-        <div className="seg-approval-card__head">
-          <h3 className="seg-approval-card__title">{humanTitle}</h3>
-          <RiskBadge tier={tier} />
+      <section className={css.card} aria-labelledby={`${id}-title`} aria-describedby={`${id}-scope`} aria-busy={busy}>
+        <header className={css.header}>
+          <span className={css.icon}><ShieldCheck size={18} aria-hidden /></span>
+          <div className={css.heading}>
+            <span className={css.eyebrow}>{t('approval.request')}</span>
+            <h3 id={`${id}-title`} className={css.title}>{title}</h3>
+          </div>
+          {requiresCode && <span className={css.verification}><KeyRound size={12} aria-hidden />{t('approval.verification')}</span>}
+        </header>
+
+        {approval.summary !== title && <p className={css.description}>{approval.summary}</p>}
+        <div className={css.scope} id={`${id}-scope`}>
+          <div><span>{t('approval.scope.label')}</span><strong>{t('approval.scope.once')}</strong></div>
+          {approval.target && <div><span>{t('approval.target')}</span><code>{approval.target}</code></div>}
+          {!approval.conversation_id && <div><span>{t('approval.origin')}</span><strong>{t('approval.origin.autonomous')}</strong></div>}
         </div>
 
-        {/* Body: one-sentence "why" from backend */}
-        {whyBody && (
-          <p className="seg-approval-card__why">{whyBody}</p>
-        )}
-
-        {/* Collapsible technical details */}
-        {paramEntries.length > 0 && (
-          <details
-            ref={detailsRef}
-            className="seg-details seg-approval-card__details"
-          >
-            <summary>
-              <svg
-                className="seg-approval-card__chevron"
-                width="13"
-                height="13"
-                viewBox="0 0 13 13"
-                fill="none"
-                aria-hidden="true"
-              >
-                <path d="M4 5l2.5 2.5L9 5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              {t('approval.details.toggle')}
-            </summary>
-            <dl className="seg-approval-card__params">
-              {paramEntries.map(([k, v]) => (
-                <div key={k} className="seg-approval-card__param-row">
-                  <dt>{k}</dt>
-                  <dd>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</dd>
-                </div>
-              ))}
-            </dl>
+        {(parameters.length > 0 || approval.technical_detail) && (
+          <details className={css.details}>
+            <summary><ChevronDown size={14} aria-hidden />{t('approval.details.toggle')}</summary>
+            {approval.technical_detail && <p className={css.technical}>{approval.technical_detail}</p>}
+            {parameters.length > 0 && <dl className={css.parameters}>
+              {parameters.map(([key, value]) => <div key={key}>
+                <dt>{key}</dt><dd>{typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value)}</dd>
+              </div>)}
+            </dl>}
           </details>
         )}
 
-        {/* Enrollment nudge (mfa not enrolled) */}
-        {cardState.phase === 'needs_enrollment' && (
-          <EnrollmentNudge onDismiss={() => setCardState({ phase: 'idle' })} />
-        )}
-
-        {/* Inline error band */}
-        {isError && (
-          <div className="seg-approval-card__error-band" role="alert">
-            <span>{cardState.message}</span>
-            <div style={{ display: 'flex', gap: 'var(--sp-2)' }}>
-              <button
-                type="button"
-                className="cv-btn cv-btn--ghost cv-btn--sm"
-                onClick={() => setCardState({ phase: 'idle' })}
-              >
-                {t('approval.err.cancel')}
-              </button>
-              <button
-                type="button"
-                className="cv-btn cv-btn--secondary cv-btn--sm"
-                onClick={() => {
-                  if (cardState.action === 'allow') void doApprove()
-                  else void handleDeny()
-                }}
-              >
-                {t('approval.err.retry')}
-              </button>
-            </div>
+        {enterprise && <p className={css.notice}>{t('approval.enterprise')}</p>}
+        {state === 'enroll' && <div className={css.notice} role="status">
+          <p>{t('approval.enroll.prompt')}</p>
+          <Button size="sm" onClick={() => navigate('/sistema?tab=seguridad')}>{t('approval.enroll.cta')}</Button>
+        </div>}
+        {error && <p className={css.error} role="alert">{error}</p>}
+        {terminal ? <footer className={css.footer} role="status">
+          <span>{t(state === 'expired' ? 'approval.expired' : 'approval.resolved')}</span>
+          <Button size="sm" variant="ghost" onClick={onResolved}>{t('approval.expired.close')}</Button>
+        </footer> : <footer className={css.footer}>
+          <span className={css.hint}>{t('approval.scope.hint')}</span>
+          <div className={css.actions}>
+            <Button size="sm" variant="ghost" disabled={busy} loading={state === 'denying'} onClick={() => void decide('deny')}>
+              {t('approval.btn.deny')}
+            </Button>
+            {!enterprise && <Button ref={trigger} size="sm" variant="primary" disabled={busy || state === 'code'} loading={state === 'allowing'} onClick={approve}>
+              {requiresCode && <KeyRound size={13} aria-hidden />}{t('approval.btn.allow')}
+            </Button>}
           </div>
-        )}
-
-        {/* Expired state */}
-        {isExpired && (
-          <div className="seg-approval-card__expired-band" role="status">
-            <span>{t('approval.expired')}</span>
-            <button
-              type="button"
-              className="cv-btn cv-btn--ghost cv-btn--sm"
-              onClick={onResolved}
-            >
-              {t('approval.expired.close')}
-            </button>
-          </div>
-        )}
-
-        {/* Actions — hidden when showing enrollment nudge or expired */}
-        {cardState.phase !== 'needs_enrollment' && !isExpired && !isError && (
-          <div
-            className="seg-approval-card__actions"
-            role="group"
-            aria-label="Acciones de aprobación"
-          >
-            <button
-              className="cv-btn cv-btn--ghost cv-btn--sm"
-              onClick={() => void handleDeny()}
-              disabled={actionsDisabled}
-              type="button"
-            >
-              {isResolving && cardState.action === 'deny'
-                ? t('approval.btn.denying')
-                : t('approval.btn.deny')}
-            </button>
-
-            <button
-              className={`cv-btn cv-btn--sm ${tier === 'destructive' ? 'cv-btn--secondary' : 'cv-btn--primary'}`}
-              onClick={handleApproveClick}
-              disabled={actionsDisabled}
-              type="button"
-            >
-              {isResolving && cardState.action === 'allow' ? (
-                t('approval.btn.allowing')
-              ) : isMfaTier ? (
-                <>
-                  <KeyRound size={14} aria-hidden="true" style={{ marginRight: 'var(--sp-1)' }} />
-                  {t('approval.btn.allow_mfa')}
-                </>
-              ) : (
-                t('approval.btn.allow')
-              )}
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* MfaModal — stays open until code confirmed or cancelled */}
-      {cardState.phase === 'awaiting_code' && (
-        <MfaModal
-          title={humanTitle}
-          onSign={handleMfaSign}
-          onCancel={handleMfaCancel}
-        />
-      )}
+        </footer>}
+      </section>
+      {state === 'code' && <MfaModal title={title}
+        onSign={({ totp }) => { void decide('once', totp) }}
+        onCancel={() => setState('idle')} />}
     </>
   )
 }

@@ -466,7 +466,6 @@ interface ProviderRowProps {
 
 export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConfirm }: ProviderRowProps) {
   const t = useT()
-  const reduced = useReducedMotion()
   const [testing, setTesting] = useState(false)
   const [showKeyForm, setShowKeyForm] = useState(false)
   const [apiKeyInput, setApiKeyInput] = useState('')
@@ -598,7 +597,6 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
   return (
     <motion.div
       className={rowClass}
-      whileHover={reduced ? undefined : { y: -2 }}
       transition={SPRING}
       layout
     >

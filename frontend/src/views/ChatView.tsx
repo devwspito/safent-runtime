@@ -284,15 +284,13 @@ function ThinkingBlock({ text, done }: ThinkingBlockProps) {
 interface UserMessageProps {
   text: string
   failed?: boolean
-  enterDelay?: number
 }
 
-const UserMessage = memo(function UserMessage({ text, failed, enterDelay = 0 }: UserMessageProps) {
+const UserMessage = memo(function UserMessage({ text, failed }: UserMessageProps) {
   const t = useT()
   return (
     <div
       className={[styles.messageRow, styles.messageRowUser].join(' ')}
-      style={{ animationDelay: `${enterDelay}ms` }}
       role="article"
       aria-label={t('chat.aria.message')}
     >
@@ -320,12 +318,10 @@ const APP_VIEW_ROUTES: ReadonlySet<string> = new Set([
 
 interface AssistantMessageProps {
   message: Extract<ChatMessage, { type: 'assistant' }>
-  enterDelay?: number
 }
 
 const AssistantMessage = memo(function AssistantMessage({
   message,
-  enterDelay = 0,
 }: AssistantMessageProps) {
   const { thinkingText, thinkingDone, toolSteps, activityText, renderedHtml, isStreaming } = message
   const navigate = useNavigate()
@@ -365,7 +361,6 @@ const AssistantMessage = memo(function AssistantMessage({
   return (
     <div
       className={styles.messageRow}
-      style={{ animationDelay: `${enterDelay}ms` }}
       role="article"
       aria-label={t('chat.aria.reply')}
     >
@@ -1191,18 +1186,16 @@ export default function ChatView() {
             {showWelcome ? (
               <Welcome onSuggestion={handleSuggestion} />
             ) : (
-              messages.map((msg, idx) =>
+              messages.map(msg =>
                 msg.type === 'user' ? (
                   <UserMessage
                     key={msg.id}
                     text={msg.text}
-                    enterDelay={Math.min(idx * 30, 180)}
                   />
                 ) : (
                   <AssistantMessage
                     key={msg.id}
                     message={msg}
-                    enterDelay={Math.min(idx * 30, 180)}
                   />
                 ),
               )

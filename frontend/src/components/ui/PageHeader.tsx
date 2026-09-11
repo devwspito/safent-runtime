@@ -1,5 +1,4 @@
 import type { ReactNode } from 'react'
-import { AnimatedPageHeaderText } from './motion'
 
 export interface PageHeaderProps {
   title: string
@@ -12,7 +11,8 @@ export function PageHeader({ title, subtitle, actions }: PageHeaderProps) {
   return (
     <header className="view-header ds-page-header">
       <div className="ds-page-header__left">
-        <AnimatedPageHeaderText title={title} subtitle={subtitle} />
+        <h1 className="view-title">{title}</h1>
+        {subtitle ? <p className="view-subtitle">{subtitle}</p> : null}
       </div>
       {actions ? <div className="ds-page-header__actions">{actions}</div> : null}
     </header>

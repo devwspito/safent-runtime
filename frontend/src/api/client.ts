@@ -73,14 +73,26 @@ const BASE = '/api/v1'
 export class ApiError extends Error {
   readonly status: number
   readonly body: unknown
+  readonly code: string | undefined
 
   constructor(message: string, status: number, body: unknown) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.body = body
+    this.code = errorCode(body)
   }
 }
+
+function errorCode(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined
+  const detail = (body as Record<string, unknown>).detail
+  const code = detail && typeof detail === 'object'
+    ? (detail as Record<string, unknown>).code : undefined
+  return typeof code === 'string' ? code : undefined
+}
+
+const FACTOR_ERRORS = new Set(['mfa_required', 'invalid_totp', 'mfa_not_enrolled'])
 
 interface RequestOptions extends RequestInit {
   timeoutMs?: number
@@ -128,17 +140,24 @@ async function request<T>(path: string, options: RequestOptions = {}, _retried =
   }
   clearTimeout(timer)
 
+  let errorBody: unknown = null
+  if (!res.ok) {
+    try { errorBody = await res.json() } catch { /* non-JSON */ }
+  }
+
+  // A rejected MFA code is not an expired session. Replaying that request
+  // silently submits the same factor twice and can disrupt the owner session.
   // Session token rotated/expired mid-use → renew once and retry, so the user
   // never hits a dead 401 while the tab is active.
-  if (res.status === 401 && !_retried && token() && path !== '/session/refresh') {
+  if (res.status === 401 && !FACTOR_ERRORS.has(errorCode(errorBody) ?? '')
+    && !_retried && token() && path !== '/session/refresh') {
     if (await refreshToken()) {
       return request<T>(path, options, true)
     }
   }
 
   if (!res.ok) {
-    let body: unknown = null
-    try { body = await res.json() } catch { /* non-JSON */ }
+    const body = errorBody
     const b = body as Record<string, unknown> | null
     const message =
       (b?.detail as Record<string, unknown> | undefined)?.message as string
@@ -892,7 +911,7 @@ export function listPendingApprovals(): Promise<PendingApproval[]> {
 
 export function resolveApproval(
   proposalId: string,
-  decision: string,
+  decision: 'once' | 'deny',
   factors: { totp?: string | null } = {},
 ): Promise<unknown> {
   return request<unknown>(`/approvals/${encodeURIComponent(proposalId)}`, {

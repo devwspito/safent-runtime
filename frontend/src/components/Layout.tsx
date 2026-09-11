@@ -301,7 +301,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
   // colleague's assistant asking for help is just as "needs your attention"
   // as the agent's own HITL approvals.
   const pendingCount =
-    usePendingApprovals(6000, approvalRefreshTick).length +
+    usePendingApprovals(6000, approvalRefreshTick).approvals.length +
     usePendingInboundDelegations(6000, approvalRefreshTick).length
 
   async function handleSendMessage(text: string) {

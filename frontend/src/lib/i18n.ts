@@ -65,15 +65,26 @@ const translations = {
     'approval.badge.destructive':'Requiere aprobación manual',
 
     // Approval card — buttons
-    'approval.btn.allow':        'Sí, permitir',
+    'approval.btn.allow':        'Permitir una vez',
     'approval.btn.allow_mfa':    'Sí, permitir (necesita código)',
-    'approval.btn.deny':         'No, rechazar',
+    'approval.btn.deny':         'Rechazar',
     'approval.btn.allowing':     'Permitiendo…',
     'approval.btn.denying':      'Rechazando…',
 
     // Approval card — states / toasts
-    'approval.toast.allowed':    'Acción permitida. El agente continúa.',
-    'approval.toast.denied':     'Acción rechazada. El agente se ha detenido.',
+    'approval.toast.allowed':    'Solicitud aprobada. El resultado se mostrará cuando termine la acción.',
+    'approval.toast.denied':     'Solicitud rechazada.',
+    'approval.request':          'Permiso solicitado',
+    'approval.verification':     'Verificación adicional',
+    'approval.scope.label':      'Alcance',
+    'approval.scope.once':       'Solo esta acción',
+    'approval.scope.hint':       'No autoriza otras acciones.',
+    'approval.target':           'Herramienta',
+    'approval.origin':           'Origen',
+    'approval.origin.autonomous': 'Fuera de esta conversación',
+    'approval.enterprise':       'Esta solicitud requiere aprobación de tu organización. Puedes rechazarla aquí.',
+    'approval.resolved':         'Decisión registrada.',
+    'approval.list_unavailable': 'No se pueden actualizar las aprobaciones. Se conservan las últimas solicitudes conocidas.',
     'approval.toast.err_allow':  'No se pudo aprobar. Inténtalo de nuevo.',
     'approval.toast.err_deny':   'No se pudo rechazar la acción. Inténtalo de nuevo.',
     'approval.details.toggle':   'Ver detalles técnicos',
@@ -1045,15 +1056,26 @@ const translations = {
     'approval.badge.destructive': 'Requires manual approval',
 
     // Approval card — buttons
-    'approval.btn.allow':        'Yes, allow',
+    'approval.btn.allow':        'Allow once',
     'approval.btn.allow_mfa':    'Yes, allow (needs code)',
-    'approval.btn.deny':         'No, deny',
+    'approval.btn.deny':         'Deny',
     'approval.btn.allowing':     'Allowing…',
     'approval.btn.denying':      'Denying…',
 
     // Approval card — states / toasts
-    'approval.toast.allowed':    'Action allowed. The agent is continuing.',
-    'approval.toast.denied':     'Action denied. The agent has stopped.',
+    'approval.toast.allowed':    'Request approved. The result will appear when the action completes.',
+    'approval.toast.denied':     'Request denied.',
+    'approval.request':          'Permission requested',
+    'approval.verification':     'Additional verification',
+    'approval.scope.label':      'Scope',
+    'approval.scope.once':       'This action only',
+    'approval.scope.hint':       'Does not authorize other actions.',
+    'approval.target':           'Tool',
+    'approval.origin':           'Origin',
+    'approval.origin.autonomous': 'Outside this conversation',
+    'approval.enterprise':       'This request needs your organization’s approval. You can deny it here.',
+    'approval.resolved':         'Decision recorded.',
+    'approval.list_unavailable': 'Approvals cannot be refreshed. Keeping the last known requests.',
     'approval.toast.err_allow':  'Could not approve. Please try again.',
     'approval.toast.err_deny':   'Could not deny the action. Please try again.',
     'approval.details.toggle':   'View technical details',
@@ -2038,4 +2060,3 @@ export function approvalTitle(kind: string | undefined, summary: string, locale:
   const dict = translations[locale] as Record<string, string>
   return dict[key] ?? summary
 }
-

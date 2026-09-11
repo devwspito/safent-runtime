@@ -123,6 +123,6 @@ export function SistemaView() {
   // Same fresh-approvals + inbound-delegations sources as the sidebar badge —
   // the red count on the Seguridad tab always matches what the Seguridad list
   // actually shows (approvals section + inbound-delegations section combined).
-  const pending = usePendingApprovals().length + usePendingInboundDelegations().length
+  const pending = usePendingApprovals().approvals.length + usePendingInboundDelegations().length
   return <Hub tabs={SISTEMA_TABS} ariaLabelKey="nav.section.system" tabAlerts={{ seguridad: pending }} />
 }

@@ -49,7 +49,7 @@
   --color-danger-surface:  #2b0d0d;
 
   /* ── Typography ──────────────────────────────────────────────────────────── */
-  --font-ui:   "Inter", "system-ui", sans-serif;
+  --font-ui:   "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "Geist Mono", "Source Code Pro", "Menlo", monospace;
 
   /* Type scale — base 13px dense UI */
@@ -108,10 +108,14 @@
   --dur-quick: 100ms;
   --dur-base:  160ms;
   --dur-slow:  240ms;
-  --ease:      cubic-bezier(0.2, 0, 0, 1);
+  --ease:      cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
 
   /* ── Layout ──────────────────────────────────────────────────────────────── */
   --sidebar-width: 220px;
+  --page-gutter: clamp(20px, 3vw, 40px);
+  --content-width: 960px;
   /* Single header height shared by the 3 column headers (left rail, chat topbar,
      context panel) so their bottom borders line up perfectly across columns. */
   --topbar-height: 52px;

@@ -11,9 +11,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { sileo } from 'sileo'
 import { Save, CheckCircle, ShieldCheck, Globe, Wifi, Terminal } from 'lucide-react'
 import { useT } from '../lib/i18n'
-import { isApprovalFresh } from '../hooks/usePendingApprovals'
+import { usePendingApprovals } from '../hooks/usePendingApprovals'
 import {
-  listPendingApprovals,
   listInboundDelegations,
   mfaStatus,
   getPolicies,
@@ -39,7 +38,6 @@ import {
 } from '../api/client'
 import type { EgressMode, EgressModeResponse, KillSwitchStatus } from '../api/types'
 import type {
-  PendingApproval,
   InboundDelegation,
   MfaStatus,
   PoliciesResponse,
@@ -87,23 +85,9 @@ function tNew(t: Translate, key: string, fallback: string): string {
 
 const POLL_INTERVAL_MS = 3000
 
-function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
+function ApprovalsSection() {
   const t = useT()
-  const [approvals, setApprovals] = useState<PendingApproval[]>([])
-  const [loading, setLoading] = useState(true)
-
-  const load = useCallback(async () => {
-    const data = await listPendingApprovals()
-    const fresh = Array.isArray(data) ? data.filter(a => isApprovalFresh(a.created_at)) : []
-    setApprovals(fresh)
-    setLoading(false)
-  }, [])
-
-  useEffect(() => {
-    load()
-    const timer = setInterval(load, POLL_INTERVAL_MS)
-    return () => clearInterval(timer)
-  }, [load])
+  const { approvals, isLoading: loading, error, refresh } = usePendingApprovals(POLL_INTERVAL_MS)
 
   return (
     <section className="cv-section">
@@ -113,9 +97,10 @@ function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
           <span className={s.sectionLabelCount}>{approvals.length}</span>
         )}
       </div>
+      {error && <p role="status">{t('approval.list_unavailable')}</p>}
       {loading ? (
         <ApprovalsSkeletonBlock />
-      ) : approvals.length === 0 ? (
+      ) : approvals.length === 0 && !error ? (
         <div className={s.approvalsEmptyRow} role="status">
           <CheckCircle size={15} aria-hidden="true" />
           {t('seg.approvals.empty')}
@@ -127,8 +112,7 @@ function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
               <AnimatedListItem key={a.proposal_id}>
                 <ApprovalCard
                   approval={a}
-                  mfaDisabled={mfaDisabled}
-                  onResolved={load}
+                  onResolved={refresh}
                 />
               </AnimatedListItem>
             ))}
@@ -1956,11 +1940,6 @@ export function KillSwitchSection() {
 
 export default function SeguridadView() {
   const t = useT()
-  const [mfaDisabled, setMfaDisabled] = useState(false)
-
-  useEffect(() => {
-    getPolicies().then(p => setMfaDisabled(p.mfa_on_dangers === false)).catch(() => {})
-  }, [])
 
   return (
     <>
@@ -1971,7 +1950,7 @@ export default function SeguridadView() {
 
       <div className="view-body cv-view-body">
         <KillSwitchSection />
-        <ApprovalsSection mfaDisabled={mfaDisabled} />
+        <ApprovalsSection />
         <InboundDelegationsSection />
         <GovernanceSection />
         <EgressSection />

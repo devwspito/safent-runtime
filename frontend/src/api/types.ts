@@ -426,8 +426,10 @@ export interface PendingApproval {
   technical_detail?: string
   /** task_id from the pre_tool_call hook; null for rows written before migration */
   conversation_id?: string | null
-  /** Always 'mfa' in the TOTP-only model */
+  /** Server-classified verification level; never inferred from a UI setting. */
   required_level?: string
+  /** Enterprise-routed requests cannot be approved locally. Denial is allowed. */
+  route?: 'local' | 'enterprise'
   /** Whether the owner has enrolled a TOTP secret */
   mfa_enrolled?: boolean
   /** ISO-8601 creation timestamp. Used client-side to discard stale ghost cards. */

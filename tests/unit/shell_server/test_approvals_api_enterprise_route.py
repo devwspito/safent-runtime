@@ -72,6 +72,23 @@ class TestEnterpriseRouteDenyStillWorks:
 
 
 class TestPendingListSurfacesRoute:
+    def test_gate_does_not_advertise_unsupported_permanent_approval(self) -> None:
+        client = _make_client(_FakeControlPlaneApproveRaises())
+        response = client.post(
+            f"/api/v1/approvals/{uuid4()}", json={"decision": "always"}
+        )
+        assert response.status_code == 422
+
+    def test_unavailable_gate_is_not_reported_as_an_empty_queue(self) -> None:
+        class Unavailable:
+            async def list_hitl_pending(self):
+                raise RuntimeError("internal details must not reach the response")
+
+        response = _make_client(Unavailable()).get("/api/v1/approvals/pending")
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == "approvals_unavailable"
+        assert "internal details" not in response.text
+
     def test_to_frontend_surfaces_enterprise_route(self) -> None:
         from hermes.shell_server.cowork.approvals_api import _to_frontend
 

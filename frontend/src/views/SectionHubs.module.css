@@ -7,5 +7,6 @@
 
 .tabBar {
   flex-shrink: 0;
-  padding: var(--space-4) var(--space-8) 0;
+  padding: var(--space-4) max(var(--page-gutter), calc((100% - var(--content-width)) / 2));
+  border-bottom: 1px solid var(--color-border-subtle);
 }

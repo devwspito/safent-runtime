@@ -11,6 +11,7 @@
 }
 
 .chatView {
+  --chat-gutter: max(var(--space-5), calc((100% - 760px) / 2));
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -32,17 +33,6 @@
   flex-shrink: 0;
   gap: var(--space-3);
   background: var(--color-bg);
-  /* subtle entrance */
-  animation: topbarIn var(--dur-slow) var(--ease) both;
-}
-
-@keyframes topbarIn {
-  from { opacity: 0; transform: translateY(-3px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .topbar { animation: none; }
 }
 
 .topbarTitle {
@@ -88,11 +78,11 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-8) var(--space-10) var(--space-4);
+  padding: var(--space-8) var(--chat-gutter) var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
 }
 
 /* ── Message rows ────────────────────────────────────────────────────────── */
@@ -104,17 +94,6 @@
   width: 100%;
   align-self: flex-start;
   gap: var(--space-2);
-  /* staggered enter — sibling N gets delay via inline style */
-  animation: msgIn var(--dur-slow) var(--ease) both;
-}
-
-@keyframes msgIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .messageRow { animation: none; }
 }
 
 .messageRowUser {
@@ -127,7 +106,7 @@
 .userBubble {
   background: var(--color-surface-raise);
   border: 1px solid var(--color-border-subtle);
-  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-sm) var(--radius-lg);
+  border-radius: var(--radius-xl);
   padding: var(--space-3) var(--space-4);
   font-size: var(--text-base);
   line-height: var(--leading-normal);
@@ -162,11 +141,11 @@
 
 /* Editorial prose — uses --font-prose from styles.css alias */
 .agentProse {
-  font-family: var(--font-prose, 'Iowan Old Style', 'Georgia', ui-serif, serif);
-  font-size: 16px;
-  line-height: 1.78;
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.7;
   color: var(--color-text);
-  letter-spacing: 0.004em;
+  letter-spacing: normal;
   max-width: 700px;
 }
 
@@ -551,7 +530,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-10);
+  padding: var(--space-2) var(--chat-gutter);
   font-size: var(--text-xs);
   color: var(--color-text-dim);
   flex-shrink: 0;
@@ -720,7 +699,7 @@
 
 .composerWrap {
   flex-shrink: 0;
-  padding: 0 var(--space-8) var(--space-6);
+  padding: 0 var(--chat-gutter) var(--space-5);
 }
 
 .attachmentsRow {
@@ -732,10 +711,8 @@
 
 .composerBox {
   position: relative;
-  background: var(--surface-glass);
-  backdrop-filter: blur(14px) saturate(1.2);
-  -webkit-backdrop-filter: blur(14px) saturate(1.2);
-  border: 1px solid var(--border-glass);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   /* overflow visible so the "+" menu can render ABOVE the box (outside it). */
@@ -745,11 +722,7 @@
 }
 
 .composerBox:focus-within {
-  border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border));
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 8px 28px rgba(0, 0, 0, 0.35),
-    0 0 18px color-mix(in srgb, var(--color-accent) 22%, transparent);
+  border-color: var(--color-text-dim);
 }
 
 .composerTextarea {

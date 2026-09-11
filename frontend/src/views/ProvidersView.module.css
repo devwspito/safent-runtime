@@ -7,10 +7,10 @@
 .body {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-6) var(--space-8);
+  padding: var(--space-6) max(var(--page-gutter), calc((100% - var(--content-width)) / 2));
   display: flex;
   flex-direction: column;
-  gap: var(--space-8);
+  gap: var(--space-6);
 }
 
 /* ── Section ────────────────────────────────────────────────────────────── */
@@ -33,8 +33,18 @@
 .list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 0;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
   list-style: none;
+}
+
+.list > li + li { border-top: 1px solid var(--color-border-subtle); }
+
+@media (max-width: 600px) {
+  .row { flex-wrap: wrap; }
+  .rowActions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
 }
 
 /* ── Provider row ────────────────────────────────────────────────────────── */
@@ -46,29 +56,16 @@
   align-items: center;
   gap: var(--space-4);
   padding: var(--space-3) var(--space-4);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.025) 0%, rgba(255, 255, 255, 0) 100%),
-    var(--color-surface-raise);
-  border: 1px solid var(--color-border-subtle);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  border-radius: var(--radius-md);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
   position: relative;
   overflow: hidden;
-  /* Only animate border-color + box-shadow in CSS; y-translate is via motion */
-  transition:
-    border-color var(--dur-base) var(--ease),
-    box-shadow var(--dur-base) var(--ease),
-    background var(--dur-base) var(--ease);
+  transition: background var(--dur-quick) var(--ease);
 }
 
-.row:hover {
-  border-color: var(--color-border);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.07),
-    0 0 0 1px rgba(255, 255, 255, 0.04);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0) 100%),
-    color-mix(in srgb, var(--color-accent) 3%, var(--color-surface-raise));
+@media (hover: hover) and (pointer: fine) {
+  .row:hover { background: var(--color-surface-hover); }
 }
 
 /* Active row — accent left bar + accent glow border */

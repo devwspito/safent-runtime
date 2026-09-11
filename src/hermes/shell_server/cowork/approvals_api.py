@@ -47,7 +47,8 @@ _LEVEL_MFA = ProtectionLevel.MFA.value  # "mfa"
 
 
 class ApprovalDecision(BaseModel):
-    decision: Literal["once", "always", "deny"]
+    # This gate consumes a single proposal; it does not install standing rules.
+    decision: Literal["once", "deny"]
     totp: str | None = None  # required only for mfa-tier proposals; ignored for simple-tier
 
 
@@ -69,9 +70,14 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
     async def list_pending_approvals(request: Request) -> list[dict]:
         try:
             rows = await request.app.state.control_plane.list_hitl_pending()
-        except (AgentUnavailable, Exception):  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.warning("hermes.cowork.approvals.list_unavailable")
-            return []
+            # An unavailable gate is not an empty queue. Polling clients retain
+            # their last known pending requests on 503 rather than erasing them.
+            raise HTTPException(status_code=503, detail={
+                "code": "approvals_unavailable",
+                "message": "No se pueden consultar las aprobaciones en este momento.",
+            }) from exc
         return [_to_frontend(r, store) for r in rows]
 
     @router.get("/api/v1/mfa/status")
