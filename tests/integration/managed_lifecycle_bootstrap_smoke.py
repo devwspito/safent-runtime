@@ -23,6 +23,31 @@ from pathlib import Path
 sys.path.insert(0, "/review/src")
 
 
+def validate_gateway_fixture(_path, _authorization, _body):
+    """Optional test-only cross-repository boundary; no production hook."""
+
+
+def construct_fixture_agent(_binding, native, model):
+    from hermes.runtime.nous_engine import GovernedAIAgent
+
+    return GovernedAIAgent(
+        model=model,
+        api_key=native["api_key"],
+        base_url=native["base_url"],
+        provider=native["provider"],
+        api_mode=native["api_mode"],
+        max_iterations=1,
+        enabled_toolsets=[],
+        quiet_mode=True,
+        skip_memory=True,
+        skip_context_files=True,
+        skip_background_review=True,
+        save_trajectories=False,
+        ephemeral_system_prompt="Reply OK.",
+        max_tokens=16,
+    )
+
+
 def worker():
     from hermes.runtime.managed_llm_bootstrap import complete_process_bootstrap, initialize_process
     from hermes.runtime.managed_llm_profile import current_profile
@@ -47,7 +72,7 @@ def worker():
 
     from hermes.runtime.managed_llm import _resolve_managed_binding
     from hermes.runtime.managed_llm_lifecycle import run_admitted_native, watch_authority
-    from hermes.runtime.nous_engine import GovernedAIAgent, _resolve_hermes_runtime
+    from hermes.runtime.nous_engine import _resolve_hermes_runtime
     from hermes.runtime.shutdown_deadline import ShutdownDeadline
 
     binding = _resolve_managed_binding(db_path)
@@ -56,22 +81,7 @@ def worker():
     assert binding.api_key not in (Path(os.environ["HERMES_HOME"]) / "config.yaml").read_text()
     # Existing wrapper, native resolver and SDK; no parallel inference engine.
     # Direct construction is diagnostic only while the production gate is closed.
-    agent = GovernedAIAgent(
-        model=model,
-        api_key=native["api_key"],
-        base_url=native["base_url"],
-        provider=native["provider"],
-        api_mode=native["api_mode"],
-        max_iterations=1,
-        enabled_toolsets=[],
-        quiet_mode=True,
-        skip_memory=True,
-        skip_context_files=True,
-        skip_background_review=True,
-        save_trajectories=False,
-        ephemeral_system_prompt="Reply OK.",
-        max_tokens=16,
-    )
+    agent = construct_fixture_agent(binding, native, model)
 
     async def run():
         deadline = ShutdownDeadline(seconds=1.0)
@@ -146,6 +156,7 @@ def main():  # noqa: PLR0915 - self-contained disposable process fixture
                 self.send_response(404)
                 self.end_headers()
                 return
+            validate_gateway_fixture(self.path, self.headers.get("Authorization"), body)
             if "/revoke/" in self.path:
                 request_started.set()
                 # Deliberately non-cooperative upstream. Parent proves that the

@@ -2964,14 +2964,11 @@ class NousReasoningEngine:
         """
         from hermes.runtime.managed_llm_bootstrap import assert_process_admission  # noqa: PLC0415
 
-        assert_process_admission()
         if model_config.managed:
-            # Hermes 0.21.1 turn_context publishes api_key to global auxiliary
-            # mirrors unconditionally. No supported per-agent opt-out exists.
-            # Keep the signed binding usable for inspection/revocation, but do
-            # not leak its scoped credential into another session's routing.
-            from hermes.runtime.model_config import ManagedProviderUnavailableError, MANAGED_EXECUTION_UNAVAILABLE
-            raise ManagedProviderUnavailableError(MANAGED_EXECUTION_UNAVAILABLE)
+            _assert_managed_execution_ready()
+        assert_process_admission(managed=model_config.managed)
+        if model_config.managed and model_config.extra:
+            raise ValueError("Managed inference does not accept custom request overrides")
         effective_consent = consent_context if consent_context is not None else self._consent_context
         # FIX D — use cached variants to avoid re-reading memory/disk every message.
         enriched_prompt = _cached_enrich_prompt(system_prompt, tenant_id)
@@ -3021,15 +3018,18 @@ class NousReasoningEngine:
         # chat template not to think. chat_template_kwargs only shapes the
         # rendered prompt; the OpenAI tools/tool_calls schema is untouched, so
         # tool-calling is unaffected. Mirrors skill_synthesis.py.
-        _extra_body: dict[str, Any] = {}
-        _op_extra = model_config.extra.get("extra_body") if model_config.extra else None
-        if isinstance(_op_extra, dict):
-            _extra_body.update(_op_extra)
-        _ctk = _extra_body.setdefault("chat_template_kwargs", {})
-        if isinstance(_ctk, dict) and "enable_thinking" not in _ctk:
-            _ctk["enable_thinking"] = False
-        if _extra_body:
-            _extra_knobs["request_overrides"] = {"extra_body": _extra_body}
+        # Enterprise owns a closed request schema. Neither profile/tool fields
+        # nor local Qwen extensions can select a route or override its grant.
+        if not model_config.managed:
+            _extra_body: dict[str, Any] = {}
+            _op_extra = model_config.extra.get("extra_body") if model_config.extra else None
+            if isinstance(_op_extra, dict):
+                _extra_body.update(_op_extra)
+            _ctk = _extra_body.setdefault("chat_template_kwargs", {})
+            if isinstance(_ctk, dict) and "enable_thinking" not in _ctk:
+                _ctk["enable_thinking"] = False
+            if _extra_body:
+                _extra_knobs["request_overrides"] = {"extra_body": _extra_body}
         agent = GovernedAIAgent(
             model=bare_model,
             api_key=rt.get("api_key"),
@@ -3120,6 +3120,21 @@ class NousReasoningEngine:
 # ---------------------------------------------------------------------------
 # Module-level pure helpers
 # ---------------------------------------------------------------------------
+
+
+def _assert_managed_execution_ready() -> None:
+    """Release gate, not a setting or hook accepted from profiles/tools.
+
+    The isolated native factory fixture substitutes this private function only
+    in its own process. Production remains unconditionally closed until the
+    complete confined service lifecycle has been certified.
+    """
+    from hermes.runtime.model_config import (  # noqa: PLC0415
+        MANAGED_EXECUTION_UNAVAILABLE,
+        ManagedProviderUnavailableError,
+    )
+
+    raise ManagedProviderUnavailableError(MANAGED_EXECUTION_UNAVAILABLE)
 
 
 def _resolve_per_cycle_consent(
