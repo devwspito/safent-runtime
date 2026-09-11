@@ -2144,8 +2144,8 @@ class DbusRuntimeServiceWiring:
         call. Import is deferred so the scanner infra is never loaded unless
         the scan path is actually exercised.
 
-        Returns None if hermes.security_center is not installed (scan is
-        additive/optional — must never crash the install path).
+        Returns None if hermes.security_center is unavailable. Installation
+        callers must block; an unavailable scanner is never an implicit PASS.
         """
         if self._scan_service is not None:
             return self._scan_service
@@ -2183,8 +2183,7 @@ class DbusRuntimeServiceWiring:
             )
         except ImportError:
             logger.warning(
-                "hermes.dbus.security_center_unavailable — scan es no-op "
-                "(instalar hermes.security_center para habilitar)"
+                "hermes.dbus.security_center_unavailable — installation blocked"
             )
             return None
         # Slot CVE: usa Trivy real cuando el binario está horneado (/usr/bin/trivy),
@@ -2438,7 +2437,7 @@ class DbusRuntimeServiceWiring:
         source_url: str = "",
         emit_signals: bool = True,
         allow_warn: bool = False,
-    ) -> dict | None:
+    ) -> dict:
         """Run a pre-install security scan for ANY install kind.
 
         The Security Center is the SO's "antivirus" — system threats (kind
@@ -2446,8 +2445,6 @@ class DbusRuntimeServiceWiring:
         tool linter, signature, prompt-injection heuristics) share one gate.
 
         Returns:
-          None                    — scanner NO desplegado (operador optó por no
-                                    instalarlo): se procede (fail-open consciente).
           {"record": record}      — PASS only (or WARN cuando allow_warn=True):
                                     install may proceed.
           {"blocked": True, ...}  — FAIL (auto_block), WARN sin override, O error
@@ -2461,22 +2458,25 @@ class DbusRuntimeServiceWiring:
         procede con allow_warn=True (override explícito del dueño, p.ej. una
         confirmación de usuario ya registrada por la UI gated).
 
-        Postura: si el scanner NO está (ImportError / no construible), fail-OPEN
-        (None) — es decisión de despliegue. Si el scanner SÍ está pero revienta en
-        runtime, fail-CLOSED (blocked) — un SO público no instala sin un veredicto
-        de seguridad fiable. argv (linter de runner MCP) y source_url (procedencia
-        de paquete) alimentan los scanners.
+        Missing/broken scanner always blocks. An installation needs a real
+        review; force may acknowledge a recorded finding, not invent a review.
+        argv and source_url feed runner/provenance analysis.
         """
         try:
             from hermes.security_center.domain.install_target import InstallTarget  # noqa: PLC0415
             from hermes.security_center.application.scan_service import ScanBlockedError  # noqa: PLC0415
         except ImportError:
             logger.warning(
-                "hermes.dbus.security_center_unavailable — _scan_install_target es no-op"
+                "hermes.dbus.security_center_unavailable — installation blocked"
             )
-            return None
-        if self._scan_service_lazy() is None:
-            return None
+            return self._scan_unavailable()
+        try:
+            scan_service = self._scan_service_lazy()
+        except Exception as exc:  # noqa: BLE001 — broken scanner must not authorize installation
+            logger.warning("hermes.dbus.scan_initialization_failed reason=%s", type(exc).__name__)
+            return self._scan_unavailable()
+        if scan_service is None:
+            return self._scan_unavailable()
 
         target = InstallTarget(
             kind=kind,
@@ -2546,6 +2546,16 @@ class DbusRuntimeServiceWiring:
                 ),
             }
         return {"record": record}
+
+    @staticmethod
+    def _scan_unavailable() -> dict:
+        """No scan ID, score or verdict without an actual scanner result."""
+        return {
+            "ok": False,
+            "blocked": True,
+            "code": "scan_unavailable",
+            "error": "El análisis de seguridad no está disponible. No se ha instalado nada.",
+        }
 
     @staticmethod
     def _build_block_dict_from_record(record: "Any", exc: "Any") -> dict:
@@ -2668,12 +2678,8 @@ class DbusRuntimeServiceWiring:
             kind, ident, argv=argv, source_url=source_url,
             emit_signals=False, allow_warn=True,
         )
-        if result is None:
-            # security_center ausente/no-op → PASS implícito para no bloquear la UI.
-            return json.dumps({
-                "scan_id": "", "identifier": ident, "score": 100,
-                "verdict": "PASS", "risks": [],
-            })
+        if result is None or result.get("code") == "scan_unavailable":
+            return json.dumps(self._scan_unavailable())
         if result.get("blocked"):
             return self._serialize_scan_record_from_blocked(ident)
         return self._serialize_scan_record(result["record"])
