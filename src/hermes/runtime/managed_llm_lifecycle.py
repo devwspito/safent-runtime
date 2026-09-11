@@ -18,6 +18,7 @@ from pathlib import Path
 
 from hermes.runtime.model_config import ManagedProviderUnavailableError
 from hermes.security.configuration_lock import configuration_lock
+from hermes.tasks.domain.task_cancel_registry import OperationCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -197,10 +198,14 @@ class ProcessAdmission:
 
         return release
 
-    def check(self, *, allow_blocked: bool = False) -> Generation:
+    def check_process_open(self) -> None:
+        """Cheap delivery fence; never waits for configuration I/O on the loop."""
         with self._gate:
             if self._closed or os.getpid() != self.pid:
                 raise LifecycleUnavailable("Runtime restart required before admitting work")
+
+    def check(self, *, allow_blocked: bool = False) -> Generation:
+        self.check_process_open()
         # Never hold the in-process latch while waiting on a DB/file lock.
         # A caller holding configuration_lock may close admission at any time.
         try:
@@ -243,6 +248,8 @@ async def run_admitted_native(admission: ProcessAdmission | None, call, interrup
     Uses the daemon's existing default executor. Cancellation before the worker
     starts prevents native invocation; cancellation after it starts must not
     unregister the still-running native request from subsequent shutdown.
+    A response returned after losing authority is a terminal cancellation, not
+    a successful narrative (nor a retry under a future, different authority).
     """
     cancelled = threading.Event()
 
@@ -256,13 +263,31 @@ async def run_admitted_native(admission: ProcessAdmission | None, call, interrup
                 release = admission.register_interrupt(interrupt)
             if cancelled.is_set():
                 return None
-            return call()
+            result = call()
+            if admission is not None:
+                try:
+                    admission.check()
+                except LifecycleUnavailable:
+                    raise OperationCancelled(
+                        "La autorización del motor cambió o ya no se puede verificar."
+                    ) from None
+            return result
         finally:
             if release is not None:
                 release()
 
     try:
-        return await asyncio.get_running_loop().run_in_executor(None, worker)
+        result = await asyncio.get_running_loop().run_in_executor(None, worker)
+        if admission is not None:
+            try:
+                # Revocation can close the latch while the completed executor
+                # result waits to be delivered to the event loop.
+                admission.check_process_open()
+            except LifecycleUnavailable:
+                raise OperationCancelled(
+                    "La autorización del motor cambió o ya no se puede verificar."
+                ) from None
+        return result
     except asyncio.CancelledError:
         cancelled.set()
         raise

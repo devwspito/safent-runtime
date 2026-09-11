@@ -301,3 +301,114 @@ async def test_cancel_during_authority_wait_does_not_invoke_native_after_lock_re
     await asyncio.to_thread(guard.check)
     await asyncio.sleep(0.05)
     assert not called.is_set() and not guard._interrupts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["close", "revoke", "restore", "storage"])
+async def test_native_result_after_authority_loss_is_cancelled_not_a_success(tmp_path, transition):
+    from hermes.runtime.managed_llm_lifecycle import run_admitted_native
+    from hermes.tasks.domain.task_cancel_registry import OperationCancelled
+
+    path = tmp_path / "state.db"
+    wiring, signed = _seed(path)
+    apply_signed_gateway(wiring, signed)
+    guard = boot(path)
+
+    def native():
+        if transition == "close":
+            guard.close()
+        elif transition == "storage":
+            path.unlink()
+            path.mkdir()
+        else:
+            original = wiring._association_store.get()
+            wiring._association_store.mark_revoked()
+            if transition == "restore":
+                wiring._association_store.save(
+                    association=original, instance_secret="fictional-restored-secret",
+                )
+                boot(path)
+        # Native Hermes returns interruption/error as a dict, not necessarily
+        # an exception. Even a success-looking result cannot renew authority.
+        return {"final_response": "partial answer", "completed": True}
+
+    with pytest.raises(OperationCancelled, match="autorización"):
+        await run_admitted_native(guard, native, lambda: None)
+    assert not guard._interrupts
+
+
+@pytest.mark.asyncio
+async def test_result_delivery_checks_latch_after_executor_releases_callback(tmp_path, monkeypatch):
+    from hermes.runtime.managed_llm_lifecycle import run_admitted_native
+    from hermes.tasks.domain.task_cancel_registry import OperationCancelled
+
+    guard = boot(tmp_path / "state.db")
+    original_register = guard.register_interrupt
+
+    def register(callback):
+        release = original_register(callback)
+
+        def release_then_revoke():
+            release()
+            guard.close()
+
+        return release_then_revoke
+
+    monkeypatch.setattr(guard, "register_interrupt", register)
+    with pytest.raises(OperationCancelled, match="autorización"):
+        await run_admitted_native(guard, lambda: {"completed": True}, lambda: None)
+    assert not guard._interrupts
+
+
+@pytest.mark.asyncio
+async def test_unchanged_native_result_and_error_preserve_their_original_contract(tmp_path):
+    from hermes.runtime.managed_llm_lifecycle import run_admitted_native
+
+    guard = boot(tmp_path / "state.db")
+    result = {"completed": True, "final_response": "done"}
+    assert await run_admitted_native(guard, lambda: result, lambda: None) is result
+    assert await run_admitted_native(None, lambda: result, lambda: None) is result
+
+    def fail():
+        raise ValueError("synthetic provider failure")
+
+    with pytest.raises(ValueError, match="synthetic provider failure"):
+        await run_admitted_native(guard, fail, lambda: None)
+    assert not guard._interrupts
+
+
+@pytest.mark.asyncio
+async def test_authority_loss_cancels_real_queue_without_retry_or_success_stream(tmp_path, caplog):
+    from hermes.runtime.managed_llm_lifecycle import run_admitted_native
+    from hermes.tasks.domain.ports import TaskStatus
+    from hermes.tasks.infrastructure.sqlite_work_queue import SqliteWorkQueue
+    from hermes.testing import FakeReasoningEngine, scripted_response
+    from tests.tasks.test_agent_loop import _chat_item, _make_chat_orchestrator
+
+    guard = boot(tmp_path / "state.db")
+    queue_path = tmp_path / "queue.db"
+    queue = SqliteWorkQueue(db_path=queue_path)
+
+    class LosingAuthorityEngine(FakeReasoningEngine):
+        async def run_cycle(self, context):
+            def native():
+                guard.close()
+                return {"completed": True, "final_response": "must not be published"}
+
+            await run_admitted_native(guard, native, lambda: None)
+            return await super().run_cycle(context)
+
+    engine = LosingAuthorityEngine(scripted=[scripted_response(narrative="must not be published")])
+    orchestrator, _, sink = _make_chat_orchestrator(engine=engine, queue=queue)
+    item = await queue.enqueue(_chat_item())
+    claimed = await queue.claim_next()
+    with caplog.at_level("INFO"):
+        await orchestrator._process(claimed)
+    restarted = SqliteWorkQueue(db_path=queue_path)
+    assert (await restarted._load_item(str(item.id))).status is TaskStatus.CANCELLED
+    assert await restarted.reconcile_stale() == 0
+    assert await restarted.claim_next() is None
+    assert [entry["outcome"] for entry in sink.closed] == ["cancelled"]
+    assert sink.emitted == []
+    assert "hermes.tasks.loop.task_completed" not in caplog.text
+    assert "chat_replied" not in caplog.text

@@ -327,8 +327,8 @@ class AgentLoopOrchestrator:
         try:
             output = await self._engine.run_cycle(ctx)
         except OperationCancelled as exc:
-            # Operator stopped the task mid-cycle (stream callback raised). Terminal,
-            # NO retry (unlike a normal failure).
+            # Operator stop or revoked execution authority. Terminal, NO retry
+            # (unlike a normal failure under the same authority).
             reason = str(exc).strip() or "Detenida por el operador"
             logger.info(
                 "hermes.tasks.loop.cancelled task=%s reason=%s", str(item.id), reason
@@ -720,7 +720,7 @@ class AgentLoopOrchestrator:
     async def _handle_cancelled(
         self, item: WorkItem, reason: str, effective_sink: Any, is_chat: bool
     ) -> None:
-        """Operator stopped this task: close the stream, persist a note, mark the
+        """Execution was stopped: close the stream, persist a note, mark the
         task CANCELLED (terminal, no retry), and clear the cancel flag."""
         if is_chat and effective_sink is not None:
             try:
@@ -737,7 +737,7 @@ class AgentLoopOrchestrator:
                     self._conversation_repo.append_message(
                         conversation_id=_UUID(conv_id_str),
                         role="assistant",
-                        content=f"⏹ Tarea detenida por el operador. {reason}".strip(),
+                        content=f"⏹ Tarea detenida. {reason}".strip(),
                         task_id=item.id,
                     )
                 except Exception as exc:  # noqa: BLE001
