@@ -31,8 +31,9 @@
       <p id="failed-hint" class="sub"></p>
       <div class="actions">
         <button id="btn-retry" class="btn" type="button">Reintentar</button>
-        <button id="btn-diagnostics" class="btn btn-secondary" type="button">Exportar diagnóstico</button>
+        <button id="btn-diagnostics" class="btn btn-secondary" type="button" disabled aria-describedby="diagnostics-note">Exportar diagnóstico</button>
       </div>
+      <p id="diagnostics-note" class="hint">La exportación desde esta ventana aún no está disponible. Puedes consultar los detalles técnicos abajo.</p>
       <details class="details">
         <summary>Detalles técnicos</summary>
         <dl>
@@ -54,6 +55,7 @@
     <section id="screen-ready" hidden>
       <h1>Listo</h1>
     </section>
+    <p id="action-error" class="hint" role="alert" hidden></p>
   </main>
 
   <script type="module" src="./main.js"></script>

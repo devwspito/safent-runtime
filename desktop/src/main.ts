@@ -1,5 +1,6 @@
 import { initialState, reduceLifecycle, type UiState } from './lifecycle.js'
-import { exportDiagnostics, requestCancel, requestRetry, subscribeToEngineEvents, subscribeToReconnect } from './ipc.js'
+import { requestCancel, requestRetry, subscribeToEngineEvents, subscribeToReconnect } from './ipc.js'
+import { nativeAction } from './native-action.js'
 import { manageFocusOnTransition, render, type ScreenElements } from './render.js'
 
 function requireElement<T extends HTMLElement>(id: string): T {
@@ -46,22 +47,37 @@ function main(): void {
     manageFocusOnTransition(previousKind, state, els)
   }
 
-  void subscribeToEngineEvents((event) => apply(reduceLifecycle(state, { source: 'engine', event })))
-  void subscribeToReconnect((reason) => apply(reduceLifecycle(state, { source: 'reconnect', reason })))
+  const actionError = requireElement('action-error')
+  function showActionError(message: string) {
+    actionError.textContent = message
+    actionError.hidden = !message
+  }
+  const eventError = () => showActionError('No se pudo conectar con el servicio de la aplicación. Cierra y vuelve a abrir Safent.')
+  void subscribeToEngineEvents((event) => {
+    showActionError('')
+    apply(reduceLifecycle(state, { source: 'engine', event }))
+  }).catch(eventError)
+  void subscribeToReconnect((reason) => apply(reduceLifecycle(state, { source: 'reconnect', reason }))).catch(eventError)
+
+  const cancel = nativeAction(requestCancel, showActionError,
+    'No se pudo solicitar la cancelación. Safent puede seguir preparando tu espacio; comprueba el estado antes de reintentar.')
+  const retry = nativeAction(requestRetry, showActionError,
+    'No se pudo solicitar el reintento. Puedes volver a intentarlo sin perder los detalles del fallo.')
 
   els.cancelButton.addEventListener('click', () => {
     if (els.cancelButton.disabled) return
-    void requestCancel()
+    void cancel()
   })
 
   els.retryButton.addEventListener('click', () => {
     if (els.retryButton.disabled) return
-    apply(reduceLifecycle(state, { source: 'retry-requested' }))
-    void requestRetry()
-  })
-
-  els.diagnosticsButton.addEventListener('click', () => {
-    void exportDiagnostics()
+    const previous = state
+    const pending = reduceLifecycle(state, { source: 'retry-requested' })
+    apply(pending)
+    void retry().then(ok => {
+      // Never overwrite a newer engine event while an IPC reply was in flight.
+      if (!ok && state === pending) apply(previous)
+    })
   })
 
   // Disable the browser's own right-click menu on every screen this shell

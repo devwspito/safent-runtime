@@ -50,6 +50,11 @@ funcionalidad entregada.
   primer corte (antes de los cambios posteriores de Integrations/diálogos).
 - Native desktop: 81 PASS / 4 archivos; typecheck y build PASS. Los assets
   `desktop/ui` se regeneraron desde `desktop/src`, como exige build.mjs.
+- Corte posterior nativo: **83 PASS / 5 archivos**, añade guard single-flight
+  y feedback visible de fallos IPC; suscripciones capturan rechazo, retry fallido
+  no queda girando ni pisa eventos recientes. Exportar diagnóstico deshabilitado
+  explícitamente porque no existe comando Rust: pendiente implementar selector
+  nativo/CLI/exportación protegida antes de habilitarlo, no simular éxito.
 - Playwright Chrome, fixture aislada: 1440×960 y 390×844, detalle poblado,
   resize, abrir sidebar, main oculto mientras navegación abierta, Escape cierra.
   Sin pageerrors ni overflow horizontal en la ronda final de Tareas.

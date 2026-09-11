@@ -36,7 +36,7 @@ export async function subscribeToReconnect(onReconnect) {
 async function invoke(command) {
     const api = tauri();
     if (!api)
-        return;
+        throw new Error('Native Safent runtime is unavailable');
     await api.core.invoke(command);
 }
 /** "Cancelar": honest per contract §6 — the backend answers with a `failed` event. */
@@ -46,16 +46,5 @@ export function requestCancel() {
 /** "Reintentar" on the one failure screen. */
 export function requestRetry() {
     return invoke('retry_bootstrap');
-}
-/**
- * "Exportar diagnóstico" — FR-029, one gesture, no secrets by construction.
- * KNOWN GAP (see the integration report): no `export_diagnostics` Tauri
- * command exists in the core yet, even though the CLI already implements
- * the underlying verb (`safent diagnostics --out <path>`, contract §4) —
- * this call is a no-op today (best-effort `invoke`, swallows the rejection)
- * until that command is added.
- */
-export function exportDiagnostics() {
-    return invoke('export_diagnostics');
 }
 //# sourceMappingURL=ipc.js.map

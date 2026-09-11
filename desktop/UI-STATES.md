@@ -1,7 +1,7 @@
 # Estados de la ventana (`desktop/src`)
 
 **Preparando** (`kind: 'preparing'`) — pantalla por defecto: «Preparando
-Safent», texto en vivo (`aria-live="polite"`) con la etapa activa
+tu espacio», texto en vivo (`aria-live="polite"`) con la etapa activa
 (`stage.label`, ya en español del CLI). Lista de etapas «Hecho»/«En curso»
 con progreso real («43 de 86 MB»), nunca un porcentaje inventado. «Cancelar»
 activo hasta el punto de no retorno (hoy, `container`); después se
@@ -11,7 +11,8 @@ termine.»
 **Fallo** (`kind: 'failed'`) — la ÚNICA pantalla de error (FR-033). Titular
 en lenguaje del dueño según `FailureCode` (`failure-copy.ts`; nunca
 «podman»/«contenedor»/«VM» fuera de «Detalles»). «Reintentar» (oculto si no
-`retryable`; «Reintentando…» sin doble envío) y «Exportar diagnóstico».
+`retryable`; «Reintentando…» sin doble envío). «Exportar diagnóstico» aparece
+deshabilitado con explicación hasta que exista el comando nativo.
 `<details>` con Código, Etapa, Mensaje técnico. Cancel también resuelve
 aquí: el contrato lo trata como un `failed` más.
 
@@ -57,7 +58,20 @@ realmente emite, verificado contra el código real de la línea del núcleo:
 apagado real (`stop_engine_best_effort` + reconectar / salir).
 
 **Sigue sin cablear**: `export_diagnostics` — el botón «Exportar diagnóstico»
-invoca un comando Tauri que todavía no existe en el núcleo (la CLI ya expone
+está deshabilitado, no invoca un comando inexistente (la CLI ya expone
 `diagnostics --out <path>`, contrato §4; falta el comando + la superficie de
 guardado/revelado del fichero — no es wiring mecánico, es una decisión de UX
 pendiente). Ver el informe de integración.
+
+## Feedback IPC (revisión 2026-09-11)
+
+Errores de suscripción al lifecycle, cancelación y reintento tienen mensaje
+visible; no rechazos de promesa sin capturar. Doble envío bloqueado mientras
+invoke está pendiente. Error al solicitar retry restaura el fallo anterior sólo
+si no llegó un evento más nuevo del motor. La UI nunca anuncia que cancelar o
+reintentar completó el trabajo por el mero acuse IPC. Sin Tauri, invocar una
+acción falla explícitamente (no éxito ficticio del preview browser).
+
+Arranque claro/oscuro neutral sin animación decorativa del logo; progreso
+indeterminado con transform, reduced-motion desactiva movimiento. Cambios
+generados en `ui/` mediante `npm run build`, no editados a mano.
