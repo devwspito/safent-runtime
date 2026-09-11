@@ -102,3 +102,16 @@ Archivos de producto cambiados: `src-tauri/src/{main,boot,window_policy}.rs`,
 assets generados `ui/`; integración mínima autorizada en
 `../frontend/src/components/SystemUpdateFooter.tsx` y su test, dos claves
 ES/EN en `../frontend/src/lib/i18n.ts`. Ningún backend ni manifiesto publicado.
+
+## Corrección de integración: assets generados
+
+La revisión del checkout detectó que `ui/main.js` importaba `native-updater.js`,
+pero ese módulo y su source map habían quedado fuera del primer commit. El
+binario scratch y los tests locales los tenían disponibles, por lo que no
+detectaron la omisión de Git. Se incorporan ambos assets generados.
+
+Nuevo `src/generated-assets.test.ts`: verifica existencia de los módulos/maps
+referenciados y, en un checkout Git, que estén versionados. Reprodujo el fallo
+antes de incorporar los archivos. Después: **106 tests desktop PASS /9 archivos**,
+typecheck/build PASS. No cambia el contrato de actualización ni certifica que el
+instalador pendiente funcione; cierra la integridad del loader versionado.
