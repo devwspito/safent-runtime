@@ -483,6 +483,20 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(rows)
 
     @method()
+    async def GetTasksDashboard(  # noqa: N802
+        self, limit: "u", operator_token: "s",  # noqa: F821,UP037
+    ) -> "s":  # noqa: F821,UP037
+        """Durable task dashboard for an authenticated local operator."""
+        sender_uid = await self._resolve_current_sender_uid()
+        try:
+            result = await self._wiring.get_tasks_dashboard(
+                limit=int(limit), sender_uid=sender_uid, operator_token=operator_token or None,
+            )
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
+        return json.dumps(result)
+
+    @method()
     async def GetScheduledTask(self, trigger_id: "s") -> "s":  # noqa: N802,F821,UP037
         """Detalle de una tarea programada por su trigger_id (read-only, no authZ).
 

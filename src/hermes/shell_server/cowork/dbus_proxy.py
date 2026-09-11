@@ -61,6 +61,15 @@ class DbusRuntimeProxy:
         raw = await self._call(member, *args)
         return _parse_dict(raw)
 
+    async def call_operator_dict(self, member: str, *args: Any) -> dict:
+        """Call a verb explicitly accepting a final signed operator token.
+
+        For sensitive reads as well as writes; never append this to legacy
+        verbs whose D-Bus signature does not accept it.
+        """
+        token = self._mint_operator_token(operation=member)
+        return _parse_dict(await self._call(member, *args, token))
+
     async def call_bool(self, member: str, *args: Any) -> bool:
         """Call a D-Bus member that returns a bool. Fail-hard on AgentUnavailable."""
         raw = await self._call(member, *args)

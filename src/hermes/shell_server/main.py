@@ -1498,6 +1498,10 @@ def create_app() -> FastAPI:
     app.include_router(create_skills_hub_router(_DB_PATH))
     app.include_router(create_mcp_router())
     app.include_router(create_tasks_router())
+    from hermes.shell_server.cowork.task_dashboard_api import (  # noqa: PLC0415
+        create_task_dashboard_router,
+    )
+    app.include_router(create_task_dashboard_router())
     app.include_router(create_security_router())
     app.include_router(create_memory_router())
     app.include_router(create_web_search_router())

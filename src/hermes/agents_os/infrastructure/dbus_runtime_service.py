@@ -4025,6 +4025,19 @@ class DbusRuntimeServiceWiring:
         jobs = _neus_cron_list_jobs(include_disabled=True)
         return [_neus_job_to_task_dict(job) for job in jobs[:limit]]
 
+    async def get_tasks_dashboard(
+        self, *, limit: int = 100, sender_uid: int, operator_token: str | None = None,
+    ) -> dict:
+        """Owner-only read including task results, not the public metadata surface."""
+        self._authorize_and_resolve(
+            sender_uid, operation="get_tasks_dashboard", operator_token=operator_token,
+        )
+        from hermes.tasks.infrastructure.sqlite_task_dashboard import (  # noqa: PLC0415
+            read_task_dashboard,
+        )
+
+        return read_task_dashboard(self._composio_db_path(), limit=limit)
+
     async def list_recent_tasks(self, *, limit: int = 50) -> list[dict]:
         """Recent work items across all statuses (activity log).
 
