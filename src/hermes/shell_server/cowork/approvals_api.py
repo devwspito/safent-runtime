@@ -1,25 +1,8 @@
-"""HITL approvals for the Safent Cowork web UI (P4 elevation gate).
+"""Community HITL decisions through the authenticated owner channel.
 
-  GET  /api/v1/approvals/pending          → [{proposal_id, kind, summary, target, required_level}]
-  POST /api/v1/approvals/{proposal_id}     body: {decision, totp?}
-  GET  /api/v1/mfa/status                  → {enrolled}
-  POST /api/v1/mfa/enroll                  body: {totp?}  → {otpauth_uri, secret}
-
-Escalated MFA model (owner decision 2026-06-25):
-  - simple tier  (most tools: cronjob, send_message, delegate_task …)
-      → Approve/Deny without MFA.  required_level="simple".
-  - mfa tier (MOST_DELICATE: install_*/set_policy/disable_mfa/skill_manage +
-      destructive/irreversible tools)
-      → TOTP required.  required_level="mfa".
-
-Classification is from tool_delicacy.is_mfa_required (single source of truth).
-The agent is isolated by netns — it cannot call this endpoint (bearer + network
-isolation). For simple-tier proposals the human pressing Approve IS proof of presence.
-For mfa-tier the TOTP adds the one factor the caged agent cannot reach (owner-only
-0600 secret).
-
-Policy changes (policies_api.py: set_preset/set_policy_tools/set_approval_on_dangers)
-still require MFA — those endpoints are NOT touched here.
+The shell's auth/network boundary protects these routes. Enterprise-routed
+proposals still require a signed cloud decision; local denial remains possible.
+MFA belongs to Enterprise and is not a Community approval factor.
 """
 
 from __future__ import annotations
@@ -30,39 +13,21 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from hermes.capabilities.infrastructure.sqlite_approval_gate import ApprovalGateError
 from hermes.capabilities.proposal_summary import human_summary
-from hermes.capabilities.tool_delicacy import is_mfa_required
-from hermes.shell_server.security.mfa import MfaStore, ProtectionLevel
-from hermes.shell_server.security.mfa_tool_tier import MfaFactors
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable, AuthenticatedChannel
 
 logger = logging.getLogger("hermes.shell_server.cowork.approvals_api")
 
-# Tier labels used in the required_level field (consumed by ApprovalCard.tsx).
-_LEVEL_SIMPLE = "simple"
-_LEVEL_MFA = ProtectionLevel.MFA.value  # "mfa"
-
-
 class ApprovalDecision(BaseModel):
     # This gate consumes a single proposal; it does not install standing rules.
+    model_config = ConfigDict(extra="forbid")
     decision: Literal["once", "deny"]
-    totp: str | None = None  # required only for mfa-tier proposals; ignored for simple-tier
 
 
-class EnrollBody(BaseModel):
-    totp: str | None = None  # required only to ROTATE an existing enrollment
-
-
-class RiddleBody(BaseModel):
-    totp: str
-    question: str
-    answer: str
-
-
-def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
+def create_approvals_router() -> APIRouter:
     router = APIRouter()
 
     @router.get("/api/v1/approvals/pending")
@@ -77,7 +42,7 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
                 "code": "approvals_unavailable",
                 "message": "No se pueden consultar las aprobaciones en este momento.",
             }) from exc
-        return [_to_frontend(r, mfa) for r in rows]
+        return [_to_frontend(r) for r in rows]
 
     @router.post("/api/v1/approvals/{proposal_id}", status_code=200)
     async def resolve_approval(request: Request, proposal_id: str, body: ApprovalDecision) -> dict:
@@ -93,23 +58,9 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
             except AgentUnavailable as exc:
                 raise _unavailable(proposal_id, exc) from exc
 
-        # APPROVE — ALWAYS forward the owner's TOTP if provided. The GATE is the single
-        # MFA enforcement point: it decides FROM THE STORED tool_name whether MFA is
-        # required and verifies it. (Bug fixed 2026-06-25: this used to re-fetch the
-        # pending list and STRING-MATCH the proposal_id to decide whether to forward the
-        # TOTP. When that match missed — e.g. id-format/timing — an mfa-tier approval was
-        # sent with mfa_factors=None and the gate DENIED a VALID approval with mfa_required.
-        # The owner "entered the right TOTP" and it was dropped before the gate. We now
-        # forward whatever the owner signed and let the gate be the source of truth + return
-        # the precise reason [mfa_required|invalid_totp|mfa_not_enrolled] for a friendly msg.)
-        mfa_factors: MfaFactors | None = (
-            MfaFactors(totp=body.totp) if (body.totp and body.totp.strip()) else None
-        )
-
         try:
             raw = await request.app.state.control_plane.approve(
-                channel=channel, proposal_id=parsed_id,
-                mfa_factors=mfa_factors)
+                channel=channel, proposal_id=parsed_id)
             # raw is a JSON string from the D-Bus adapter: {"token": ..., "live": bool}
             # live=True  → LIVE: the blocked conversation thread was signalled; the
             #              exact tool call is executing right now.
@@ -128,15 +79,15 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
                 except (ValueError, TypeError):
                     pass  # non-JSON string → keep live=True default
             logger.info(
-                "hermes.cowork.approvals.approved proposal=%s totp=%s live=%s",
-                proposal_id, "yes" if mfa_factors else "no", live,
+                "hermes.cowork.approvals.approved proposal=%s live=%s",
+                proposal_id, live,
             )
             return {"ok": True, "decision": body.decision, "live": live}
         except ApprovalGateError as exc:
             gate_reason = getattr(exc, "reason", "approval_failed")
             status = _status_for_gate_reason(gate_reason)
             raise HTTPException(status_code=status, detail={"code": gate_reason,
-                "message": _mfa_reason_message(gate_reason)}) from exc
+                "message": _approval_reason_message(gate_reason)}) from exc
         except AgentUnavailable as exc:
             raise _unavailable(proposal_id, exc) from exc
 
@@ -147,10 +98,7 @@ def create_approvals_router(mfa: MfaStore | None = None) -> APIRouter:
 # Private helpers
 # ---------------------------------------------------------------------------
 
-_MFA_REASON_MESSAGES: dict[str, str] = {
-    "mfa_not_enrolled": "No hay MFA configurado. Configúralo antes de aprobar acciones.",
-    "invalid_totp": "Código TOTP incorrecto o expirado.",
-    "mfa_required": "Se requiere MFA para aprobar esta acción.",
+_APPROVAL_REASON_MESSAGES: dict[str, str] = {
     "proposal_invalid": "Esta aprobación ya no es válida (puede haber expirado o ya fue "
                         "resuelta). Refresca el panel.",
     # Fase 2 Phase 4b: this row is routed to Enterprise — only a signed cloud
@@ -163,23 +111,20 @@ _MFA_REASON_MESSAGES: dict[str, str] = {
 }
 
 # Reasons that must surface as 403 Forbidden (the caller is not authorized to
-# perform THIS specific resolution, as opposed to bad/missing MFA which is 401).
+# perform THIS specific resolution).
 _FORBIDDEN_REASONS: frozenset[str] = frozenset({
     "enterprise_route_requires_cloud_decision",
 })
 
 
-def _mfa_reason_message(reason: str) -> str:
-    return _MFA_REASON_MESSAGES.get(
+def _approval_reason_message(reason: str) -> str:
+    return _APPROVAL_REASON_MESSAGES.get(
         reason,
-        "Verificación MFA fallida: código o respuesta del acertijo incorrectos, "
-        "o falta un factor para esta acción.",
+        "No se pudo resolver la aprobación. Actualiza el panel y revisa su estado.",
     )
 
 
 def _status_for_gate_reason(reason: str) -> int:
-    if reason in {"mfa_required", "invalid_totp", "mfa_not_enrolled"}:
-        return 401
     if reason in _FORBIDDEN_REASONS:
         return 403
     return 400
@@ -200,7 +145,7 @@ def _parse_proposal_id(raw: str) -> UUID:
             "message": f"Not a valid UUID: {raw!r}"}) from exc
 
 
-def _to_frontend(row: dict, store: MfaStore) -> dict:
+def _to_frontend(row: dict) -> dict:
     tool_name = row.get("tool_name", "")
     risk = row.get("risk", "")
     parameters = row.get("parameters_redacted", {})
@@ -222,8 +167,7 @@ def _to_frontend(row: dict, store: MfaStore) -> dict:
         # When the row was created (ISO). The frontend uses it to hide stale ghost
         # cards (older than the owner-wait window) that a timed-out thread may leave.
         "created_at": row.get("created_at") or None,
-        # Escalated MFA model: mfa-tier tools require TOTP; simple-tier do not.
-        "required_level": _LEVEL_MFA if is_mfa_required(tool_name) else _LEVEL_SIMPLE,
+        "required_level": "simple",
         # Fase 2 Phase 4b: "enterprise" when only a signed cloud decision can
         # approve this row (Approve here fails with enterprise_route_requires_
         # cloud_decision — see resolve_approval); Deny always still works (I-2).

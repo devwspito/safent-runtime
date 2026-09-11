@@ -235,7 +235,7 @@ async def test_gate_register_pending_persists_new_columns_on_migrated_legacy_db(
         minter=HitlApprovalMinter(signing_key=b"k" * 32),
         signer=signer,
         audit_repo=None,
-        mfa_verifier=None,
+
     )  # constructing the gate migrates the schema
 
     proposal_id = uuid4()

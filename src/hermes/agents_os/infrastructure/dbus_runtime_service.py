@@ -3444,7 +3444,6 @@ class DbusRuntimeServiceWiring:
         *,
         proposal_id: UUID,
         sender_uid: int,
-        totp: str | None = None,
         operator_token: str | None = None,
     ) -> HitlApprovalResult:
         """Aprueba una acción HIGH pendiente y re-encola la tarea (FR-015).
@@ -3467,19 +3466,9 @@ class DbusRuntimeServiceWiring:
         approved_by = self._authorize_and_resolve(
             sender_uid, operation="approve_action", operator_token=operator_token
         )
-        # Forward the owner's TOTP to the gate — the gate is the single MFA enforcement
-        # point for ALL surfaces (red-team 2026-06-19, finding 3). mfa-tier tools require
-        # valid factors here; simple-tier tools ignore them. Dropping totp here caused
-        # gate.approve to always fail with mfa_required for mfa-tier proposals, which was
-        # then mis-reported as proposal_invalid (bug 2026-06-25).
-        mfa_factors: Any | None = None
-        if totp:
-            from hermes.shell_server.security.mfa_tool_tier import MfaFactors  # noqa: PLC0415
-            mfa_factors = MfaFactors(totp=totp)
         token = await self._gate.approve(
             proposal_id=proposal_id,
             approved_by=approved_by,
-            mfa_factors=mfa_factors,
         )
         logger.info(
             "hermes.dbus.hitl_approved",

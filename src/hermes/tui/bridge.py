@@ -99,10 +99,10 @@ class RuntimeBridge:
         return bool(await self.call("resume"))
 
     # -- HITL -------------------------------------------------------------
-    async def approve(self, proposal_id: str, totp: str = "") -> str:
+    async def approve(self, proposal_id: str) -> str:
         # The owner's TOTP is forwarded to the daemon gate (single MFA enforcement
         # point for ALL surfaces — web/QML/TUI). Empty string ⇒ the gate fails closed.
-        return await self.call("approve", proposal_id, totp)
+        return await self.call("approve", proposal_id)
 
     async def reject(self, proposal_id: str, reason: str) -> bool:
         return bool(await self.call("reject", proposal_id, reason))

@@ -268,15 +268,11 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(status)
 
     @method()
-    async def Approve(self, proposal_id: "s", totp: "s") -> "s":  # noqa: N802,F821,UP037
+    async def Approve(self, proposal_id: "s") -> "s":  # noqa: N802,F821,UP037
         """HITL approve. approved_by = UID del bus. NO dispara run_cycle.
 
-        `totp` = owner's TOTP code, forwarded to the gate so the gate (the single MFA
-        enforcement point for ALL surfaces — red-team 2026-06-19, finding 3) verifies it.
-        Empty string = no factor (the gate rejects, fail-closed).
-
         ApprovalGateError is caught here and re-raised as a structured D-Bus error whose
-        error name encodes the gate reason (e.g. org.hermes.Error.ApprovalGate.mfa_required)
+        error name encodes the gate reason (e.g. enterprise_route_requires_cloud_decision)
         so that the client adapter (_translate_dbus_error) can reconstruct the exact reason
         code without string-matching the human-readable message.
 
@@ -293,7 +289,6 @@ class Runtime1ServiceInterface(ServiceInterface):
             result = await self._wiring.approve_action(
                 proposal_id=UUID(proposal_id),
                 sender_uid=sender_uid,
-                totp=totp or None,
             )
         except ApprovalGateError as exc:
             # Encode the machine-readable reason into the D-Bus error name so

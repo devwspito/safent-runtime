@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from hermes.capabilities.infrastructure.sqlite_approval_gate import ApprovalGateError
 from hermes.shell_server.cowork.approvals_api import create_approvals_router
-from hermes.shell_server.security.mfa import MfaStore
+
 
 pytestmark = pytest.mark.unit
 
@@ -24,13 +24,13 @@ pytestmark = pytest.mark.unit
 def _make_client(control_plane) -> TestClient:
     app = FastAPI()
     app.state.control_plane = control_plane
-    app.include_router(create_approvals_router(mfa=MfaStore()))
+    app.include_router(create_approvals_router())
     return TestClient(app, raise_server_exceptions=True)
 
 
 class _FakeControlPlaneApproveRaises:
-    async def approve(self, *, channel, proposal_id, mfa_factors=None):
-        del channel, mfa_factors  # Interface inputs intentionally unused by this denial stub.
+    async def approve(self, *, channel, proposal_id):
+        del channel  # Interface inputs intentionally unused by this denial stub.
         raise ApprovalGateError(
             f"proposal_id={proposal_id} está enrutada a Enterprise.",
             reason="enterprise_route_requires_cloud_decision",
@@ -48,7 +48,7 @@ class TestEnterpriseRouteApproveRejectedWith403:
         pid = str(uuid4())
 
         resp = client.post(
-            f"/api/v1/approvals/{pid}", json={"decision": "once", "totp": None}
+            f"/api/v1/approvals/{pid}", json={"decision": "once"}
         )
 
         assert resp.status_code == 403
@@ -65,7 +65,7 @@ class TestEnterpriseRouteDenyStillWorks:
         pid = str(uuid4())
 
         resp = client.post(
-            f"/api/v1/approvals/{pid}", json={"decision": "deny", "totp": None}
+            f"/api/v1/approvals/{pid}", json={"decision": "deny"}
         )
 
         assert resp.status_code == 200
@@ -101,7 +101,7 @@ class TestPendingListSurfacesRoute:
             "parameters_redacted": {},
             "route": "enterprise",
         }
-        result = _to_frontend(row, MfaStore())
+        result = _to_frontend(row)
         assert result["route"] == "enterprise"
 
     def test_to_frontend_defaults_route_to_local(self) -> None:
@@ -114,5 +114,5 @@ class TestPendingListSurfacesRoute:
             "justification": "j",
             "parameters_redacted": {},
         }
-        result = _to_frontend(row, MfaStore())
+        result = _to_frontend(row)
         assert result["route"] == "local"

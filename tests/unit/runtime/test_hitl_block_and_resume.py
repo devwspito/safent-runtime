@@ -193,7 +193,7 @@ class TestResolveNativeDangerApproval:
             minter=minter,
             signer=signer,
             audit_repo=None,
-            mfa_verifier=None,  # Mandato 2: no MFA for per-action
+
         )
 
         broker = MagicMock()
@@ -393,7 +393,7 @@ class TestApproveGateNoMfa:
             minter=minter,
             signer=signer,
             audit_repo=None,
-            mfa_verifier=None,  # no MFA verifier
+
         )
 
         proposal_id = uuid4()
@@ -418,7 +418,7 @@ class TestApproveGateNoMfa:
             token = await gate.approve(
                 proposal_id=proposal_id,
                 approved_by=operator_id,
-                mfa_factors=None,
+
             )
         except ApprovalGateError as exc:
             pytest.fail(
@@ -449,7 +449,7 @@ class TestApproveGateNoMfa:
             minter=minter,
             signer=signer,
             audit_repo=None,
-            mfa_verifier=None,
+
         )
 
         with pytest.raises(ApprovalGateError, match="no existe o ya fue resuelta"):
@@ -534,7 +534,7 @@ class TestCommunityApprovalWithoutMfa:
             minter=minter,
             signer=signer,
             audit_repo=None,
-            mfa_verifier=None,
+
         )
         proposal_id = uuid4()
         operator_id = uuid4()
@@ -549,7 +549,7 @@ class TestCommunityApprovalWithoutMfa:
             action_digest="abc123",
         )
         try:
-            token = await gate.approve(proposal_id=proposal_id, approved_by=operator_id, mfa_factors=None)
+            token = await gate.approve(proposal_id=proposal_id, approved_by=operator_id)
         except ApprovalGateError as exc:
             pytest.fail(f"simple-tier approve should NOT require MFA but raised: {exc}")
         assert token and len(token) > 0
@@ -575,7 +575,7 @@ class TestCommunityApprovalWithoutMfa:
             minter=minter,
             signer=signer,
             audit_repo=None,
-            mfa_verifier=None,
+
         )
         proposal_id = uuid4()
         operator_id = uuid4()
@@ -592,4 +592,4 @@ class TestCommunityApprovalWithoutMfa:
         token = await gate.approve(proposal_id=proposal_id, approved_by=operator_id)
         assert token
         with pytest.raises(ApprovalGateError):
-            await gate.approve(proposal_id=proposal_id, approved_by=operator_id, mfa_factors=None)
+            await gate.approve(proposal_id=proposal_id, approved_by=operator_id)

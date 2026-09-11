@@ -45,7 +45,7 @@ def _make_broker_and_loop(db_path: Path) -> tuple:
     signer.append_and_persist = AsyncMock()
 
     gate = SqliteApprovalGate(
-        db_path=db_path, minter=minter, signer=signer, audit_repo=None, mfa_verifier=None,
+        db_path=db_path, minter=minter, signer=signer, audit_repo=None,
     )
     broker = MagicMock()
     broker._approval_gate = gate
@@ -204,7 +204,7 @@ class TestLocalApproveRejectedOnEnterpriseRoute:
             minter=HitlApprovalMinter(signing_key=signing_key),
             signer=signer,
             audit_repo=None,
-            mfa_verifier=None,
+
         )
 
         proposal_id = uuid4()

@@ -172,14 +172,11 @@ class TestMethodSignatures:
         assert m.out_signature == "b"
 
     def test_approve_in_signature(self, iface: Runtime1ServiceInterface) -> None:
-        """Approve: proposal_id(s) totp(s) → approval_token(s).
-
-        The 2nd arg (totp, type 's') was added so the owner's TOTP reaches the gate —
-        the single MFA enforcement point for all surfaces (TOTP-only model 2026-06-24)."""
+        """Approve: proposal_id(s) → result(s). Owner identity comes from the bus."""
         methods = self._method_map(iface)
         assert "Approve" in methods
         m = methods["Approve"]
-        assert m.in_signature == "ss"
+        assert m.in_signature == "s"
         assert m.out_signature == "s"
 
     def test_reject_in_signature(self, iface: Runtime1ServiceInterface) -> None:

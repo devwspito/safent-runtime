@@ -214,13 +214,8 @@ class DbusControlPlaneAdapter:
         *,
         channel: AuthenticatedChannel,
         proposal_id: UUID,
-        mfa_factors: Any | None = None,
     ) -> str:
-        # Escalated MFA model (owner decision 2026-06-25):
-        # simple-tier → mfa_factors is None → pass empty TOTP; the gate skips MFA check.
-        # mfa-tier   → mfa_factors.totp is non-empty; the gate verifies it.
-        totp = (mfa_factors.totp if mfa_factors is not None else None) or ""
-        return await self._call_returning("call_approve", str(proposal_id), totp)
+        return await self._call_returning("call_approve", str(proposal_id))
 
     async def reject(
         self, *, channel: AuthenticatedChannel, proposal_id: UUID, reason: str

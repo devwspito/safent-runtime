@@ -228,19 +228,18 @@ class ControlPlaneService:
         *,
         channel: AuthenticatedChannel,
         proposal_id: UUID,
-        mfa_factors: Any | None = None,
     ) -> str:
         """HITL approve. approved_by = UUID(channel.sender_uid). NO dispara run_cycle.
 
-        `mfa_factors` se reenvía al gate, que verifica la MFA del dueño: la decisión de
-        seguridad vive en el gate (toda superficie), no aquí (red-team 2026-06-19).
+        La autorización usa el UID del canal; el gate conserva la restricción
+        de decisiones firmadas para propuestas enrutadas a Enterprise.
         """
         self._authorize(channel.sender_uid, operation="approve")
         if self._gate is None:
             raise NotImplementedError("approval_gate no inyectado")
         approved_by = _uid_to_uuid(channel.sender_uid)
         return await self._gate.approve(
-            proposal_id=proposal_id, approved_by=approved_by, mfa_factors=mfa_factors
+            proposal_id=proposal_id, approved_by=approved_by
         )
 
     async def reject(

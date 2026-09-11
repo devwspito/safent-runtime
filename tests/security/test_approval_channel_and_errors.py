@@ -1,24 +1,7 @@
-"""Regression: TOTP must be forwarded as mfa_factors to gate.approve (bug 2026-06-25).
+"""Owner-channel regression after retiring Community MFA.
 
-Two root causes fixed:
-
-  1. `approve_action` in `DbusRuntimeServiceWiring` received `totp` but NEVER passed it
-     to `gate.approve()` — the `mfa_factors` argument was always None. For mfa-tier tools
-     (e.g. skill_manage) the gate rejects with mfa_required, which crossed D-Bus as an
-     untyped error and surfaced as "proposal_invalid". A correct TOTP was silently dropped.
-
-  2. `_translate_dbus_error` in `DbusControlPlaneAdapter` caught ALL ApprovalGateError
-     variants by string-matching the message and mapped them to reason="proposal_invalid",
-     losing the real reason (mfa_required / invalid_totp / mfa_not_enrolled). The fix
-     encodes the reason in the D-Bus error NAME (org.hermes.Error.ApprovalGate.<reason>)
-     so the client can reconstruct it exactly.
-
-These tests verify:
-  - approve_action forwards totp → gate receives MfaFactors(totp=...) not None.
-  - approve_action with no totp → gate receives mfa_factors=None (simple-tier path).
-  - _translate_dbus_error extracts "mfa_required" from a structured D-Bus error name.
-  - _translate_dbus_error extracts "invalid_totp" from a structured D-Bus error name.
-  - _translate_dbus_error falls back to "proposal_invalid" for unstructured legacy errors.
+The old forwarding cases below now assert that factors are rejected or absent.
+Generic structured-error decoding remains tested, including historical reasons.
 """
 
 from __future__ import annotations
@@ -86,30 +69,22 @@ def _make_wiring_with_recording_gate():
 
 
 # ---------------------------------------------------------------------------
-# Bug #1: approve_action must forward totp as MfaFactors to gate.approve
+# Approval uses the verified owner channel, with no factor forwarding.
 # ---------------------------------------------------------------------------
 
 
-class TestApproveActionToTPForwarding:
-    """approve_action must forward totp as MfaFactors to gate.approve (bug 2026-06-25)."""
+class TestApproveActionOwnerChannel:
+    """Community no longer accepts or forwards TOTP."""
 
-    async def test_totp_forwarded_as_mfa_factors(self) -> None:
-        """When totp is provided, gate.approve receives MfaFactors(totp=...), not None."""
+    async def test_removed_totp_argument_cannot_reach_gate(self) -> None:
+        """No hidden compatibility path accepts a Community factor."""
         wiring, gate = _make_wiring_with_recording_gate()
         proposal_id = uuid4()
-        await wiring.approve_action(
-            proposal_id=proposal_id,
-            sender_uid=_AUTHORIZED_UID,
-            totp="123456",
-        )
-        assert len(gate.approve_calls) == 1
-        mfa = gate.approve_calls[0]["mfa_factors"]
-        assert mfa is not None, (
-            "gate.approve must receive MfaFactors when totp is provided — "
-            "previously the totp was received by approve_action but dropped before "
-            "forwarding to gate.approve, causing mfa-tier proposals to always fail."
-        )
-        assert mfa.totp == "123456"
+        with pytest.raises(TypeError):
+            await wiring.approve_action(
+                proposal_id=proposal_id, sender_uid=_AUTHORIZED_UID, totp="123456",
+            )
+        assert gate.approve_calls == []
 
     async def test_no_totp_gives_none_mfa_factors(self) -> None:
         """When totp is absent, gate.approve receives mfa_factors=None (simple-tier)."""
@@ -118,21 +93,20 @@ class TestApproveActionToTPForwarding:
         await wiring.approve_action(
             proposal_id=proposal_id,
             sender_uid=_AUTHORIZED_UID,
-            totp=None,
         )
         assert len(gate.approve_calls) == 1
+        assert gate.approve_calls[0]["approved_by"] == UUID(int=_AUTHORIZED_UID)
         assert gate.approve_calls[0]["mfa_factors"] is None, (
             "Without totp, mfa_factors must be None so simple-tier tools pass through."
         )
 
     async def test_empty_string_totp_gives_none_mfa_factors(self) -> None:
-        """Empty string totp is treated as absent (simple-tier path)."""
+        """An ordinary owner decision carries no MFA factors."""
         wiring, gate = _make_wiring_with_recording_gate()
         proposal_id = uuid4()
         await wiring.approve_action(
             proposal_id=proposal_id,
             sender_uid=_AUTHORIZED_UID,
-            totp="",
         )
         assert len(gate.approve_calls) == 1
         assert gate.approve_calls[0]["mfa_factors"] is None

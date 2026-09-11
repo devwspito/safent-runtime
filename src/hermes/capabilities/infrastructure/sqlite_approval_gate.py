@@ -82,12 +82,12 @@ _ENTERPRISE_CLOUD_APPROVER: str = "enterprise:cloud-decision"
 class ApprovalGateError(RuntimeError):
     """Error irrecuperable del ApprovalGate — no degradar.
 
-    `reason` carries the machine-readable code (e.g. 'mfa_not_enrolled',
-    'invalid_totp', 'invalid_riddle') so the presentation layer can route
+    `reason` carries the machine-readable code (e.g. 'proposal_invalid',
+    'enterprise_route_requires_cloud_decision') so the presentation layer can route
     to the correct user-facing message without string-parsing the message.
     """
 
-    def __init__(self, message: str, reason: str = "mfa_denied") -> None:
+    def __init__(self, message: str, reason: str = "proposal_invalid") -> None:
         super().__init__(message)
         self.reason = reason
 
@@ -112,7 +112,6 @@ class SqliteApprovalGate:
         signer: AuditHashChainSigner,
         audit_repo: Any | None = None,
         token_ttl: int = _DEFAULT_TOKEN_TTL_S,
-        mfa_verifier: Any | None = None,
     ) -> None:
         self._db_path = db_path
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,11 +119,6 @@ class SqliteApprovalGate:
         self._signer = signer
         self._audit_repo = audit_repo
         self._token_ttl = token_ttl
-        # Injected MfaToolTierVerifier (duck-typed: .verify_for_tool(tool_name, risk,
-        # factors) -> (ok, reason)). Enforces owner MFA INSIDE approve so EVERY surface
-        # (web + D-Bus) is structurally MFA-gated — closes the MFA-skip side-door
-        # (red-team 2026-06-19, finding 3). None ⇒ approve fails closed (no MFA-less mint).
-        self._mfa_verifier = mfa_verifier
         self._ensure_schema()
 
     # ------------------------------------------------------------------
@@ -325,28 +319,21 @@ class SqliteApprovalGate:
         return status
 
     async def approve(
-        self, *, proposal_id: UUID, approved_by: UUID, mfa_factors: Any | None = None
+        self, *, proposal_id: UUID, approved_by: UUID
     ) -> str:
-        """Aprueba la propuesta con modelo de MFA escalado (owner decision 2026-06-25).
+        """Approve a local proposal through the authenticated owner channel.
 
         SC-004: registra quién aprobó (approved_by autenticado, no del body).
 
-        Escalated MFA model:
-          - simple tier (la mayoría de tools): minta el token directamente, sin MFA.
-          - mfa tier (MOST_DELICATE / destructivos): verifica TOTP vía mfa_verifier
-            ANTES de mintear. Fail-closed: sin verifier → ApprovalGateError.
-
-        La clasificación se lee del tool_name almacenado en la fila (fuente única:
-        tool_delicacy.is_mfa_required). El agente NO puede influenciar el tier
-        (el tool_name lo escribe el hook server-side, no el LLM).
+        Enterprise-routed rows require a signed cloud decision. MFA is enforced
+        by Enterprise, never enrolled or verified in Community.
 
         Returns:
             Token de aprobación (opaco, HMAC-SHA256, single-use).
 
         Raises:
-            ApprovalGateError: si la propuesta no existe/ya resuelta o MFA falla.
+            ApprovalGateError: propuesta inválida o decisión reservada a Enterprise.
         """
-        from hermes.capabilities.tool_delicacy import is_mfa_required  # noqa: PLC0415
 
         row = self._fetch_pending(proposal_id)
         if row is None:
