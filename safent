@@ -270,29 +270,41 @@ _ensure_machine() {
 
 # MAC3-07 (verificacion-mac-3.md, MAC-07/MAC2-13 repeated unfixed): reports
 # the full path of a gvproxy/vfkit process serving THE MACHINE NAMED $1
-# whose path is NOT the one bundled at $_podman_bundle_dir/bin/<name> —
-# empty when nothing matching is running yet, when there is no bundle to
-# compare against (bare terminal install), or when every match found IS the
+# whose path is NOT the one bundled at $_podman_bundle_dir/<name> — empty
+# when nothing matching is running yet, when there is no bundle to compare
+# against (bare terminal install), or when every match found IS the
 # bundled one. Only ever meaningful on macOS with the pinned podman —
 # guarded exactly like _ensure_machine/cmd_ensure_machine above.
-# `ps -axo pid=,comm=,args=` (never /proc: Darwin-only) — `comm` on macOS is
-# the process's own full invoked path, exactly what the verification report
-# used by hand (`ps -o pid=,comm= -p <pid>`) to catch this live; `args` is
-# scanned for the machine's OWN name so the OWNER's own separate machine
-# (if one happens to be running too) can never produce a false positive.
+# MAC4-03 (verificacion-mac-4.md): two defects in the ORIGINAL version, both
+# reproduced live against the real Mac's own processes:
+#   1. `comm=` TRUNCATES to 16 characters the instant it shares a `ps -o`
+#      spec with ANY other field ("/opt/podman/bin/" and "/private/tmp/saf"
+#      each measure exactly 16) — the guard's `case` never matched a
+#      gvproxy/vfkit pattern at all, so it always returned empty, a dead
+#      guard. `args=` alone carries the full invocation, no such limit;
+#      the verification report's own manual check that DID see the full
+#      path (`ps -o pid=,comm= -p <pid>`) only ever combined comm with
+#      pid, never with args — that is why it worked there but not here.
+#   2. The expected path was "$_podman_bundle_dir/bin/<name>" — but the
+#      REAL .app ships its runtime FLAT (`Contents/Resources/runtime/
+#      gvproxy`, confirmed via `ls`), never under a bin/ subdirectory
+#      (Tauri's bundle.resources glob flattens the staging tree's own
+#      bin/ at build time, same as podman itself). Left unfixed, fixing
+#      defect 1 alone would have made the guard flag the LEGITIMATE
+#      bundled helper as foreign and block every single boot.
 # Best-effort: `ps` failing/being unavailable reports "nothing found",
 # never blocks a healthy machine from starting.
 _foreign_engine_helper() {
   [ "$RTN" = podman ] && [ "$OS" = Darwin ] && [ -n "${_podman_bundle_dir:-}" ] || return 0
   _machine="$1"
   _ps_tmp="$(mktemp)" || return 0
-  ps -axo pid=,comm=,args= >"$_ps_tmp" 2>/dev/null || true
+  ps -axo args= >"$_ps_tmp" 2>/dev/null || true
   _found=""
   while IFS= read -r _line; do
-    _comm="$(printf '%s\n' "$_line" | awk '{print $2}')"
+    _comm="$(printf '%s\n' "$_line" | awk '{print $1}')"
     case "$_comm" in
-      */gvproxy|gvproxy) _want="$_podman_bundle_dir/bin/gvproxy" ;;
-      */vfkit|vfkit) _want="$_podman_bundle_dir/bin/vfkit" ;;
+      */gvproxy|gvproxy) _want="$_podman_bundle_dir/gvproxy" ;;
+      */vfkit|vfkit) _want="$_podman_bundle_dir/vfkit" ;;
       *) continue ;;
     esac
     case "$_line" in *"$_machine"*) ;; *) continue ;; esac
@@ -1103,14 +1115,26 @@ _companion_env_common() {
 # Fail closed instead: refuse with a clear recovery step rather than guess.
 # `safent companion update` is the ONE place a missing marker is still a
 # legitimate bootstrap case (see _companion_update_env) — never here.
+# MAC4-04 (verificacion-mac-4.md): returns 1 with NO output at all when the
+# marker is missing — deliberately NEVER calls _die_porcelain (or prints
+# anything) from HERE. This function is only ever invoked as
+# `VAR="$(_persisted_ads_image)"` (see _companion_env below), i.e. INSIDE a
+# command substitution subshell: an `exit` from within that subshell only
+# ever terminates the SUBSHELL, not the real process — confirmed live, this
+# is exactly why the ORIGINAL raw `echo ...; exit 1` silently produced rc=1
+# with ZERO bytes on stdout instead of a clean --porcelain failure, and why
+# a first attempt at fixing it by calling _die_porcelain FROM HERE also
+# failed silently (its `exit` killed the subshell; the JSON it printed got
+# captured into $SAFENT_ADS_IMAGE as if it were the image name, and the
+# calling shell carried on with a garbage value instead of aborting).
+# _die_porcelain must run in the CALLING shell, not in here — see
+# _companion_env's own `|| _die_porcelain` immediately after the assignment.
 _persisted_ads_image() {
   if [ -f "$COMPANION_STATE/image" ]; then
     cat "$COMPANION_STATE/image"
     return 0
   fi
-  echo "[x] $COMPANION_STATE/image not found — refusing to guess the companion's image." >&2
-  echo "    Run 'safent companion update' once to record it, then retry." >&2
-  exit 1
+  return 1
 }
 
 # Exports the three vars compose.yaml interpolates (SAFENT_STATE,
@@ -1129,7 +1153,12 @@ _persisted_ads_image() {
 # _companion_update_env — and the only one that overwrites the marker.
 _companion_env() {
   _companion_env_common
-  SAFENT_ADS_IMAGE="$(_persisted_ads_image)"
+  # MAC4-04: `|| _die_porcelain` runs IN THIS SHELL (never inside the `$(...)`
+  # that captures _persisted_ads_image's stdout) — its `exit` therefore
+  # actually terminates the process, and nothing ever gets a chance to
+  # treat a `failed` JSON line as if it were the image name.
+  SAFENT_ADS_IMAGE="$(_persisted_ads_image)" || _die_porcelain companion_network_conflict \
+    "$COMPANION_STATE/image not found — refusing to guess the companion's image. Run 'safent companion update' once to record it, then retry." false
   export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
 }
 
@@ -1917,11 +1946,17 @@ cmd_stage_runtime() {
       # still reach the explicit, porcelain-aware comparison below (an
       # honest runtime_hash_mismatch), never a raw, uncaught shell abort
       # with no `failed` event at all.
-      # `codesign -d` reports on STDERR (Apple's convention): discarding it here
-      # left real_cdhash empty, so a correctly signed binary never matched its
-      # manifest cdhash and the app refused its OWN bundle with
-      # runtime_hash_mismatch. Same defect as stage-runtime.sh's producer side;
-      # this consumer only lit up once the cdhashes stopped being null.
+      # MAC4-01 (verificacion-mac-4.md), same class as 70330e4 (which fixed
+      # the producer, stage-runtime.sh — this is the CONSUMER's own copy of
+      # the identical bug): `codesign -d`/`-dvvv` writes its report to
+      # STDERR (Apple's own convention), never stdout. `2>/dev/null` threw
+      # away the one line this needs (`CDHash=...`), so `real_cdhash` was
+      # ALWAYS empty and could never equal a real manifest cdhash — every
+      # signed, correctly-bundled binary failed closed as
+      # runtime_hash_mismatch on a real Mac. Unreachable while cdhash
+      # entries all shipped null (MAC3-05); populating them (MAC3-05 fixed)
+      # lit this up for the first time. `2>&1` merges the report onto the
+      # SAME stream `sed`/`head` already read from.
       real_cdhash="$("$codesign_bin" -dvvv "$src" 2>&1 | sed -n 's/^CDHash=\(.*\)$/\1/p' | head -1 || true)"
       [ "$real_cdhash" = "$cdhash" ] || _die_porcelain runtime_hash_mismatch "$path no coincide con el cdhash del manifiesto" false
     else
@@ -1985,12 +2020,21 @@ cmd_ensure_machine() {
       if [ -n "${_podman_bundle_dir:-}" ] && [ -f "$_podman_bundle_dir/$MACHINE_IMAGE_FILE" ]; then
         _machine_image="$_podman_bundle_dir/$MACHINE_IMAGE_FILE"
       fi
+      # MAC4-05 (verificacion-mac-4.md): measured live at 20.93 s with ZERO
+      # `progress` events — the biggest silent gap in the whole boot,
+      # surviving the adapter's stall watchdog only because stderr also
+      # refreshes `last_activity` (engine_adapter.rs:545-551), never
+      # because anything was actually narrated. Same fix already applied
+      # to `pull_engine` (_pull_with_heartbeat) — `_run_with_heartbeat`
+      # (used by companion install/repair) is the ALREADY-GENERIC version
+      # of that same idea (heartbeats every 5s, app-engine.md §3), reused
+      # here as-is rather than inventing a THIRD heartbeat mechanism.
       if [ -n "$_machine_image" ]; then
-        "$RT" machine init "$name" --image "$_machine_image" --provider applehv \
-          --rootful --cpus 4 --memory 8192 --disk-size 60 >&2 \
+        _run_with_heartbeat "$RT" machine init "$name" --image "$_machine_image" --provider applehv \
+          --rootful --cpus 4 --memory 8192 --disk-size 60 \
           || _die_porcelain machine_create_failed "No se pudo crear la maquina" true
       else
-        "$RT" machine init "$name" --rootful --cpus 4 --memory 8192 --disk-size 60 >&2 \
+        _run_with_heartbeat "$RT" machine init "$name" --rootful --cpus 4 --memory 8192 --disk-size 60 \
           || _die_porcelain machine_create_failed "No se pudo crear la maquina" true
       fi
     fi
@@ -2005,7 +2049,9 @@ cmd_ensure_machine() {
 
   rootful="$("$RT" machine inspect "$name" --format '{{.Rootful}}' 2>/dev/null | head -1)"
   [ "$rootful" = "true" ] || _die_porcelain machine_create_failed "La maquina existente es rootless" false
-  "$RT" machine start "$name" >&2 2>/dev/null || "$RT" info >/dev/null 2>&1 \
+  # MAC4-05: same heartbeat treatment as `machine init` above — starting
+  # an already-created machine (VM boot) can be just as silent.
+  _run_with_heartbeat "$RT" machine start "$name" || "$RT" info >/dev/null 2>&1 \
     || _die_porcelain machine_start_failed "No se pudo arrancar la maquina" true
 
   # MAC3-07: fail loudly instead of shipping a machine silently run by a
@@ -2085,12 +2131,42 @@ cmd_ensure_images() {
   fi
 }
 
+
+# MAC4-02 (verificacion-mac-4.md): `up` is documented idempotent
+# (app-engine.md §4) and `boot.rs`'s `confirm_ready` relies on that
+# literally — it re-invokes `up` on EVERY reopen with a healthy engine,
+# just to re-mint the ticket, with no other repair action first. `_run`
+# used to destroy+recreate UNCONDITIONALLY (`"$RT" rm -f "$NAME"`), so a
+# perfectly healthy engine lost its container id, port, and any in-flight
+# work on every single reopen (measured live: 12.7 s, new id, new port).
+# True convergence: reuse a container that exists, is running, and is
+# already serving the DESIRED digest — the SAME field cmd_facts already
+# uses for engineContainer.imageDigest (MAC3-02: {{.ImageDigest}}, never
+# the bare local image ID {{.Image}}). A non-digest-pinned $IMAGE (a bare
+# terminal install without SAFENT_ENGINE_DIGEST) can never safely claim
+# convergence this way — it always re-runs, unchanged from before.
+_container_matches_desired() {
+  _exists && _running || return 1
+  case "$IMAGE" in
+    *@sha256:*) ;;
+    *) return 1 ;;
+  esac
+  _d="$("$RT" inspect --type container -f '{{.ImageDigest}}' "$NAME" 2>/dev/null || true)"
+  [ -n "$_d" ] || _d="$("$RT" inspect --type container -f '{{.Image}}' "$NAME" 2>/dev/null || true)"
+  [ "$_d" = "${IMAGE#*@}" ]
+}
+
 cmd_up() {
   secret_fd=3
   [ "${1:-}" = "--secret-fd" ] && secret_fd="${2:-3}"
 
   _stage container "Creando el contenedor"
-  _run
+  _ensure_machine
+  if _container_matches_desired; then
+    : # already converged on the desired digest — never destroy a healthy engine
+  else
+    _run
+  fi
   _stage_done
 
   _stage health "Esperando a que Safent este listo"

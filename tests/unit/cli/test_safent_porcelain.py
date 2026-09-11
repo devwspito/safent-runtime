@@ -183,12 +183,18 @@ case "$1" in
         [ "$exists" = "true" ] && exit 0 || exit 1
         ;;
       init)
+        # MAC4-05 (verificacion-mac-4.md): simulates the real, silent
+        # 20.93 s `machine init`/`start` gap so a heartbeat mechanism has
+        # something to actually heartbeat THROUGH, same shape as
+        # FAKE_PULL_DELAY_SECONDS for pull_engine.
+        [ -n "${FAKE_MACHINE_INIT_DELAY_SECONDS:-}" ] && sleep "$FAKE_MACHINE_INIT_DELAY_SECONDS"
         [ "${FAKE_MACHINE_INIT_FAILS:-false}" = "true" ] && exit 1
         mname="$1"
         [ -n "${FAKE_MACHINES_STATE:-}" ] && echo "$mname" >> "$FAKE_MACHINES_STATE"
         exit 0
         ;;
       start)
+        [ -n "${FAKE_MACHINE_START_DELAY_SECONDS:-}" ] && sleep "$FAKE_MACHINE_START_DELAY_SECONDS"
         [ "${FAKE_MACHINE_START_FAILS:-false}" = "true" ] && exit 1
         exit 0
         ;;
@@ -546,6 +552,53 @@ class TestFactsIsPureObservation:
         assert json.loads(result2.stdout.strip())["localCompanionImageDigest"] is None
 
 
+class TestFactsFailsClosedInsteadOfSilentlyOnAnIncompleteCompanionScaffold:
+    """MAC4-04 (verificacion-mac-4.md, "mina"): a companion compose scaffold
+    can exist (a prior `safent up` without --no-companion ran
+    provision.sh's --scaffold step) while its persisted image marker does
+    not (an incomplete/transitional state) — `cmd_facts`'s own
+    `_companion_container_counts` reaches `_persisted_ads_image`, which
+    used to `echo ...; exit 1` raw: rc=1, ZERO bytes on stdout, breaking
+    --porcelain's own contract (app-engine.md §2) and translated by the
+    adapter into an undifferentiated daemon_unhealthy."""
+
+    def test_facts_emits_a_closed_failed_event_instead_of_dying_silently(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        companion_bin_dir = home_dir / ".safent" / "companions" / "ads" / "bin"
+        companion_bin_dir.mkdir(parents=True)
+        (companion_bin_dir / "compose.yaml").write_text("services: {}\n")
+        # Deliberately NOT writing .../ads/image — the incomplete state.
+
+        result = _run_safent("facts", "--porcelain", env=env)
+
+        assert result.returncode == 25, f"stdout={result.stdout}\nstderr={result.stderr}"  # companion_network_conflict
+        lines = [line for line in result.stdout.splitlines() if line]
+        assert len(lines) == 1, f"--porcelain must emit exactly one NDJSON line, got: {result.stdout!r}"
+        event = json.loads(lines[0])  # raises if it is not valid JSON at all
+        assert event["t"] == "failed"
+        assert event["code"] == "companion_network_conflict"
+        assert "image" in event["detail"]
+        assert event["retryable"] is False
+
+    def test_non_porcelain_still_prints_a_clear_message_on_stderr(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        companion_bin_dir = home_dir / ".safent" / "companions" / "ads" / "bin"
+        companion_bin_dir.mkdir(parents=True)
+        (companion_bin_dir / "compose.yaml").write_text("services: {}\n")
+
+        result = _run_safent("facts", env=env)
+
+        assert result.returncode == 25, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert result.stdout == ""
+        assert "image" in result.stderr
+
+
 class TestEnsureMachineOnLinuxIsANoOp:
     def test_ensure_machine_closes_immediately_without_touching_podman_machine(
         self, tmp_path: Path, fake_bin_dir: Path
@@ -598,7 +651,15 @@ def _fake_codesign(fake_bin_dir: Path, *, verify_ok: bool, cdhash: str) -> None:
     manifest entry that carries a `cdhash` — faking the REAL binary (not
     the CLI's own logic) so these tests prove the actual verification
     branch, not a restated assumption. `verify_ok=False` simulates a
-    tampered/invalid signature; `cdhash` is what `-dvvv` reports back."""
+    tampered/invalid signature; `cdhash` is what `-dvvv` reports back.
+
+    MAC4-01 (verificacion-mac-4.md): the REAL `codesign -d`/`-dvvv` writes
+    its report to STDERR (Apple's own convention) — this fake used to
+    `echo` it to stdout, which is exactly why a real-Mac-only bug
+    (`safent:1920`'s `2>/dev/null` discarding that report) shipped twice
+    without a single test catching it. `>&2` here makes this fake match
+    the real binary's channel, so `cmd_stage_runtime`'s OWN `2>/dev/null`
+    bug reproduces under test."""
     script = (
         "#!/bin/sh\n"
         "case \"$1\" in\n"
@@ -616,12 +677,14 @@ def _fake_codesign(fake_bin_dir: Path, *, verify_ok: bool, cdhash: str) -> None:
 
 
 def _fake_ps(fake_bin_dir: Path, output: str) -> None:
-    """Fakes the REAL `ps` binary `_foreign_engine_helper` (MAC3-07) shells
-    out to — `output` is exactly what `ps -axo pid=,comm=,args=` would
-    print: one process per line, "<pid> <comm> <args...>". Ignores its own
-    argv (the fake never needs to distinguish invocations, unlike
-    `_FAKE_PODMAN`) since `_foreign_engine_helper` only ever calls `ps` one
-    way."""
+    """Fakes the REAL `ps` binary `_foreign_engine_helper` (MAC3-07,
+    MAC4-03) shells out to — `output` is exactly what `ps -axo args=`
+    would print: one process per line, "<full-path> <rest-of-args...>",
+    no pid column (MAC4-03: combining `comm=` with any other field
+    truncates it to 16 characters on real macOS `ps` — dropped entirely).
+    Ignores its own argv (the fake never needs to distinguish invocations,
+    unlike `_FAKE_PODMAN`) since `_foreign_engine_helper` only ever calls
+    `ps` one way."""
     ps = fake_bin_dir / "ps"
     ps.write_text(f"#!/bin/sh\ncat <<'PSEOF'\n{output}\nPSEOF\n")
     ps.chmod(0o755)
@@ -1175,6 +1238,65 @@ class TestUpDeliversTheTicketOnlyOnTheSecretFd:
             thread.join(timeout=5)
 
 
+class TestUpConvergesInsteadOfDestroyingAHealthyEngine:
+    """MAC4-02 (verificacion-mac-4.md, third distinct cause): `boot.rs`'s
+    `confirm_ready` re-invokes `up` on EVERY reopen with an already-healthy
+    engine, just to re-mint the ticket — `_run` used to `rm -f` and
+    recreate UNCONDITIONALLY, so a perfectly healthy, digest-matching
+    container lost its id and port on every single reopen (measured live:
+    12.7 s, new id, new port). `up` must reuse a converged container
+    (exists, running, serving the DESIRED digest) instead of destroying
+    it — only when SAFENT_IMAGE is digest-pinned (repo@sha256:...), the
+    only shape the desktop app ever sets."""
+
+    def test_reopening_twice_never_destroys_or_recreates_a_converged_container(
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        digest = "deadbeef" * 8  # 64 hex chars — sha256-shaped, value itself is arbitrary
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            port=healthz_server,
+            image_digest=digest,
+            extra_env={"SAFENT_IMAGE": f"ghcr.io/devwspito/safent@sha256:{digest}"},
+        )
+
+        result1, ticket1 = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+        assert result1.returncode == 0, f"stdout={result1.stdout}\nstderr={result1.stderr}"
+        calls_after_first = _podman_calls(podman_log)
+        assert not any(c.startswith("rm -f ") for c in calls_after_first), calls_after_first
+        assert not any(c.startswith("run -d ") for c in calls_after_first), calls_after_first
+
+        result2, ticket2 = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+        assert result2.returncode == 0, f"stdout={result2.stdout}\nstderr={result2.stderr}"
+        calls_after_both = _podman_calls(podman_log)
+        calls_from_second_run = calls_after_both[len(calls_after_first) :]
+        assert not any(c.startswith("rm -f ") for c in calls_from_second_run), calls_from_second_run
+        assert not any(c.startswith("run -d ") for c in calls_from_second_run), calls_from_second_run
+
+        assert ticket1.strip() == ticket2.strip() == f"http://127.0.0.1:{healthz_server}/?k={_SECRET_TOKEN}"
+
+    def test_a_non_digest_pinned_image_still_recreates_every_time_unchanged(
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A bare terminal install (SAFENT_IMAGE unset, or a plain tag) has
+        no digest to converge against — it must keep today's behavior
+        (always recreate) rather than silently claiming convergence."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, port=healthz_server
+        )
+
+        result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        assert any(c.startswith("rm -f ") for c in calls), calls
+        assert any(c.startswith("run -d ") for c in calls), calls
+
+
 class TestStatusHonoursPorcelain:
     """CLI-N2 (specs/025-safent-repaso matriz-final-39eeb8e): `cmd_status`
     (safent:788-796 at the time of the finding) `echo`d human text
@@ -1502,7 +1624,14 @@ class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
     `/opt/podman/bin/gvproxy`/`vfkit` actually serving it (different
     sha256) — no bundled containers.conf steered podman's helper
     resolution. `cmd_ensure_machine` must now catch this and fail loudly
-    instead of shipping silently."""
+    instead of shipping silently.
+
+    MAC4-03 (verificacion-mac-4.md): the ORIGINAL guard was dead code on a
+    real Mac — `ps -o comm=` truncates to 16 characters once combined with
+    any other field, and the expected bundled path had a spurious `bin/`
+    component the REAL .app never has (it ships its runtime FLAT). Both
+    fixed; these fixtures now reflect the FLAT layout and a `ps -axo
+    args=`-only shape (no pid column, no truncation)."""
 
     def test_a_foreign_gvproxy_serving_our_own_machine_fails_the_machine_stage(
         self, tmp_path: Path, fake_bin_dir: Path
@@ -1513,15 +1642,14 @@ class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
         pinned = pinned_dir / "podman"
         pinned.write_text(_FAKE_PODMAN)
         pinned.chmod(0o755)
-        (pinned_dir / "bin").mkdir()
-        (pinned_dir / "bin" / "gvproxy").write_bytes(b"bundled gvproxy")
-        (pinned_dir / "bin" / "vfkit").write_bytes(b"bundled vfkit")
+        (pinned_dir / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "vfkit").write_bytes(b"bundled vfkit")
         # The OWNER's own podman.io install — a DIFFERENT path — is what is
         # actually running for OUR machine (safent-test-engine).
         _fake_ps(
             fake_bin_dir,
-            "84104 /opt/podman/bin/gvproxy --listen safent-test-engine\n"
-            "84106 /opt/podman/bin/vfkit --machine safent-test-engine",
+            "/opt/podman/bin/gvproxy --listen safent-test-engine\n"
+            "/opt/podman/bin/vfkit --machine safent-test-engine",
         )
 
         podman_log = tmp_path / "podman.log"
@@ -1547,6 +1675,44 @@ class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
         assert "/opt/podman/bin/gvproxy" in failed["detail"]
         assert failed["retryable"] is False
 
+    def test_a_foreign_gvproxy_under_a_path_longer_than_16_characters_is_still_caught(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """MAC4-03's exact reproduction on the real Mac: both the bundled
+        AND the foreign path happened to be longer than 16 characters
+        ("/opt/podman/bin/" and "/private/tmp/saf" themselves already
+        measure exactly 16) — a fixture whose comparison only "worked" on
+        short paths would hide the same class of bug again."""
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "a-rather-long-bundle-directory-name-on-purpose"
+        pinned_dir.mkdir(parents=True)
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        (pinned_dir / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "vfkit").write_bytes(b"bundled vfkit")
+        foreign = "/Users/someone/.local/share/containers/podman/bin/gvproxy"
+        assert len(foreign) > 16
+        _fake_ps(fake_bin_dir, f"{foreign} --listen safent-test-engine")
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 16, f"stdout={result.stdout}\nstderr={result.stderr}"
+        failed = _parse_ndjson(result.stdout)[-1]
+        assert failed["code"] == "machine_start_failed"
+        assert foreign in failed["detail"], failed["detail"]
+
     def test_the_bundled_gvproxy_serving_our_own_machine_passes(
         self, tmp_path: Path, fake_bin_dir: Path
     ) -> None:
@@ -1556,14 +1722,13 @@ class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
         pinned = pinned_dir / "podman"
         pinned.write_text(_FAKE_PODMAN)
         pinned.chmod(0o755)
-        (pinned_dir / "bin").mkdir()
-        (pinned_dir / "bin" / "gvproxy").write_bytes(b"bundled gvproxy")
-        (pinned_dir / "bin" / "vfkit").write_bytes(b"bundled vfkit")
-        # The comm path matches the BUNDLED one exactly — no problem.
+        (pinned_dir / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "vfkit").write_bytes(b"bundled vfkit")
+        # The comm path matches the BUNDLED one exactly (flat, no bin/) — no problem.
         _fake_ps(
             fake_bin_dir,
-            f"84104 {pinned_dir}/bin/gvproxy --listen safent-test-engine\n"
-            f"84106 {pinned_dir}/bin/vfkit --machine safent-test-engine",
+            f"{pinned_dir}/gvproxy --listen safent-test-engine\n"
+            f"{pinned_dir}/vfkit --machine safent-test-engine",
         )
 
         podman_log = tmp_path / "podman.log"
@@ -1596,10 +1761,9 @@ class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
         pinned = pinned_dir / "podman"
         pinned.write_text(_FAKE_PODMAN)
         pinned.chmod(0o755)
-        (pinned_dir / "bin").mkdir()
-        (pinned_dir / "bin" / "gvproxy").write_bytes(b"bundled gvproxy")
-        (pinned_dir / "bin" / "vfkit").write_bytes(b"bundled vfkit")
-        _fake_ps(fake_bin_dir, "1 /sbin/launchd\n2 /usr/libexec/something-unrelated")
+        (pinned_dir / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "vfkit").write_bytes(b"bundled vfkit")
+        _fake_ps(fake_bin_dir, "/sbin/launchd\n/usr/libexec/something-unrelated")
 
         podman_log = tmp_path / "podman.log"
         machines_state = tmp_path / "machines.state"
@@ -1617,3 +1781,78 @@ class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         events = _parse_ndjson(result.stdout)
         assert events[-1]["t"] == "done"
+
+
+class TestEnsureMachineEmitsHeartbeatsOnASilentInitOrStart:
+    """MAC4-05 (verificacion-mac-4.md, MAC3-06 unchanged): the `machine`
+    stage measured 20.93 s with ZERO `progress` events — the single
+    biggest silent gap in the whole boot. app-engine.md §3 requires
+    progress at least every 5 s while a stage is alive; `pull_engine`
+    already solved this with a heartbeat (_pull_with_heartbeat) —
+    `cmd_ensure_machine` must not be the one stage left behind."""
+
+    def test_a_silent_machine_init_still_emits_progress_heartbeats(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_INIT_DELAY_SECONDS": "6",
+            },
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        progress_events = [e for e in events if e["t"] == "progress" and e["id"] == "machine"]
+        assert len(progress_events) >= 1, f"expected at least one heartbeat during a 6s silent init: {events}"
+
+    def test_a_silent_machine_start_still_emits_progress_heartbeats(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """The machine already exists (a prior boot created it) — only
+        `machine start` (the VM boot itself) is slow this time."""
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("safent-test-engine\n")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_START_DELAY_SECONDS": "6",
+            },
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        progress_events = [e for e in events if e["t"] == "progress" and e["id"] == "machine"]
+        assert len(progress_events) >= 1, f"expected at least one heartbeat during a 6s silent start: {events}"
