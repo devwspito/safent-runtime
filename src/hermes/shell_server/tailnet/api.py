@@ -9,9 +9,7 @@ Endpoints:
   GET    /api/v1/tailnet/ssh-hosts     — hosts approved for governed SSH (spec 022 v2),
                                           with when each was approved
   DELETE /api/v1/tailnet/ssh-hosts/{host} — revoke a host's SSH approval; requires the
-                                          owner's TOTP (require_owner_mfa) — a HIGHER bar
-                                          than the egress domain grant/revoke pair, because
-                                          this host had REMOTE_EXEC, not just network reach.
+                                          owner's UI session, never the internal daemon token.
                                           Audited (AuditKind.TAILNET_SSH_HOST_REVOKED).
 
 Security model — mirrors ``remote_access_tunnel/api.py`` exactly (same reasoning:
@@ -46,8 +44,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from hermes.shell_server.remote_access_tunnel.rate_limiter import PasswordRateLimiter
-from hermes.shell_server.security.mfa import MfaStore
-from hermes.shell_server.security.owner_mfa_gate import require_owner_mfa
+from hermes.shell_server.security.owner_confirmation import require_owner_session
 from hermes.shell_server.security.secrets import SecretsVault
 from hermes.tailnet_ssh.infrastructure.json_host_allowlist_store import (
     DEFAULT_ALLOWLIST_PATH,
@@ -147,10 +144,6 @@ class SshHostEntry(BaseModel):
 
 class SshHostsResponse(BaseModel):
     hosts: list[SshHostEntry]
-
-
-class RevokeSshHostRequest(BaseModel):
-    totp: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +278,6 @@ def create_tailnet_router(
     vault_path: Path | None = None,
     rate_limiter: PasswordRateLimiter | None = None,
     ssh_allowlist_path: Path | None = None,
-    mfa: MfaStore | None = None,
 ) -> APIRouter:
     """Create the /api/v1/tailnet router.
 
@@ -437,11 +429,9 @@ def create_tailnet_router(
         )
 
     @router.delete("/ssh-hosts/{host}", response_model=SshHostsResponse)
-    async def revoke_ssh_host(host: str, payload: RevokeSshHostRequest) -> SshHostsResponse:
-        """Revoke a host's governed-SSH approval. Requires the owner's TOTP —
-        a HIGHER bar than the egress domain grant/revoke pair (that host had
-        REMOTE_EXEC on the owner's tailnet, not just network reach)."""
-
+    async def revoke_ssh_host(request: Request, host: str) -> SshHostsResponse:
+        """Only the UI owner may revoke governed-SSH approval; no MFA in Community."""
+        require_owner_session(request)
         store = JsonHostAllowlistStore(effective_ssh_allowlist_path)
         store.revoke(host)
         logger.info("hermes.tailnet.ssh_host_revoked host=%s", host)

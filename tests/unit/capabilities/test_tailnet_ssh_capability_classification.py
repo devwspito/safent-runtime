@@ -42,7 +42,7 @@ class TestTailnetSshDelicacy:
     @pytest.mark.parametrize("tool", sorted(TAILNET_SSH_TOOL_NAMES))
     def test_is_not_forced_into_totp_mfa_tier(self, tool: str) -> None:
         """is_mfa_required is the SEPARATE TOTP-at-approval axis
-        (_MFA_TIER_HITL) — tailnet_ssh intentionally is NOT on it (simple
+        (_ENTERPRISE_REVIEW_TOOLS) — tailnet_ssh intentionally is NOT on it (simple
         Aprobar/Rechazar card, like send_message/ha_call_service)."""
         assert is_mfa_required(tool) is False
 

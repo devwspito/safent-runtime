@@ -67,3 +67,35 @@ La auditoría detectó que el primer cambio retiraba también la comprobación d
    Continuar TODA la UI, Ads, Enterprise y backend del alcance integral.
 
 Registro global: `safent-control-enterprise/docs/safent-integral-status.md`.
+
+## Segundo checkpoint: políticas, egress y revocación SSH
+
+Los fallos unitarios enumerados arriba han quedado resueltos. Nueva ejecución
+completa: **5.355 correctas, 19 omitidas, 38 deseleccionadas, 4 avisos**.
+Log DGX `/tmp/safent-runtime-owner-policy-tests-20260911.log`. Después se añadieron
+21 negativas de autorización egress: 30 pruebas de ese archivo correctas.
+Frontend sigue con 143 pruebas correctas y build/TypeScript correctos.
+
+- `approval_on_dangers` sustituye a `mfa_on_dangers` en contrato UI/API, política,
+  hook y gateway. No se ofrece endpoint antiguo. Una configuración antigua sin
+  el nuevo campo mantiene aprobaciones activadas por defecto, no las deshabilita.
+- `hook_approval_block` nombra correctamente la aprobación, sin simular MFA.
+- La revisión Enterprise tiene su clasificación independiente
+  `_ENTERPRISE_REVIEW_TOOLS`/`requires_enterprise_review`; las pruebas de la tabla
+  de rutas corporativas siguen comprobando todas las combinaciones.
+- Todas las mutaciones de políticas y egress exigen sesión UI del dueño mediante
+  una dependencia compartida del subrouter. El token interno no puede alterarlas
+  ni con la aprobación de peligros ya desactivada. Revocación SSH también la exige.
+- Guardado de políticas por lote: una escritura atómica por decisión, temporal
+  exclusivo 0600, fsync y bloqueo entre procesos del ciclo leer/modificar/escribir.
+  Prueba con cuatro procesos/24 cambios sin pérdida; fallo de replace conserva
+  el archivo anterior. Validación de booleanos estricta antes de guardar el lote.
+- Eliminado `owner_mfa_gate.py`, ya sin consumidores de código. Persisten otros
+  restos de MFA en schemas/factores D-Bus y componentes frontend sin uso; esta
+  eliminación no equivale a finalizar toda la limpieza.
+
+No publicar aún: siguen vigentes las limitaciones de scan/artefacto y estado
+desconocido del freno. Hallazgo adicional: `mcp_api.py` propaga `force=True`
+suponiendo una aprobación anterior, sin exigir todavía el grant que protege
+skills; cerrar ese recorrido (normal y managed-remote) con pruebas antes de release.
+También auditar el fail-open de lectura de `ToolPolicyStore` ante corrupción.

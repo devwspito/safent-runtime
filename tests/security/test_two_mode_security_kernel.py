@@ -2,7 +2,7 @@
 
 Tests the core invariants:
   1. Session YOLO (dangers run free) requires BOTH auto_mode=ON AND the owner
-     having lowered the danger gate (mfa_on_dangers=OFF). With the danger gate
+     having lowered the danger gate (approval_on_dangers=OFF). With the danger gate
      at its default (ON), AUTO mode still surfaces the ApprovalRequested card
      for dangerous commands — "DANGERS piden MFA sí o sí". The danger gate wins
      over AUTO mode.
@@ -10,7 +10,7 @@ Tests the core invariants:
   3. ResolveApproval(deny) → resolve_gateway_approval called with "deny".
 
 All tests are unit tests: they monkeypatch tools.approval so the suite runs
-without hermes-agent installed, and patch ToolPolicyStore.mfa_on_dangers so
+without hermes-agent installed, and patch ToolPolicyStore.approval_on_dangers so
 the danger-gate state is deterministic and independent of host policy files.
 """
 from __future__ import annotations
@@ -108,27 +108,27 @@ def _install_fake_approval(monkeypatch: Any, fake_mod: types.ModuleType) -> None
 
 
 # ---------------------------------------------------------------------------
-# Danger-gate helper: force ToolPolicyStore.mfa_on_dangers() deterministically
+# Danger-gate helper: force ToolPolicyStore.approval_on_dangers() deterministically
 # ---------------------------------------------------------------------------
 
 
-def _force_danger_gate(monkeypatch, *, mfa_on_dangers: bool) -> None:
+def _force_danger_gate(monkeypatch, *, approval_on_dangers: bool) -> None:
     """Pin the owner's danger-gate flag so tests are independent of host policy.
 
-    apply_auto_mode_for_cycle reads the flag via _load_mfa_on_dangers ->
-    ToolPolicyStore().mfa_on_dangers(); patching the class method keeps the real
+    apply_auto_mode_for_cycle reads the flag via _load_approval_on_dangers ->
+    ToolPolicyStore().approval_on_dangers(); patching the class method keeps the real
     import/plumbing path in the source under test.
     """
     from hermes.capabilities.tool_policy import ToolPolicyStore
 
     monkeypatch.setattr(
-        ToolPolicyStore, "mfa_on_dangers", lambda self: mfa_on_dangers
+        ToolPolicyStore, "approval_on_dangers", lambda self: approval_on_dangers
     )
 
 
 # ---------------------------------------------------------------------------
 # Test 1 — AUTO ON is necessary but NOT sufficient for session YOLO.
-#          YOLO requires auto_mode=ON AND mfa_on_dangers=OFF (owner escape hatch).
+#          YOLO requires auto_mode=ON AND approval_on_dangers=OFF (owner escape hatch).
 #          With the danger gate at its default (ON), AUTO mode still cards dangers.
 # ---------------------------------------------------------------------------
 
@@ -136,7 +136,7 @@ def _force_danger_gate(monkeypatch, *, mfa_on_dangers: bool) -> None:
 class TestAutoModeOn:
     """AUTO mode ON: session YOLO only when the owner also lowered the danger gate.
 
-    The danger gate (mfa_on_dangers, default ON) wins over AUTO mode: dangerous
+    The danger gate (approval_on_dangers, default ON) wins over AUTO mode: dangerous
     commands keep pausing for owner MFA even in autonomous mode unless the owner
     explicitly lowered the gate (the escape hatch, itself set behind MFA).
     """
@@ -160,7 +160,7 @@ class TestAutoModeOn:
 
         # Patch the settings path
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        _force_danger_gate(monkeypatch, mfa_on_dangers=False)
+        _force_danger_gate(monkeypatch, approval_on_dangers=False)
 
         from hermes.runtime.approval_gateway import (
             apply_auto_mode_for_cycle,
@@ -172,7 +172,7 @@ class TestAutoModeOn:
 
         assert enable_calls == ["cerebro"], (
             "enable_session_yolo must be called with 'cerebro' only when AUTO is ON "
-            "AND the owner lowered the danger gate (mfa_on_dangers=OFF)"
+            "AND the owner lowered the danger gate (approval_on_dangers=OFF)"
         )
         assert disable_calls == [], (
             "disable_session_yolo must NOT be called in full-autonomy mode"
@@ -196,7 +196,7 @@ class TestAutoModeOn:
         settings = tmp_path / "security_mode.json"
         settings.write_text(json.dumps({"auto_mode": True}))
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        _force_danger_gate(monkeypatch, mfa_on_dangers=True)
+        _force_danger_gate(monkeypatch, approval_on_dangers=True)
 
         from hermes.runtime.approval_gateway import (
             apply_auto_mode_for_cycle,
@@ -229,7 +229,7 @@ class TestAutoModeOn:
         settings = tmp_path / "security_mode.json"
         settings.write_text(json.dumps({"auto_mode": True}))
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        _force_danger_gate(monkeypatch, mfa_on_dangers=False)
+        _force_danger_gate(monkeypatch, approval_on_dangers=False)
 
         from hermes.runtime.approval_gateway import (
             apply_auto_mode_for_cycle,
@@ -268,7 +268,7 @@ class TestAutoModeOn:
         settings = tmp_path / "security_mode.json"
         settings.write_text(json.dumps({"auto_mode": True}))
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        _force_danger_gate(monkeypatch, mfa_on_dangers=True)
+        _force_danger_gate(monkeypatch, approval_on_dangers=True)
 
         from hermes.runtime.approval_gateway import (
             apply_auto_mode_for_cycle,

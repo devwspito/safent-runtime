@@ -463,13 +463,8 @@ class TestApproveGateNoMfa:
 # Escalated MFA model: is_mfa_required / tier classification
 # ---------------------------------------------------------------------------
 
-class TestEscalatedMfaTier:
-    """Regression: is_mfa_required classifies tools to simple vs mfa tier.
-
-    Owner decision 2026-06-25: cronjob is SIMPLE (approved without TOTP).
-    install_*, set_policy, disable_mfa, skill_manage are MFA tier.
-    Classification must come from tool_delicacy, never word-list scanning.
-    """
+class TestCommunityApprovalWithoutMfa:
+    """Community never requires a second factor, including sensitive approvals."""
 
     def test_cronjob_is_simple_tier(self) -> None:
         """cronjob is explicitly simple tier — no TOTP needed to approve."""
@@ -478,30 +473,29 @@ class TestEscalatedMfaTier:
             "cronjob must be simple tier (owner approved no TOTP, 2026-06-25)"
         )
 
-    def test_install_app_is_mfa_tier(self) -> None:
-        """install_app is mfa tier — TOTP required to approve."""
+    def test_install_app_needs_no_mfa(self) -> None:
         from hermes.capabilities.tool_delicacy import is_mfa_required
-        assert is_mfa_required("install_app") is True
+        assert is_mfa_required("install_app") is False
 
-    def test_install_mcp_is_mfa_tier(self) -> None:
+    def test_install_mcp_needs_no_mfa(self) -> None:
         from hermes.capabilities.tool_delicacy import is_mfa_required
-        assert is_mfa_required("install_mcp") is True
+        assert is_mfa_required("install_mcp") is False
 
-    def test_install_skill_is_mfa_tier(self) -> None:
+    def test_install_skill_needs_no_mfa(self) -> None:
         from hermes.capabilities.tool_delicacy import is_mfa_required
-        assert is_mfa_required("install_skill") is True
+        assert is_mfa_required("install_skill") is False
 
-    def test_skill_manage_is_mfa_tier(self) -> None:
+    def test_skill_manage_needs_no_mfa(self) -> None:
         from hermes.capabilities.tool_delicacy import is_mfa_required
-        assert is_mfa_required("skill_manage") is True
+        assert is_mfa_required("skill_manage") is False
 
-    def test_set_policy_is_mfa_tier(self) -> None:
+    def test_set_policy_needs_no_mfa(self) -> None:
         from hermes.capabilities.tool_delicacy import is_mfa_required
-        assert is_mfa_required("set_policy") is True
+        assert is_mfa_required("set_policy") is False
 
-    def test_disable_mfa_is_mfa_tier(self) -> None:
+    def test_legacy_tool_name_cannot_trigger_mfa(self) -> None:
         from hermes.capabilities.tool_delicacy import is_mfa_required
-        assert is_mfa_required("disable_mfa") is True
+        assert is_mfa_required("disable_mfa") is False
 
     def test_send_message_is_simple_tier(self) -> None:
         """send_message is simple tier — no TOTP needed."""
@@ -561,8 +555,8 @@ class TestEscalatedMfaTier:
         assert token and len(token) > 0
 
     @pytest.mark.asyncio
-    async def test_gate_approve_mfa_tier_requires_verifier(self, tmp_path: Path) -> None:
-        """mfa-tier proposal: gate.approve raises ApprovalGateError when mfa_verifier=None."""
+    async def test_gate_sensitive_approval_is_single_use_without_mfa(self, tmp_path: Path) -> None:
+        """Removing MFA preserves the authenticated, one-use proposal decision."""
         from hermes.capabilities.infrastructure.sqlite_approval_gate import (
             SqliteApprovalGate,
             ApprovalGateError,
@@ -581,7 +575,7 @@ class TestEscalatedMfaTier:
             minter=minter,
             signer=signer,
             audit_repo=None,
-            mfa_verifier=None,  # no verifier → should FAIL for mfa-tier tools
+            mfa_verifier=None,
         )
         proposal_id = uuid4()
         operator_id = uuid4()
@@ -590,10 +584,12 @@ class TestEscalatedMfaTier:
             work_item_id=uuid4(),
             consent_context=ConsentContext(operator_id=operator_id, tenant_id=uuid4()),
             risk=RiskLevel.HIGH,
-            justification="install_skill — mfa tier, TOTP required",
+            justification="install_skill — explicit owner approval",
             parameters_redacted={"skill_id": "some-skill"},
             tool_name="install_skill",
             action_digest="def456",
         )
-        with pytest.raises(ApprovalGateError, match="mfa-tier"):
+        token = await gate.approve(proposal_id=proposal_id, approved_by=operator_id)
+        assert token
+        with pytest.raises(ApprovalGateError):
             await gate.approve(proposal_id=proposal_id, approved_by=operator_id, mfa_factors=None)

@@ -141,12 +141,12 @@ def apply_auto_mode_for_cycle() -> None:
     YOLO is enabled ONLY when AUTO mode is on AND the owner has turned OFF
     "MFA on dangers" (the escape hatch). The danger gate wins over AUTO:
 
-      AUTO ON  + mfa_on_dangers ON (default) → session_yolo DISABLED: gateway HITL
+      AUTO ON  + approval_on_dangers ON (default) → session_yolo DISABLED: gateway HITL
                stays engaged even in autonomous mode → dangerous native commands
                (terminal/write_file/execute_code) surface the ApprovalRequested card
                and PAUSE for owner MFA. Safe reads still run free (the gateway only
                cards dangerous patterns). This is "DANGERS piden MFA sí o sí".
-      AUTO ON  + mfa_on_dangers OFF → session_yolo ENABLED: full autonomy, dangers
+      AUTO ON  + approval_on_dangers OFF → session_yolo ENABLED: full autonomy, dangers
                run free (owner accepted responsibility via the UI alert).
       AUTO OFF → session_yolo DISABLED: gateway HITL engaged regardless.
 
@@ -166,21 +166,21 @@ def apply_auto_mode_for_cycle() -> None:
         return
 
     auto_mode = load_auto_mode()
-    mfa_on_dangers = _load_mfa_on_dangers()
-    yolo = auto_mode and not mfa_on_dangers
+    approval_on_dangers = _load_approval_on_dangers()
+    yolo = auto_mode and not approval_on_dangers
     try:
         if yolo:
             enable_session_yolo(_SESSION_KEY)
             logger.info(
                 "hermes.approval_gateway.cycle.yolo_on: full autonomy "
-                "(auto_mode=on, mfa_on_dangers=OFF — owner-accepted)"
+                "(auto_mode=on, approval_on_dangers=OFF — owner-accepted)"
             )
         else:
             disable_session_yolo(_SESSION_KEY)
             logger.debug(
                 "hermes.approval_gateway.cycle.yolo_off: gateway HITL engaged "
-                "(auto_mode=%s, mfa_on_dangers=%s) — dangers pause for owner MFA",
-                auto_mode, mfa_on_dangers,
+                "(auto_mode=%s, approval_on_dangers=%s) — dangers pause for owner MFA",
+                auto_mode, approval_on_dangers,
             )
     except Exception as exc:  # noqa: BLE001
         logger.error(
@@ -190,7 +190,7 @@ def apply_auto_mode_for_cycle() -> None:
         )
 
 
-def _load_mfa_on_dangers() -> bool:
+def _load_approval_on_dangers() -> bool:
     """Read the owner's MFA-on-dangers flag (fail-SAFE to True = gate up).
 
     Lazy import keeps approval_gateway loadable without the capabilities layer
@@ -199,10 +199,10 @@ def _load_mfa_on_dangers() -> bool:
     """
     try:
         from hermes.capabilities.tool_policy import ToolPolicyStore  # noqa: PLC0415
-        return ToolPolicyStore().mfa_on_dangers()
+        return ToolPolicyStore().approval_on_dangers()
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "hermes.approval_gateway.mfa_on_dangers_read_failed: %s — defaulting ON",
+            "hermes.approval_gateway.approval_on_dangers_read_failed: %s — defaulting ON",
             exc,
         )
         return True

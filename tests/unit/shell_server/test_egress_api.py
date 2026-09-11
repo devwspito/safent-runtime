@@ -17,10 +17,13 @@ UNIX socket connect.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from hermes.shell_server import egress_api
 from hermes.shell_server.egress_api import create_egress_router
 
 pytestmark = pytest.mark.unit
@@ -30,8 +33,27 @@ _INVALID_DOMAIN = "not a domain!!"
 
 def _client() -> TestClient:
     app = FastAPI()
+    app.state.shell_webui_token = "owner-ui"
     app.include_router(create_egress_router())
-    return TestClient(app)
+    return TestClient(app, headers={"Authorization": "Bearer owner-ui"})
+
+
+@pytest.mark.parametrize("path", [
+    "mode", "deny/add", "deny/remove", "domains/grant", "domains/revoke",
+    "mcp/domains/grant", "mcp/domains/revoke",
+])
+@pytest.mark.parametrize("token", ["", "internal-daemon", "another-owner"])
+def test_non_owner_cannot_change_any_egress_rule(
+    path: str, token: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("_MODE_PATH", "_GRANTS_PATH", "_DENY_PATH", "_MCP_GRANTS_PATH"):
+        monkeypatch.setattr(egress_api, name, tmp_path / name)
+    client = _client()
+    client.headers["Authorization"] = f"Bearer {token}"
+    payload = {"mode": "allow"} if path == "mode" else {"domain": "example.com"}
+    response = client.post(f"/api/v1/egress/{path}", json=payload)
+    assert response.status_code == 403
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize(

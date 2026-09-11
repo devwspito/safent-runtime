@@ -1,7 +1,7 @@
 """security_hook per-agent tool-policy overlay — Enterprise Fase 2 Phase 2.
 
 Covers the NEW Step 1.4 (_resolve_tool_policy_for_cycle) wired into Steps
-1.5 (is_owner_disabled) and 1.6 (mfa_on_dangers / is_enabled):
+1.5 (is_owner_disabled) and 1.6 (approval_on_dangers / is_enabled):
 
   - An agent whose AgentAccessScope carries a policy_overlay disabling a tool
     the GLOBAL store enables -> BLOCKED for that agent only (Step 1.5).
@@ -17,7 +17,7 @@ Covers the NEW Step 1.4 (_resolve_tool_policy_for_cycle) wired into Steps
 Uses a synthetic, non-native tool name ("custom_test_tool") so Step 1.1
 (native access-scope floor) and Step 1.6's native MFA gate never interfere:
 classify_nous_tool returns None for it, which is the documented no-op path
-for both (hook_mfa_block short-circuits to False; the access-scope floor only
+for both (hook_approval_block short-circuits to False; the access-scope floor only
 governs native Nous tools).
 """
 

@@ -80,7 +80,7 @@ _ORCHESTRATION: frozenset[str] = frozenset({"delegate_task", "mixture_of_agents"
 # cage-escaping-outbound class as delegate_to_colleague/send_message, but
 # NOT a native Nous tool either. The REAL HITL gate is
 # `security_hook._resolve_tailnet_ssh_consent` (ALWAYS-ask per-host
-# block-and-resume, independent of mfa_on_dangers — see that function's
+# block-and-resume, independent of approval_on_dangers — see that function's
 # docstring); this classification only keeps delicacy()/the Policies UI
 # coherent, it does not itself gate anything.
 _DELICATE_NON_NATIVE: frozenset[str] = frozenset(
@@ -114,7 +114,7 @@ def default_enabled_equilibrado(tool: str) -> bool:
 
 # Cage-CONTAINED writes: DELICATE, but their blast radius is fully inside the sandbox
 # (uid 999, isolated fs) — the cage already confines them, so they do NOT need owner MFA
-# even when mfa_on_dangers is ON. Everything else DELICATE/MOST_DELICATE ESCAPES the cage
+# even when approval_on_dangers is ON. Everything else DELICATE/MOST_DELICATE ESCAPES the cage
 # in effect (arbitrary exec, outbound network, install, governance) and DOES require MFA.
 # (Owner decision 2026-06-19: "MFA on what escapes the cage" — keeps autonomy fluid for
 # the contained writes/reads, asks only where owner confirmation actually matters.)
@@ -132,17 +132,17 @@ CAGED_NATIVE_TOOLS: frozenset[str] = CAGED_NATIVE_EXEC_TOOLS | CAGED_NATIVE_FILE
 
 
 # ---------------------------------------------------------------------------
-# Escalated MFA model — per-action HITL tier (owner decision 2026-06-25).
+# Separate local HITL and corporate review classifications.
 #
 # TWO AXES — do NOT conflate them:
 #
 #   _MOST_DELICATE  (security-hook / delicacy() axis)
-#     → Tools blocked by the pre-dispatch hook; governs default-off and riddle MFA.
+#     → Tools blocked by the pre-dispatch hook; governs default-off and local HITL.
 #     → Includes "cronjob" because scheduling a cron IS cage-widening (capability
 #       changes that survive across sessions).
 #
-#   _MFA_TIER_HITL  (per-action HITL approval axis)
-#     → Tools whose HITL *approval card* requires TOTP before the owner can allow.
+#   _ENTERPRISE_REVIEW_TOOLS  (per-action HITL approval axis)
+#     → Tools routed to corporate approval when the tenant enables that policy.
 #     → "cronjob" is SIMPLE here (owner decision 2026-06-25: schedule delegation is
 #       approved with a plain click; the cage still enforces at execution time).
 #     → Set = (_MOST_DELICATE - scheduling tools) ∪ _DESTRUCTIVE.
@@ -162,14 +162,13 @@ def is_destructive(tool: str) -> bool:
     """True if *tool*'s PRIMARY registered contract is PERMANENT DATA LOSS.
 
     Single query point over the curated `_DESTRUCTIVE` overlay above.
-    `_DESTRUCTIVE` is already unioned into `_MFA_TIER_HITL` (see
-    `is_mfa_required` below), so approval_router.route()'s TOTP-keyed model
-    (Fase 2 Phase 4c) does not need a separate `irreversible` input — a
-    destructive tool is already MFA-tier. This query point remains available
+    `_DESTRUCTIVE` is already unioned into `_ENTERPRISE_REVIEW_TOOLS` (see
+    `requires_enterprise_review` below), so approval_router.route() does not
+    need a separate `irreversible` input. This query point remains available
     for other callers that need the raw destructive/irreversible signal on its
     own. Currently empty (see _DESTRUCTIVE docstring); destructive native
     tools land here as they're added to the catalog. No re-listing: one edit
-    to `_DESTRUCTIVE` re-aligns both is_mfa_required() and this query.
+    to `_DESTRUCTIVE` re-aligns corporate review and this query.
     """
     return tool in _DESTRUCTIVE
 
@@ -190,25 +189,19 @@ _MOST_DELICATE_SIMPLE_HITL: frozenset[str] = frozenset({"cronjob"})
 # como propuesta con aprobacion humana. Siguen siendo SPEND para auditoria
 # (tool_sensitivity._SAFENT_ADS_WRITE_TOOLS) y HITL por defecto sin overlay.
 
-_MFA_TIER_HITL: frozenset[str] = (
+_ENTERPRISE_REVIEW_TOOLS: frozenset[str] = (
     _MOST_DELICATE - _MOST_DELICATE_SIMPLE_HITL
 ) | _DESTRUCTIVE
 
 
 def requires_enterprise_review(tool: str) -> bool:
-    """True when a per-action HITL approval requires owner TOTP.
+    """Security-sensitive actions routed to Enterprise when the tenant enables it.
 
-    Escalated MFA model (owner decision 2026-06-25):
-      - _MFA_TIER_HITL tools (install_* / set_policy / disable_mfa / skill_manage) → MFA.
-      - _DESTRUCTIVE tools (irreversible data loss) → MFA.
-      - cronjob and everything else → simple (no MFA, plain Approve/Deny button).
-
-    Single source of truth consumed by:
-      - sqlite_approval_gate.approve() (enforcement point)
-      - approvals_api._to_frontend() (required_level field for the frontend)
-      - ApprovalCard.tsx (conditional MfaModal)
+    Independent of Community MFA (absent) and of whether a tool needs local HITL.
+    The tenant gate and signed cloud decision remain enforced by approval_router
+    and SqliteApprovalGate. Cronjob still needs local approval, not this route.
     """
-    return tool in _MFA_TIER_HITL
+    return tool in _ENTERPRISE_REVIEW_TOOLS
 
 
 def is_mfa_required(tool: str) -> bool:
@@ -216,19 +209,19 @@ def is_mfa_required(tool: str) -> bool:
     return False
 
 
-def hook_mfa_block(tool: str, *, mfa_on_dangers: bool) -> bool:
-    """Whether the security_hook must block this tool pending owner MFA.
+def hook_approval_block(tool: str, *, approval_on_dangers: bool) -> bool:
+    """Whether the security_hook must block this tool pending owner approval.
 
     SCOPED TO NATIVE Nous tools only — capability/external tools (install_app, Composio,
-    MCP) bypass the hook and are gated by the BROKER's own per-action HITL (web UI + MFA);
+    MCP) bypass the hook and are gated by the BROKER's own per-action HITL;
     blocking them here would dead-end their approval flow. Coherence audit 2026-06-19.
 
     Within native tools (which bypass the broker → the hook IS their gate):
       - MOST_DELICATE (skill_manage / cronjob / delegate_task — self-modify, schedule,
-        spawn): ALWAYS blocks. The escape hatch (mfa_on_dangers=OFF) NEVER frees the
+        spawn): ALWAYS blocks. The escape hatch (approval_on_dangers=OFF) NEVER frees the
         actions the agent would use to widen itself — not even in full-autonomy mode.
       - cage-ESCAPING DELICATE (send_message / discord / ha_call_service — outbound):
-        blocks only when mfa_on_dangers is ON; the owner's escape hatch frees them OFF.
+        blocks only when approval_on_dangers is ON; the owner's escape hatch frees them OFF.
       - caged-exec (gateway pause-cards them), cage-contained writes (write_file/patch),
         and reads: never block here (the cage / gateway handle them).
     """
@@ -238,7 +231,7 @@ def hook_mfa_block(tool: str, *, mfa_on_dangers: bool) -> bool:
         return False
     d = delicacy(tool)
     if d is Delicacy.MOST_DELICATE:
-        return True  # self-widening: MFA always, escape hatch does not apply
+        return True  # self-widening: approval always, escape hatch does not apply
     if d is Delicacy.DELICATE:
-        return mfa_on_dangers  # cage-escaping outbound: MFA while the owner keeps the gate up
+        return approval_on_dangers  # outbound approval while the owner keeps the gate up
     return False  # NORMAL

@@ -8,13 +8,16 @@ refuses) — to use it, the owner enables it in the UI.
 
 The policy file lives owner-only under /var/lib/hermes (agent-inaccessible: the agent runs
 in a separate sandbox without this path). Changing the policy is itself a most-delicate
-action → MFA + riddle (enforced at the API layer).
+action requiring the owner's authenticated session (enforced at the API layer).
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import tempfile
+from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
 
@@ -22,7 +25,9 @@ from hermes.capabilities.tool_delicacy import CAGED_NATIVE_TOOLS, default_enable
 from hermes.runtime.nous_tool_risk_map import NOUS_TOOL_CATALOG
 from hermes.tailnet_ssh.tool_names import TAILNET_SSH_TOOL_NAMES
 
-_DEFAULT_PATH = Path(os.environ.get("HERMES_POLICY_DIR", "/var/lib/hermes/policies")) / "tool_policy.json"
+_DEFAULT_PATH = (
+    Path(os.environ.get("HERMES_POLICY_DIR", "/var/lib/hermes/policies")) / "tool_policy.json"
+)
 
 # Capability (os_surface) tools the broker can execute — kept in sync with
 # capability_tool_specs; listed here so the Policies UI shows them too.
@@ -260,11 +265,28 @@ class ToolPolicyStore:
             return {}
 
     def _save(self, data: dict) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, self._path)
+        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, name = tempfile.mkstemp(dir=self._path.parent, prefix=".policy-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps(data))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, self._path)
+        finally:
+            Path(name).unlink(missing_ok=True)
+
+    def _update(self, change: Callable[[dict], dict]) -> None:
+        """Serialize read-modify-write across instances and processes.
+
+        Lock a stable sibling, not the policy inode replaced by the atomic save.
+        Readers see either the complete old document or the complete new one.
+        """
+        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(self._path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(fd, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self._save(change(self._load()))
 
     def _preset(self) -> Preset:
         raw = self._load().get("preset", Preset.EQUILIBRADO.value)
@@ -309,23 +331,20 @@ class ToolPolicyStore:
         except Exception:  # noqa: BLE001 — policy is usability layer; fail-open here
             return False
 
-    def mfa_on_dangers(self) -> bool:
-        """Whether DANGEROUS commands require owner MFA per execution (default ON).
+    def approval_on_dangers(self) -> bool:
+        """Whether dangerous outbound commands ask for owner approval (default ON).
 
-        ON (default): a danger (delicacy DELICATE/MOST_DELICATE) pauses for owner MFA
-        even in autonomous mode — the agent cannot self-provide the code. OFF (the
-        owner's escape hatch, set behind MFA+riddle + a UI alert): dangers run free,
-        owner takes responsibility. Fail-SAFE: any read error → True (gate stays up).
+        This is not an authentication factor. Self-widening operations and the
+        cage remain independently enforced when this switch is disabled.
+        A missing value keeps approval enabled, including an old MFA-only config.
         """
         try:
-            return bool(self._load().get("mfa_on_dangers", True))
+            return bool(self._load().get("approval_on_dangers", True))
         except Exception:  # noqa: BLE001 — never fail-open the danger gate
             return True
 
-    def set_mfa_on_dangers(self, enabled: bool) -> None:
-        d = self._load()
-        d["mfa_on_dangers"] = bool(enabled)
-        self._save(d)
+    def set_approval_on_dangers(self, enabled: bool) -> None:
+        self._update(lambda data: {**data, "approval_on_dangers": bool(enabled)})
 
     def snapshot(self) -> dict:
         """Full state for the UI: preset + every catalog tool's enabled flag.
@@ -335,7 +354,7 @@ class ToolPolicyStore:
             tools:          {name: bool} — kept for backwards-compat with any
                             existing consumer (frontend, shell_server, tests).
             overridden:     sorted list of tool names with explicit overrides.
-            mfa_on_dangers: whether danger-gate MFA is on.
+            approval_on_dangers: whether the owner-approval danger gate is on.
             catalog:        list of enriched tool descriptors — one per tool
                             (static catalog + live dynamic tools from
                             DynamicToolRegistry).  Each entry:
@@ -348,8 +367,10 @@ class ToolPolicyStore:
                                             and _OS_NATIVE_SKILL_NAMES suppressed tools)
                               origin      : "native" | "capability" | "mcp" | "composio"
         """
+        from hermes.capabilities.dynamic_tool_registry import (  # noqa: PLC0415
+            get_dynamic_tool_registry,
+        )
         from hermes.capabilities.tool_delicacy import delicacy  # noqa: PLC0415
-        from hermes.capabilities.dynamic_tool_registry import get_dynamic_tool_registry  # noqa: PLC0415
 
         preset = self._preset()
         overrides = self._load().get("overrides", {})
@@ -393,22 +414,24 @@ class ToolPolicyStore:
             "preset": preset.value,
             "tools": tools,
             "overridden": sorted(overrides),
-            "mfa_on_dangers": self.mfa_on_dangers(),
+            "approval_on_dangers": self.approval_on_dangers(),
             "catalog": catalog,
         }
 
     def set_tool(self, tool: str, enabled: bool) -> None:
-        d = self._load()
-        overrides = dict(d.get("overrides", {}))
-        overrides[tool] = bool(enabled)
-        d["overrides"] = overrides
-        self._save(d)
+        self.set_tools({tool: enabled})
+
+    def set_tools(self, tools: dict[str, bool]) -> None:
+        """Persist one complete UI decision, not N partially visible writes."""
+        self._update(lambda data: {
+            **data, "overrides": {**data.get("overrides", {}), **tools},
+        })
 
     def apply_preset(self, preset: Preset) -> None:
         # A preset is a clean slate: drop per-tool overrides.
-        self._save({"preset": preset.value, "overrides": {}})
+        self._update(lambda _data: {"preset": preset.value, "overrides": {}})
 
-    def for_agent(self, agent_id: str, overlay: dict) -> "AgentToolPolicyView":
+    def for_agent(self, agent_id: str, overlay: dict) -> AgentToolPolicyView:
         """Return a per-agent VIEW with a cloud-pushed policy_overlay on top.
 
         Precedence: agent overlay → global file (this store) → preset default.
@@ -467,7 +490,7 @@ class AgentToolPolicyView:
     NEVER re-enable a tool the owner disabled; overlay `False` CAN additionally
     disable a tool the owner left enabled. is_owner_disabled mirrors this: the
     owner's conscious disable is inviolable (an overlay can never clear it),
-    while the overlay may itself register an additional disable. mfa_on_dangers
+    while the overlay may itself register an additional disable. approval_on_dangers
     has no per-agent axis in this overlay shape (always defers to the global
     decision).
 
@@ -527,8 +550,8 @@ class AgentToolPolicyView:
         overlay_bit = self._overlay_enabled(tool)
         return overlay_bit is False
 
-    def mfa_on_dangers(self) -> bool:
-        return self._base.mfa_on_dangers()
+    def approval_on_dangers(self) -> bool:
+        return self._base.approval_on_dangers()
 
     def approval_override(self, tool: str) -> str | None:
         """This agent's overlay 'approval' override for *tool* ('auto'|'hitl'|None).

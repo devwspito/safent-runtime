@@ -16,7 +16,7 @@ Gate order (fail-closed — a single BLOCK from any step short-circuits):
   6. Denylist gate       — broker._check_denylist() for os_native service ops.
 
 Step 1.6 (Enterprise governance, Fase 2 Phase 4c — TOTP-keyed model): when a
-native danger needs owner approval (hook_mfa_block fired),
+native danger needs owner approval (hook_approval_block fired),
 `_compute_danger_route()` consults approval_router.route() to decide WHO
 resolves it — LOCAL (the worker's plain Approve/Deny, no TOTP, today's D-Bus
 path) for a SIMPLE-tier action, or ENTERPRISE (the tenant's centralized TOTP
@@ -450,7 +450,7 @@ def _compute_danger_route(
     Enterprise governance, Fase 2 Phase 4c — TOTP-keyed routing (supersedes
     Phase 4b's delicacy/sensitivity/irreversible eligibility calculus).
     Consulted ONLY here, at the native-danger gate, for an action that ALREADY
-    requires owner approval (hook_mfa_block fired) — this NEVER creates a new
+    requires owner approval (hook_approval_block fired) — this NEVER creates a new
     approval surface, it only decides WHO resolves the SAME approval that was
     always going to block (I-3: substitutes ONLY the owner-MFA gate, never the
     hardline/self-jailbreak/denylist floor, which runs later in Steps 2/3/6
@@ -1586,7 +1586,7 @@ def make_pre_tool_call_hook(
             row (see `_agent_is_cloud_managed`). None => today's fail-open
             behaviour for a missing scope row, unchanged.
     """
-    from hermes.capabilities.tool_delicacy import hook_mfa_block  # noqa: PLC0415
+    from hermes.capabilities.tool_delicacy import hook_approval_block  # noqa: PLC0415
     from hermes.capabilities.tool_policy import ToolPolicyStore  # noqa: PLC0415
 
     _tool_policy = ToolPolicyStore()
@@ -1659,7 +1659,7 @@ def make_pre_tool_call_hook(
             # "Using the browser" is a per-CONVERSATION consent, NOT the per-danger MFA
             # hatch of Step 1.6: the FIRST browser_* in a conversation surfaces ONE
             # approval card; once approved, the rest of that conversation drives the
-            # browser with no re-ask. Always-ask (independent of mfa_on_dangers), so the
+            # browser with no re-ask. Always-ask (independent of approval_on_dangers), so the
             # owner ALWAYS sees + gates the browser even in full-autonomy mode — this is
             # WHY it lives here and not in Step 1.6 (which the owner-preapproval
             # short-circuit clears for enabled DELICATE tools, so browser NEVER produced
@@ -1681,7 +1681,7 @@ def make_pre_tool_call_hook(
 
             # Step 1.6-tailnet_ssh: per-HOST SSH consent (spec 022 v2). Mirrors the
             # browser per-SESSION gate above — always-ask (independent of
-            # mfa_on_dangers), so it lives here rather than Step 1.6. Unlike browser,
+            # approval_on_dangers), so it lives here rather than Step 1.6. Unlike browser,
             # the approval PERSISTS per HOST (not per conversation): the first
             # tailnet_ssh/tailnet_file_get/tailnet_file_put call to a given host
             # surfaces ONE card; once approved, that host is written to the owner's
@@ -1704,11 +1704,11 @@ def make_pre_tool_call_hook(
                 )
 
             # Step 1.6: MFA-on-dangers (owner decision 2026-06-19; coherence audit fix).
-            # Gates NATIVE dangers that bypass the broker. hook_mfa_block encapsulates the
+            # Gates NATIVE dangers that bypass the broker. hook_approval_block encapsulates the
             # full decision (single source in tool_delicacy): MOST_DELICATE native
             # (skill_manage/cronjob/delegate_task) ALWAYS needs MFA — the escape hatch
             # NEVER frees self-widening; cage-escaping DELICATE (send_message/discord/ha)
-            # needs MFA only while mfa_on_dangers is ON; caged-exec / cage-contained /
+            # needs MFA only while approval_on_dangers is ON; caged-exec / cage-contained /
             # reads / capability+external tools are handled elsewhere (gateway, cage,
             # broker HITL). SECURITY gate → not swallowed: errors fail-CLOSED via the
             # outer handler; the flag accessor itself fails-safe to ON.
@@ -1716,14 +1716,14 @@ def make_pre_tool_call_hook(
             # — exclude it here so it does not ALSO go through the mfa-on-dangers path.
             # tailnet_ssh/* likewise has its own per-HOST gate above (Step
             # 1.6-tailnet_ssh); classify_nous_tool() already returns None for it (not
-            # native) so hook_mfa_block would no-op anyway — excluded explicitly so
+            # native) so hook_approval_block would no-op anyway — excluded explicitly so
             # this stays true even if it is ever added to the native catalog.
             _needs_owner_mfa = (
                 bool(tool_name)
                 and not _is_browser_session_tool(tool_name)
                 and not _is_tailnet_ssh_tool(tool_name)
-                and hook_mfa_block(
-                    tool_name, mfa_on_dangers=_effective_policy.mfa_on_dangers()
+                and hook_approval_block(
+                    tool_name, approval_on_dangers=_effective_policy.approval_on_dangers()
                 )
             )
             if _needs_owner_mfa:
@@ -1864,7 +1864,7 @@ _NATIVE_DANGER_GATE_TIMEOUT_S: float = 30.0
 # "Using the browser" is a per-CONVERSATION consent, NOT the per-danger MFA hatch:
 # the FIRST browser_* in a conversation surfaces ONE approval card; once the owner
 # approves, the rest of that conversation drives the browser (navigate/click/type)
-# with no re-ask. Always-ask — decoupled from mfa_on_dangers — so the owner ALWAYS
+# with no re-ask. Always-ask — decoupled from approval_on_dangers — so the owner ALWAYS
 # sees + gates the browser, even in full-autonomy mode. State is in-memory (daemon
 # lifetime): a restart fail-safes to re-ask, never a silent grant. Bounded so a
 # long-lived daemon cannot grow it unboundedly; eviction only forces a harmless
@@ -1911,7 +1911,7 @@ def _resolve_browser_session_consent(
     First browser_* in a conversation → ONE approval card (reuses the native
     block-and-resume gate with a per-conversation proposal key). On approve, the
     conversation is marked → later browser_* ALLOW with no card. Always-ask
-    (decoupled from mfa_on_dangers). FAIL-CLOSED via _resolve_native_danger_approval.
+    (decoupled from approval_on_dangers). FAIL-CLOSED via _resolve_native_danger_approval.
     """
     from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
         get_conversation_for_task,

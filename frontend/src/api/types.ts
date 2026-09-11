@@ -469,7 +469,7 @@ export interface PolicyCatalogEntry {
 export interface PoliciesResponse {
   preset?: string
   tools?: Record<string, boolean>
-  mfa_on_dangers?: boolean
+  approval_on_dangers?: boolean
   catalog?: PolicyCatalogEntry[]
 }
 

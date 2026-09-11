@@ -49,7 +49,7 @@ from Fase 2 Phase 4a/4b):
       tenant_gate = agent_managed_by == "cloud" AND tenant_remote_approval_enabled
 
   `_DESTRUCTIVE` (irreversible) tools are already unioned into
-  `_MFA_TIER_HITL` inside tool_delicacy.py, so `requires_enterprise_review(tool)` alone
+  `_ENTERPRISE_REVIEW_TOOLS` inside tool_delicacy.py, so `requires_enterprise_review(tool)` alone
   is sufficient — no separate `irreversible`/`sensitivity_categories` input is
   needed here (avoids re-deriving a second, driftable eligibility calculus).
 

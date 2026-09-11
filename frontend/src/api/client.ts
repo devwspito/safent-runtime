@@ -948,7 +948,7 @@ export function mfaEnroll(totp: string | null = null): Promise<{ otpauth_uri?: s
 
 export function getPolicies(): Promise<PoliciesResponse> {
   return request<PoliciesResponse>('/policies').catch(
-    () => ({ preset: 'equilibrado', tools: {}, mfa_on_dangers: true }),
+    () => ({ preset: 'equilibrado', tools: {}, approval_on_dangers: true }),
   )
 }
 
@@ -973,8 +973,8 @@ export function setPolicyTools(tools: Record<string, boolean>): Promise<unknown>
   })
 }
 
-export function setMfaOnDangers(enabled: boolean): Promise<unknown> {
-  return request<unknown>('/policies/mfa_on_dangers', {
+export function setApprovalOnDangers(enabled: boolean): Promise<unknown> {
+  return request<unknown>('/policies/approval_on_dangers', {
     method: 'POST',
     body: JSON.stringify({ enabled }),
   })

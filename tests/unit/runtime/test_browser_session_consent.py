@@ -9,7 +9,7 @@ The fix routes browser_* through a dedicated per-SESSION gate BEFORE Step 1.6:
   - the FIRST browser_* in a conversation surfaces ONE card (per-conversation
     proposal key, so concurrent/subsequent browser actions share the one decision);
   - once approved, the whole conversation is marked → later browser_* ALLOW, no card;
-  - always-ask (decoupled from mfa_on_dangers);
+  - always-ask (decoupled from approval_on_dangers);
   - the kernel floor (terminal/code/service) is untouched.
 
 These tests lock:

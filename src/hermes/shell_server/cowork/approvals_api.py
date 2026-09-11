@@ -18,7 +18,7 @@ isolation). For simple-tier proposals the human pressing Approve IS proof of pre
 For mfa-tier the TOTP adds the one factor the caged agent cannot reach (owner-only
 0600 secret).
 
-Policy changes (policies_api.py: set_preset/set_policy_tools/set_mfa_on_dangers)
+Policy changes (policies_api.py: set_preset/set_policy_tools/set_approval_on_dangers)
 still require MFA — those endpoints are NOT touched here.
 """
 

@@ -17,7 +17,7 @@ import {
   getPolicies,
   setPolicyPreset,
   setPolicyTools,
-  setMfaOnDangers,
+  setApprovalOnDangers,
   getSecurityScans,
   grantEgressDomain,
   revokeEgressDomain,
@@ -480,7 +480,7 @@ export function GovernanceSection() {
   const [toolPending, setToolPending] = useState<Record<string, boolean>>({})
   const hasPendingTools = Object.keys(toolPending).length > 0
 
-  const mfaDisabled = pol?.mfa_on_dangers === false
+  const approvalDisabled = pol?.approval_on_dangers === false
 
   const load = useCallback(async () => {
     const p = await getPolicies()
@@ -577,13 +577,13 @@ export function GovernanceSection() {
         }
 
       } else if (pendingAction.kind === 'mfa_dangers') {
-        await setMfaOnDangers(pendingAction.enabled)
+        await setApprovalOnDangers(pendingAction.enabled)
         sileo.success({
           title: pendingAction.enabled
             ? t('seg.dangers.on.ok')
             : t('seg.dangers.off.ok'),
         })
-        setPol(prev => prev ? { ...prev, mfa_on_dangers: pendingAction.enabled } : prev)
+        setPol(prev => prev ? { ...prev, approval_on_dangers: pendingAction.enabled } : prev)
         setPendingAction(null)
       }
     } catch (err) {
@@ -596,7 +596,7 @@ export function GovernanceSection() {
 
   function requestPresetSave() {
     if (!pendingPreset) return
-    if (mfaDisabled) {
+    if (approvalDisabled) {
       setBusy(true)
       void setPolicyPreset(pendingPreset)
         .then(() => {
@@ -631,7 +631,7 @@ export function GovernanceSection() {
 
   function handleSaveToolChanges() {
     if (!hasPendingTools) return
-    if (mfaDisabled) {
+    if (approvalDisabled) {
       void persistBatchDirect({ ...toolPending })
     } else {
       setPendingAction({ kind: 'batch', changes: { ...toolPending } })
@@ -695,7 +695,7 @@ export function GovernanceSection() {
                 {t('seg.policies.dangers.label')}
               </span>
               <span className={s.settingsRowHint}>
-                {mfaDisabled
+                {approvalDisabled
                   ? t('seg.policies.dangers.off')
                   : t('seg.policies.dangers.on')}
               </span>
@@ -703,7 +703,7 @@ export function GovernanceSection() {
             <ToggleSwitch
               id="toggle-mfa-dangers"
               aria-label={t('seg.policies.dangers.label')}
-              checked={pol.mfa_on_dangers ?? true}
+              checked={pol.approval_on_dangers ?? true}
               disabled={busy}
               onChange={requestMfaDangersToggle}
             />
