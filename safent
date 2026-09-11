@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=9
+_CLI_REV=10
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -766,9 +766,24 @@ _json_bool_field() {
   sed -n "s/.*\"$2\": *\(true\|false\).*/\1/p" "$1" | head -1
 }
 
+# A failed inspect is not evidence that a container is stopped. Enumerate first
+# to distinguish an absent container from an unavailable engine, then require an
+# explicit false state for the exact existing name. No mutation on uncertainty.
+_require_data_container_stopped() {
+  _data_names="$("$RT" ps -a --format '{{.Names}}')" || return 1
+  if printf '%s\n' "$_data_names" | grep -Fx -- "$NAME" >/dev/null; then
+    _data_running="$("$RT" inspect --type container -f '{{.State.Running}}' "$NAME")" || return 1
+    [ "$_data_running" = false ] || return 1
+  fi
+}
+
 cmd_backup() {
+  # Secret-bearing archives must be private from their first byte, not only
+  # after tar has finished writing them.
+  umask 077
   _dir="${1:-$_BACKUP_DEFAULT_DIR}"
   mkdir -p "$_dir" || { echo "[x] Could not create $_dir"; exit 1; }
+  _dir="$(cd "$_dir" && pwd)" || exit 1
 
   if ! "$RT" volume exists "$DATA_VOLUME" 2>/dev/null; then
     echo "[x] No data volume ($DATA_VOLUME) to back up — nothing to do."
@@ -779,6 +794,10 @@ cmd_backup() {
   if _exists && _running; then _was_running=1; fi
   echo "[*] Stopping Safent for a consistent backup..."
   cmd_stop >/dev/null 2>&1 || true
+  if ! _require_data_container_stopped; then
+    echo "[x] Cannot verify that Safent is stopped; refusing to export live data." >&2
+    exit 1
+  fi
 
   _work="$(mktemp -d)" || { echo "[x] Could not create a temp workdir."; exit 1; }
   trap 'rm -rf "$_work"' EXIT INT TERM
@@ -812,17 +831,28 @@ cmd_backup() {
 MANIFEST
 
   _archive="$_dir/safent-backup-${_ts}.tar.gz"
+  # Do not overwrite an earlier backup (or follow a pre-existing symlink)
+  # when two invocations happen within the same timestamp.
+  (set -C; : > "$_archive") 2>/dev/null || {
+    echo "[x] Backup destination already exists; refusing to overwrite $_archive." >&2
+    exit 1
+  }
   ( cd "$_work" && tar -czf "$_archive" manifest.json data-volume.tar state.tar )
   chmod 0600 "$_archive"  # secrets live in state.tar (companion bearer + TLS key)
 
   if [ "$_was_running" = 1 ]; then
     echo "[*] Restarting Safent..."
     cmd_start >/dev/null 2>&1 || true
+    if ! _exists || ! _running; then
+      echo "[x] Backup saved to $_archive, but Safent did not restart." >&2
+      exit 1
+    fi
   fi
   echo "[ok] Backup written to $_archive"
 }
 
 cmd_restore() {
+  umask 077
   _archive=""
   _force=0
   for _a in "$@"; do
@@ -862,15 +892,28 @@ cmd_restore() {
       exit 1
     fi
   done
+  # Detect an unusable companion-state archive before stopping or replacing
+  # any data. This checks format, not authenticity or complete path policy.
+  tar -tf "$_work/state.tar" >/dev/null || {
+    echo "[x] Companion state archive is unreadable; refusing to restore." >&2
+    exit 1
+  }
 
   if _exists && _running; then
     echo "[*] Stopping Safent..."
     cmd_stop >/dev/null 2>&1 || true
   fi
+  if ! _require_data_container_stopped; then
+    echo "[x] Cannot verify that Safent is stopped; refusing to replace its data volume." >&2
+    exit 1
+  fi
 
   if "$RT" volume exists "$DATA_VOLUME" 2>/dev/null; then
     [ "$_force" = 1 ] || { echo "[x] Volume exists and --force was not given — aborting."; exit 1; }
-    "$RT" volume rm -f "$DATA_VOLUME" >/dev/null 2>&1 || true
+    "$RT" volume rm -f "$DATA_VOLUME" >/dev/null 2>&1 || {
+      echo "[x] Could not remove the old volume; refusing to import over it." >&2
+      exit 1
+    }
   fi
   "$RT" volume create "$DATA_VOLUME" >/dev/null
   echo "[*] Importing the data volume..."
@@ -878,7 +921,10 @@ cmd_restore() {
 
   echo "[*] Restoring companion state + seccomp cache..."
   mkdir -p "$_STATE_ROOT"
-  tar -xf "$_work/state.tar" -C "$_STATE_ROOT" 2>/dev/null || true
+  tar -xf "$_work/state.tar" -C "$_STATE_ROOT" || {
+    echo "[x] Data volume imported, but companion state restoration failed. Safent remains stopped." >&2
+    exit 1
+  }
 
   echo "[*] Starting Safent..."
   cmd_start >/dev/null 2>&1 || true

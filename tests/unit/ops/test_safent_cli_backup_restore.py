@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tarfile
@@ -58,6 +59,11 @@ _running_file="$FAKE_STATE_DIR/running"
 [ -f "$_running_file" ] || echo "$FAKE_CONTAINER_RUNNING" > "$_running_file"
 
 case "$1" in
+  ps)
+    [ "${FAKE_PS_FAILS:-}" != "true" ] || exit 125
+    if [ "$(cat "$_exists_file")" = "true" ]; then echo safent-test; fi
+    exit 0
+    ;;
   inspect)
     exists="$(cat "$_exists_file")"
     [ "$exists" = "true" ] || exit 1
@@ -93,7 +99,11 @@ case "$1" in
         printf 'FAKE-VOLUME-DATA' > "$out"
         exit 0
         ;;
-      import|create|rm)
+      rm)
+        [ "${FAKE_REMOVE_FAILS:-}" != "true" ] || exit 1
+        exit 0
+        ;;
+      import|create)
         exit 0
         ;;
       *)
@@ -102,10 +112,12 @@ case "$1" in
     esac
     ;;
   stop)
+    [ "${FAKE_STOP_FAILS:-}" != "true" ] || exit 1
     echo false > "$_running_file"
     exit 0
     ;;
   start)
+    [ "${FAKE_START_FAILS:-}" != "true" ] || exit 1
     [ "$(cat "$_exists_file")" = "true" ] || exit 1
     echo true > "$_running_file"
     exit 0
@@ -167,6 +179,7 @@ def _run_safent(
         capture_output=True,
         text=True,
         timeout=60,
+        check=False,
     )
 
 
@@ -192,6 +205,85 @@ class TestBackupRefusesWithoutAVolume:
 
 
 class TestSuccessfulBackup:
+    def test_archive_is_private_before_final_chmod(
+        self, tmp_path: Path, fake_bin_dir: Path,
+    ) -> None:
+        tar = fake_bin_dir / "tar"
+        tar.write_text(
+            '#!/bin/sh\n"$REAL_TAR" "$@" || exit $?\n'
+            'if [ "$1" = -czf ]; then ls -l "$2" > "$ARCHIVE_MODE_LOG"; fi\n'
+        )
+        tar.chmod(0o755)
+        mode_log = tmp_path / "archive-mode"
+        result = _run_safent(
+            "backup", str(tmp_path / "backups"), fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home", podman_log=tmp_path / "podman.log",
+            extra_env={"REAL_TAR": shutil.which("tar"), "ARCHIVE_MODE_LOG": str(mode_log)},
+        )
+        assert result.returncode == 0, result.stderr
+        assert mode_log.read_text().startswith("-rw-------")
+
+    @pytest.mark.parametrize("symlink", [False, True])
+    def test_existing_destination_is_not_overwritten(
+        self, tmp_path: Path, fake_bin_dir: Path, symlink: bool,
+    ) -> None:
+        date = fake_bin_dir / "date"
+        date.write_text('#!/bin/sh\nprintf "20260911T000000Z\\n"\n')
+        date.chmod(0o755)
+        output = tmp_path / "backups"
+        output.mkdir()
+        destination = output / "safent-backup-20260911T000000Z.tar.gz"
+        protected = tmp_path / "protected"
+        protected.write_bytes(b"must survive")
+        if symlink:
+            destination.symlink_to(protected)
+        else:
+            destination.write_bytes(b"must survive")
+        result = _run_safent(
+            "backup", str(output), fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home", podman_log=tmp_path / "podman.log",
+        )
+        assert result.returncode != 0
+        assert destination.read_bytes() == b"must survive"
+        assert protected.read_bytes() == b"must survive"
+
+    def test_unavailable_engine_is_not_proof_of_stopped_data(
+        self, tmp_path: Path, fake_bin_dir: Path,
+    ) -> None:
+        log = tmp_path / "podman.log"
+        result = _run_safent(
+            "backup", str(tmp_path / "backups"), fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home", podman_log=log,
+            extra_env={"FAKE_PS_FAILS": "true"},
+        )
+        assert result.returncode != 0
+        assert not any(call.startswith("volume export") for call in _podman_calls(log))
+
+    def test_failed_stop_never_exports_live_data(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        log = tmp_path / "podman.log"
+        result = _run_safent(
+            "backup", str(tmp_path / "backups"), fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home", podman_log=log, container_running=True,
+            extra_env={"FAKE_STOP_FAILS": "true"},
+        )
+        assert result.returncode != 0
+        assert not any(call.startswith("volume export") for call in _podman_calls(log))
+        assert "[ok] backup" not in result.stdout.lower()
+
+    def test_restart_failure_reports_archive_without_claiming_full_success(
+        self, tmp_path: Path, fake_bin_dir: Path,
+    ) -> None:
+        output = tmp_path / "backups"
+        result = _run_safent(
+            "backup", str(output), fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home", podman_log=tmp_path / "podman.log",
+            container_running=True, extra_env={"FAKE_START_FAILS": "true"},
+        )
+        assert result.returncode != 0
+        assert len(list(output.glob("safent-backup-*.tar.gz"))) == 1
+        assert "restart" in (result.stdout + result.stderr).lower()
+        assert "[ok] backup" not in result.stdout.lower()
+
     def test_produces_a_0600_archive_with_manifest_and_matching_checksums(
         self, tmp_path: Path, fake_bin_dir: Path
     ) -> None:
@@ -287,6 +379,33 @@ def _make_backup(
 
 
 class TestRestoreRefusesToOverwriteWithoutForce:
+    def test_failed_removal_never_imports_over_existing_data(
+        self, tmp_path: Path, fake_bin_dir: Path,
+    ) -> None:
+        archive = _make_backup(tmp_path, fake_bin_dir, tmp_path / "backups")
+        log = tmp_path / "podman-restore.log"
+        result = _run_safent(
+            "restore", str(archive), "--force", fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "restore-home", podman_log=log,
+            extra_env={"FAKE_REMOVE_FAILS": "true"},
+        )
+        assert result.returncode != 0
+        assert not any(call.startswith("volume import") for call in _podman_calls(log))
+
+    def test_failed_stop_never_removes_or_imports_volume(
+        self, tmp_path: Path, fake_bin_dir: Path,
+    ) -> None:
+        archive = _make_backup(tmp_path, fake_bin_dir, tmp_path / "backups")
+        log = tmp_path / "podman-restore.log"
+        result = _run_safent(
+            "restore", str(archive), "--force", fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "restore-home", podman_log=log,
+            container_running=True, extra_env={"FAKE_STOP_FAILS": "true"},
+        )
+        assert result.returncode != 0
+        calls = _podman_calls(log)
+        assert not any(call.startswith(("volume rm", "volume import")) for call in calls)
+
     def test_refuses_when_volume_exists_and_no_force(
         self, tmp_path: Path, fake_bin_dir: Path
     ) -> None:
@@ -416,6 +535,32 @@ class TestRestoreVerifiesTheContainerActuallyCameUp:
 
 
 class TestRestoreRefusesATamperedArchive:
+    def test_corrupt_state_with_matching_hash_still_refuses_before_mutation(
+        self, tmp_path: Path, fake_bin_dir: Path,
+    ) -> None:
+        archive = _make_backup(tmp_path, fake_bin_dir, tmp_path / "backups")
+        extracted = tmp_path / "broken-state"
+        extracted.mkdir()
+        with tarfile.open(archive) as tf:
+            tf.extractall(extracted, filter="data")
+        invalid_state = b"not a tar archive"
+        (extracted / "state.tar").write_bytes(invalid_state)
+        manifest = json.loads((extracted / "manifest.json").read_text())
+        manifest["sha256"]["state.tar"] = hashlib.sha256(invalid_state).hexdigest()
+        (extracted / "manifest.json").write_text(json.dumps(manifest))
+        corrupt = tmp_path / "corrupt.tar.gz"
+        with tarfile.open(corrupt, "w:gz") as tf:
+            for name in ("manifest.json", "data-volume.tar", "state.tar"):
+                tf.add(extracted / name, arcname=name)
+        log = tmp_path / "restore.log"
+        result = _run_safent(
+            "restore", str(corrupt), "--force", fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "restore-home", podman_log=log, container_running=True,
+        )
+        assert result.returncode != 0
+        assert not any(call.startswith(("volume rm", "volume import", "stop "))
+                       for call in _podman_calls(log))
+
     def test_sha256_mismatch_refuses_without_touching_the_volume(
         self, tmp_path: Path, fake_bin_dir: Path
     ) -> None:
