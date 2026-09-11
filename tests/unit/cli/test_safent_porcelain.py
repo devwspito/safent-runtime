@@ -605,7 +605,9 @@ def _fake_codesign(fake_bin_dir: Path, *, verify_ok: bool, cdhash: str) -> None:
         "  --verify)\n"
         f"    {'exit 0' if verify_ok else 'exit 1'} ;;\n"
         "  -dvvv)\n"
-        f"    echo 'CDHash={cdhash}' ;;\n"
+        # real `codesign -d` reports on stderr; a fake that prints on stdout
+        # lets the consumer's own 2>/dev/null bug pass unnoticed (it did).
+        f"    echo 'CDHash={cdhash}' >&2 ;;\n"
         "esac\n"
     )
     codesign = fake_bin_dir / "codesign"
