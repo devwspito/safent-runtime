@@ -2091,12 +2091,42 @@ cmd_ensure_images() {
   fi
 }
 
+
+# MAC4-02 (verificacion-mac-4.md): `up` is documented idempotent
+# (app-engine.md §4) and `boot.rs`'s `confirm_ready` relies on that
+# literally — it re-invokes `up` on EVERY reopen with a healthy engine,
+# just to re-mint the ticket, with no other repair action first. `_run`
+# used to destroy+recreate UNCONDITIONALLY (`"$RT" rm -f "$NAME"`), so a
+# perfectly healthy engine lost its container id, port, and any in-flight
+# work on every single reopen (measured live: 12.7 s, new id, new port).
+# True convergence: reuse a container that exists, is running, and is
+# already serving the DESIRED digest — the SAME field cmd_facts already
+# uses for engineContainer.imageDigest (MAC3-02: {{.ImageDigest}}, never
+# the bare local image ID {{.Image}}). A non-digest-pinned $IMAGE (a bare
+# terminal install without SAFENT_ENGINE_DIGEST) can never safely claim
+# convergence this way — it always re-runs, unchanged from before.
+_container_matches_desired() {
+  _exists && _running || return 1
+  case "$IMAGE" in
+    *@sha256:*) ;;
+    *) return 1 ;;
+  esac
+  _d="$("$RT" inspect --type container -f '{{.ImageDigest}}' "$NAME" 2>/dev/null || true)"
+  [ -n "$_d" ] || _d="$("$RT" inspect --type container -f '{{.Image}}' "$NAME" 2>/dev/null || true)"
+  [ "$_d" = "${IMAGE#*@}" ]
+}
+
 cmd_up() {
   secret_fd=3
   [ "${1:-}" = "--secret-fd" ] && secret_fd="${2:-3}"
 
   _stage container "Creando el contenedor"
-  _run
+  _ensure_machine
+  if _container_matches_desired; then
+    : # already converged on the desired digest — never destroy a healthy engine
+  else
+    _run
+  fi
   _stage_done
 
   _stage health "Esperando a que Safent este listo"

@@ -1181,6 +1181,65 @@ class TestUpDeliversTheTicketOnlyOnTheSecretFd:
             thread.join(timeout=5)
 
 
+class TestUpConvergesInsteadOfDestroyingAHealthyEngine:
+    """MAC4-02 (verificacion-mac-4.md, third distinct cause): `boot.rs`'s
+    `confirm_ready` re-invokes `up` on EVERY reopen with an already-healthy
+    engine, just to re-mint the ticket — `_run` used to `rm -f` and
+    recreate UNCONDITIONALLY, so a perfectly healthy, digest-matching
+    container lost its id and port on every single reopen (measured live:
+    12.7 s, new id, new port). `up` must reuse a converged container
+    (exists, running, serving the DESIRED digest) instead of destroying
+    it — only when SAFENT_IMAGE is digest-pinned (repo@sha256:...), the
+    only shape the desktop app ever sets."""
+
+    def test_reopening_twice_never_destroys_or_recreates_a_converged_container(
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        digest = "deadbeef" * 8  # 64 hex chars — sha256-shaped, value itself is arbitrary
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            port=healthz_server,
+            image_digest=digest,
+            extra_env={"SAFENT_IMAGE": f"ghcr.io/devwspito/safent@sha256:{digest}"},
+        )
+
+        result1, ticket1 = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+        assert result1.returncode == 0, f"stdout={result1.stdout}\nstderr={result1.stderr}"
+        calls_after_first = _podman_calls(podman_log)
+        assert not any(c.startswith("rm -f ") for c in calls_after_first), calls_after_first
+        assert not any(c.startswith("run -d ") for c in calls_after_first), calls_after_first
+
+        result2, ticket2 = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+        assert result2.returncode == 0, f"stdout={result2.stdout}\nstderr={result2.stderr}"
+        calls_after_both = _podman_calls(podman_log)
+        calls_from_second_run = calls_after_both[len(calls_after_first) :]
+        assert not any(c.startswith("rm -f ") for c in calls_from_second_run), calls_from_second_run
+        assert not any(c.startswith("run -d ") for c in calls_from_second_run), calls_from_second_run
+
+        assert ticket1.strip() == ticket2.strip() == f"http://127.0.0.1:{healthz_server}/?k={_SECRET_TOKEN}"
+
+    def test_a_non_digest_pinned_image_still_recreates_every_time_unchanged(
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A bare terminal install (SAFENT_IMAGE unset, or a plain tag) has
+        no digest to converge against — it must keep today's behavior
+        (always recreate) rather than silently claiming convergence."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, port=healthz_server
+        )
+
+        result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        assert any(c.startswith("rm -f ") for c in calls), calls
+        assert any(c.startswith("run -d ") for c in calls), calls
+
+
 class TestStatusHonoursPorcelain:
     """CLI-N2 (specs/025-safent-repaso matriz-final-39eeb8e): `cmd_status`
     (safent:788-796 at the time of the finding) `echo`d human text
