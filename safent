@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=11
+_CLI_REV=12
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -601,34 +601,7 @@ cmd_stop() {
 
 cmd_restart() { cmd_stop; cmd_open; }
 
-# Reclaim disk used by OLD Safent images + dangling layers + the build cache. This is
-# surgical and cannot lose data:
-#   • It removes ONLY images of the Safent repo, and NEVER the one the current container
-#     runs on (so a failed pull always leaves you on the working version).
-#   • It leaves every other app's images alone.
-#   • It never runs `volume prune`, so the safent-data volume (keystore / MFA / providers
-#     / config / memory) is physically out of reach of this path — nothing can be lost.
-# Each old version hoards ~7 GB; on a machine that filled up over time, freeing them
-# BEFORE the pull is what stops "no space left on device" from wedging the update.
-_reclaim_space() {
-  repo="${IMAGE%:*}"                                                   # ghcr.io/devwspito/safent
-  keep="$("$RT" inspect -f '{{.Image}}' "$NAME" 2>/dev/null | sed 's/^sha256://')"
-  n=0
-  if [ -n "$keep" ]; then
-    old="$("$RT" images --no-trunc --format '{{.ID}} {{.Repository}}' 2>/dev/null \
-          | awk -v r="$repo" '$2==r {print $1}' | sed 's/^sha256://' | sort -u)"
-    for id in $old; do
-      [ "$id" = "$keep" ] && continue                                 # never the running image
-      "$RT" rmi -f "sha256:$id" >/dev/null 2>&1 && n=$((n + 1)) || true
-    done
-  fi
-  "$RT" image prune -f   >/dev/null 2>&1 || true                       # untagged/dangling leftovers
-  "$RT" builder prune -f >/dev/null 2>&1 || true                       # build cache (safe to drop)
-  [ "$n" -gt 0 ] && echo "[ok] Freed space from $n old Safent image(s)."
-  return 0
-}
-
-# Self-update the CLI itself before updating the image. The prune/agent fixes
+# Self-update the CLI itself before updating the image. Launcher fixes
 # live in THIS script — the image cannot deliver them — so `safent update` keeps
 # the CLI current too, without the owner ever re-running the installer. Only
 # replaces when the published _CLI_REV is strictly newer (never downgrades);
@@ -715,18 +688,13 @@ cmd_update() {
   _ensure_agent
   echo "[*] Fetching the latest Safent image..."
   _ensure_machine
-  # Reclaim space BEFORE pulling so the new image has room even on a full disk. See
-  # _reclaim_space: it only ever touches old Safent images / dangling layers / build
-  # cache — your data volume is never in scope.
-  echo "[*] Reclaiming space from previous versions (your data is untouched)..."
-  _reclaim_space
+  # Do not prune the shared engine or force-remove old images here. Other
+  # instances may need them, including for rollback. Disk maintenance requires
+  # its own explicit, scoped operation; a failed pull leaves this container as-is.
   # Pull the correct image (enterprise or community) based on the current marker.
   "$RT" pull "$(_image)"
   echo "[*] Recreating the container with the new image..."
   _run   # -v safent-data keeps your config (keystore, MFA, providers)
-  # The image we ran until a second ago is now unreferenced (tag moved to the new pull,
-  # container recreated) → reclaim it too, same surgical path.
-  _reclaim_space
   _open_and_print
 }
 
