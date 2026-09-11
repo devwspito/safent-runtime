@@ -348,13 +348,9 @@ def _make_bundle(
     tmp_path: Path,
     entries: list[tuple[str, bytes, str]],
     podman_version: str = "6.1.1",
-    cdhashes: dict[str, str] | None = None,
 ) -> Path:
     """A minimal <bundle>/engine/ layout: a real copy of `safent` alongside a
-    runtime-bundle.json manifest and the binaries it describes. `cdhashes`
-    (MAC-02, verificacion-mac-1.md): an optional {path: cdhash} overlay —
-    entries with no cdhash keep the pre-fix shape exactly (no such key at
-    all), proving old-shaped manifests still work via the sha256 fallback."""
+    runtime-bundle.json manifest and the binaries it describes."""
     engine_dir = tmp_path / "bundle" / "engine"
     engine_dir.mkdir(parents=True)
     (engine_dir / "safent").write_bytes(_SAFENT_CLI.read_bytes())
@@ -365,10 +361,7 @@ def _make_bundle(
         target = engine_dir / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
-        entry = {"path": rel_path, "sha256": hashlib.sha256(content).hexdigest(), "mode": mode}
-        if cdhashes and rel_path in cdhashes:
-            entry["cdhash"] = cdhashes[rel_path]
-        manifest_entries.append(entry)
+        manifest_entries.append({"path": rel_path, "sha256": hashlib.sha256(content).hexdigest(), "mode": mode})
     manifest = {"podman_version": podman_version, "entries": manifest_entries}
     (engine_dir / "runtime-bundle.json").write_text(json.dumps(manifest, indent=2))
     return engine_dir
@@ -672,30 +665,17 @@ def _fake_darwin(fake_bin_dir: Path) -> None:
     uname.chmod(0o755)
 
 
-def _fake_codesign(fake_bin_dir: Path, *, verify_ok: bool, cdhash: str) -> None:
-    """MAC-02 (verificacion-mac-1.md): `cmd_stage_runtime` shells out to
-    `codesign --verify --strict <path>` and `codesign -dvvv <path>` for any
-    manifest entry that carries a `cdhash` — faking the REAL binary (not
-    the CLI's own logic) so these tests prove the actual verification
-    branch, not a restated assumption. `verify_ok=False` simulates a
-    tampered/invalid signature; `cdhash` is what `-dvvv` reports back.
-
-    MAC4-01 (verificacion-mac-4.md): the REAL `codesign -d`/`-dvvv` writes
-    its report to STDERR (Apple's own convention) — this fake used to
-    `echo` it to stdout, which is exactly why a real-Mac-only bug
-    (`safent:1920`'s `2>/dev/null` discarding that report) shipped twice
-    without a single test catching it. `>&2` here makes this fake match
-    the real binary's channel, so `cmd_stage_runtime`'s OWN `2>/dev/null`
-    bug reproduces under test."""
+def _fake_codesign(fake_bin_dir: Path, *, verify_ok: bool) -> None:
+    """Owner's decision (11-sep-2026): `cmd_stage_runtime` shells out to
+    ONE shallow `codesign --verify --strict <enclosing .app>` on macOS —
+    faking the REAL binary (not the CLI's own logic) so these tests prove
+    the actual verification branch, not a restated assumption.
+    `verify_ok=False` simulates a tampered/invalid signature."""
     script = (
         "#!/bin/sh\n"
         "case \"$1\" in\n"
         "  --verify)\n"
         f"    {'exit 0' if verify_ok else 'exit 1'} ;;\n"
-        "  -dvvv)\n"
-        # real `codesign -d` reports on stderr; a fake that prints on stdout
-        # lets the consumer's own 2>/dev/null bug pass unnoticed (it did).
-        f"    echo 'CDHash={cdhash}' >&2 ;;\n"
         "esac\n"
     )
     codesign = fake_bin_dir / "codesign"
@@ -927,94 +907,12 @@ class TestStageRuntime:
         assert failed["retryable"] is False
         assert not (home_dir / ".safent" / "runtime" / "6.1.1" / "podman").exists()
 
-    def test_a_cdhash_entry_verifies_by_codesign_even_with_a_stale_sha256(
-        self, tmp_path: Path, fake_bin_dir: Path
-    ) -> None:
-        """MAC-02 (verificacion-mac-1.md): codesigning rewrites a Mach-O's
-        bytes, so its PRE-sign sha256 recorded in the manifest never
-        matches again — a `cdhash` entry must verify by signature instead
-        and stage successfully despite the (deliberately, realistically)
-        stale sha256 still sitting in the same manifest entry."""
-        _fake_codesign(fake_bin_dir, verify_ok=True, cdhash="realcdhash0123456789abcdef")
-        podman_log = tmp_path / "podman.log"
-        home_dir = tmp_path / "home"
-        engine_dir = _make_bundle(
-            tmp_path,
-            entries=[("podman", b"post-signing bytes, sha256 below is now stale", "0755")],
-            cdhashes={"podman": "realcdhash0123456789abcdef"},
-        )
-        manifest_path = engine_dir / "runtime-bundle.json"
-        manifest = json.loads(manifest_path.read_text())
-        manifest["entries"][0]["sha256"] = "0" * 64  # deliberately wrong/stale
-        manifest_path.write_text(json.dumps(manifest, indent=2))
-
-        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
-        result = subprocess.run(
-            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
-            env=env, capture_output=True, text=True, timeout=60,
-        )
-        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
-        events = _parse_ndjson(result.stdout)
-        _assert_stage_closure_invariant(events)
-        assert events[-1]["t"] == "done"
-        staged = home_dir / ".safent" / "runtime" / "6.1.1" / "podman"
-        assert staged.read_bytes() == b"post-signing bytes, sha256 below is now stale"
-
-    def test_a_cdhash_entry_fails_closed_when_codesign_verify_rejects_it(
-        self, tmp_path: Path, fake_bin_dir: Path
-    ) -> None:
-        _fake_codesign(fake_bin_dir, verify_ok=False, cdhash="irrelevant")
-        podman_log = tmp_path / "podman.log"
-        home_dir = tmp_path / "home"
-        engine_dir = _make_bundle(
-            tmp_path,
-            entries=[("podman", b"tampered-after-signing", "0755")],
-            cdhashes={"podman": "whatever-was-recorded-at-sign-time"},
-        )
-        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
-        result = subprocess.run(
-            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
-            env=env, capture_output=True, text=True, timeout=60,
-        )
-        assert result.returncode == 14, f"stdout={result.stdout}\nstderr={result.stderr}"
-        failed = _parse_ndjson(result.stdout)[-1]
-        assert failed["code"] == "runtime_hash_mismatch"
-        assert failed["retryable"] is False
-        assert not (home_dir / ".safent" / "runtime" / "6.1.1" / "podman").exists()
-
-    def test_a_cdhash_entry_fails_closed_when_the_real_cdhash_does_not_match(
-        self, tmp_path: Path, fake_bin_dir: Path
-    ) -> None:
-        """codesign --verify can pass (a validly signed file) while the
-        SIGNATURE itself is not the one the manifest expects (e.g. resigned
-        by someone else, or the wrong file entirely) — cdhash equality is
-        the actual identity check, not just "is it signed at all"."""
-        _fake_codesign(fake_bin_dir, verify_ok=True, cdhash="attacker-controlled-cdhash")
-        podman_log = tmp_path / "podman.log"
-        home_dir = tmp_path / "home"
-        engine_dir = _make_bundle(
-            tmp_path,
-            entries=[("podman", b"some binary", "0755")],
-            cdhashes={"podman": "the-real-expected-cdhash"},
-        )
-        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
-        result = subprocess.run(
-            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
-            env=env, capture_output=True, text=True, timeout=60,
-        )
-        assert result.returncode == 14, f"stdout={result.stdout}\nstderr={result.stderr}"
-        failed = _parse_ndjson(result.stdout)[-1]
-        assert failed["code"] == "runtime_hash_mismatch"
-        assert failed["retryable"] is False
-        assert not (home_dir / ".safent" / "runtime" / "6.1.1" / "podman").exists()
-
-    def test_an_entry_with_no_cdhash_key_still_verifies_by_sha256_unchanged(
-        self, tmp_path: Path, fake_bin_dir: Path
-    ) -> None:
-        """Backward compatibility: a manifest entry shaped exactly like
-        before this pass (no `cdhash` key at all — e.g. a non-Mach-O file,
-        or an older bundle) must keep working through the ORIGINAL sha256
-        check, unaffected by codesign existing or not."""
+    def test_a_correct_sha256_entry_stages_normally(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        """Owner's decision (11-sep-2026, "el codigo mas simple es el que
+        funciona mejor"): macOS integrity is Apple's own codesign seal,
+        verified ONCE at the bundle level — removed the whole per-file
+        cdhash mechanism (MAC-02) that used to exist alongside this. Linux
+        keeps the sha256 manifest exactly as before."""
         podman_log = tmp_path / "podman.log"
         home_dir = tmp_path / "home"
         engine_dir = _make_bundle(
@@ -1028,6 +926,105 @@ class TestStageRuntime:
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         staged = home_dir / ".safent" / "runtime" / "6.1.1" / "provision.sh"
         assert staged.read_bytes() == b"#!/bin/sh\necho hi\n"
+
+
+def _make_app_bundle(tmp_path: Path, entries: list[tuple[str, bytes, str]], podman_version: str = "6.1.1") -> Path:
+    """Same shape as `_make_bundle`, but nested under `<Name>.app/Contents/
+    Resources/runtime/` — the real Tauri macOS layout `cmd_stage_runtime`'s
+    `${bundle_dir%%/Contents/*}` strips back to find the enclosing `.app`
+    to `codesign --verify --strict`."""
+    engine_dir = tmp_path / "Safent.app" / "Contents" / "Resources" / "runtime"
+    engine_dir.mkdir(parents=True)
+    (engine_dir / "safent").write_bytes(_SAFENT_CLI.read_bytes())
+    (engine_dir / "safent").chmod(0o755)
+
+    manifest_entries = []
+    for rel_path, content, mode in entries:
+        target = engine_dir / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        manifest_entries.append({"path": rel_path, "sha256": hashlib.sha256(content).hexdigest(), "mode": mode})
+    manifest = {"podman_version": podman_version, "entries": manifest_entries}
+    (engine_dir / "runtime-bundle.json").write_text(json.dumps(manifest, indent=2))
+    return engine_dir
+
+
+class TestStageRuntimeOnDarwinTrustsTheAppBundlesCodesignSeal:
+    """Owner's decision (11-sep-2026, "el codigo mas simple es el que
+    funciona mejor"): macOS integrity is Apple's own code-signing seal,
+    nothing else — ONE shallow `codesign --verify --strict` of the
+    ENCLOSING .app, never a per-file sha256/cdhash re-derivation (that
+    whole mechanism, MAC-02/MAC4-01/MAC5-02, is gone)."""
+
+    def test_a_valid_signature_stages_every_file_even_with_a_wrong_sha256(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """The sha256 recorded in the manifest is deliberately WRONG here —
+        proving darwin no longer checks it at all once the bundle-level
+        codesign verify passes (Linux still would reject this)."""
+        _fake_darwin(fake_bin_dir)
+        _fake_codesign(fake_bin_dir, verify_ok=True)
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        engine_dir = _make_app_bundle(tmp_path, entries=[("podman", b"a real signed binary", "0755")])
+        manifest_path = engine_dir / "runtime-bundle.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["entries"][0]["sha256"] = "0" * 64  # deliberately wrong
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        result = subprocess.run(
+            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["t"] == "done"
+        staged = home_dir / ".safent" / "runtime" / "6.1.1" / "podman"
+        assert staged.read_bytes() == b"a real signed binary"
+
+    def test_an_invalid_signature_fails_closed_before_staging_anything(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        _fake_codesign(fake_bin_dir, verify_ok=False)
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        engine_dir = _make_app_bundle(tmp_path, entries=[("podman", b"tampered binary", "0755")])
+
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        result = subprocess.run(
+            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 14, f"stdout={result.stdout}\nstderr={result.stderr}"  # runtime_hash_mismatch
+        failed = _parse_ndjson(result.stdout)[-1]
+        assert failed["code"] == "runtime_hash_mismatch"
+        assert failed["retryable"] is False
+        assert not (home_dir / ".safent" / "runtime" / "6.1.1" / "podman").exists()
+
+    def test_a_bundle_not_inside_an_app_fails_closed_instead_of_skipping_verification(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """A loose runtime dir with no enclosing `.app` (not the real macOS
+        layout at all) must never SILENTLY skip verification — data-model.md's
+        own invariant, "un binario que no verifica no se ejecuta jamas"."""
+        _fake_darwin(fake_bin_dir)
+        _fake_codesign(fake_bin_dir, verify_ok=True)
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        engine_dir = _make_bundle(tmp_path, entries=[("podman", b"fake-podman-binary", "0755")])
+
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        result = subprocess.run(
+            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 14, f"stdout={result.stdout}\nstderr={result.stderr}"
+        failed = _parse_ndjson(result.stdout)[-1]
+        assert failed["code"] == "runtime_hash_mismatch"
+        assert not (home_dir / ".safent" / "runtime" / "6.1.1" / "podman").exists()
 
 
 class TestEnsureImages:

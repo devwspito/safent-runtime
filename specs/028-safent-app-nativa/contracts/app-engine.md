@@ -70,6 +70,13 @@ type EngineEvent =
 · `daemon_unhealthy` · `companion_network_conflict` · `companion_migration_failed`
 · `companion_unreachable` · `backup_failed` · `restore_failed` · `clock_skew`.
 
+**Integridad del runtime empaquetado, por plataforma** (decisión del dueño,
+11-sep-2026 — "el código más simple es el que funciona mejor"; `runtime_hash_mismatch`
+cubre ambos casos): en **macOS**, la firma de código de Apple — `cmd_stage_runtime`
+verifica el `.app` entero con un `codesign --verify --strict` superficial, nunca
+un `sha256`/`cdhash` por fichero. En **Linux**, el manifiesto `sha256` de
+`runtime-bundle.json`, sin cambios.
+
 **Vocabulario de `HostFacts.os`** (MAC-01, verificacion-mac-1.md): el CLI
 deriva `os` de su propio `uname -s` en minúsculas — **`"darwin"`** (macOS) o
 **`"linux"`**, nunca un nombre de producto (`"macos"` no es, ni ha sido nunca,
