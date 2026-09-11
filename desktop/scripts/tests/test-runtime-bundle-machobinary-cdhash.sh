@@ -67,8 +67,10 @@ case "$1" in
     path="$2"
     f="$FAKE_CDHASHES_DIR/$(basename "$path")"
     [ -f "$f" ] || exit 1
-    echo "Executable=$path"
-    echo "CDHash=$(cat "$f")"
+    # real `codesign -d` reports on STDERR; the fake must too, or the test
+    # passes against behaviour the real tool never has (it did once).
+    echo "Executable=$path" >&2
+    echo "CDHash=$(cat "$f")" >&2
     exit 0
     ;;
   *) exit 0 ;;

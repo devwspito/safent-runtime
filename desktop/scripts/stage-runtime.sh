@@ -588,7 +588,12 @@ _write_runtime_bundle_manifest() {
       # pipefail (this script's own `set -eo pipefail`), an unsigned file's
       # `codesign -dvvv` exiting non-zero would otherwise abort the ENTIRE
       # script right here instead of gracefully falling back to null.
-      real_cdhash="$("$CODESIGN" -dvvv "$f" 2>/dev/null | sed -n 's/^CDHash=\(.*\)$/\1/p' | head -1 || true)"
+      # `codesign -d` writes its report to STDERR, not stdout (Apple's own
+      # convention): with `2>/dev/null` the CDHash= line was thrown away and
+      # every Mach-O shipped with a null cdhash — caught by the pipeline's
+      # post-refresh gate, never by the test, whose fake codesign printed on
+      # stdout. Merge the streams, then parse.
+      real_cdhash="$("$CODESIGN" -dvvv "$f" 2>&1 | sed -n 's/^CDHash=\(.*\)$/\1/p' | head -1 || true)"
       # `if`, not a standalone `&&` — under `set -e`, the common "not yet
       # signed" case (real_cdhash empty, the condition below is false)
       # would otherwise abort the WHOLE script right here (a bare `test &&
