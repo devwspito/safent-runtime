@@ -1688,7 +1688,21 @@ cmd_facts() {
   if [ -n "$RT" ] && _exists; then
     engine_exists=true
     _running && engine_running=true
-    d="$("$RT" inspect -f '{{.Image}}' "$NAME" 2>/dev/null || true)"
+    # MAC3-02 (verificacion-mac-2.md → verificacion-mac-3.md): {{.Image}}
+    # returns the LOCAL IMAGE ID (confirmed against real podman 6.1.1: a
+    # container run from a digest-pinned pull reports the SAME bare
+    # ID here regardless of which digest it was pulled by), never a
+    # digest — reconcile.rs's images_gap compared it against
+    # desired.engine_image.digest (always "sha256:...") and NEVER matched,
+    # so a perfectly healthy, correctly-digested container was destroyed
+    # and recreated on every single observation. {{.ImageDigest}} is the
+    # real per-container digest field (confirmed empirically: a plain,
+    # non-array string, "index" not required); fall back to the image ID
+    # only in the (defensive, not expected in this app's own flow — every
+    # container it creates runs an image pulled BY digest) case where
+    # podman has no digest recorded for this container's image at all.
+    d="$("$RT" inspect -f '{{.ImageDigest}}' "$NAME" 2>/dev/null || true)"
+    [ -n "$d" ] || d="$("$RT" inspect -f '{{.Image}}' "$NAME" 2>/dev/null || true)"
     [ -n "$d" ] && engine_digest="\"$(_json_str "$d")\""
   fi
 

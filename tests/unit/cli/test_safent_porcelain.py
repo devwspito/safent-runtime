@@ -55,9 +55,21 @@ case "$1" in
         '{{.State.Running}}')
           [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
           echo "$FAKE_CONTAINER_RUNNING"; exit 0 ;;
-        '{{.Image}}')
+        '{{.ImageDigest}}')
+          # MAC3-02 (verificacion-mac-3.md): the REAL per-container digest
+          # field — confirmed against real podman 6.1.1. The OLD fake had
+          # `{{.Image}}` (the local image ID field) answer with a
+          # sha256-shaped value, which is exactly the wrong assumption
+          # that let the pre-fix bug (safent used `{{.Image}}` for this)
+          # pass every test while failing on a real Mac.
           [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
+          [ "${FAKE_IMAGE_DIGEST_EMPTY:-false}" = "true" ] && exit 0
           echo "sha256:$FAKE_IMAGE_DIGEST"; exit 0 ;;
+        '{{.Image}}')
+          # The REAL local image ID — bare hex, no "sha256:" prefix (that
+          # prefix only ever appears on a genuine digest/{{.ImageDigest}}).
+          [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
+          echo "${FAKE_CONTAINER_IMAGE_ID:-idonlyfallback0000000000000000000000000000000000000000000000}"; exit 0 ;;
       esac
       exit 0
     fi
@@ -394,6 +406,54 @@ class TestFactsIsPureObservation:
         assert facts["engineContainer"]["running"] is True
         assert facts["engineContainer"]["imageDigest"] == "sha256:deadbeef"
         assert facts["dataVolume"] is True
+
+    def test_engine_container_image_digest_is_never_the_local_image_id(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """MAC3-02 (verificacion-mac-3.md): `inspect -f '{{.Image}}'` (the
+        field the CLI used to read) returns podman's LOCAL IMAGE ID, never
+        a digest — reconcile.rs's images_gap compared it against
+        desired.engine_image.digest (always sha256:...) and could NEVER
+        match, so a perfectly healthy, correctly-digested container was
+        destroyed and recreated on every single observation. A distinct
+        FAKE_CONTAINER_IMAGE_ID here proves the ID value is never what
+        ends up in imageDigest — only {{.ImageDigest}}'s real digest is."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            image_digest="realdigest0123456789",
+            extra_env={"FAKE_CONTAINER_IMAGE_ID": "totallydifferentlocalimageid00000000000000000000000000000000"},
+        )
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        facts = json.loads(result.stdout.strip())
+        assert facts["engineContainer"]["imageDigest"] == "sha256:realdigest0123456789"
+        assert "totallydifferentlocalimageid" not in facts["engineContainer"]["imageDigest"]
+
+    def test_engine_container_image_digest_falls_back_to_the_image_id_when_no_digest_is_recorded(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """Defensive fallback (not expected in this app's own flow — every
+        container it creates runs an image pulled BY digest, so podman
+        always has one recorded) for the rare case {{.ImageDigest}}
+        reports nothing at all: better a comparable-but-stale ID than a
+        silently absent fact."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_IMAGE_DIGEST_EMPTY": "true",
+                "FAKE_CONTAINER_IMAGE_ID": "fallbacklocalimageid000000000000000000000000000000000000000000",
+            },
+        )
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        facts = json.loads(result.stdout.strip())
+        assert facts["engineContainer"]["imageDigest"] == "fallbacklocalimageid000000000000000000000000000000000000000000"
 
     def test_porcelain_facts_is_wrapped_in_a_facts_event(self, tmp_path: Path, fake_bin_dir: Path) -> None:
         podman_log = tmp_path / "podman.log"

@@ -106,6 +106,19 @@ deriva permanente).
 | `running` | `machine inspect <name> --format '{{.State}}'` == `running` | booleano |
 | `ours` | `$SAFENT_STATE_HOME/machine.json`'s `name` == esta máquina | booleano |
 
+**Vocabulario de `HostFacts.engineContainer.imageDigest`** (MAC3-02,
+verificacion-mac-3.md): el CLI lee `inspect -f '{{.ImageDigest}}'` — **nunca**
+`{{.Image}}`, que en el podman real (6.1.1) devuelve el **ID local** de la
+imagen (`365e584d7f5c…`), no un digest, confirmado en vivo contra un
+contenedor real. `images_gap` (`reconcile.rs`) compara este campo contra
+`desired.engine_image.digest` (siempre `sha256:…`); comparar un ID nunca
+podía coincidir, así que un contenedor sano y con el digest correcto se
+destruía y recreaba en cada arranque. Si `{{.ImageDigest}}` viene vacío (no
+se espera en el flujo propio de esta app — todo contenedor que crea arranca
+una imagen bajada por digest), se usa `{{.Image}}` como respaldo — un ID, que
+por construcción nunca coincide con un digest deseado, así que el respaldo
+sigue siendo seguro (pide recrear) en vez de fingir una coincidencia.
+
 ## 4. Verbos
 
 | Verbo | Qué hace | Idempotente | Etapas que emite |
