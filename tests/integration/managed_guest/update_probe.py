@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -11,7 +13,7 @@ from pathlib import Path
 from run_guest import validate_scratch
 
 
-def main() -> None:  # noqa: PLR0912 - explicit allowlisted offline fixture updates
+def main() -> None:  # noqa: PLR0912, PLR0915 - allowlisted offline fixture updates
     root = validate_scratch(Path(sys.argv[1]))
     files = ["guest_probe.py"]
     options = set(sys.argv[2:])
@@ -19,10 +21,18 @@ def main() -> None:  # noqa: PLR0912 - explicit allowlisted offline fixture upda
         files.append("managed_checks.py")
     if "diagnostic" in options:
         files.append("diagnostic_check.py")
-    if options - {"managed", "kmod", "diagnostic", "wheel"}:
+    if options - {"managed", "kmod", "diagnostic", "wheel", "tool", "launcher"}:
         raise ValueError("Only managed/kmod/diagnostic fixture options are supported")
     if "wheel" in options and "diagnostic" not in options:
         raise ValueError("Wheel replacement is only permitted in the diagnostic fixture")
+    if "tool" in options:
+        if "diagnostic" not in options:
+            raise ValueError("Tool proof requires the explicit diagnostic fixture")
+        files += ["tool_probe.py", "tool_guest_check.py"]
+    if "launcher" in options:
+        if "tool" not in options:
+            raise ValueError("Launcher replacement requires the diagnostic tool proof")
+        files.append("hermes-exec-launcher")
     disk = root / "runtime.raw"
     descriptor = os.open(disk, os.O_RDWR | os.O_NOFOLLOW)
     try:
@@ -38,6 +48,15 @@ def main() -> None:  # noqa: PLR0912 - explicit allowlisted offline fixture upda
             elif name == "input-manifest.json":
                 source = root / name
             destination = "/opt/safent-guest-fixture/" + name
+            if name == "hermes-exec-launcher":
+                relative = "ops/agents-os-edition/scripts/hermes-exec-launcher"
+                source = root / "source" / relative
+                expected = json.loads((root / "input-manifest.json").read_text())["overlay_sha256"][
+                    relative
+                ]
+                if hashlib.sha256(source.read_bytes()).hexdigest() != expected:
+                    raise ValueError("Launcher source does not match explicit input manifest")
+                destination = "/usr/libexec/hermes/hermes-exec-launcher"
             subprocess.run(["debugfs", "-w", "-R", f"rm {destination}", str(disk)], check=True)
             subprocess.run(
                 ["debugfs", "-w", "-R", f"write {source} {destination}", str(disk)], check=True
@@ -51,6 +70,17 @@ def main() -> None:  # noqa: PLR0912 - explicit allowlisted offline fixture upda
             ).stdout
             if actual != source.read_bytes():
                 raise RuntimeError("Offline fixture update verification failed")
+            if name == "hermes-exec-launcher":
+                subprocess.run(
+                    [
+                        "debugfs",
+                        "-w",
+                        "-R",
+                        f"set_inode_field {destination} mode 0100755",
+                        str(disk),
+                    ],
+                    check=True,
+                )
         if "kmod" in options:
             # This artifact must have been extracted from the signed/checksummed
             # Ubuntu image; never resolve it from the host's executable PATH.

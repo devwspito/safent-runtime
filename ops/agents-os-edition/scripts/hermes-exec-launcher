@@ -42,12 +42,16 @@ import json
 import logging
 import os
 import re
+import select
+import selectors
 import shutil
 import socket
 import struct
 import subprocess  # noqa: S404  — argv is a list, no shell; see security model above
 import sys
 import threading
+import time
+from pathlib import Path
 
 # ── Constants ───────────────────────────────────────────────────────────────────
 
@@ -62,18 +66,41 @@ _LOG_TAG = "hermes-exec-launcher"
 # the netns → no DNS covert channel. NO direct route exists, so this is the ONLY exit.
 _EGRESS_PROXY_URL = "http://10.200.0.1:3128"
 
-_MAX_REQUEST_BYTES = 256 * 1024          # request frame (argv + cwd) — generous
-_MAX_OUTPUT_BYTES = 256 * 1024           # per-stream cap returned to the daemon
+_MAX_REQUEST_BYTES = 256 * 1024  # request frame (argv + cwd) — generous
+_MAX_OUTPUT_BYTES = 256 * 1024  # per-stream cap returned to the daemon
 _ARGV_MAX_ITEMS = 512
 _ARGV_MAX_ITEM_LEN = 16_384
 _PATH_RE = re.compile(r"^/[^\x00-\x1f]*$")  # absolute, no control chars (anti property-injection)
 _DEFAULT_TIMEOUT_S = 30
-_MAX_TIMEOUT_S = 86_400                   # 24h ceiling (the user wants long tasks; not infinite)
+_MAX_TIMEOUT_S = 86_400  # 24h ceiling (the user wants long tasks; not infinite)
 _GRACE_S = 5
+_GUARD_READY_TIMEOUT_S = 10
+_RUNTIME_UNIT = "hermes-runtime.service"
+_READY = b"SAFENT_EXEC_GUARD_READY\n"
+# This inert guard runs as hermes-sandbox under the SAME hardening as argv.
+# The model controls neither this source nor its private stdin. A late unit may
+# start its guard, but cannot execute caller code until the launcher revalidates
+# the exact original daemon, not a replacement with a reused service name.
+_EXEC_GUARD = (
+    "import os,sys; os.write(1,b'SAFENT_EXEC_GUARD_READY\\n'); "
+    "permit=os.read(0,1); "
+    "sys.exit(125) if permit != b'1' else None; "
+    "os.dup2(os.open('/dev/null',os.O_RDONLY),0); "
+    "os.execv(sys.argv[1],sys.argv[1:])"
+)
 
 # HARDCODED transient-service hardening (caller cannot modify these). Mirrors the
 # daemon's terminal scope hardening + adds the netns egress jail + keystore hiding.
 _EXEC_PROPERTIES: tuple[str, ...] = (
+    # Requisite never activates an inactive runtime. BindsTo would implicitly
+    # pull it in, allowing a stale request to restart it. PartOf propagates
+    # explicit stop/restart; pidfd/EOF monitoring below covers unexpected exits.
+    f"--property=Requisite={_RUNTIME_UNIT}",
+    f"--property=After={_RUNTIME_UNIT}",
+    f"--property=PartOf={_RUNTIME_UNIT}",
+    "--property=KillMode=control-group",
+    "--property=TimeoutStopSec=2s",
+    "--property=SendSIGKILL=yes",
     f"--property=NetworkNamespacePath={_NETNS_PATH}",
     # User=hermes-sandbox (NOT the daemon's `hermes`): DAC then blocks the agent
     # from reading/writing the daemon's owner-only files (shell-state.db, master.key)
@@ -127,6 +154,7 @@ logger = logging.getLogger(_LOG_TAG)
 
 # ── Peer credentials ─────────────────────────────────────────────────────────────
 
+
 def _hermes_gid() -> int:
     try:
         return grp.getgrnam("hermes").gr_gid
@@ -146,6 +174,7 @@ def _check_peercred(conn: socket.socket, hermes_gid: int) -> tuple[int, int]:
 
 
 # ── Wire protocol (4-byte BE length + UTF-8 JSON; mirrors browser-launcher) ──────
+
 
 def _recv_exactly(conn: socket.socket, n: int) -> bytes:
     buf = bytearray()
@@ -174,6 +203,7 @@ def _send_frame(conn: socket.socket, payload: dict) -> None:
 
 
 # ── Request validation ───────────────────────────────────────────────────────────
+
 
 def _validate_request(req: dict) -> tuple[list[str], str | None, str | None, int]:
     """Return (argv, cwd, workspace, timeout_s). Raises ValueError on bad input."""
@@ -219,6 +249,7 @@ def _validate_request(req: dict) -> tuple[list[str], str | None, str | None, int
 
 # ── Command execution (in the jailed netns, captured) ────────────────────────────
 
+
 def _build_cmd(
     argv: list[str], cwd: str | None, workspace: str | None, timeout_s: int
 ) -> list[str]:
@@ -227,9 +258,9 @@ def _build_cmd(
         "systemd-run",
         f"--unit={unit}",
         f"--slice={_SLICE}",
-        "--pipe",       # connect the unit's stdio to ours → captured
-        "--wait",       # block until the unit exits, propagate its exit code
-        "--collect",    # GC the unit after exit
+        "--pipe",  # connect the unit's stdio to ours → captured
+        "--wait",  # block until the unit exits, propagate its exit code
+        "--collect",  # GC the unit after exit
         "--quiet",
         f"--property=RuntimeMaxSec={timeout_s + _GRACE_S}",
         *_EXEC_PROPERTIES,
@@ -245,35 +276,171 @@ def _build_cmd(
     if cwd:
         cmd.append(f"--working-directory={cwd}")
     cmd.append("--")
+    cmd.extend(["/usr/bin/python3", "-I", "-S", "-c", _EXEC_GUARD])
     cmd.extend(argv)
     return cmd
 
 
-def _run_command(
-    argv: list[str], cwd: str | None, workspace: str | None, timeout_s: int
-) -> dict:
-    cmd = _build_cmd(argv, cwd, workspace, timeout_s)
-    logger.info(
-        "launcher.exec runner=%s argc=%d cwd=%s netns=jailed timeout=%ds",
-        argv[0], len(argv), cwd or "-", timeout_s,
-    )
+def _process_identity(pid: int) -> str:
+    return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+
+
+def _current_peer(pid: int, uid: int, identity: str) -> bool:
+    """Fail closed on missing/ambiguous systemd state; never start any service."""
     try:
-        proc = subprocess.run(  # noqa: S603 — cmd is a fixed list, no shell
-            cmd,
+        if Path(f"/proc/{pid}").stat().st_uid != uid or _process_identity(pid) != identity:
+            return False
+        result = subprocess.run(  # noqa: S603 - fixed read-only service inspection
+            [
+                "/usr/bin/systemctl",
+                "show",
+                _RUNTIME_UNIT,
+                "-p",
+                "MainPID",
+                "-p",
+                "ActiveState",
+                "-p",
+                "SubState",
+            ],
             capture_output=True,
-            timeout=timeout_s + _GRACE_S * 2,
+            timeout=1,
             check=False,
         )
+        state = dict(line.split("=", 1) for line in result.stdout.decode().splitlines())
+        return (
+            result.returncode == 0
+            and state
+            == {
+                "MainPID": str(pid),
+                "ActiveState": "active",
+                "SubState": "running",
+            }
+            and _process_identity(pid) == identity
+        )
+    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+        return False
+
+
+def _peer_open(conn: socket.socket, pidfd: int) -> bool:
+    # Neither real client half-closes: one frame, then a response, then close.
+    # Readability after the frame means EOF or extra unsolicited input: reject.
+    ready, _, _ = select.select([conn, pidfd], [], [], 0)
+    return not ready
+
+
+def _stop_unit(unit: str) -> None:
+    if not re.fullmatch(r"hermes-exec-[0-9a-f]{16}\.service", unit):
+        raise ValueError("Invalid owned execution unit")
+    try:
+        subprocess.run(  # noqa: S603 - internally generated unit, validated above
+            ["/usr/bin/systemctl", "stop", unit], capture_output=True, timeout=4, check=False
+        )
     except subprocess.TimeoutExpired:
-        return {"ok": True, "exit_code": 124, "stdout": "", "stderr": "timeout"}
-    except FileNotFoundError:
-        return {"ok": False, "error": "systemd-run not found"}
-    stdout = proc.stdout.decode("utf-8", "replace")[:_MAX_OUTPUT_BYTES]
-    stderr = proc.stderr.decode("utf-8", "replace")[:_MAX_OUTPUT_BYTES]
-    return {"ok": True, "exit_code": proc.returncode, "stdout": stdout, "stderr": stderr}
+        subprocess.run(  # noqa: S603 - exact owned unit only
+            ["/usr/bin/systemctl", "kill", "--kill-whom=all", "--signal=KILL", unit],
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+
+
+def _watch_command(proc, conn, pidfd, pid, uid, identity, timeout_s):  # noqa: PLR0917
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    released = False
+    started = time.monotonic()
+    next_check = started
+    with selectors.DefaultSelector() as selector:
+        selector.register(conn, selectors.EVENT_READ, "peer")
+        selector.register(pidfd, selectors.EVENT_READ, "peer")
+        for name in buffers:
+            stream = getattr(proc, name)
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
+        streams = 2
+        while streams or proc.poll() is None:
+            now = time.monotonic()
+            if now - started > timeout_s + _GRACE_S or (
+                not released and now - started > _GUARD_READY_TIMEOUT_S
+            ):
+                raise TimeoutError("Execution deadline")
+            if now >= next_check:
+                if not _current_peer(pid, uid, identity) or not _peer_open(conn, pidfd):
+                    raise PermissionError("Execution caller no longer active")
+                next_check = now + 0.5
+            for key, _ in selector.select(0.1):
+                name = key.data
+                if name == "peer":
+                    raise PermissionError("Execution caller disconnected")
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    streams -= 1
+                    continue
+                buffer = buffers[name]
+                buffer.extend(chunk[: max(0, _MAX_OUTPUT_BYTES - len(buffer))])
+                if name == "stdout" and not released and len(buffer) >= len(_READY):
+                    if not buffer.startswith(_READY):
+                        raise PermissionError("Invalid execution guard")
+                    # Recheck after actual unit startup, before caller argv.
+                    if not _current_peer(pid, uid, identity) or not _peer_open(conn, pidfd):
+                        raise PermissionError("Stale execution admission")
+                    proc.stdin.write(b"1")
+                    proc.stdin.flush()
+                    proc.stdin.close()
+                    del buffer[: len(_READY)]
+                    released = True
+        if not released:
+            raise PermissionError("Execution guard did not admit command")
+    return {
+        "ok": True,
+        "exit_code": proc.returncode,
+        **{name: value.decode("utf-8", "replace") for name, value in buffers.items()},
+    }
+
+
+def _run_command(argv, cwd, workspace, timeout_s, *, conn, pid, uid) -> dict:
+    proc = None
+    pidfd = None
+    unit = None
+    try:
+        identity = _process_identity(pid)
+        pidfd = os.pidfd_open(pid)  # Unsupported kernel/API is a closed gate.
+        if not _current_peer(pid, uid, identity) or not _peer_open(conn, pidfd):
+            raise PermissionError("Unauthorized execution caller")
+        cmd = _build_cmd(argv, cwd, workspace, timeout_s)
+        unit = next(arg.removeprefix("--unit=") for arg in cmd if arg.startswith("--unit="))
+        proc = subprocess.Popen(  # noqa: S603 - argv only after fixed jailed guard
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0
+        )
+        return _watch_command(proc, conn, pidfd, pid, uid, identity, timeout_s)
+    except (
+        OSError,
+        AttributeError,
+        IndexError,
+        ValueError,
+        TimeoutError,
+        subprocess.SubprocessError,
+    ):
+        # Never echo argv, filesystem contents, provider detail or raw errors.
+        return {"ok": False, "error": "execution_unavailable"}
+    finally:
+        if unit is not None:
+            try:
+                _stop_unit(unit)
+            except (OSError, subprocess.SubprocessError):
+                logger.error("launcher.owned_unit_stop_failed")
+        if proc is not None:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=2)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                stream.close()
+        if pidfd is not None:
+            os.close(pidfd)
 
 
 # ── Connection handler (one per thread) ──────────────────────────────────────────
+
 
 def _handle_connection(conn: socket.socket, hermes_gid: int) -> None:
     with conn:
@@ -297,7 +464,7 @@ def _handle_connection(conn: socket.socket, hermes_gid: int) -> None:
             except OSError:
                 pass
             return
-        result = _run_command(argv, cwd, workspace, timeout_s)
+        result = _run_command(argv, cwd, workspace, timeout_s, conn=conn, pid=pid, uid=uid)
         try:
             _send_frame(conn, result)
         except OSError as exc:
@@ -305,6 +472,7 @@ def _handle_connection(conn: socket.socket, hermes_gid: int) -> None:
 
 
 # ── Socket + main loop ───────────────────────────────────────────────────────────
+
 
 def _setup_socket(hermes_gid: int) -> socket.socket:
     parent = os.path.dirname(_SOCK_PATH)
@@ -317,7 +485,7 @@ def _setup_socket(hermes_gid: int) -> socket.socket:
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(_SOCK_PATH)
     os.chown(_SOCK_PATH, 0, hermes_gid)  # root:hermes
-    os.chmod(_SOCK_PATH, 0o660)          # only group hermes connects
+    os.chmod(_SOCK_PATH, 0o660)  # only group hermes connects
     sock.listen(16)
     logger.info("launcher.listening path=%s gid=%d", _SOCK_PATH, hermes_gid)
     return sock

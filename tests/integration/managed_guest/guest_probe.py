@@ -97,7 +97,13 @@ def main() -> None:
     )
     if report["ready"] and Path("/opt/safent-guest-fixture/managed_checks.py").exists():
         try:
-            if Path("/opt/safent-guest-fixture/diagnostic_check.py").exists():
+            if Path("/opt/safent-guest-fixture/tool_guest_check.py").exists():
+                from tool_guest_check import check
+
+                report["gate"] = (
+                    "TWO diagnostic-only substitutions; fixture LLM tool_call; NOT production"
+                )
+            elif Path("/opt/safent-guest-fixture/diagnostic_check.py").exists():
                 from diagnostic_check import check
 
                 report["gate"] = "TWO diagnostic-only substitutions; NOT production"
@@ -113,6 +119,9 @@ def main() -> None:
             partial = Path("/var/lib/safent-diagnostic-partial.json")
             if partial.exists():
                 report["diagnostic_partial"] = json.loads(partial.read_text())
+            partial = Path("/var/lib/safent-tool-guest-partial.json")
+            if partial.exists():
+                report["tool_partial"] = json.loads(partial.read_text())
     report["journal"] = command(
         "journalctl", "--no-pager", "-b", "-u", "hermes-runtime", "-n", "250"
     )
