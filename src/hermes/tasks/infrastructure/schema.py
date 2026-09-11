@@ -882,11 +882,12 @@ def _recreate_p5_cancellation_if_needed(conn: sqlite3.Connection) -> None:
         ).fetchall()
         conn.execute(_DDL_AGENT_TASKS_NEW_P5)
         conn.execute(
-            f"INSERT INTO agent_tasks_new ({_P2_COLUMNS}) SELECT {_P2_COLUMNS} FROM agent_tasks"
+            f"INSERT INTO agent_tasks_new ({_P2_COLUMNS}) SELECT {_P2_COLUMNS} FROM agent_tasks"  # noqa: S608 — fixed schema-owned columns
         )
         conn.execute("DROP TABLE agent_tasks")
         conn.execute("ALTER TABLE agent_tasks_new RENAME TO agent_tasks")
-        for name, sql in objects:
+        for name, original_sql in objects:
+            sql = original_sql
             if name == "agent_tasks_dedup_key_active_unique":
                 sql = sql.replace(
                     "('completed','failed','rejected')",
