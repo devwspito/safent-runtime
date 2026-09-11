@@ -25,29 +25,20 @@ const SYSTEM_UPDATE_POLL_MS = 15 * 60_000
 // and must see completion (or the stale-flag expiry) in seconds, not in 15 min.
 const SYSTEM_UPDATE_ACTIVE_POLL_MS = 20_000
 
-/** Compare two dotted versions ("0.8.34"). >0 if a is newer than b, 0 if equal, <0 older. */
-function cmpVersion(a: string, b: string): number {
-  const pa = a.split('.').map(n => parseInt(n, 10) || 0)
-  const pb = b.split('.').map(n => parseInt(n, 10) || 0)
-  const len = Math.max(pa.length, pb.length)
-  for (let i = 0; i < len; i++) {
-    const d = (pa[i] || 0) - (pb[i] || 0)
-    if (d !== 0) return d > 0 ? 1 : -1
-  }
-  return 0
-}
-
 function injectedUpdate(): SafentUpdateGlobal | undefined {
   if (typeof window === 'undefined') return undefined
   return (window as unknown as { __safentUpdate?: SafentUpdateGlobal }).__safentUpdate
 }
 
-/** Older host shells only ever injected a bare version string — kept as a fallback
- *  (expandir → contraer) until every shell ships the richer contracts/update.md object. */
-function legacyInjectedVersion(): string {
-  if (typeof window === 'undefined') return ''
-  const v = (window as unknown as { __safentLatestVersion?: unknown }).__safentLatestVersion
-  return typeof v === 'string' ? v.trim() : ''
+/** Native APP availability is distinct from the daemon's engine update. */
+function nativeAppVersion(): string | null {
+  const value = (window as unknown as { __safentNativeUpdater?: unknown }).__safentNativeUpdater
+  if (!value || typeof value !== 'object') return null
+  const data = value as Record<string, unknown>
+  return data.status === 'unavailable' && data.reason === 'integration_missing'
+    && typeof data.app_version === 'string' && data.app_version.length <= 64
+    && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(data.app_version)
+    ? data.app_version : null
 }
 
 interface UpdateSignal {
@@ -64,11 +55,9 @@ function resolveUpdateSignal(status: SystemUpdateStatus): UpdateSignal {
   if (host) {
     return { available: host.available, latestVersion: host.to?.app ?? status.latest_version ?? '' }
   }
-  const legacy = legacyInjectedVersion()
-  const legacyNewer = !!legacy && !!status.current_version && cmpVersion(legacy, status.current_version) > 0
   return {
-    available: !!status.update_available || legacyNewer,
-    latestVersion: status.latest_version || legacy,
+    available: !!status.update_available,
+    latestVersion: status.latest_version || '',
   }
 }
 
@@ -128,7 +117,14 @@ export function SystemUpdateFooter() {
     }
   }
 
-  if (!status?.current_version) return null
+  const appVersion = nativeAppVersion()
+  const nativeNotice = appVersion ? (
+    <p style={{ margin: 0, fontSize: 'var(--text-xs)', color: 'var(--color-text-dim)', lineHeight: 1.5 }}>
+      {t('sysupdate.native.version').replace('{v}', appVersion)}
+      <span style={{ display: 'block' }}>{t('sysupdate.native.unavailable')}</span>
+    </p>
+  ) : null
+  if (!status?.current_version) return nativeNotice
 
   const signal = resolveUpdateSignal(status)
   const available = !updating && signal.available
@@ -147,6 +143,7 @@ export function SystemUpdateFooter() {
         fontSize: 'var(--text-xs)', color: 'var(--color-text-dim)',
       }}
     >
+      {nativeNotice}
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', minWidth: 0 }}>
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {t('sysupdate.current').replace('{v}', status.current_version)}

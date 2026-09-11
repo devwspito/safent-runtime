@@ -57,9 +57,9 @@ pub struct TauriManifestPlatform {
     pub url: String,
 }
 
-/// contracts/update.md §1 — `latest.json`, already signature-verified by the
-/// caller (Tauri's updater plugin verifies `minisign` before this shape ever
-/// reaches application code; see `tauri_updater.rs`).
+/// contracts/update.md §1 — release metadata from `latest.json`.
+/// This shape does not prove artifact authenticity. The caller must complete
+/// Tauri's verified download before any apply (see `tauri_updater.rs`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct TauriManifest {
     pub version: Version,

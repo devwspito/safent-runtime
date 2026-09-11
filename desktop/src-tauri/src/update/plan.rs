@@ -68,7 +68,7 @@ fn next_app_version(
     app_platform_key: &str,
 ) -> Option<semver::Version> {
     let entry = tauri_manifest.platforms.get(app_platform_key)?;
-    let _ = &entry.signature; // presence checked; verification itself is tauri_updater.rs's job
+    let _ = &entry.signature; // metadata only; UpdatePorts must verify the downloaded artifact
     (tauri_manifest.version > current.app).then(|| tauri_manifest.version.clone())
 }
 

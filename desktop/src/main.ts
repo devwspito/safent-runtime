@@ -3,6 +3,7 @@ import { isTauriRuntime, requestCancel, requestRetry, requestDiagnostics, subscr
 import { reduceBootstrapSnapshot } from './bootstrap-state.js'
 import { diagnosticsAction } from './diagnostics-action.js'
 import { nativeAction } from './native-action.js'
+import { renderNativeUpdater } from './native-updater.js'
 import { manageFocusOnTransition, render, type ScreenElements } from './render.js'
 
 function requireElement<T extends HTMLElement>(id: string): T {
@@ -39,6 +40,8 @@ function collectElements(): ScreenElements {
 
 function main(): void {
   const els = collectElements()
+  renderNativeUpdater(requireElement('native-updater'),
+    (window as unknown as { __safentNativeUpdater?: unknown }).__safentNativeUpdater)
   let state: UiState = initialState
   let attemptId: number | undefined
   render(state, els)

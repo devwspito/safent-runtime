@@ -96,6 +96,7 @@ pub fn create_main_window(app: &AppHandle, policy: WindowPolicy) -> tauri::Resul
             .inner_size(1280.0, 860.0)
             .min_inner_size(900.0, 600.0)
             .initialization_script(BLOCK_CONTEXT_MENU_JS)
+            .initialization_script(crate::update::availability::initialization_script())
             .on_navigation(move |url| is_navigation_allowed(policy.authorized().as_ref(), url))
             .build()?;
 

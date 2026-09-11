@@ -429,7 +429,6 @@ use tauri::{AppHandle, Emitter, Listener, Manager};
 
 use crate::domain::{Bytes, ImageRef, MachineSpec};
 use crate::engine_adapter::{EmbeddedCliConfig, EmbeddedCliDriver};
-use crate::start_update_checker;
 use crate::window_policy::WindowPolicy;
 
 /// The UI lane already codes against these exact channel names.
@@ -782,7 +781,6 @@ fn navigate_to_ticket(app: &AppHandle, ticket: &BootstrapTicket) {
         policy.set_authorized_origin(url.clone());
     }
     let _ = window.navigate(url);
-    start_update_checker(&window);
 }
 
 fn app_version() -> SemVer {

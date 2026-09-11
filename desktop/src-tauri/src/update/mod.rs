@@ -13,6 +13,7 @@
 //! every item below IS exercised, by the unit tests in its own file.
 #![allow(dead_code, unused_imports)]
 
+pub mod availability;
 pub mod orchestrator;
 pub mod plan;
 pub mod tauri_updater;

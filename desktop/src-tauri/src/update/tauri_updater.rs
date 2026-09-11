@@ -1,16 +1,14 @@
-//! The thin, impure edge of `update/`: talks to the Tauri updater plugin and
-//! verifies `runtime-manifest.json`'s minisign signature. Everything that can
-//! be pure lives in `plan.rs`/`orchestrator.rs` instead — this module exists
-//! only because SOMETHING has to actually call the network and the plugin.
+//! Unwired adapter primitives: reshape Tauri metadata and verify the signed
+//! runtime manifest. This module does not itself fetch, install, or relaunch.
 //!
 //! Two manifests, two different verification paths, by design (contracts/
 //! update.md §1-2):
-//! - `latest.json` (the app piece): the Tauri updater plugin already fetches
-//!   it, verifies its minisign signature, and compares semver against the
-//!   running app internally (`Updater::check()`). We never re-verify it
-//!   ourselves — that would be a second, divergence-prone implementation of
-//!   the same check. `tauri_manifest_from_check` only RESHAPES that already-
-//!   trusted result into `plan.rs`'s input shape.
+//! - `latest.json` (the app piece): `Updater::check()` fetches release metadata
+//!   and compares versions. It does NOT verify a signature of latest.json.
+//!   The plugin verifies the downloaded artifact in `Update::download()`.
+//!   `tauri_manifest_from_check` only reshapes metadata; it cannot authorize
+//!   installation. Future UpdatePorts must complete the plugin's verified
+//!   download before backup/apply, never install raw metadata URLs directly.
 //! - `runtime-manifest.json` (engine + companion digests): the plugin has no
 //!   concept of this file — it is ours, so WE verify it, with the same
 //!   minisign public key embedded in `tauri.conf.json` (`plugins.updater.
@@ -39,7 +37,7 @@ pub struct CheckedAppUpdate {
     pub download_url: String,
 }
 
-/// Reshapes the plugin's already-verified `check()` result into `plan.rs`'s
+/// Reshapes the plugin's release metadata from `check()` into `plan.rs`'s
 /// `TauriManifest` — a single-entry manifest for OUR platform when something
 /// is newer, or an empty one (matching "platform absent" in `plan.rs`, which
 /// already means "no app piece") when `check()` found nothing.

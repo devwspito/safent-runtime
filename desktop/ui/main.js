@@ -3,6 +3,7 @@ import { isTauriRuntime, requestCancel, requestRetry, requestDiagnostics, subscr
 import { reduceBootstrapSnapshot } from './bootstrap-state.js';
 import { diagnosticsAction } from './diagnostics-action.js';
 import { nativeAction } from './native-action.js';
+import { renderNativeUpdater } from './native-updater.js';
 import { manageFocusOnTransition, render } from './render.js';
 function requireElement(id) {
     const el = document.getElementById(id);
@@ -34,6 +35,7 @@ function collectElements() {
 }
 function main() {
     const els = collectElements();
+    renderNativeUpdater(requireElement('native-updater'), window.__safentNativeUpdater);
     let state = initialState;
     let attemptId;
     render(state, els);

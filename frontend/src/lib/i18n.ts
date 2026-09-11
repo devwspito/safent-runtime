@@ -913,6 +913,8 @@ const translations = {
     // actually confirmed (contracts/update.md §3); otherwise the footer shows
     // sysupdate.current quietly, with no button at all.
     'sysupdate.current':        'Versión {v}',
+    'sysupdate.native.version': 'App nativa {v}',
+    'sysupdate.native.unavailable': 'El actualizador de la app nativa no está disponible en esta compilación.',
     'sysupdate.action':         'Actualizar',
     'sysupdate.updating':       'Actualizando…',
     'sysupdate.available':      'Hay una versión nueva',
@@ -1823,6 +1825,8 @@ const translations = {
     // actually confirmed (contracts/update.md §3); otherwise the footer shows
     // sysupdate.current quietly, with no button at all.
     'sysupdate.current':        'Version {v}',
+    'sysupdate.native.version': 'Native app {v}',
+    'sysupdate.native.unavailable': 'The native app updater is not available in this build.',
     'sysupdate.action':         'Update',
     'sysupdate.updating':       'Updating…',
     'sysupdate.available':      'A new version is available',

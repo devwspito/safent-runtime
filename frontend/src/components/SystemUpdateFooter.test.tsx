@@ -43,6 +43,7 @@ describe('SystemUpdateFooter', () => {
     getInstallRequests.mockReset().mockResolvedValue({ requests: [] })
     delete (window as unknown as Record<string, unknown>).__safentUpdate
     delete (window as unknown as Record<string, unknown>).__safentLatestVersion
+    delete (window as unknown as Record<string, unknown>).__safentNativeUpdater
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -75,6 +76,36 @@ describe('SystemUpdateFooter', () => {
     expect(buttons.some(b => b.textContent?.includes('Actualizar'))).toBe(false)
     // Desinstalar is unrelated to update availability — always present.
     expect(buttons.some(b => b.getAttribute('aria-label') === 'Desinstalar')).toBe(true)
+  })
+
+  it('ignores the unsigned legacy VERSION string', async () => {
+    (window as unknown as Record<string, unknown>).__safentLatestVersion = '99.0.0'
+    await render()
+    expect(container.textContent).not.toContain('99.0.0')
+    expect(container.textContent).not.toContain('Actualizar')
+  })
+
+  it('shows native updater unavailability even while the daemon status is unknown', async () => {
+    getSystemUpdate.mockReturnValue(new Promise(() => {}))
+    ;(window as unknown as Record<string, unknown>).__safentNativeUpdater = {
+      status: 'unavailable', reason: 'integration_missing', app_version: '0.9.0',
+    }
+    await render()
+    expect(container.textContent).toContain('App nativa 0.9.0')
+    expect(container.textContent).toContain('no está disponible en esta compilación')
+    expect(container.querySelector('button')).toBeNull()
+  })
+
+  it('does not hide an independently available engine update because the native updater is unavailable', async () => {
+    getSystemUpdate.mockResolvedValue(status({ update_available: true, latest_version: '0.8.1' }))
+    ;(window as unknown as Record<string, unknown>).__safentNativeUpdater = {
+      status: 'unavailable', reason: 'integration_missing', app_version: '0.9.0',
+    }
+    await render()
+    expect(container.textContent).toContain('App nativa 0.9.0')
+    expect(container.textContent).toContain('Versión 0.8.0')
+    expect(container.textContent).toContain('v0.8.1')
+    expect(container.textContent).toContain('Actualizar')
   })
 
   it('SC-006: shows Actualizar when the daemon confirms update_available', async () => {
