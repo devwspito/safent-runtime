@@ -560,140 +560,14 @@
 /* ── Welcome screen ──────────────────────────────────────────────────────── */
 
 .welcome {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-5);
-  padding: var(--space-10);
-  min-height: 400px;
-  flex: 1;
-  animation: welcomeIn var(--dur-slow) var(--ease) both;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 16px; padding: 32px 0; min-height: 260px; flex: 1;
 }
-
-@keyframes welcomeIn {
-  from { opacity: 0; transform: translateY(12px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .welcome { animation: none; }
-}
-
-.welcomeMark {
-  width: 56px;
-  height: 56px;
-  border-radius: 14px;
-  background: var(--color-accent);
-  color: #fff;
-  font-size: 24px;
-  font-weight: var(--weight-semibold);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  letter-spacing: var(--tracking-tighter);
-  /* soft ambient glow — decorative icon only */
-  box-shadow: 0 0 42px color-mix(in srgb, var(--color-accent) 38%, transparent);
-  font-family: var(--font-ui);
-  animation: markBreathe 4s ease-in-out infinite alternate;
-}
-
-@keyframes markBreathe {
-  from {
-    transform: scale(1);
-    box-shadow: 0 0 42px color-mix(in srgb, var(--color-accent) 30%, transparent);
-  }
-  to {
-    transform: scale(1.02);
-    box-shadow: 0 0 46px color-mix(in srgb, var(--color-accent) 44%, transparent);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .welcomeMark { animation: none; }
-}
-
-.welcomeTitle {
-  font-size: var(--text-2xl);
-  font-weight: 650;
-  letter-spacing: -0.02em;
-  text-align: center;
-  line-height: var(--leading-dense);
-  background: linear-gradient(
-    92deg,
-    var(--color-text) 30%,
-    color-mix(in srgb, var(--color-accent) 75%, var(--color-text))
-  );
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
-.welcomeSubtitle {
-  font-size: var(--text-md);
-  color: var(--color-text-muted);
-  text-align: center;
-  max-width: 360px;
-  line-height: var(--leading-normal);
-}
-
-.welcomeSuggestions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  justify-content: center;
-  max-width: 600px;
-}
-
-.suggestionPill {
-  border: 1px solid var(--border-glass);
-  border-radius: var(--radius-pill);
-  background: var(--surface-glass);
-  backdrop-filter: blur(14px) saturate(1.2);
-  -webkit-backdrop-filter: blur(14px) saturate(1.2);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  color: var(--color-text-muted);
-  font-size: var(--text-sm);
-  font-family: var(--font-ui);
-  padding: var(--space-2) var(--space-4);
-  cursor: pointer;
-  transition: background var(--dur-base) var(--ease),
-              border-color var(--dur-base) var(--ease),
-              color var(--dur-base) var(--ease),
-              transform var(--dur-base) var(--ease),
-              box-shadow var(--dur-base) var(--ease);
-  /* fade-in only — entrance never touches `transform`, so the hover/active
-     transform transitions below stay free to animate immediately. */
-  animation: pillIn var(--dur-slow) var(--ease) both;
-}
-
-.welcomeSuggestions button:nth-child(1) { animation-delay: 60ms; }
-.welcomeSuggestions button:nth-child(2) { animation-delay: 110ms; }
-.welcomeSuggestions button:nth-child(3) { animation-delay: 160ms; }
-.welcomeSuggestions button:nth-child(4) { animation-delay: 210ms; }
-
-@keyframes pillIn {
-  from { opacity: 0; }
-  to   { opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .suggestionPill { animation: none; }
-}
-
-.suggestionPill:hover {
-  color: var(--color-text);
-  border-color: color-mix(in srgb, var(--color-accent) 35%, var(--color-border));
-  transform: translateY(-1px);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 8px 28px rgba(0, 0, 0, 0.35),
-    var(--shadow-glow);
-}
-
-.suggestionPill:active {
-  transform: translateY(0) scale(0.98);
-}
+.welcomeTitle { font-size: 28px; font-weight: 550; letter-spacing: -.035em; text-align: center; line-height: 1.2; color: var(--color-text); }
+.welcomeSubtitle { font-size: 14px; color: var(--color-text-muted); text-align: center; max-width: 400px; line-height: 1.6; }
+.welcomeSuggestions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: 600px; margin-top: 8px; }
+.suggestionPill { border: 1px solid var(--color-border-subtle); border-radius: 8px; background: transparent; color: var(--color-text-muted); font: inherit; font-size: 12px; padding: 10px 12px; cursor: pointer; }
+@media (hover: hover) and (pointer: fine) { .suggestionPill:hover { background: var(--color-surface-raise); color: var(--color-text); } }
 
 /* ── Composer ────────────────────────────────────────────────────────────── */
 
@@ -711,9 +585,9 @@
 
 .composerBox {
   position: relative;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
+  background: var(--color-surface-raise);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 18px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   /* overflow visible so the "+" menu can render ABOVE the box (outside it). */
   overflow: visible;
@@ -814,38 +688,14 @@
 
 /* Send / stop buttons */
 .sendBtn {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  height: 30px;
-  padding: 0 var(--space-4);
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--color-accent) 88%, white),
-    var(--color-accent)
-  );
-  color: #fff;
-  border: none;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--tracking-tight);
-  cursor: pointer;
-  transition: box-shadow var(--dur-quick) var(--ease),
-              opacity var(--dur-quick) var(--ease),
-              transform var(--dur-quick) var(--ease);
-  white-space: nowrap;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  height: 32px; padding: 0 12px; background: var(--color-action); color: var(--color-action-text);
+  border: none; border-radius: 999px; font-size: 12px; font-weight: 550;
+  cursor: pointer; white-space: nowrap;
+  transition: transform var(--dur-quick) var(--ease);
 }
-
-.sendBtn:hover:not(:disabled) {
-  box-shadow: 0 0 18px color-mix(in srgb, var(--color-accent) 30%, transparent);
-  transform: translateY(-1px);
-}
-
-.sendBtn:active:not(:disabled) {
-  transform: scale(0.97);
-}
-
+.sendBtn:disabled { opacity: .35; cursor: not-allowed; }
+.sendBtn:active:not(:disabled) { transform: scale(.97); }
 .stopBtn {
   display: flex;
   align-items: center;
@@ -1116,3 +966,5 @@
 .liveBrowserFullscreenBtn:hover {
   background: rgba(0, 0, 0, 0.72);
 }
+.jumpToLatest { align-self: center; display: inline-flex; align-items: center; gap: 6px; color: var(--color-text); background: var(--color-surface-raise); border: 1px solid var(--color-border); border-radius: 999px; padding: 7px 12px; margin: 0 0 8px; font: inherit; font-size: 12px; cursor: pointer; }
+@media (max-width: 700px) { .chatView { --chat-gutter: 16px; } .welcomeTitle { font-size: 24px; } .composerTextarea { padding: 16px 16px 8px; } }

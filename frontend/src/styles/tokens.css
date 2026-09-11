@@ -2,13 +2,13 @@
 /*     Single source of truth for Community. Port of the enterprise token set.  */
 :root {
   /* ── Slate scale (Radix 12-step) ─────────────────────────────────────────── */
-  --slate-1:  #151718;
-  --slate-2:  #1a1d1e;
-  --slate-3:  #202425;
-  --slate-4:  #26292b;
-  --slate-5:  #2b2f31;
-  --slate-6:  #313538;
-  --slate-7:  #3a3f42;
+  --slate-1:  #181818;
+  --slate-2:  #1e1e1e;
+  --slate-3:  #252525;
+  --slate-4:  #2b2b2b;
+  --slate-5:  #303030;
+  --slate-6:  #333333;
+  --slate-7:  #414141;
   --slate-8:  #4c5155;
   --slate-9:  #697177;
   --slate-10: #787f85;
@@ -22,11 +22,14 @@
   --color-bg-subtle:     var(--slate-3);
   --color-surface-hover: rgba(255, 255, 255, 0.04);
   --color-surface-press: rgba(255, 255, 255, 0.06);
-  --color-border-subtle: var(--slate-6);
+  --color-border-subtle: rgba(255, 255, 255, 0.075);
   --color-border:        var(--slate-7);
   --color-text:          var(--slate-12);
   --color-text-muted:    var(--slate-11);
-  --color-text-dim:      var(--slate-9);
+  --color-text-dim:      #929292;
+  --color-sidebar:       #323232;
+  --color-action:        #ededed;
+  --color-action-text:   #1b1b1b;
 
   /* ── Blue accent — primary actions/links ONLY ────────────────────────────── */
   --blue-9:         #0091ff;
@@ -49,7 +52,7 @@
   --color-danger-surface:  #2b0d0d;
 
   /* ── Typography ──────────────────────────────────────────────────────────── */
-  --font-ui:   "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-ui:   -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "Geist Mono", "Source Code Pro", "Menlo", monospace;
 
   /* Type scale — base 13px dense UI */

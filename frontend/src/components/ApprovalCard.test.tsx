@@ -54,8 +54,9 @@ it('submits once under double clicks and never calls approval execution complete
   expect(container.textContent).toContain('Decisión registrada')
 })
 
-it('requests MFA again after a failed attempt instead of retrying without a code', async () => {
-  resolve.mockRejectedValueOnce(new Error('invalid_totp'))
+it('keeps MFA in place during submission and refocuses the same field after rejection', async () => {
+  let reject!: (reason: unknown) => void
+  resolve.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail }))
   render({ ...approval, required_level: 'mfa', mfa_enrolled: true })
   act(() => button('Permitir una vez').click())
   expect(resolve).not.toHaveBeenCalled()
@@ -66,7 +67,15 @@ it('requests MFA again after a failed attempt instead of retrying without a code
   })
   await act(async () => button('Confirmar con código').click())
   expect(resolve).toHaveBeenCalledWith('proposal-1', 'once', { totp: '123456' })
-  act(() => button('Permitir una vez').click())
+  expect(document.querySelector('input')).toBe(input)
+  expect(input.disabled).toBe(true)
+  await act(async () => button('Confirmar con código').click())
+  expect(resolve).toHaveBeenCalledTimes(1)
+  await act(async () => reject(new ApiError('Invalid code', 401, { detail: { code: 'invalid_totp' } })))
+  expect(document.querySelector('input')).toBe(input)
+  expect(input.disabled).toBe(false)
+  expect(document.activeElement).toBe(input)
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain('Código incorrecto')
   expect(document.querySelector('[role="dialog"]')).not.toBeNull()
   expect(resolve).toHaveBeenCalledTimes(1)
 })

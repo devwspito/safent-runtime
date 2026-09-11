@@ -60,7 +60,7 @@ export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps
       if (code === 'proposal_invalid' || code === 'expired') {
         setState('expired')
       } else {
-        setState('idle')
+        setState(decision === 'once' && requiresCode ? 'code' : 'idle')
         setError(t(code === 'invalid_totp' ? 'mfa.err.invalid'
           : decision === 'once' ? 'approval.err.allow' : 'approval.err.deny'))
       }
@@ -110,7 +110,7 @@ export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps
           <p>{t('approval.enroll.prompt')}</p>
           <Button size="sm" onClick={() => navigate('/sistema?tab=seguridad')}>{t('approval.enroll.cta')}</Button>
         </div>}
-        {error && <p className={css.error} role="alert">{error}</p>}
+        {error && state !== 'code' && <p className={css.error} role="alert">{error}</p>}
         {terminal ? <footer className={css.footer} role="status">
           <span>{t(state === 'expired' ? 'approval.expired' : 'approval.resolved')}</span>
           <Button size="sm" variant="ghost" onClick={onResolved}>{t('approval.expired.close')}</Button>
@@ -126,7 +126,8 @@ export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps
           </div>
         </footer>}
       </section>
-      {state === 'code' && <MfaModal title={title}
+      {(state === 'code' || (state === 'allowing' && requiresCode)) && <MfaModal title={title}
+        loading={state === 'allowing'} error={error}
         onSign={({ totp }) => { void decide('once', totp) }}
         onCancel={() => setState('idle')} />}
     </>

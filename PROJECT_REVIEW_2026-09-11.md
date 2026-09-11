@@ -65,6 +65,47 @@ septiembre de 2026. No sustituye a las operaciones de escritura del SDK/API.
 
 ## Trabajo abierto, en orden
 
+### Segunda entrega: referencia desktop y continuidad de permisos
+
+La captura del propietario fija el patrón: sidebar más clara que el chat,
+superficies neutras, conversación como vista principal y panel contextual
+cerrado hasta solicitarlo. No se está reproduciendo el navegador incrustado como
+un panel permanente. La referencia no implica acceso al código fuente de Codex.
+
+| Before | After | Why |
+| --- | --- | --- |
+| Panel contextual abierto al entrar al chat | Cerrado por defecto; apertura explícita | Priorizar la conversación |
+| Bienvenida con brillo, gradiente y entradas escalonadas | Tipografía sobria, sugerencias compactas y contenido inmediato | Reducir distracciones |
+| El diálogo MFA desaparece durante el envío | Mismo diálogo y campo durante envío y error, foco recuperado | Corregir sin reiniciar |
+| Trampa de foco MFA manual | Primitiva accesible compartida Base UI | Gestionar Escape, foco y diálogos |
+| Chat desplazado sin acción para volver | Botón para volver al último mensaje | Conservar la posición de lectura |
+
+Validado: 141 pruebas frontend, typecheck y build. La prueba MFA comprueba que
+el campo no se reemplaza, se bloquea el doble envío y se enfoca tras error.
+Enterprise incorpora la misma base visual, inspectores accesibles, cola de
+aprobaciones con decisiones visibles, MFA sin cerrar sesión y pruebas propias.
+
+Esto sigue siendo una entrega parcial. No se han completado onboarding,
+chat Enterprise como pantalla principal, todas las vistas Community/Enterprise,
+panel Ads, tamaños estrechos ni validación con campañas reales. Las demos son
+datos ficticios, nunca evidencia de conexión o ejecución.
+
+Riesgos registrados para la siguiente revisión:
+- Enterprise KMS usa almacenamiento SQLite aun con Postgres configurado:
+  resolver persistencia/composición antes de despliegues efímeros o multirréplica.
+- Rol de gobernanza ads e herencia de capacidades: falta implementación
+  completa y prueba de revocación; no basta con añadir una etiqueta.
+- CRM: inspector OpenAPI disponible; autenticación, activación y ejecución
+  heredada todavía pendientes.
+- Presets Ads en Enterprise: contrastar con el catálogo actual y eliminar
+  cualquier promesa de escrituras autónomas sin aprobación.
+- Bundles JS grandes y avisos npm pendientes de clasificación; no aplicar
+  actualizaciones mayores a ciegas.
+
+Infraestructura Friendog: VM friendog-enterprise creada en
+sylvan-plane-508309-q0, europe-west1-b, e2-micro. Aún no acredita despliegue
+de Enterprise, alta de Luis como administrador, TLS, backups ni OAuth Ads.
+
 1. Chat completo: compositor, actividad de herramientas, estados de ejecución,
    panel contextual, scroll, foco y permisos junto a la acción que los solicita.
 2. Aprobaciones: diferenciar autorización de capacidad y propuesta de Ads, mostrar

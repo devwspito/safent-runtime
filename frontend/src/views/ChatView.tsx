@@ -67,16 +67,14 @@ function Welcome({ onSuggestion }: WelcomeProps) {
     t('chat.suggest.4'),
   ]
   return (
-    <div className={styles.welcome} role="main">
-      <div className={styles.welcomeMark} aria-hidden="true">L</div>
+    <div className={styles.welcome}>
       <h1 className={styles.welcomeTitle}>{t('chat.welcome.title')}</h1>
       <p className={styles.welcomeSubtitle}>{t('chat.welcome.subtitle')}</p>
-      <div className={styles.welcomeSuggestions} role="list" aria-label={t('chat.suggestions_aria')}>
+      <div className={styles.welcomeSuggestions} aria-label={t('chat.suggestions_aria')}>
         {suggestions.map((s) => (
           <button
             key={s}
             className={styles.suggestionPill}
-            role="listitem"
             type="button"
             onClick={() => onSuggestion(s)}
           >
@@ -1062,7 +1060,8 @@ export default function ChatView() {
   const { convId, agentName, messages, status, sendMessage, stopStream, approvalRefreshTick, liveBrowserActive } =
     useOutletContext<ChatOutletContext>()
   const [composerText, setComposerText] = useState('')
-  const [panelOpen, setPanelOpen] = useState(true)
+  const [panelOpen, setPanelOpen] = useState(false)
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const [showNoModel, setShowNoModel] = useState(false)
   const [noProvider, setNoProvider] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -1108,10 +1107,17 @@ export default function ChatView() {
       const nearBottom = el!.scrollTop + el!.clientHeight >= el!.scrollHeight - 80
       pinRef.current = nearBottom
       userScrolledRef.current = !nearBottom
+      setShowJumpToLatest(!nearBottom)
     }
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => el.removeEventListener('scroll', onScroll)
   }, [])
+
+  useLayoutEffect(() => {
+    userScrolledRef.current = false
+    pinRef.current = true
+    setShowJumpToLatest(false)
+  }, [convId])
 
   useLayoutEffect(() => {
     const el = bodyRef.current
@@ -1207,6 +1213,17 @@ export default function ChatView() {
             />
           </div>
 
+          {showJumpToLatest && <button
+            className={styles.jumpToLatest}
+            type="button"
+            aria-label={t('chat.latest')}
+            onClick={() => {
+              if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+              pinRef.current = true
+              userScrolledRef.current = false
+              setShowJumpToLatest(false)
+            }}
+          ><ChevronDown size={16} aria-hidden="true" />{t('chat.latest')}</button>}
           {liveBrowserActive && <LiveBrowserPanel />}
 
           {showNoModel || noProvider ? (
