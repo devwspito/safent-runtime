@@ -50,3 +50,26 @@ patch_containers_conf_for_isolated_locks() {
 
   sed -i '/^\[engine\]$/a lock_type = "file"' "$conf"
 }
+
+# MAC3-07 (verificacion-mac-3.md, MAC-07/MAC2-13 repeated unfixed): unlike
+# Linux (an UPSTREAM containers.conf, extracted from the podman-static
+# tarball, patched above), the official macOS .pkg ships no containers.conf
+# at all — this WRITES one fresh. Without it, safent's own CONTAINERS_CONF-
+# from-bundle logic has nothing to find, podman resolves gvproxy/vfkit via
+# PATH, and a Mac that already has podman.io's own installer in place
+# silently runs ITS gvproxy/vfkit instead of the bundled, hash-verified
+# ones (confirmed live: different sha256) — on a Mac with NO podman
+# installed at all, machine start fails outright. ONE helper_binaries_dir
+# entry, not two like Linux's: podman/gvproxy/vfkit/krunkit all land FLAT
+# in the SAME bin/ on macOS (no libexec/ split). `$BINDIR` is
+# containers-common's OWN literal token (resolved at runtime to "directory
+# of the currently running podman binary") — the single-quoted heredoc
+# delimiter keeps it unexpanded here, exactly like the Linux patch's sed
+# program above.
+write_macos_containers_conf() {
+  local dest="$1"
+  cat >"$dest" <<'EOF'
+[engine]
+helper_binaries_dir = ["$BINDIR"]
+EOF
+}

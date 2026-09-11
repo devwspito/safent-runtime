@@ -325,6 +325,20 @@ mod tests {
         // before images_gap/container_gap — the ones that already treat a
         // healthy container as converged — were ever reached. This is the
         // exact "reopen with the motor already alive" facts shape.
+        //
+        // MAC3-02 (verificacion-mac-3.md): fixing MAC2-01 moved the SAME bug
+        // one layer down, from machine_gap to images_gap — `cmd_facts` read
+        // `inspect -f '{{.Image}}'` (podman's local IMAGE ID, never a
+        // digest) into this exact field, so `converged_macos_facts()`'s
+        // `image_digest: Some("sha256:engine-good")` below was an untested
+        // ASSUMPTION about the wire shape, not a verified one — this test
+        // stayed green while a real Mac kept destroying a healthy engine.
+        // `safent`'s `cmd_facts` now reads `{{.ImageDigest}}` (confirmed
+        // against real podman 6.1.1), so this fixture's shape is no longer
+        // just assumed: `engine_adapter_real_cli_contract.rs`'s
+        // `real_facts_reports_the_container_image_digest_never_the_local_image_id`
+        // proves the REAL CLI now actually emits a digest-shaped value here,
+        // not the image ID `{{.Image}}` would have given.
         let facts = converged_macos_facts();
         assert!(
             facts.machines[0].running,

@@ -55,9 +55,21 @@ case "$1" in
         '{{.State.Running}}')
           [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
           echo "$FAKE_CONTAINER_RUNNING"; exit 0 ;;
-        '{{.Image}}')
+        '{{.ImageDigest}}')
+          # MAC3-02 (verificacion-mac-3.md): the REAL per-container digest
+          # field — confirmed against real podman 6.1.1. The OLD fake had
+          # `{{.Image}}` (the local image ID field) answer with a
+          # sha256-shaped value, which is exactly the wrong assumption
+          # that let the pre-fix bug (safent used `{{.Image}}` for this)
+          # pass every test while failing on a real Mac.
           [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
+          [ "${FAKE_IMAGE_DIGEST_EMPTY:-false}" = "true" ] && exit 0
           echo "sha256:$FAKE_IMAGE_DIGEST"; exit 0 ;;
+        '{{.Image}}')
+          # The REAL local image ID — bare hex, no "sha256:" prefix (that
+          # prefix only ever appears on a genuine digest/{{.ImageDigest}}).
+          [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
+          echo "${FAKE_CONTAINER_IMAGE_ID:-idonlyfallback0000000000000000000000000000000000000000000000}"; exit 0 ;;
       esac
       exit 0
     fi
@@ -395,6 +407,54 @@ class TestFactsIsPureObservation:
         assert facts["engineContainer"]["imageDigest"] == "sha256:deadbeef"
         assert facts["dataVolume"] is True
 
+    def test_engine_container_image_digest_is_never_the_local_image_id(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """MAC3-02 (verificacion-mac-3.md): `inspect -f '{{.Image}}'` (the
+        field the CLI used to read) returns podman's LOCAL IMAGE ID, never
+        a digest — reconcile.rs's images_gap compared it against
+        desired.engine_image.digest (always sha256:...) and could NEVER
+        match, so a perfectly healthy, correctly-digested container was
+        destroyed and recreated on every single observation. A distinct
+        FAKE_CONTAINER_IMAGE_ID here proves the ID value is never what
+        ends up in imageDigest — only {{.ImageDigest}}'s real digest is."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            image_digest="realdigest0123456789",
+            extra_env={"FAKE_CONTAINER_IMAGE_ID": "totallydifferentlocalimageid00000000000000000000000000000000"},
+        )
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        facts = json.loads(result.stdout.strip())
+        assert facts["engineContainer"]["imageDigest"] == "sha256:realdigest0123456789"
+        assert "totallydifferentlocalimageid" not in facts["engineContainer"]["imageDigest"]
+
+    def test_engine_container_image_digest_falls_back_to_the_image_id_when_no_digest_is_recorded(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """Defensive fallback (not expected in this app's own flow — every
+        container it creates runs an image pulled BY digest, so podman
+        always has one recorded) for the rare case {{.ImageDigest}}
+        reports nothing at all: better a comparable-but-stale ID than a
+        silently absent fact."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_IMAGE_DIGEST_EMPTY": "true",
+                "FAKE_CONTAINER_IMAGE_ID": "fallbacklocalimageid000000000000000000000000000000000000000000",
+            },
+        )
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        facts = json.loads(result.stdout.strip())
+        assert facts["engineContainer"]["imageDigest"] == "fallbacklocalimageid000000000000000000000000000000000000000000"
+
     def test_porcelain_facts_is_wrapped_in_a_facts_event(self, tmp_path: Path, fake_bin_dir: Path) -> None:
         podman_log = tmp_path / "podman.log"
         env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
@@ -551,6 +611,18 @@ def _fake_codesign(fake_bin_dir: Path, *, verify_ok: bool, cdhash: str) -> None:
     codesign = fake_bin_dir / "codesign"
     codesign.write_text(script)
     codesign.chmod(0o755)
+
+
+def _fake_ps(fake_bin_dir: Path, output: str) -> None:
+    """Fakes the REAL `ps` binary `_foreign_engine_helper` (MAC3-07) shells
+    out to — `output` is exactly what `ps -axo pid=,comm=,args=` would
+    print: one process per line, "<pid> <comm> <args...>". Ignores its own
+    argv (the fake never needs to distinguish invocations, unlike
+    `_FAKE_PODMAN`) since `_foreign_engine_helper` only ever calls `ps` one
+    way."""
+    ps = fake_bin_dir / "ps"
+    ps.write_text(f"#!/bin/sh\ncat <<'PSEOF'\n{output}\nPSEOF\n")
+    ps.chmod(0o755)
 
 
 class TestEnsureMachineNeverAdoptsAForeignMachine:
@@ -1271,6 +1343,84 @@ class TestBundledPodmanGetsItsOwnStorage:
         assert not (state_home / "podman" / "storage.conf").exists()
 
 
+class TestSeccompProfileResolvesFromTheBundleNotTheStateDir:
+    """MAC3-03 (verificacion-mac-3.md, MAC2-07 repeated unfixed): a real Mac
+    run failed with a raw podman error — "opening seccomp profile failed:
+    open <path>: no such file or directory" — because the profile was
+    fetched INTO $SAFENT_STATE_HOME at runtime (image extraction or a
+    raw.githubusercontent download), and podman actually runs INSIDE the
+    podman-machine VM, which only ever virtiofs-mounts /Users, /private and
+    /var/folders. Shipping the profile as a bundled, hash-verified runtime
+    asset (like podman/gvproxy/vfkit) removes the network/image dependency
+    entirely for the PINNED-podman (desktop app) case."""
+
+    def test_bundled_profile_is_used_instead_of_fetching_at_runtime(
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        # ops/container/seccomp/safent.json, staged flat exactly as
+        # stage-runtime.sh's APP_FILES would (see runtime-manifest.lock's
+        # app_files.entries) — content is irrelevant to this test, only
+        # its PATH being the one actually used matters.
+        bundled_profile = pinned_dir / "safent.json"
+        bundled_profile.write_text('{"defaultAction":"SCMP_ACT_ERRNO"}')
+
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, port=healthz_server
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert ticket.strip() == f"http://127.0.0.1:{healthz_server}/?k={_SECRET_TOKEN}"
+        run_calls = [c for c in _podman_calls(podman_log) if c.startswith("run -d ")]
+        assert len(run_calls) == 1, run_calls
+        assert f"--security-opt seccomp={bundled_profile}" in run_calls[0], run_calls[0]
+
+    def test_state_home_given_as_a_symlink_is_canonicalized_before_use(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """Reproduces the exact shape of the real failure: verificacion-mac-3.md's
+        own harness set SAFENT_STATE_HOME to a /tmp path, which is itself a
+        symlink to /private/tmp on macOS — the HOST resolves it fine, but
+        the guest VM (a different OS, no such symlink) cannot. The report's
+        own pass 2 proved the CANONICAL form of the identical folder works;
+        this asserts safent now canonicalizes any override itself instead
+        of depending on the caller already spelling it that way."""
+        real_state = tmp_path / "real-state"
+        real_state.mkdir()
+        alias_state = tmp_path / "alias-state"
+        alias_state.symlink_to(real_state)
+
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        env["SAFENT_PODMAN"] = str(pinned)
+        env["SAFENT_STATE_HOME"] = str(alias_state)
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+
+        storage_conf = real_state / "podman" / "storage.conf"
+        assert storage_conf.is_file(), "safent must generate its own storage.conf under the CANONICAL state home"
+        content = storage_conf.read_text()
+        assert str(real_state / "podman" / "storage") in content
+        assert str(alias_state) not in content, (
+            f"storage.conf must record the canonical path, not the symlink alias: {content}"
+        )
+
+
 class TestMachineInitUsesTheBundledImage:
     """MAC-06 (verificacion-mac-1.md): `machine init` shipped with no
     `--image` at all, so the bundled 932 MB `podman-machine.aarch64.
@@ -1342,3 +1492,126 @@ class TestMachineInitUsesTheBundledImage:
         calls = _podman_calls(podman_log)
         assert "machine init safent-test-engine --rootful --cpus 4 --memory 8192 --disk-size 60" in calls
         assert not any("--image" in c for c in calls), calls
+
+
+class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
+    """MAC3-07 (verificacion-mac-3.md, MAC-07/MAC2-13 repeated unfixed): a
+    real Mac had its machine started fine, but `ps` showed the OWNER's own
+    `/opt/podman/bin/gvproxy`/`vfkit` actually serving it (different
+    sha256) — no bundled containers.conf steered podman's helper
+    resolution. `cmd_ensure_machine` must now catch this and fail loudly
+    instead of shipping silently."""
+
+    def test_a_foreign_gvproxy_serving_our_own_machine_fails_the_machine_stage(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        (pinned_dir / "bin").mkdir()
+        (pinned_dir / "bin" / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "bin" / "vfkit").write_bytes(b"bundled vfkit")
+        # The OWNER's own podman.io install — a DIFFERENT path — is what is
+        # actually running for OUR machine (safent-test-engine).
+        _fake_ps(
+            fake_bin_dir,
+            "84104 /opt/podman/bin/gvproxy --listen safent-test-engine\n"
+            "84106 /opt/podman/bin/vfkit --machine safent-test-engine",
+        )
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 16, f"stdout={result.stdout}\nstderr={result.stderr}"  # machine_start_failed
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        failed = events[-1]
+        assert failed["t"] == "failed"
+        assert failed["code"] == "machine_start_failed"
+        assert "foreign helper binary" in failed["detail"]
+        assert "/opt/podman/bin/gvproxy" in failed["detail"]
+        assert failed["retryable"] is False
+
+    def test_the_bundled_gvproxy_serving_our_own_machine_passes(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        (pinned_dir / "bin").mkdir()
+        (pinned_dir / "bin" / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "bin" / "vfkit").write_bytes(b"bundled vfkit")
+        # The comm path matches the BUNDLED one exactly — no problem.
+        _fake_ps(
+            fake_bin_dir,
+            f"84104 {pinned_dir}/bin/gvproxy --listen safent-test-engine\n"
+            f"84106 {pinned_dir}/bin/vfkit --machine safent-test-engine",
+        )
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["t"] == "done"
+
+    def test_no_gvproxy_or_vfkit_running_yet_is_not_a_failure(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """A machine that just started and has not spun up its helpers yet
+        (or a `ps` that finds nothing at all) must never be treated as a
+        foreign-helper failure — absence of evidence is not evidence."""
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        (pinned_dir / "bin").mkdir()
+        (pinned_dir / "bin" / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "bin" / "vfkit").write_bytes(b"bundled vfkit")
+        _fake_ps(fake_bin_dir, "1 /sbin/launchd\n2 /usr/libexec/something-unrelated")
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        assert events[-1]["t"] == "done"

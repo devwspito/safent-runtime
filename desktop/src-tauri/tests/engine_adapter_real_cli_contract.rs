@@ -94,9 +94,19 @@ case "$1" in
         '{{.State.Running}}')
           [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
           echo "$FAKE_CONTAINER_RUNNING"; exit 0 ;;
-        '{{.Image}}')
+        '{{.ImageDigest}}')
+          # MAC3-02 (verificacion-mac-3.md): the REAL per-container digest
+          # field (confirmed against real podman 6.1.1) — the OLD fake had
+          # `{{.Image}}` (the local image ID field) answer with a
+          # sha256-shaped value, exactly the wrong assumption that let the
+          # pre-fix bug (safent used `{{.Image}}` for this) pass every
+          # test while failing on a real Mac.
           [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
           echo "sha256:$FAKE_IMAGE_DIGEST"; exit 0 ;;
+        '{{.Image}}')
+          # The REAL local image ID — bare hex, never "sha256:"-prefixed.
+          [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
+          echo "${FAKE_CONTAINER_IMAGE_ID:-fakelocalimageid0000000000000000000000000000000000000000000}"; exit 0 ;;
       esac
       exit 0
     fi
@@ -287,6 +297,48 @@ fn real_facts_of_a_converged_engine_deserializes_field_for_field() {
     assert!(facts.data_volume);
     assert_eq!(facts.app_version.as_str(), "0.8.42");
     assert!(!facts.another_instance_running);
+}
+
+/// MAC3-02 (verificacion-mac-3.md): `inspect -f '{{.Image}}'` (what
+/// `cmd_facts` used to read) returns podman's LOCAL IMAGE ID, never a
+/// digest — confirmed against real podman 6.1.1, not assumed — so
+/// `reconcile::images_gap` compared an ID against `desired.engine_image.
+/// digest` (always `sha256:...`) and could NEVER match: a perfectly
+/// healthy, correctly-digested container was destroyed and recreated on
+/// EVERY single observation. The real-CLI contract test this replaces
+/// (`real_facts_of_a_converged_engine_deserializes_field_for_field`) could
+/// not have caught this on its own: its fake podman ALSO answered
+/// `{{.Image}}` with a sha256-shaped value (the exact wrong assumption),
+/// so it stayed green while production failed — this test sets a
+/// DISTINCT, clearly-not-a-digest FAKE_CONTAINER_IMAGE_ID specifically to
+/// prove the adapter never receives it as `image_digest`.
+#[test]
+fn real_facts_reports_the_container_image_digest_never_the_local_image_id() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fx = healthy_fixture("digest-not-id", "engine-good");
+    // SAFETY: ENV_LOCK held for the whole test body (see healthy_fixture's
+    // own doc comment) — a value that would never pass for a digest.
+    unsafe {
+        set_env(
+            "FAKE_CONTAINER_IMAGE_ID",
+            "totallydifferentlocalimageid00000000000000000000000000000000",
+        );
+    }
+    let driver = EmbeddedCliDriver::new(config(&fx, "engine-good"));
+
+    let facts = driver
+        .observe()
+        .expect("the REAL safent facts --json --porcelain must parse into HostFacts");
+
+    let container = facts
+        .engine_container
+        .as_ref()
+        .expect("engineContainer is ALWAYS an object on the real wire");
+    assert_eq!(
+        container.image_digest.as_deref(),
+        Some("sha256:engine-good"),
+        "must be the real digest — never the local image id, regardless of what {{{{.Image}}}} reports"
+    );
 }
 
 /// MAC-01 (verificacion-mac-1.md): the real `safent facts --json --porcelain`

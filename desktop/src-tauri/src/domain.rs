@@ -356,6 +356,34 @@ pub enum FailureCode {
     /// misleading `cli_porcelain_unsupported` — this name says exactly
     /// what is missing instead.
     EngineDigestMissing,
+    /// NOT part of the CLI's vocabulary — synthesized by `engine_adapter.rs`
+    /// when a `failed` event's stderr shows the seccomp profile itself
+    /// could not be opened/obtained. MAC3-03 (verificacion-mac-3.md):
+    /// reproduced live on a real Mac as a raw podman error surfacing
+    /// through `daemon_unhealthy` — "Error: opening seccomp profile
+    /// failed: open <path>: no such file or directory" — because the CLI's
+    /// `_run` (`safent`) had no dedicated failure branch for it at all: the
+    /// whole script runs under `set -e`, so `podman run` failing this way
+    /// aborted before any `_die_porcelain` call ever ran. Also raised for
+    /// the CLI's own honest self-report (`_ensure_seccomp`'s last-resort
+    /// branch, "Could not obtain the seccomp profile") when the bundled,
+    /// image-baked, downloaded, and cached sources are all unavailable.
+    /// Either origin points at the SAME missing resource, never at the
+    /// container's own health — this name says exactly that.
+    SeccompProfileMissing,
+    /// NOT part of the CLI's vocabulary — synthesized by `engine_adapter.rs`
+    /// when a `failed` event's stderr shows the machine's own gvproxy/vfkit
+    /// is a FOREIGN (non-bundled) binary. MAC3-07 (verificacion-mac-3.md,
+    /// MAC-07/MAC2-13 repeated unfixed): reproduced live — a Mac with its
+    /// own podman.io install running ran ITS gvproxy/vfkit for OUR machine
+    /// (different sha256), because no bundled `containers.conf` steered
+    /// podman's helper resolution and `augmented_path()` added
+    /// `/opt/podman/bin` to the CLI's own PATH. The CLI (`cmd_ensure_
+    /// machine`) reports this generically as `machine_start_failed` (the
+    /// closed 20-code vocabulary has no dedicated code for it); this name
+    /// says exactly what is wrong instead of leaving it as an
+    /// undifferentiated start failure.
+    ForeignEngineHelper,
 }
 
 impl FailureCode {
@@ -391,6 +419,8 @@ impl FailureCode {
             FailureCode::RepairIneffective => "repair_ineffective",
             FailureCode::LocalStorageConflict => "local_storage_conflict",
             FailureCode::EngineDigestMissing => "engine_digest_missing",
+            FailureCode::SeccompProfileMissing => "seccomp_profile_missing",
+            FailureCode::ForeignEngineHelper => "foreign_engine_helper",
         }
     }
 }

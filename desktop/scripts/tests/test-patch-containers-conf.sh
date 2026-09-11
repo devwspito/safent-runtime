@@ -71,3 +71,26 @@ if patch_containers_conf_for_bundled_helpers "$NOENGINE" 2>/dev/null; then
 fi
 
 echo "[ok] all patch_containers_conf_for_bundled_helpers assertions passed"
+
+# ---- MAC3-07: write_macos_containers_conf (no upstream file to patch) -----
+MACOS_CONF="$WORK/macos-containers.conf"
+write_macos_containers_conf "$MACOS_CONF"
+
+echo "[*] macOS containers.conf sets helper_binaries_dir to \$BINDIR alone (flat bin/, no libexec/ split)"
+[ -f "$MACOS_CONF" ] || fail "write_macos_containers_conf did not create $MACOS_CONF"
+grep -qF '[engine]' "$MACOS_CONF" || fail "macOS containers.conf missing [engine] section"
+# shellcheck disable=SC2016 # literal $BINDIR token being searched for, not expanded
+grep -qF 'helper_binaries_dir = ["$BINDIR"]' "$MACOS_CONF" \
+  || fail "macOS containers.conf: helper_binaries_dir line missing or wrong"
+# Linux's own libexec/ split entry must NEVER appear here — macOS stages
+# gvproxy/vfkit/krunkit flat alongside podman, not under a libexec/ subdir.
+if grep -qF 'libexec' "$MACOS_CONF"; then
+  fail "macOS containers.conf must not reference libexec/ (Linux-only layout)"
+fi
+
+echo "[*] write_macos_containers_conf is deterministic — same call, same output, byte for byte"
+MACOS_CONF2="$WORK/macos-containers2.conf"
+write_macos_containers_conf "$MACOS_CONF2"
+diff "$MACOS_CONF" "$MACOS_CONF2" >/dev/null || fail "write_macos_containers_conf produced different output on a second call"
+
+echo "[ok] all write_macos_containers_conf assertions passed"
