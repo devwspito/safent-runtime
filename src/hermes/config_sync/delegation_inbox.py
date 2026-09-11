@@ -864,6 +864,32 @@ async def run_delegation_inbox_once(
 
     resolved_db_path = db_path or _STATE_DB_PATH
 
+    # A separate durable telemetry channel: delivery ACK is never execution.
+    # Keep SQLite/HTTP off the event loop and re-check association per send.
+    import asyncio  # noqa: PLC0415
+
+    from hermes.config_sync.delegation_status import push_status_events  # noqa: PLC0415
+
+    def pairing_is_current() -> bool:
+        current = store.get()
+        return (
+            current is not None and current.state == "active"
+            and current.instance_id == assoc.instance_id
+            and current.tenant_id == assoc.tenant_id
+            and current.paired_at == assoc.paired_at
+            and current.cloud_endpoint == assoc.cloud_endpoint
+            and current.signing_pubkey_hex == assoc.signing_pubkey_hex
+        )
+
+    try:
+        await asyncio.to_thread(
+            push_status_events, resolved_db_path, instance_id=assoc.instance_id,
+            cloud_endpoint=assoc.cloud_endpoint, instance_secret=instance_secret,
+            is_current=pairing_is_current,
+        )
+    except Exception:  # noqa: BLE001 — telemetry failure cannot block policy/inbox work
+        logger.warning("hermes.config_sync.delegation_status.unavailable")
+
     try:
         push_pending_delegation_results_once(
             db_path=resolved_db_path,

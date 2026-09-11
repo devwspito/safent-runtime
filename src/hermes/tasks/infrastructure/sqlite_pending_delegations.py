@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS pending_delegations (
     from_instance_id TEXT NOT NULL,
     to_employee_id   TEXT NOT NULL DEFAULT '',
     to_agent_id      TEXT NOT NULL DEFAULT '',
+    to_instance_id   TEXT,
     body             TEXT NOT NULL,
     issued_at        TEXT NOT NULL,
     status           TEXT NOT NULL DEFAULT 'pending'
@@ -110,6 +111,16 @@ class SqlitePendingDelegationRepository:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(_DDL_PENDING_DELEGATIONS)
+        # A verified recipient is required before sending execution telemetry.
+        # Legacy rows remain unknown; never guess their destination after pairing.
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(pending_delegations)")}
+        if "to_instance_id" not in columns:
+            try:
+                self._conn.execute("ALTER TABLE pending_delegations ADD COLUMN to_instance_id TEXT")
+            except sqlite3.OperationalError:
+                columns = {row[1] for row in self._conn.execute("PRAGMA table_info(pending_delegations)")}
+                if "to_instance_id" not in columns:
+                    raise
 
     @classmethod
     def in_memory(cls) -> SqlitePendingDelegationRepository:
@@ -132,8 +143,8 @@ class SqlitePendingDelegationRepository:
             INSERT OR IGNORE INTO pending_delegations (
                 message_id, correlation_id, from_employee_id, from_agent_id,
                 from_instance_id, to_employee_id, to_agent_id, body,
-                issued_at, status, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                issued_at, status, created_at, to_instance_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
             (
                 envelope["message_id"],
@@ -146,6 +157,7 @@ class SqlitePendingDelegationRepository:
                 envelope["body"],
                 envelope["issued_at"],
                 now,
+                envelope.get("to_instance_id"),
             ),
         )
         conn.commit()
