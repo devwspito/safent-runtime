@@ -474,6 +474,13 @@ struct TauriNotifier {
 
 impl Notifier for TauriNotifier {
     fn notify(&self, event: &DomainEvent) {
+        if let Some(snapshot) = self
+            .app
+            .state::<crate::diagnostics::DiagnosticsState>()
+            .record(event)
+        {
+            let _ = self.app.emit("safent://bootstrap-state", snapshot);
+        }
         match event {
             DomainEvent::StageEntered {
                 stage,

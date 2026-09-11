@@ -10,6 +10,8 @@ fn main() {
             "write_host_clipboard",
             "cancel_bootstrap",
             "retry_bootstrap",
+            "export_diagnostics",
+            "get_bootstrap_state",
         ]),
     ))
     .expect("failed to run tauri-build");

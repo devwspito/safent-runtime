@@ -1,5 +1,7 @@
 import { initialState, reduceLifecycle, type UiState } from './lifecycle.js'
-import { requestCancel, requestRetry, subscribeToEngineEvents, subscribeToReconnect } from './ipc.js'
+import { isTauriRuntime, requestCancel, requestRetry, requestDiagnostics, subscribeToBootstrapState } from './ipc.js'
+import { reduceBootstrapSnapshot } from './bootstrap-state.js'
+import { diagnosticsAction } from './diagnostics-action.js'
 import { nativeAction } from './native-action.js'
 import { manageFocusOnTransition, render, type ScreenElements } from './render.js'
 
@@ -53,16 +55,23 @@ function main(): void {
     actionError.hidden = !message
   }
   const eventError = () => showActionError('No se pudo conectar con el servicio de la aplicación. Cierra y vuelve a abrir Safent.')
-  void subscribeToEngineEvents((event) => {
+  void subscribeToBootstrapState((snapshot) => {
     showActionError('')
-    apply(reduceLifecycle(state, { source: 'engine', event }))
+    apply(reduceBootstrapSnapshot(state, snapshot))
   }).catch(eventError)
-  void subscribeToReconnect((reason) => apply(reduceLifecycle(state, { source: 'reconnect', reason }))).catch(eventError)
 
   const cancel = nativeAction(requestCancel, showActionError,
     'No se pudo solicitar la cancelación. Safent puede seguir preparando tu espacio; comprueba el estado antes de reintentar.')
   const retry = nativeAction(requestRetry, showActionError,
     'No se pudo solicitar el reintento. Puedes volver a intentarlo sin perder los detalles del fallo.')
+
+  const diagnosticsNote = requireElement('diagnostics-note')
+  const exportDiagnostic = diagnosticsAction(els.diagnosticsButton, diagnosticsNote, requestDiagnostics)
+  els.diagnosticsButton.disabled = !isTauriRuntime()
+  if (!isTauriRuntime()) diagnosticsNote.textContent = 'La exportación necesita la aplicación nativa de Safent.'
+  els.diagnosticsButton.addEventListener('click', () => {
+    if (!els.diagnosticsButton.disabled) void exportDiagnostic()
+  })
 
   els.cancelButton.addEventListener('click', () => {
     if (els.cancelButton.disabled) return

@@ -12,6 +12,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+tempfile = "3"
 
 # update/ orchestrator (contracts/update.md): parse latest.json + runtime-manifest.json,
 # compare VersionSet, drive the Tauri updater plugin for the wrapper's own self-update.

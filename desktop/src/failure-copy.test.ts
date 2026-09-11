@@ -28,6 +28,7 @@ const ALL_CODES: readonly FailureCode[] = [
   'cli_porcelain_unsupported',
   'repair_ineffective',
   'local_storage_conflict',
+  'engine_digest_missing',
 ]
 
 const JARGON = /podman|contenedor|container|\bvm\b|máquina virtual|digest|daemon/i

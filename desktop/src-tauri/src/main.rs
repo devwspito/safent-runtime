@@ -28,6 +28,7 @@ mod update;
 // domain + reconciler + ports/adapter + the observe-plan-apply loop — THE
 // default and only boot path (main() below).
 mod boot;
+mod diagnostics;
 mod domain;
 mod engine_adapter;
 mod ports;
@@ -257,11 +258,15 @@ fn main() {
             window_policy::focus_existing(app);
         }))
         .manage(policy.clone())
+        .manage(diagnostics::DiagnosticsState::default())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             read_host_clipboard,
             write_host_clipboard,
             boot::cancel_bootstrap,
-            boot::retry_bootstrap
+            boot::retry_bootstrap,
+            diagnostics::export_diagnostics,
+            diagnostics::get_bootstrap_state
         ])
         .setup(move |app| {
             // NOTE: do NOT replace the default macOS menu. A custom menu that drops the

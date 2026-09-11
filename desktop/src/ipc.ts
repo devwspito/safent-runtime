@@ -1,4 +1,5 @@
 import type { EngineEvent } from './lifecycle.js'
+import type { BootstrapSnapshot } from './bootstrap-state.js'
 
 // The shell ships with ZERO npm runtime dependencies (see desktop/README.md's
 // "reversible shell" goal): `app.withGlobalTauri: true` in tauri.conf.json
@@ -22,6 +23,22 @@ function tauri(): TauriGlobal | undefined {
 
 export function isTauriRuntime(): boolean {
   return tauri() !== undefined
+}
+
+/** Subscribe first, then replay. A late snapshot cannot replace newer live state. */
+export async function subscribeToBootstrapState(onState: (snapshot: BootstrapSnapshot) => void): Promise<() => void> {
+  const api=tauri()
+  if(!api) return ()=>{}
+  let sequence=0
+  const accept=(snapshot:BootstrapSnapshot|null)=>{
+    if(!snapshot || !Number.isSafeInteger(snapshot.sequence) || snapshot.sequence<=sequence) return
+    sequence=snapshot.sequence
+    onState(snapshot)
+  }
+  const unlisten=await api.event.listen<BootstrapSnapshot>('safent://bootstrap-state',msg=>accept(msg.payload))
+  try { accept(await api.core.invoke<BootstrapSnapshot|null>('get_bootstrap_state')) }
+  catch(error) { unlisten(); throw error }
+  return unlisten
 }
 
 /**
@@ -77,4 +94,14 @@ export function requestCancel(): Promise<void> {
 /** "Reintentar" on the one failure screen. */
 export function requestRetry(): Promise<void> {
   return invoke('retry_bootstrap')
+}
+
+export type DiagnosticResult = { status: 'saved' | 'cancelled' }
+
+export async function requestDiagnostics(): Promise<DiagnosticResult> {
+  const api = tauri()
+  if (!api) throw new Error('Native Safent runtime is unavailable')
+  const result = await api.core.invoke<DiagnosticResult>('export_diagnostics')
+  if (result?.status !== 'saved' && result?.status !== 'cancelled') throw new Error('Unconfirmed diagnostic export')
+  return result
 }

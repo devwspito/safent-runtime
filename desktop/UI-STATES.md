@@ -11,9 +11,11 @@ termine.»
 **Fallo** (`kind: 'failed'`) — la ÚNICA pantalla de error (FR-033). Titular
 en lenguaje del dueño según `FailureCode` (`failure-copy.ts`; nunca
 «podman»/«contenedor»/«VM» fuera de «Detalles»). «Reintentar» (oculto si no
-`retryable`; «Reintentando…» sin doble envío). «Exportar diagnóstico» aparece
-deshabilitado con explicación hasta que exista el comando nativo.
-`<details>` con Código, Etapa, Mensaje técnico. Cancel también resuelve
+`retryable`; «Reintentando…» sin doble envío). «Exportar diagnóstico de arranque»
+abre el selector nativo sólo dentro de la app; en preview sin Tauri queda
+deshabilitado con explicación.
+`<details>` con Código, última Etapa y explicación de la información omitida
+(no se transportan mensajes privados en el snapshot). Cancel también resuelve
 aquí: el contrato lo trata como un `failed` más.
 
 **Reconectando** (`kind: 'reconnecting'`) — red de seguridad de
@@ -57,11 +59,42 @@ realmente emite, verificado contra el código real de la línea del núcleo:
 `safent://quit-requested`; `boot.rs::start` ahora escucha ambos y ejecuta el
 apagado real (`stop_engine_best_effort` + reconectar / salir).
 
-**Sigue sin cablear**: `export_diagnostics` — el botón «Exportar diagnóstico»
-está deshabilitado, no invoca un comando inexistente (la CLI ya expone
-`diagnostics --out <path>`, contrato §4; falta el comando + la superficie de
-guardado/revelado del fichero — no es wiring mecánico, es una decisión de UX
-pendiente). Ver el informe de integración.
+## Diagnóstico de arranque y replay (2026-09-11)
+
+`export_diagnostics` ya está cableado al selector oficial de Tauri en Rust.
+La afirmación anterior de que la CLI implementaba `diagnostics --out` era
+incorrecta: ese verbo aparece en el contrato documental, no en el dispatcher
+real de `safent`. La exportación entregada es **diagnóstico mínimo de arranque**,
+no un bundle de soporte completo del runtime.
+
+JSON schema1: versión pública de app, OS/arquitectura, últimos128 eventos
+bootstrap proyectados por allowlist y contador de eventos omitidos. Nunca
+recopila archivos, conversaciones, variables, keychain, stdout/stderr, etiquetas
+libres, detalles de error, URL o credenciales. Ni siquiera los guarda en el
+buffer. No ejecuta CLI ni scripts para exportar.
+
+Selector nativo elige destino; el frontend no puede proporcionar ruta ni cuerpo.
+Escritura atómica mediante temporal hermano (0600 en Unix), rechazando symlinks
+y destinos no regulares. Reemplazo de un archivo existente sólo tras la selección
+y confirmación del diálogo del SO. Doble invocación bloqueada en Rust y renderer.
+Cancelación: estado normal, sin archivo; error: aviso recuperable sin mensaje
+crudo de sistema; éxito sólo después de escritura confirmada. No abre ni sube el
+archivo automáticamente.
+
+El loader escucha `safent://bootstrap-state` y después invoca
+`get_bootstrap_state`: snapshot `{sequence,event,last_stage,point_of_no_return}`
+tipado, sin texto libre. Ignora secuencias antiguas/duplicadas para que un snapshot
+tardío no sustituya eventos nuevos o un reintento. Reutiliza `reduceLifecycle`;
+no hay otro motor de arranque. Corrige el fallo inicial emitido antes de montar
+la ventana, reproducido en binario real. Ambos comandos nuevos se conceden
+**sólo al loader local**, nunca a `remote-ui`; no se concede acceso JS general a
+diálogos o filesystem. Los canales legacy de eventos siguen existiendo, pero
+este loader usa el canal seguro con replay.
+
+Verificación:95 renderer tests,207 Rust tests, typecheck/build/fmt; binario Linux
+aarch64 real bajo Xvfb con runtime deliberadamente ausente, selector GTK real,
+cancelación y guardado JSON0600 comprobados. Mac/Windows y distribución firmada
+siguen pendientes. No se publicó imagen final.
 
 ## Feedback IPC (revisión 2026-09-11)
 

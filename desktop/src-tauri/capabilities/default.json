@@ -6,6 +6,8 @@
   "permissions": [
     "core:default",
     "allow-cancel-bootstrap",
-    "allow-retry-bootstrap"
+    "allow-retry-bootstrap",
+    "allow-export-diagnostics",
+    "allow-get-bootstrap-state"
   ]
 }

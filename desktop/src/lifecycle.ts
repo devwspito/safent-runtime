@@ -59,6 +59,7 @@ export type FailureCode =
   | 'cli_porcelain_unsupported'
   | 'repair_ineffective'
   | 'local_storage_conflict'
+  | 'engine_digest_missing'
 
 /** One line from `safent://engine-event`, exactly `boot.rs`'s `EngineEventPayload`. */
 export type EngineEvent =

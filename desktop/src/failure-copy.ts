@@ -113,6 +113,10 @@ const COPY: Record<FailureCode, FailureCopy> = {
     headline: 'Algo en este equipo ya está usando el almacén local de Safent.',
     hint: 'Cierra otras copias de Safent que puedan estar abiertas y vuelve a intentarlo.',
   },
+  engine_digest_missing: {
+    headline: 'Esta copia de Safent está incompleta.',
+    hint: 'Descarga una copia completa desde la página oficial. Puedes exportar el diagnóstico de arranque para soporte.',
+  },
 }
 
 const FALLBACK: FailureCopy = {
