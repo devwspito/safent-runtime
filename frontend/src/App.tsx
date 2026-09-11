@@ -6,14 +6,10 @@ import ChatView from './views/ChatView'
 import AdsView from './views/AdsView'
 import { CapacidadesView, SistemaView } from './views/SectionHubs'
 import { useActiveProvider } from './hooks/useActiveProvider'
-import { useFeatures } from './hooks/useFeatures'
 import { ReconnectScreen } from './components/ReconnectScreen'
 import { getAuthStatus, subscribeAuthStatus } from './lib/token'
 
-// Code-split OfficeView at the route boundary; it imports the canvas engine
-// which is non-trivial (~10 kB gzipped) and not needed on other routes.
-// (UsageView/EnVivoView are lazy-loaded inside SectionHubs.)
-const OfficeView = lazy(() => import('./views/OfficeView'))
+const TasksView = lazy(() => import('./views/TasksView'))
 
 
 /** Shared route-boundary skeleton: stacked lines that mirror a view header. */
@@ -42,23 +38,8 @@ function RouteFallback({ label }: { label: string }) {
   )
 }
 
-function OfficeFallback() {
-  return <RouteFallback label="Cargando Office…" />
-}
-
-/**
- * ViewGuard — wraps a route's element and redirects to /chat when the view is
- * not in the allowed set for this user.  While features are still loading we
- * render nothing (the Layout skeleton keeps the sidebar visible) to avoid a
- * flash-redirect before the permission set is known.
- *
- * 'chat' is always allowed — useFeatures.allowed() enforces this invariant.
- */
-function ViewGuard({ viewId, children }: { viewId: string; children: React.ReactNode }) {
-  const { isLoading, allowed } = useFeatures()
-  if (isLoading) return null
-  if (!allowed(viewId)) return <Navigate to="/chat" replace />
-  return <>{children}</>
+function TasksFallback() {
+  return <RouteFallback label="Cargando tareas…" />
 }
 
 // Shell: renders the Layout. The sidebar "connect a model" nudge was removed
@@ -93,16 +74,14 @@ export default function App() {
           {/* chat is always allowed — no guard needed */}
           <Route path="chat" element={<ChatView />} />
           {/* tablero removed (owner: "no es útil para nada") — /tablero now falls through to index → /chat */}
-          {/* Agentes = the unified team view (swarm + cards + pixel floor). */}
-          <Route path="agentes" element={
-            <ViewGuard viewId="agentes">
-              <Suspense fallback={<OfficeFallback />}>
-                <OfficeView />
-              </Suspense>
-            </ViewGuard>
+          <Route path="tareas" element={
+            <Suspense fallback={<TasksFallback />}>
+              <TasksView />
+            </Suspense>
           } />
-          <Route path="office" element={<Navigate to="/agentes" replace />} />
-          {/* The two hubs (owner decision): everything that isn't Chat/Agentes
+          <Route path="agentes" element={<Navigate to="/tareas" replace />} />
+          <Route path="office" element={<Navigate to="/tareas" replace />} />
+          {/* The two hubs (owner decision): everything that isn't Chat/Tareas
               lives inside them as tabs. Hubs gate their own tabs by features. */}
           <Route path="capacidades" element={<CapacidadesView />} />
           <Route path="sistema" element={<SistemaView />} />
@@ -124,8 +103,8 @@ export default function App() {
           <Route path="seguridad" element={<Navigate to="/sistema?tab=seguridad" replace />} />
           <Route path="coste" element={<Navigate to="/sistema?tab=coste" replace />} />
           <Route path="proveedores" element={<Navigate to="/sistema?tab=proveedores" replace />} />
-          {/* The recurring-tasks calendar lives inside Agentes ("Tareas" tab). */}
-          <Route path="programadas" element={<Navigate to="/agentes?tab=tareas" replace />} />
+          {/* The recurring-tasks calendar lives inside Tareas ("Programadas" tab). */}
+          <Route path="programadas" element={<Navigate to="/tareas?tab=programadas" replace />} />
           <Route path="memoria" element={<Navigate to="/sistema?tab=memoria" replace />} />
           <Route path="archivos" element={<Navigate to="/sistema?tab=archivos" replace />} />
           <Route path="ajustes" element={<Navigate to="/sistema" replace />} />

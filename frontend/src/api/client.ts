@@ -40,7 +40,6 @@ import type {
   MfaStatus,
   PoliciesResponse,
   InstallDecisionPayload,
-  AgentRoster,
   WorkspaceFile,
   MemoryItem,
   MemoryEntryDetail,
@@ -214,23 +213,6 @@ export function updateAgent(agentId: string, payload: UpdateAgentPayload): Promi
 
 export function deleteAgent(agentId: string): Promise<unknown> {
   return request<unknown>(`/agents/${encodeURIComponent(agentId)}`, { method: 'DELETE' })
-}
-
-export function getAgentRoster(): Promise<AgentRoster> {
-  return request<AgentRoster>('/agents/roster').catch(
-    () => ({ departments: [] }),
-  )
-}
-
-export function getDefaultRoster(): Promise<{ enabled: boolean }> {
-  return request<{ enabled: boolean }>('/agents/default-roster').catch(() => ({ enabled: true }))
-}
-
-export function setDefaultRoster(enabled: boolean): Promise<{ enabled: boolean }> {
-  return request<{ enabled: boolean }>('/agents/default-roster', {
-    method: 'POST',
-    body: JSON.stringify({ enabled }),
-  })
 }
 
 /**
@@ -532,6 +514,15 @@ export function getInstallRequests(): Promise<InstallRequestsListResponse> {
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────
+
+export function getTaskDashboard(): Promise<import('./types').TaskDashboardResponse> {
+  return request('/tasks/dashboard?limit=100')
+}
+
+/** No empty fallback: transport failure is not an empty inbox. */
+export function getTaskInbox(): Promise<InboundDelegation[]> {
+  return request('/inbound-delegations')
+}
 
 export function listConfiguredTasks(): Promise<ConfiguredTasksResponse> {
   return request<ConfiguredTasksResponse>('/tasks/configured').catch(

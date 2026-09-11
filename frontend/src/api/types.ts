@@ -67,32 +67,6 @@ export interface UpdateTaskPayload {
   enabled?: boolean
 }
 
-// ── Roster ────────────────────────────────────────────────────────────────────
-
-export interface RosterAgent {
-  id: string
-  name: string
-  description: string
-  // The backend (roster_api) emits "factory" (team-provided), "custom" (user-made),
-  // or "directory" (a colleague's agent, surfaced read-only — Fase 3 department-
-  // scoped visibility; it belongs to another instance, never editable here).
-  source: 'factory' | 'custom' | 'directory'
-  department: string
-  is_default: boolean
-  color: string | null
-}
-
-export interface RosterDepartment {
-  id: string
-  name: string
-  kind: 'cerebro' | 'factory' | 'custom'
-  agents: RosterAgent[]
-}
-
-export interface AgentRoster {
-  departments: RosterDepartment[]
-}
-
 // ── Workspace files ───────────────────────────────────────────────────────────
 
 export interface WorkspaceFile {
@@ -282,6 +256,26 @@ export interface ManagedRemoteEndpointsResponse {
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────
+
+/** Read-model contract; until the daemon supports it the UI reports unavailable. */
+export interface TaskDashboardItem {
+  task_id: string
+  label: string
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'pending_approval' | 'rejected' | 'cancelled'
+  source: 'local' | 'enterprise'
+  requested_by?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  conversation_id?: string | null
+  result?: string | null
+  approval_ids?: string[]
+}
+
+export interface TaskDashboardResponse {
+  available: boolean
+  tasks: TaskDashboardItem[]
+  has_more: boolean
+}
 
 export interface ConfiguredTask {
   trigger_id?: string

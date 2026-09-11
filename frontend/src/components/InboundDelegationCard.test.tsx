@@ -100,6 +100,25 @@ describe('InboundDelegationCard', () => {
     expect(onResolved).toHaveBeenCalledTimes(1)
   })
 
+  it('does not treat a negative acknowledgement as success', async () => {
+    resolveInboundDelegation.mockResolvedValue({ ok: false })
+    const onResolved = vi.fn()
+    act(() => root.render(<InboundDelegationCard delegation={delegation} onResolved={onResolved} />))
+    clickButton(container, 'Aprobar')
+    await act(async () => { await Promise.resolve() })
+    expect(onResolved).not.toHaveBeenCalled()
+    expect(sileoSuccess).not.toHaveBeenCalled()
+    expect(sileoError).toHaveBeenCalledTimes(1)
+  })
+
+  it('guards two submissions before React rerenders', async () => {
+    resolveInboundDelegation.mockReturnValue(new Promise(() => {}))
+    act(() => root.render(<InboundDelegationCard delegation={delegation} onResolved={vi.fn()} />))
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>('button')]
+    act(() => { buttons.find(b => b.textContent === 'Aprobar')!.click(); buttons.find(b => b.textContent === 'Rechazar')!.click() })
+    expect(resolveInboundDelegation).toHaveBeenCalledTimes(1)
+  })
+
   it('shows an inline error and does NOT call onResolved when the API call fails', async () => {
     resolveInboundDelegation.mockRejectedValue(new Error('network down'))
     const onResolved = vi.fn()

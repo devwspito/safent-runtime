@@ -38,5 +38,9 @@
   .iconButton:hover, .reopen:hover, .sidebar :global(.sidebar-new-chat:hover) { background: var(--color-surface-hover); color: var(--color-text); }
   .iconButton:active:not(:focus-visible), .reopen:active:not(:focus-visible) { transform: scale(.97); }
 }
-@media (max-width: 700px) { .shell { --sidebar-width: 200px; } }
+@media (max-width: 700px) {
+  .shell { --sidebar-width: 100%; }
+  .shell[data-sidebar-open="true"] :global(.main-content) { display: none; }
+  .sidebar { width: 100%; max-width: none; }
+}
 @media (prefers-reduced-motion: reduce) { .iconButton:active, .reopen:active { transform: none; } }

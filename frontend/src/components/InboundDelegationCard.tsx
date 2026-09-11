@@ -11,7 +11,7 @@
  * the decision itself is a plain approve/reject, no TOTP step.
  */
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { Users } from 'lucide-react'
 import { resolveInboundDelegation } from '../api/client'
@@ -34,16 +34,19 @@ export default function InboundDelegationCard({
 }: InboundDelegationCardProps) {
   const t = useT()
   const [cardState, setCardState] = useState<CardState>({ phase: 'idle' })
+  const resolving = useRef(false)
 
   const isResolving = cardState.phase === 'resolving'
   const isError = cardState.phase === 'error'
   const actionsDisabled = isResolving
 
   async function resolve(decision: 'approve' | 'reject') {
-    if (isResolving) return
+    if (resolving.current) return
+    resolving.current = true
     setCardState({ phase: 'resolving', action: decision })
     try {
-      await resolveInboundDelegation(delegation.message_id, decision)
+      const result = await resolveInboundDelegation(delegation.message_id, decision)
+      if (result?.ok !== true) throw new Error('Decision not acknowledged')
       sileo.success({
         title: decision === 'approve'
           ? t('delegation.toast.approved')
@@ -51,6 +54,7 @@ export default function InboundDelegationCard({
       })
       onResolved()
     } catch {
+      resolving.current = false
       const message = decision === 'approve'
         ? t('delegation.err.approve')
         : t('delegation.err.reject')

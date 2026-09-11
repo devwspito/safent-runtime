@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { PanelLeft, Search, MessageSquare, RefreshCw } from 'lucide-react'
-import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { PanelLeft, Search, MessageSquare, RefreshCw, ListTodo } from 'lucide-react'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { listConversations } from '../api/client'
 import { useChat } from '../hooks/useChat'
 import { useFeatures } from '../hooks/useFeatures'
@@ -41,15 +41,7 @@ function ChatIcon() {
   )
 }
 
-function AgentsIcon() {
-  return (
-    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="8" cy="5.5" r="2.5" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M2 14c0-3 2.686-4.5 6-4.5S14 11 14 14"
-        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
-  )
-}
+function TasksIcon() { return <ListTodo className="nav-icon" size={16} aria-hidden /> }
 
 function PlusIcon() {
   return (
@@ -87,7 +79,7 @@ interface HubNavItem extends NavItem {
 }
 
 /**
- * Four clean entries (owner decision): Chat · Agentes · Capacidades · Sistema.
+ * Four clean entries (owner decision): Chat · Tareas · Capacidades · Sistema.
  * The two hubs contain every other section as tabs (see SectionHubs.tsx).
  * A fifth, "Anuncios", is appended UNCONDITIONALLY by Layout below (026,
  * FR-001/Assumption 7) — not a feature-gated hub tab, and never hidden;
@@ -97,7 +89,7 @@ function useNavItems(): HubNavItem[] {
   const t = useT()
   return [
     { to: '/chat',        label: t('nav.chat'),                 icon: <ChatIcon /> },
-    { to: '/agentes',     label: t('nav.agentes'),              icon: <AgentsIcon /> },
+    { to: '/tareas',      label: t('nav.tareas'),               icon: <TasksIcon /> },
     { to: '/capacidades', label: t('nav.section.capabilities'), icon: <CapacidadesIcon />, anyOf: CAPACIDADES_VIEW_IDS },
     { to: '/sistema',     label: t('nav.section.system'),       icon: <SistemaIcon />, anyOf: SISTEMA_VIEW_IDS, showsPendingBadge: true },
   ]
@@ -299,6 +291,7 @@ export function RecentsSection({ activeConvId, conversationsTick, loadConversati
 
 export default function Layout({ activeProviderReload }: LayoutProps) {
   const navigate = useNavigate()
+  const location = useLocation()
   const navItems = useNavItems()
   const t = useT()
   const { locale, setLocale } = useLocale()
@@ -334,6 +327,27 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(() => !window.matchMedia?.('(max-width: 700px)').matches)
   const sidebarToggle = useRef<HTMLButtonElement>(null)
   const sidebarReopen = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    const media = window.matchMedia?.('(max-width: 700px)')
+    if (!media) return
+    const onResize = () => { if (media.matches) setSidebarOpen(false) }
+    media.addEventListener?.('change', onResize)
+    return () => media.removeEventListener?.('change', onResize)
+  }, [])
+  useEffect(() => {
+    if (window.matchMedia?.('(max-width: 700px)').matches) setSidebarOpen(false)
+  }, [location.key])
+  useEffect(() => {
+    if (!sidebarOpen) return
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || !window.matchMedia?.('(max-width: 700px)').matches) return
+      setSidebarOpen(false)
+      requestAnimationFrame(() => sidebarReopen.current?.focus())
+    }
+    window.addEventListener('keydown', onEscape)
+    return () => window.removeEventListener('keydown', onEscape)
+  }, [sidebarOpen])
 
   function toggleSidebar() {
     setSidebarOpen(open => !open)
