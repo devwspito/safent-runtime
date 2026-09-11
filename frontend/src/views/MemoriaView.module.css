@@ -5,11 +5,8 @@
 /* ── Search panel ─────────────────────────────────────────────────────────── */
 
 .searchPanel {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.025) 0%, rgba(255, 255, 255, 0) 100%),
-    var(--card);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);
   padding: var(--space-4) var(--space-5);
 }
@@ -136,11 +133,8 @@
 /* ── Memory item row — premium depth surface ─────────────────────────────── */
 
 .memItem {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.025) 0%, rgba(255, 255, 255, 0) 100%),
-    var(--card);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-sm);
   padding: var(--space-3) var(--space-4);
   display: flex;
@@ -152,14 +146,13 @@
   transition:
     border-color var(--dur-base) var(--ease),
     background var(--dur-base) var(--ease);
-  will-change: transform;
 }
 
+@media (hover: hover) and (pointer: fine) {
 .memItem:hover {
-  border-color: rgba(255, 255, 255, 0.14);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0) 100%),
-    color-mix(in srgb, var(--color-accent) 4%, var(--card));
+  border-color: var(--color-border);
+  background: var(--color-surface-raise);
+}
 }
 
 .memItem:focus-visible {

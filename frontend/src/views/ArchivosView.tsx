@@ -20,14 +20,6 @@ import { Drawer } from '../components/ui/Drawer'
 import { EmptyState } from '../components/ui/EmptyState'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
-import {
-  AnimatePresence,
-  AnimatedListItem,
-  FadeIn,
-  HoverRow,
-  motion,
-  TWEEN,
-} from '../components/ui/motion'
 import styles from './ArchivosView.module.css'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -183,7 +175,7 @@ function ListEntry({ entry, onClick }: EntryProps) {
   const colorClass = iconColorClass(entry.kind, isDir)
   const kindLabel = isDir ? t('archivos.entry.folder') : t('archivos.entry.file')
   return (
-    <HoverRow
+    <div
       className={styles.entry}
       role="button"
       tabIndex={0}
@@ -201,7 +193,7 @@ function ListEntry({ entry, onClick }: EntryProps) {
       </span>
       <span className={styles.entrySize}>{isDir ? '—' : formatBytes(entry.size)}</span>
       <span className={styles.entryDate}>{formatDate(entry.modified, t)}</span>
-    </HoverRow>
+    </div>
   )
 }
 
@@ -213,7 +205,7 @@ function GridEntry({ entry, onClick }: EntryProps) {
   const colorClass = iconColorClass(entry.kind, isDir)
   const kindLabel = isDir ? t('archivos.entry.folder') : t('archivos.entry.file')
   return (
-    <HoverRow
+    <div
       className={styles.gridEntry}
       role="button"
       tabIndex={0}
@@ -230,7 +222,7 @@ function GridEntry({ entry, onClick }: EntryProps) {
         }
       </span>
       <span className={styles.gridEntryName}>{entry.name}</span>
-    </HoverRow>
+    </div>
   )
 }
 
@@ -245,21 +237,27 @@ function FileDrawer({ file, onClose }: FileDrawerProps) {
   const t = useT()
   const [preview, setPreview] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState(false)
+  const [previewPath, setPreviewPath] = useState<string | null>(null)
+  const [retry, setRetry] = useState(0)
 
   useEffect(() => {
+    setPreview(null)
+    setPreviewError(false)
+    setPreviewLoading(false)
+    setPreviewPath(file?.path ?? null)
     if (!file || file.is_dir || !TEXT_KINDS.has(file.kind ?? '')) {
-      setPreview(null)
       return
     }
     setPreviewLoading(true)
     const controller = new AbortController()
     fetch(workspaceDownloadUrl(file.path), { signal: controller.signal })
-      .then(r => r.text())
-      .then(text => setPreview(text.slice(0, 4000) + (text.length > 4000 ? '\n[…truncado]' : '')))
-      .catch(() => setPreview(null))
-      .finally(() => setPreviewLoading(false))
+      .then(r => { if (!r.ok) throw new Error('Preview unavailable'); return r.text() })
+      .then(text => { if (!controller.signal.aborted) setPreview(text.slice(0, 4000) + (text.length > 4000 ? '\n[…truncado]' : '')) })
+      .catch(() => { if (!controller.signal.aborted) setPreviewError(true) })
+      .finally(() => { if (!controller.signal.aborted) setPreviewLoading(false) })
     return () => controller.abort()
-  }, [file])
+  }, [file, retry])
 
   return (
     <Drawer open={file !== null} title={file?.name ?? ''} onClose={onClose}>
@@ -296,15 +294,22 @@ function FileDrawer({ file, onClose }: FileDrawerProps) {
             {t('archivos.download')}
           </a>
 
-          {previewLoading && (
-            <div className={styles.previewLoading}>
+          {previewPath === file.path && previewLoading && (
+            <div className={styles.previewLoading} role="status">
               <Loader2 size={13} className="spin" aria-hidden="true" />
               <span>{t('archivos.preview.loading')}</span>
             </div>
           )}
 
-          {preview !== null && !previewLoading && (
-            <pre className={styles.preview} aria-label={t('archivos.preview.aria')}>
+          {previewPath === file.path && previewError && (
+            <div role="alert" className={styles.errorState}>
+              <p>{t('archivos.preview.error')}</p>
+              <Button variant="secondary" size="sm" onClick={() => setRetry(value => value + 1)}>{t('archivos.retry')}</Button>
+            </div>
+          )}
+          {previewPath === file.path && preview === '' && !previewLoading && <p role="status">{t('archivos.preview.empty')}</p>}
+          {previewPath === file.path && preview !== null && preview !== '' && !previewLoading && (
+            <pre className={styles.preview} tabIndex={0} aria-label={t('archivos.preview.aria')}>
               {preview}
             </pre>
           )}
@@ -338,12 +343,19 @@ export default function ArchivosView() {
   const [selectedFile, setSelectedFile] = useState<WorkspaceFile | null>(null)
   const [uploading, setUploading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const revision = useRef(0)
+  const navigationRevision = useRef(0)
+  const alive = useRef(true)
+  const uploadActive = useRef(false)
 
   const load = useCallback(async (path: string) => {
+    const request = ++revision.current
     setBrowseState({ status: 'loading' })
     try {
       const raw = await listWorkspaceFiles(path || undefined)
-      const entries = Array.isArray(raw) ? raw : []
+      if (request !== revision.current || !alive.current) return
+      if (!Array.isArray(raw) || raw.some(entry => !entry || typeof entry.path !== 'string' || typeof entry.name !== 'string')) throw new Error(t('archivos.err.load'))
+      const entries = [...raw]
       // Directories first, then files alphabetically
       entries.sort((a, b) => {
         const aDir = Boolean(a.is_dir || a.kind === 'directory')
@@ -354,6 +366,7 @@ export default function ArchivosView() {
       })
       setBrowseState({ status: 'success', entries, path })
     } catch (err) {
+      if (request !== revision.current || !alive.current) return
       setBrowseState({
         status: 'error',
         message: err instanceof Error ? err.message : t('archivos.err.load'),
@@ -361,31 +374,48 @@ export default function ArchivosView() {
     }
   }, [])
 
-  useEffect(() => { void load(currentPath) }, [load, currentPath])
+  useEffect(() => {
+    alive.current = true
+    void load(currentPath)
+    return () => { alive.current = false; revision.current++ }
+  }, [load, currentPath])
 
   function navigate(path: string) {
+    if (path === currentPath) { setSelectedFile(null); return }
+    revision.current++
+    navigationRevision.current++
     setCurrentPath(path)
     setSelectedFile(null)
   }
 
   async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const picked = e.target.files
-    if (!picked || picked.length === 0) return
+    const input = e.currentTarget
+    const picked = Array.from(input.files ?? [])
+    if (picked.length === 0 || uploadActive.current) return
+    input.value = ''
+    uploadActive.current = true
+    const navigation = navigationRevision.current
     setUploading(true)
     let ok = 0
-    for (const f of Array.from(picked)) {
+    for (const f of picked) {
+      if (!alive.current) break
       try { await uploadWorkspaceFile(f); ok += 1 }
       catch (err) {
+        if (!alive.current) break
         sileo.error({ title: t('archivos.upload.err').replace('{name}', f.name), description: err instanceof Error ? err.message : undefined })
       }
     }
+    uploadActive.current = false
+    if (!alive.current) return
     setUploading(false)
-    e.target.value = '' // reset so the same file can be re-selected
     if (ok > 0) {
       sileo.success({ title: ok === 1 ? t('archivos.upload.ok_one') : t('archivos.upload.ok_many').replace('{n}', String(ok)) })
       // Uploads land at the workspace root — go there so the file is visible.
-      navigate('')
-      void load('')
+      // A completed upload must not undo a folder the user selected meanwhile.
+      if (navigation === navigationRevision.current) {
+        navigate('')
+        if (currentPath === '') void load('')
+      }
     }
   }
 
@@ -397,8 +427,7 @@ export default function ArchivosView() {
     }
   }
 
-  // Stable key for the entry list so AnimatePresence triggers a cross-fade
-  // when the user enters a different folder.
+  // Stable identity per folder; navigation has no animation delay.
   const listKey = browseState.status === 'success' ? browseState.path : '__loading__'
   const entryCount = browseState.status === 'success' ? browseState.entries.length : 0
 
@@ -477,7 +506,7 @@ export default function ArchivosView() {
 
         {/* Error with inline retry */}
         {browseState.status === 'error' && (
-          <FadeIn>
+          <div>
             <div role="alert" className={styles.errorState}>
               <p className={styles.errorMessage}>{browseState.message}</p>
               <Button
@@ -488,18 +517,14 @@ export default function ArchivosView() {
                 {t('archivos.retry')}
               </Button>
             </div>
-          </FadeIn>
+          </div>
         )}
 
-        {/* AnimatePresence key on listKey cross-fades when navigating folders */}
-        <AnimatePresence mode="wait">
+        {/* Results update immediately, including keyboard-driven searches. */}
+        <>
           {browseState.status === 'success' && (
-            <motion.div
+            <div
               key={listKey}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={TWEEN}
             >
               {browseState.entries.length === 0 ? (
                 <EmptyState
@@ -522,16 +547,16 @@ export default function ArchivosView() {
                         role="list"
                         aria-label={(entryCount === 1 ? t('archivos.count.one') : t('archivos.count.many')).replace('{n}', String(entryCount))}
                       >
-                        <AnimatePresence initial={false}>
+                        <>
                           {browseState.entries.map(entry => (
-                            <AnimatedListItem key={entry.path}>
+                            <li key={entry.path}>
                               <ListEntry
                                 entry={entry}
                                 onClick={() => handleEntryClick(entry)}
                               />
-                            </AnimatedListItem>
+                            </li>
                           ))}
-                        </AnimatePresence>
+                        </>
                       </ul>
                     </>
                   ) : (
@@ -540,23 +565,23 @@ export default function ArchivosView() {
                       role="list"
                       aria-label={(entryCount === 1 ? t('archivos.count.one') : t('archivos.count.many')).replace('{n}', String(entryCount))}
                     >
-                      <AnimatePresence initial={false}>
+                      <>
                         {browseState.entries.map(entry => (
-                          <AnimatedListItem key={entry.path}>
+                          <li key={entry.path}>
                             <GridEntry
                               entry={entry}
                               onClick={() => handleEntryClick(entry)}
                             />
-                          </AnimatedListItem>
+                          </li>
                         ))}
-                      </AnimatePresence>
+                      </>
                     </ul>
                   )}
                 </>
               )}
-            </motion.div>
+            </div>
           )}
-        </AnimatePresence>
+        </>
       </div>
 
       <FileDrawer
