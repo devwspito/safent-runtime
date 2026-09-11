@@ -223,7 +223,19 @@ cuentas conectadas.
   verificacion-mac-2.md: grapar el DMG NO grapa lo que hay dentro; el `.app`
   suelto que este mismo pipeline publica como `macos/Safent.app.tar.gz` para
   el actualizador no tiene, si no, ninguna vía offline de validarse) pasa a
-  ser condición de release; se reintenta ante fallo transitorio, no se degrada
+  ser condición de release; se reintenta ante fallo transitorio, no se degrada.
+  **Orden exacto (MAC4-06, verificacion-mac-4.md — el orden actual sigue
+  fallando: `stapler validate Safent.app` → rc=65 dentro de un DMG ya
+  notarizado y grapado)**: `xcrun stapler staple` **escribe** el vale dentro
+  del propio paquete, así que necesita un destino escribible — grapar el
+  `.app` DESPUÉS de copiarlo a la imagen de disco final (de solo lectura
+  para distribución) no tiene dónde escribir in situ. Grapar el `.app` en
+  cuanto `notarytool submit --wait` confirma `Accepted`, **mientras sigue
+  suelto en la carpeta de trabajo** — ANTES de construir el DMG y ANTES de
+  comprimirlo a `Safent.app.tar.gz` — y construir AMBOS artefactos a partir
+  de esa MISMA copia ya grapada; grapar el `.dmg` en sí es una segunda
+  llamada independiente, después, sobre el fichero ya construido (ver
+  `desktop/RUNTIME-BUNDLE.md` para el razonamiento completo).
 - Pasar `TAURI_SIGNING_PRIVATE_KEY` y publicar `latest.json`
   (`includeUpdaterJson: true`) **y** `runtime-manifest.json` firmado
 - Gate de publicación: si falta cualquiera de los cuatro artefactos, **no hay release**

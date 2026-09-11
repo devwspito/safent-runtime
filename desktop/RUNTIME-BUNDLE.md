@@ -305,6 +305,55 @@ el DMG), añadir `xcrun stapler staple Safent.app` **antes** de comprimirlo a
 (DMG y `.app` suelto), así que es grapar dos veces el mismo vale, no pedir
 una notarización nueva.
 
+### MAC4-06 (verificacion-mac-4.md): el orden exacto que falta — grapar el
+### `.app` es ANTES de construir el DMG, no después
+
+Verificación 4 confirma que la sección de arriba **todavía no se aplicó**
+(`stapler validate Safent.app` → rc=65 dentro del propio DMG ya grapado y
+notarizado). La pregunta nueva del encargo — «¿grapar el `.app` antes de
+meterlo en el DMG?» — la respuesta es **sí, y es la ÚNICA posición que
+funciona**, por una razón mecánica, no de estilo:
+
+`xcrun stapler staple` **escribe** el vale dentro del propio paquete (un
+recurso bajo `Contents/` del `.app`, o el equivalente en el `.dmg`) — necesita
+un destino en el que se pueda escribir. Un `.app` ya copiado dentro de la
+imagen de disco final (normalmente UDZO/UDBZ, comprimida y de solo lectura
+para distribución) ya no es escribible in situ; grapar tendría que desmontar,
+reconstruir la imagen o similar. El propio fichero `.dmg`, en cambio, SIEMPRE
+es escribible en el disco del runner (aunque su contenido interno sea de solo
+lectura una vez montado), así que grapar el `.dmg` en sí nunca tiene este
+problema — es exactamente por eso que ese paso YA funciona hoy y el del `.app`
+no.
+
+**El orden que funciona, de principio a fin** (un solo `.app` firmado,
+reutilizado para AMBOS artefactos publicados):
+
+1. Construir y firmar `Safent.app` (hardened runtime, entitlements) en una
+   carpeta de trabajo normal, escribible.
+2. Empaquetar ESE `.app` para el envío a notarización (`ditto -c -k` a un
+   `.zip`, o el propio DMG en modo borrador — Apple acepta ambos formatos de
+   envío; el formato de envío es independiente del artefacto final).
+3. `xcrun notarytool submit --wait` sobre ese envío.
+4. En cuanto notarytool confirma `Accepted`: `xcrun stapler staple
+   <workdir>/Safent.app` — el `.app` TODAVÍA está suelto en la carpeta de
+   trabajo, escribible, nunca dentro de ninguna imagen de disco todavía.
+5. A partir de AQUÍ, el `.app` ya lleva vale propio. Los dos artefactos
+   publicados se construyen los DOS a partir de esta MISMA copia, ya grapada:
+   - `hdiutil create` (o `create-dmg`) el DMG final, copiando el `.app` YA
+     GRAPADO a la imagen.
+   - `tar -czf Safent.app.tar.gz Safent.app` para el actualizador — el mismo
+     paso que ya pedía la sección de arriba, ahora automático porque parte
+     del mismo `.app` ya grapado, sin necesitar su propia llamada aparte.
+6. `xcrun stapler staple Safent.dmg` sobre el `.dmg` YA CONSTRUIDO — una
+   segunda llamada independiente, sobre un fichero plano en disco (siempre
+   escribible), nunca sobre el `.app` que lleva dentro.
+
+Grapar el `.app` DESPUÉS de construir el DMG (el orden actual, a juzgar por
+el síntoma) sólo grapa el contenedor exterior; el `.app` que un dueño extrae
+—o que el actualizador descarga vía `Safent.app.tar.gz`— sigue sin vale
+propio. Invertir el orden (pasos 4 y 5 arriba) resuelve los dos artefactos a
+la vez con una única llamada nueva a `stapler staple`.
+
 `runtime-manifest.lock` → `excluded_bundle_formats.appimage` tiene el
 razonamiento completo. En corto: linuxdeploy/patchelf reescriben el RUNPATH
 de 6 de los 15 binarios del runtime al empaquetar el AppImage — parte normal
