@@ -73,8 +73,7 @@ class AgentRegistryPort(Protocol):
     def persona_for(self, agent_id: str | None) -> PersonaSpec:
         """PersonaSpec efectiva para el agent_id (o el activo si es None).
 
-        Fail-soft: si el agent_id no existe, cae al agente activo; si tampoco,
-        al primero. Nunca lanza — el daemon siempre puede razonar con ALGUNA
-        persona.
+        Ordinary missing profiles retain the default fallback. A retired factory
+        ID raises FactoryAgentRetired, never silently executes as another agent.
         """
         ...

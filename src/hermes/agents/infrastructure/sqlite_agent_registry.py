@@ -25,16 +25,8 @@ from hermes.agents.domain.ports import (
     CannotDeleteLastAgent,
     CannotUpdateDefaultAgent,
 )
-from hermes.agents.domain.default_roster import default_roster
+from hermes.agents.domain.retired_factory import RETIRED_FACTORY_IDS, require_not_retired
 from hermes.prompts.persona import PersonaSpec
-
-_ROSTER_SEEDED_KEY = "roster_seeded"
-# Toggle del equipo por defecto: cuando está OFF, los 27 especialistas sembrados
-# (id con prefijo `roster-`) se OCULTAN de list_agents (vista Agentes, delegación) —
-# NO se borran, así re-activar es instantáneo y conserva ediciones. El CEO (id `default`)
-# y los agentes propios del usuario (uuid4, sin prefijo) SIEMPRE quedan.
-_DEFAULT_ROSTER_ENABLED_KEY = "default_roster_enabled"
-_ROSTER_ID_PREFIX = "roster-"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -53,10 +45,6 @@ CREATE TABLE IF NOT EXISTS agents (
   updated_at        TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS agent_settings (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
 """
 
 # Idempotent migration: adds autonomy_level to existing DBs without it.
@@ -81,16 +69,11 @@ _MIGRATION_PROVIDER_ALIAS = "ALTER TABLE agents ADD COLUMN provider_alias TEXT"
 _MIGRATION_MANAGED_BY = "ALTER TABLE agents ADD COLUMN managed_by TEXT"
 
 
-def _now_iso() -> str:
-    return datetime.now(tz=UTC).isoformat()
-
-
 class SqliteAgentRegistry:
     """Registro de agentes en SQLite WAL, propiedad del daemon."""
 
-    def __init__(self, *, db_path: Path, seed_default_roster: bool = True) -> None:
+    def __init__(self, *, db_path: Path) -> None:
         self._db_path = db_path
-        self._seed_default_roster = seed_default_roster
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
@@ -100,7 +83,6 @@ class SqliteAgentRegistry:
             self._migrate_provider_alias(conn)
             self._migrate_managed_by(conn)
         self._ensure_default()
-        self._seed_roster()
 
     @staticmethod
     def _migrate_autonomy_level(conn: sqlite3.Connection) -> None:
@@ -154,54 +136,9 @@ class SqliteAgentRegistry:
     # Seed
     # ------------------------------------------------------------------
     def _ensure_default(self) -> None:
-        """Siembra el agente 'default' (CEO) si no hay agentes."""
+        """Ensure the native default even when only historical profiles remain."""
         with self._connect() as conn:
-            row = conn.execute("SELECT COUNT(*) AS n FROM agents").fetchone()
-            if row["n"] > 0:
-                return
             self._insert(conn, default_agent())
-
-    def _seed_roster(self) -> None:
-        """Siembra el equipo de fábrica UNA sola vez (flag en agent_settings).
-
-        Gated por flag (no por COUNT): si el dueño borra un especialista, NO reaparece
-        en el siguiente arranque. INSERT OR IGNORE por PK fija = race-safe entre daemon
-        y shell-server.
-
-        Inc 5' (2026-07-07): early-return cuando seed_default_roster=False —
-        Community NO debe sembrar los 27 roster-* templates (owner: "not
-        seeded", no meramente ocultos vía set_default_roster_enabled). El
-        agente `default` sigue sembrándose siempre por _ensure_default,
-        llamado ANTES que este método — Community conserva exactamente un
-        agente. Reversible a nivel de FILAS: emparejar (edition→associate) y
-        reabrir el registro con seed_default_roster=True vuelve a crear las
-        27 filas roster-*. La VISIBILIDAD es un eje aparte: el flag
-        default_roster_enabled es sticky por diseño (RC-3, defense-in-depth,
-        ver abajo) — no se re-activa solo; si el dueño quiere verlas tras
-        emparejar, usa set_default_roster_enabled(True) (verbo D-Bus ya
-        existente).
-
-        Defense-in-depth: también apaga el flag de visibilidad en cada boot
-        Community — un `list_agents` nunca expone roster-* aunque el DB sea
-        de una instalación previa a este fix (upgrade path con filas ya
-        sembradas). Idempotente y barato; no reemplaza el no-seed de arriba,
-        lo refuerza.
-        """
-        if not self._seed_default_roster:
-            self.set_default_roster_enabled(False)
-            return
-        with self._connect() as conn:
-            seeded = conn.execute(
-                "SELECT value FROM agent_settings WHERE key = ?", (_ROSTER_SEEDED_KEY,)
-            ).fetchone()
-            if seeded is not None:
-                return
-            for agent in default_roster():
-                self._insert(conn, agent)
-            conn.execute(
-                "INSERT OR REPLACE INTO agent_settings (key, value) VALUES (?, ?)",
-                (_ROSTER_SEEDED_KEY, _now_iso()),
-            )
 
     # ------------------------------------------------------------------
     # Mappers
@@ -280,26 +217,11 @@ class SqliteAgentRegistry:
             rows = conn.execute(
                 "SELECT * FROM agents ORDER BY is_default DESC, created_at ASC"
             ).fetchall()
-            roster_on = self._read_setting(conn, _DEFAULT_ROSTER_ENABLED_KEY) != "0"
         agents = [self._row_to_agent(r) for r in rows]
-        if not roster_on:
-            # Equipo por defecto APAGADO: ocultar los 27 especialistas sembrados
-            # (id `roster-*`). El CEO (`default`) y los agentes propios siguen visibles.
-            agents = [a for a in agents if not a.agent_id.startswith(_ROSTER_ID_PREFIX)]
-        return agents
-
-    def default_roster_enabled(self) -> bool:
-        """¿Está visible el equipo de especialistas por defecto? (ON por defecto)."""
-        with self._connect() as conn:
-            return self._read_setting(conn, _DEFAULT_ROSTER_ENABLED_KEY) != "0"
-
-    def set_default_roster_enabled(self, enabled: bool) -> None:
-        """Enciende/apaga el equipo por defecto (filtra, NO borra — reversible)."""
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO agent_settings (key, value) VALUES (?, ?)",
-                (_DEFAULT_ROSTER_ENABLED_KEY, "1" if enabled else "0"),
-            )
+        return [
+            a for a in agents
+            if a.agent_id not in RETIRED_FACTORY_IDS or a.managed_by == "cloud"
+        ]
 
     def get_agent(self, agent_id: str) -> Agent:
         with self._connect() as conn:
@@ -307,13 +229,17 @@ class SqliteAgentRegistry:
                 "SELECT * FROM agents WHERE agent_id = ?", (agent_id,)
             ).fetchone()
         if row is None:
+            require_not_retired(agent_id)
             raise AgentNotFound(agent_id)
+        require_not_retired(agent_id, managed_by=row["managed_by"])
         return self._row_to_agent(row)
 
     # ------------------------------------------------------------------
     # Commands
     # ------------------------------------------------------------------
     def create_agent(self, draft: AgentDraft) -> Agent:
+        # Reserved historical IDs cannot recreate the removed package via sync/API.
+        require_not_retired(draft.agent_id)
         now = datetime.now(tz=UTC)
         agent = Agent(
             # Honor a caller-provided id (cloud config-sync passes the stable
@@ -406,16 +332,6 @@ class SqliteAgentRegistry:
             if count <= 1:
                 raise CannotDeleteLastAgent(agent_id)
             conn.execute("DELETE FROM agents WHERE agent_id = ?", (agent_id,))
-
-    # ------------------------------------------------------------------
-    # Settings helpers (used by roster seeding)
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _read_setting(conn: sqlite3.Connection, key: str) -> str | None:
-        row = conn.execute(
-            "SELECT value FROM agent_settings WHERE key = ?", (key,)
-        ).fetchone()
-        return row["value"] if row else None
 
     # ------------------------------------------------------------------
     # Persona resolution (consumido por el engine, por ciclo)

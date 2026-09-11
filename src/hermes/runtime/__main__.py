@@ -1436,23 +1436,8 @@ async def _run(*, systemd_notify: bool) -> None:
         SqliteAgentRegistry,
     )
 
-    # Inc 5' (2026-07-07): Community seeds only the native `default` agent —
-    # the 27 roster-* templates are never created (owner: "not seeded", not
-    # merely hidden). Same store/vault pattern as _build_delegation_surface_
-    # adapter; a store error defaults to "community" (fail to the SMALLER
-    # surface, not the larger one).
-    try:
-        from hermes.instance.association_store import SQLiteAssociationStore  # noqa: PLC0415
-        from hermes.shell_server.security.secrets import SecretsVault  # noqa: PLC0415
-
-        _edition = SQLiteAssociationStore(
-            db_path=_DB_PATH, vault=SecretsVault()
-        ).edition()
-    except Exception:  # noqa: BLE001
-        _edition = "community"
-    agent_registry = SqliteAgentRegistry(
-        db_path=_DB_PATH, seed_default_roster=(_edition != "community")
-    )
+    # All editions use the native default plus explicitly configured profiles.
+    agent_registry = SqliteAgentRegistry(db_path=_DB_PATH)
 
     # Componentes del loop
     from hermes.tasks.infrastructure.sqlite_work_queue import SqliteWorkQueue  # noqa: PLC0415

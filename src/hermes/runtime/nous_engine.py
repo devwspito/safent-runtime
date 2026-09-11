@@ -635,41 +635,9 @@ def _build_tool_call_emitter(
         # Record real in-flight tool BEFORE emitting the frame so the registry
         # is always up-to-date by the time the frame reaches the client.
         if live_agent_id:
-            activity_agent = live_agent_id
-            activity_tool = function_name
-            # Delegación: atribuir la actividad EN VIVO al especialista del roster que
-            # mejor encaja, para que el Office muestre a ESE muñeco "trabajando"
-            # (conectado) durante la sub-tarea, no al Cerebro.
-            is_delegation = function_name == "delegate_task"
-            spec_id: str | None = None
-            if is_delegation:
-                from hermes.agents.domain.default_roster import match_specialist  # noqa: PLC0415
-                spec_text = " ".join(
-                    str(function_args.get(k, ""))
-                    for k in ("role", "goal", "context", "task", "instruction")
-                )
-                spec_id = match_specialist(spec_text)
-                if spec_id:
-                    activity_agent = spec_id
-                    activity_tool = "trabajando"
-            live_activity.record(_task_id_str, activity_agent, activity_tool)
-            if is_delegation and spec_id and spec_id != live_agent_id:
-                try:
-                    label = ""
-                    for key in ("goal", "role", "task"):
-                        raw = function_args.get(key)
-                        if raw:
-                            label = str(raw).strip()[:80]
-                            break
-                    live_activity.record_delegation(
-                        _task_id_str, from_id=live_agent_id, to_id=spec_id, label=label
-                    )
-                except Exception:  # noqa: BLE001 — a label/edge failure must never break dispatch
-                    logger.debug(
-                        "hermes.nous_engine.record_delegation_failed task=%s to=%s",
-                        _task_id_str,
-                        spec_id,
-                    )
+            # Attribution is observed identity, never a guessed specialist based
+            # on words in the prompt. Native delegate_task remains unchanged.
+            live_activity.record(_task_id_str, live_agent_id, function_name)
         chunk = TaskStreamChunk(kind=StreamChunkKind.TOOL_CALL, tool_call=descriptor)
         try:
             fut = asyncio.run_coroutine_threadsafe(
@@ -2198,14 +2166,22 @@ class NousReasoningEngine:
         """Resolve the PersonaSpec for this cycle from the agent_registry.
 
         Priority: context.agent_id → active_agent_id() → engine's base persona.
-        Always returns a valid PersonaSpec (fail-soft by design — a broken
-        persona resolution must never crash the reasoning cycle).
+        Ordinary missing profiles retain the existing fallback. Retired factory
+        identities explicitly fail; they must never execute as another persona.
         """
+        from hermes.agents.domain.retired_factory import (  # noqa: PLC0415
+            FactoryAgentRetired, require_not_retired,
+        )
+
         if self._agent_registry is None:
+            require_not_retired(agent_id)
             return self._persona
         try:
             return self._agent_registry.persona_for(agent_id)
+        except FactoryAgentRetired:
+            raise
         except Exception:  # noqa: BLE001 — fail-soft
+            require_not_retired(agent_id)
             logger.warning(
                 "hermes.nous_engine.cycle_persona_fallback agent_id=%s", agent_id
             )
@@ -2245,7 +2221,7 @@ class NousReasoningEngine:
         # Resolve per-cycle persona: use the agent bound to this task (from
         # DecisionContext.agent_id) or the active agent. Falls back to the
         # engine's persona (default agent) when agent_registry is absent.
-        # The registry's persona_for() is fail-soft by contract: never raises.
+        # Retired packaged identities fail explicitly; no silent default run.
         cycle_persona = self._resolve_cycle_persona(cycle_agent_id)
 
         tokenized_payload = self._tokenize_context(context)

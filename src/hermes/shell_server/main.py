@@ -933,20 +933,7 @@ def create_app() -> FastAPI:
     from hermes.agents.infrastructure.sqlite_agent_registry import (  # noqa: PLC0415
         SqliteAgentRegistry,
     )
-    from hermes.instance.association_store import SQLiteAssociationStore  # noqa: PLC0415
-
-    # Inc 5' (2026-07-07): Community seeds only the native `default` agent —
-    # the 27 roster-* templates are never created (owner: "not seeded", not
-    # merely hidden). Mirrors FeatureGuardMiddleware's own edition read
-    # (same store/vault); a store error defaults to "community" (fail to the
-    # SMALLER surface, not the larger one).
-    try:
-        _edition = SQLiteAssociationStore(db_path=_DB_PATH, vault=vault).edition()
-    except Exception:  # noqa: BLE001
-        _edition = "community"
-    agent_registry = SqliteAgentRegistry(
-        db_path=_DB_PATH, seed_default_roster=(_edition != "community")
-    )
+    agent_registry = SqliteAgentRegistry(db_path=_DB_PATH)
     app.state.repo = repo
     app.state.vault = vault
     app.state.conv_repo = conv_repo

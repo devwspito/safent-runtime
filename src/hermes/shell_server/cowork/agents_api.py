@@ -114,28 +114,6 @@ def create_agents_router() -> APIRouter:
             logger.warning("hermes.agents.list_unavailable", extra={"reason": str(exc)})
             return []
 
-    @router.get("/default-roster")
-    async def get_default_roster(request: Request) -> dict:
-        """Estado del equipo de especialistas por defecto (ON/OFF). Fail-soft: ON."""
-        proxy = request.app.state.dbus_proxy
-        try:
-            return {"enabled": await proxy.call_bool("get_default_roster_enabled")}
-        except AgentUnavailable as exc:
-            logger.warning("hermes.agents.default_roster_unavailable", extra={"reason": str(exc)})
-            return {"enabled": True}
-
-    @router.post("/default-roster")
-    async def set_default_roster(request: Request, body: dict) -> dict:
-        """Enciende/apaga el equipo por defecto (oculta/restaura los 27 especialistas;
-        el CEO y tus agentes propios siempre quedan; reversible, no borra)."""
-        proxy = request.app.state.dbus_proxy
-        enabled = bool(body.get("enabled"))
-        try:
-            await proxy.call_bool("set_default_roster_enabled", enabled)
-            return {"enabled": enabled}
-        except AgentUnavailable as exc:
-            _raise_503(exc, "set_default_roster_enabled")
-
     # ------------------------------------------------------------------
     # Roster mutators
     # ------------------------------------------------------------------

@@ -671,13 +671,11 @@ class DbusRuntimeServiceWiring:
 
         Associate mode (instance is paired with a cloud tenant):
           When cloud-managed agents exist, expose only those to the employee UI.
-          This prevents the CE default roster of 28 agents from dominating the
-          associate's UI — the enterprise controls which agents are visible.
+          The enterprise controls which managed profiles are visible.
           The default CEO (is_default=True) is always included as fallback.
 
         Community / CE mode (not associated, or no cloud agents yet):
-          Returns the full registry list unchanged (default roster filtered per
-          the default_roster_enabled flag in the registry).
+          Returns the active registry profiles; historical factory IDs are retired.
         """
         from hermes.agents.application.serialization import agent_to_dict  # noqa: PLC0415
 
@@ -756,22 +754,6 @@ class DbusRuntimeServiceWiring:
         self._authorize(sender_uid, operation="delete_agent")
         self._require_registry().delete_agent(agent_id)
         logger.info("hermes.dbus.agent_deleted", extra={"by_uid": sender_uid})
-
-    def default_roster_enabled(self) -> bool:
-        """¿Visible el equipo de especialistas por defecto? (read, sin authZ)."""
-        if self._agent_registry is None:
-            return True
-        return self._agent_registry.default_roster_enabled()
-
-    async def set_default_roster_enabled(self, *, enabled: bool, sender_uid: int) -> bool:
-        """Enciende/apaga el equipo por defecto (filtra los `roster-*`, NO borra)."""
-        self._authorize(sender_uid, operation="set_default_roster_enabled")
-        self._require_registry().set_default_roster_enabled(enabled)
-        logger.info(
-            "hermes.dbus.default_roster_toggled",
-            extra={"enabled": enabled, "by_uid": sender_uid},
-        )
-        return True
 
     # ------------------------------------------------------------------
     # Gobernanza de skills (Principio 0 / P0-1):

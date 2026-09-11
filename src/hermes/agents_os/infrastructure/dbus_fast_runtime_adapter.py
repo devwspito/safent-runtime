@@ -602,22 +602,6 @@ class Runtime1ServiceInterface(ServiceInterface):
         except CannotDeleteDefaultAgent as exc:
             raise DBusError("org.hermes.Error.NotAllowed", str(exc)) from exc
 
-    @method()
-    async def GetDefaultRosterEnabled(self) -> "b":  # noqa: N802,F821,UP037
-        """¿Visible el equipo de especialistas por defecto? (read-only, sin authZ)."""
-        return self._wiring.default_roster_enabled()
-
-    @method()
-    async def SetDefaultRosterEnabled(self, enabled: "b") -> "b":  # noqa: N802,F821,UP037
-        """Enciende/apaga el equipo por defecto (oculta/restaura los `roster-*`)."""
-        try:
-            sender_uid = await self._resolve_current_sender_uid()
-            return await self._wiring.set_default_roster_enabled(
-                enabled=enabled, sender_uid=sender_uid
-            )
-        except PermissionError as exc:
-            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
-
     # ------------------------------------------------------------------
     # Gobernanza de skills (JSON sobre D-Bus, autoría sender_uid / P0-1)
     # ------------------------------------------------------------------

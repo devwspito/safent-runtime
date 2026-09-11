@@ -623,30 +623,6 @@ export interface ConversationUsage {
   cycles: ConversationUsageCycle[]
 }
 
-// ── Agent stats ───────────────────────────────────────────────────────────────
-
-export interface AgentStatToday {
-  tokens: number
-  cost_usd: number
-  tasks: number
-}
-
-export interface AgentStat {
-  agent_id: string
-  name: string
-  department: string
-  color: string | null
-  state: 'idle' | 'working'
-  active_task_count: number
-  today: AgentStatToday
-  health: string | null
-}
-
-export interface AgentStatsResponse {
-  available: boolean
-  agents: AgentStat[]
-}
-
 // ── Memory ────────────────────────────────────────────────────────────────────
 
 export interface MemoryItem {
