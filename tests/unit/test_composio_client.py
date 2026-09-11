@@ -12,9 +12,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# ENV-DRIFT GUARD: the product image ships composio>=1.0.0-rc2, which exposes
+# ENV-DRIFT GUARD: the product image pins composio==0.13.1, which exposes
 # `composio.exceptions.ComposioError`. composio_client.py imports that symbol at
-# module load. Older host SDKs (0.7.x) lack it, so the import fails on a drifted
+# module load. Other host SDK distributions may lack it, so import fails on a drifted
 # host. This is dependency drift, NOT a product bug — the source is correct for the
 # baked image. Skip the whole module where the SDK is too old; run it wherever the
 # product's SDK is installed (image, matching dev env).
@@ -25,7 +25,7 @@ _composio_exceptions = pytest.importorskip(
 if not hasattr(_composio_exceptions, "ComposioError"):
     pytest.skip(
         "composio SDK on host lacks composio.exceptions.ComposioError "
-        "(product image ships composio>=1.0.0-rc2 which has it) — env drift, "
+        "(product image pins composio==0.13.1 which has it) — env drift, "
         "not a product bug",
         allow_module_level=True,
     )
@@ -377,18 +377,21 @@ class TestExecuteAction:
         assert result == {"subject": "Hello"}
 
     @pytest.mark.asyncio
-    async def test_passes_slug_params_entity_id_to_sdk(self) -> None:
+    @pytest.mark.parametrize("account_id", [None, "connection-selected-by-user"])
+    async def test_passes_slug_params_entity_id_to_sdk(self, account_id) -> None:
         sdk = _fake_sdk()
         await _client(sdk).execute_action(
             slug="GMAIL_SEND_EMAIL",
             params={"to": "a@b.com"},
             entity_id="user-1",
+            connected_account_id=account_id,
         )
 
         sdk.tools.execute.assert_called_once_with(
             "GMAIL_SEND_EMAIL",
             {"to": "a@b.com"},
             user_id="user-1",
+            connected_account_id=account_id,
         )
 
     @pytest.mark.asyncio
