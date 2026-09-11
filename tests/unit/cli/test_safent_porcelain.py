@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -39,6 +40,12 @@ _SAFENT_CLI = _REPO_ROOT / "safent"
 _SECRET_TOKEN = "s3cr3t-token-do-not-leak"  # noqa: S105 - test fixture, not a real credential
 
 _KNOWN_EVENT_TYPES = {"stage", "progress", "done", "failed", "facts", "ready", "status", "url"}
+
+# app-engine.md §3 / engine_adapter.rs's map_progress_unit — CLOSED, never
+# widened for one call site's convenience (MAC5-01, verificacion-mac-5.md:
+# a heartbeat emitting "unit":"seconds" made the adapter reject the WHOLE
+# line as cli_porcelain_unsupported on every cold boot).
+_KNOWN_PROGRESS_UNITS = {"bytes", "layers", "steps"}
 
 _FAKE_PODMAN = """#!/usr/bin/env bash
 set -e
@@ -396,6 +403,26 @@ class TestDataVolumeDerivesFromName:
         result = _run_safent("facts", env=env)
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         assert any(c == "volume exists safent-data" for c in _podman_calls(podman_log))
+
+
+class TestEveryProgressUnitIsInTheClosedVocabulary:
+    """MAC5-01 (verificacion-mac-5.md): a static scan of the REAL `safent`
+    source, never a runtime exercise of each call site — a bug like
+    `_run_with_heartbeat`'s "seconds" unit only fires on whichever code
+    path a test happens to drive live, but every `_stage_progress` call
+    site is a source-level fact this test can check in one pass,
+    independent of which stages this suite's other tests actually reach.
+    Catches this class of bug on Linux, no Mac needed."""
+
+    def test_every_stage_progress_call_site_uses_a_known_unit(self) -> None:
+        source = _SAFENT_CLI.read_text()
+        calls = re.findall(r"_stage_progress\s+\S+\s+\S+\s+([a-zA-Z]+)", source)
+        assert calls, "no _stage_progress call sites found — did the function get renamed?"
+        unknown = sorted({unit for unit in calls if unit not in _KNOWN_PROGRESS_UNITS})
+        assert not unknown, (
+            f"_stage_progress call site(s) use a unit outside app-engine.md §3's closed "
+            f"vocabulary {sorted(_KNOWN_PROGRESS_UNITS)}: {unknown}"
+        )
 
 
 class TestFactsIsPureObservation:

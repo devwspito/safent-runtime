@@ -1296,7 +1296,14 @@ _run_with_heartbeat() {
   while kill -0 "$_hb_pid" 2>/dev/null; do
     sleep 1
     _hb_elapsed=$((_hb_elapsed + 1))
-    [ $((_hb_elapsed % 5)) -eq 0 ] && _stage_progress "$_hb_elapsed" "" seconds
+    # MAC5-01 (verificacion-mac-5.md): "seconds" is not in the closed
+    # progress-unit vocabulary (app-engine.md §3: bytes|layers|steps) —
+    # engine_adapter.rs's map_progress_unit rejected it as
+    # cli_porcelain_unsupported on EVERY cold boot the instant this
+    # heartbeat fired (MAC4-05's own fix). "steps" is the same generic
+    # tick-count unit _pull_with_heartbeat already uses for its own
+    # heartbeat — never widen the vocabulary to add "seconds" for this.
+    [ $((_hb_elapsed % 5)) -eq 0 ] && _stage_progress "$_hb_elapsed" "" steps
   done
   wait "$_hb_pid"
 }
