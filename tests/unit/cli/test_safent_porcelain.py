@@ -598,14 +598,22 @@ def _fake_codesign(fake_bin_dir: Path, *, verify_ok: bool, cdhash: str) -> None:
     manifest entry that carries a `cdhash` — faking the REAL binary (not
     the CLI's own logic) so these tests prove the actual verification
     branch, not a restated assumption. `verify_ok=False` simulates a
-    tampered/invalid signature; `cdhash` is what `-dvvv` reports back."""
+    tampered/invalid signature; `cdhash` is what `-dvvv` reports back.
+
+    MAC4-01 (verificacion-mac-4.md): the REAL `codesign -d`/`-dvvv` writes
+    its report to STDERR (Apple's own convention) — this fake used to
+    `echo` it to stdout, which is exactly why a real-Mac-only bug
+    (`safent:1920`'s `2>/dev/null` discarding that report) shipped twice
+    without a single test catching it. `>&2` here makes this fake match
+    the real binary's channel, so `cmd_stage_runtime`'s OWN `2>/dev/null`
+    bug reproduces under test."""
     script = (
         "#!/bin/sh\n"
         "case \"$1\" in\n"
         "  --verify)\n"
         f"    {'exit 0' if verify_ok else 'exit 1'} ;;\n"
         "  -dvvv)\n"
-        f"    echo 'CDHash={cdhash}' ;;\n"
+        f"    echo 'CDHash={cdhash}' >&2 ;;\n"
         "esac\n"
     )
     codesign = fake_bin_dir / "codesign"

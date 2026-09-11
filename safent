@@ -1917,7 +1917,18 @@ cmd_stage_runtime() {
       # still reach the explicit, porcelain-aware comparison below (an
       # honest runtime_hash_mismatch), never a raw, uncaught shell abort
       # with no `failed` event at all.
-      real_cdhash="$("$codesign_bin" -dvvv "$src" 2>/dev/null | sed -n 's/^CDHash=\(.*\)$/\1/p' | head -1 || true)"
+      # MAC4-01 (verificacion-mac-4.md), same class as 70330e4 (which fixed
+      # the producer, stage-runtime.sh — this is the CONSUMER's own copy of
+      # the identical bug): `codesign -d`/`-dvvv` writes its report to
+      # STDERR (Apple's own convention), never stdout. `2>/dev/null` threw
+      # away the one line this needs (`CDHash=...`), so `real_cdhash` was
+      # ALWAYS empty and could never equal a real manifest cdhash — every
+      # signed, correctly-bundled binary failed closed as
+      # runtime_hash_mismatch on a real Mac. Unreachable while cdhash
+      # entries all shipped null (MAC3-05); populating them (MAC3-05 fixed)
+      # lit this up for the first time. `2>&1` merges the report onto the
+      # SAME stream `sed`/`head` already read from.
+      real_cdhash="$("$codesign_bin" -dvvv "$src" 2>&1 | sed -n 's/^CDHash=\(.*\)$/\1/p' | head -1 || true)"
       [ "$real_cdhash" = "$cdhash" ] || _die_porcelain runtime_hash_mismatch "$path no coincide con el cdhash del manifiesto" false
     else
       [ "$(_sha256 "$src")" = "$sha" ] || _die_porcelain runtime_hash_mismatch "$path no coincide con el manifiesto" false
