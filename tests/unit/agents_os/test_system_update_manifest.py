@@ -171,7 +171,9 @@ class TestVerifyMinisign:
 class TestIsPlaceholderPubkey:
     def test_the_committed_key_is_real_not_the_placeholder(self) -> None:
         text = (Path(rm._REPO_PUBKEY_PATH)).read_text()
-        assert rm.is_placeholder_pubkey(text) is False, "the committed key must be the real Safent updater key, not the placeholder"
+        assert rm.is_placeholder_pubkey(text) is False, (
+            "the committed key must be the real Safent updater key, not the placeholder"
+        )
         assert "minisign public key: 242808B9F2E191FD" in text.splitlines()[0]
 
     def test_a_real_looking_key_is_not_flagged(self) -> None:
@@ -298,13 +300,17 @@ class TestAgainstRealMinisignBinary:
         key_path = tmp_path / "real.key"
         subprocess.run(
             ["minisign", "-G", "-W", "-f", "-p", str(pub_path), "-s", str(key_path), "-c", "t"],
-            check=True, capture_output=True, timeout=10,
+            check=True,
+            capture_output=True,
+            timeout=10,
         )
         manifest_path = tmp_path / "runtime-manifest.json"
         manifest_path.write_bytes(_manifest_bytes(version="5.5.5"))
         subprocess.run(
             ["minisign", "-S", "-s", str(key_path), "-m", str(manifest_path), "-t", "real"],
-            check=True, capture_output=True, timeout=10,
+            check=True,
+            capture_output=True,
+            timeout=10,
         )
 
         pubkey_text = pub_path.read_text()
@@ -316,19 +322,25 @@ class TestAgainstRealMinisignBinary:
         key_path = tmp_path / "real.key"
         subprocess.run(
             ["minisign", "-G", "-W", "-f", "-p", str(pub_path), "-s", str(key_path), "-c", "t"],
-            check=True, capture_output=True, timeout=10,
+            check=True,
+            capture_output=True,
+            timeout=10,
         )
         manifest_path = tmp_path / "runtime-manifest.json"
         manifest_path.write_bytes(_manifest_bytes(version="5.5.5"))
         subprocess.run(
             ["minisign", "-S", "-s", str(key_path), "-m", str(manifest_path), "-t", "real"],
-            check=True, capture_output=True, timeout=10,
+            check=True,
+            capture_output=True,
+            timeout=10,
         )
         manifest_path.write_bytes(_manifest_bytes(version="6.6.6"))  # tamper after signing
 
         real_verify = subprocess.run(
             ["minisign", "-V", "-p", str(pub_path), "-m", str(manifest_path)],
-            capture_output=True, timeout=10, check=False,  # non-zero IS the expected outcome
+            capture_output=True,
+            timeout=10,
+            check=False,  # non-zero IS the expected outcome
         )
         assert real_verify.returncode != 0
 
@@ -495,7 +507,9 @@ class TestGetSystemUpdateContractV3Fields:
 
         body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
         assert body["current"]["app"] == "0.8.42"
-        assert isinstance(body["current"]["engine"], str)  # never null — VersionSet.engine is non-nullable
+        assert isinstance(
+            body["current"]["engine"], str
+        )  # never null — VersionSet.engine is non-nullable
         assert body["current"]["companion"] is None
 
     def test_checked_at_is_a_fresh_iso_timestamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -538,7 +552,11 @@ class TestGetSystemUpdateContractV3Fields:
 
         body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
         assert body["available"] is True
-        assert body["current"] == {"app": "0.1.0", "engine": body["current"]["engine"], "companion": None}
+        assert body["current"] == {
+            "app": "0.1.0",
+            "engine": body["current"]["engine"],
+            "companion": None,
+        }
         assert body["to"] == {
             "app": "999.0.0",
             "engine": "sha256:" + "a" * 64,
@@ -660,3 +678,103 @@ class TestUpdatingReflectsInstallRequests:
 
         body = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
         assert body["updating"] is True
+
+
+class TestSignedReleaseIdentity:
+    @pytest.mark.parametrize(
+        "version,engine,companion",
+        [
+            ("9.9.9", {"linux/amd64": "sha256:" + "a" * 64}, {}),
+            ("999.0.0", {"linux/arm64": "sha256:" + "a" * 64}, {}),
+            ("999.0.0", {"linux/amd64": "not-a-digest"}, {}),
+            (
+                "999.0.0",
+                {"linux/amd64": "sha256:" + "a" * 64},
+                {"safent-ads": {"linux/amd64": "sha256:short"}},
+            ),
+        ],
+    )
+    def test_valid_signature_does_not_authorize_incoherent_target(
+        self,
+        monkeypatch,
+        version,
+        engine,
+        companion,
+    ):
+        import hermes.shell_server.system_update as su
+
+        key, public = _generate_keypair()
+        body = _manifest_bytes(version=version, engine=engine, companion=companion)
+        signature = _minisign_sign(body, key)
+        monkeypatch.setattr(su, "_fetch_latest", lambda: "999.0.0")
+        monkeypatch.setattr(hermes, "__version__", "0.1.0")
+        monkeypatch.setattr(su, "current_arch_key", lambda: "linux/amd64")
+        monkeypatch.setattr(rm, "_PUBKEY_TEXT_OVERRIDE", public)
+        monkeypatch.setattr(rm, "_fetch_raw_bytes", lambda: body)
+        monkeypatch.setattr(rm, "_fetch_text", lambda _url: signature)
+        result = _client().get("/api/v1/system/update", headers=_auth_headers()).json()
+        assert result["update_available"] is False
+        assert result["available"] is False
+        assert result["to"] is None
+
+    @pytest.mark.parametrize(
+        "value",
+        ["", "garbage999", "1.2", "1.2.3.4", "01.2.3", "1.2.3-01", "1.2.3-", "1.2.3\n", "v" * 200],
+    )
+    def test_malformed_semver_has_no_order(self, value):
+        from hermes.shell_server.system_update import _parse
+
+        assert _parse(value) is None
+
+    def test_prerelease_semantics_and_build_metadata(self):
+        from hermes.shell_server.system_update import _parse
+
+        ordered = [
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+            "1.0.1",
+        ]
+        assert all(_parse(a) < _parse(b) for a, b in zip(ordered, ordered[1:], strict=False))
+        assert _parse("1.0.0+build.3") == _parse("v1.0.0+build.2")
+
+    def test_unsigned_version_fetch_is_size_bounded(self, monkeypatch):
+        import io
+
+        import hermes.shell_server.system_update as su
+
+        payload = io.BytesIO(b"9" * 1000)
+
+        class Response:
+            def __enter__(self):
+                return payload
+
+            def __exit__(self, *_args):
+                return None
+
+        monkeypatch.setattr(su.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+        assert su._fetch_latest() is None
+        assert payload.tell() == su._MAX_VERSION_BYTES + 1
+
+    def test_network_checks_run_outside_request_event_loop(self, monkeypatch):
+        import asyncio
+
+        import hermes.shell_server.system_update as su
+
+        checked = []
+
+        def in_worker():
+            with pytest.raises(RuntimeError, match="no running event loop"):
+                asyncio.get_running_loop()
+            checked.append(True)
+
+        monkeypatch.setattr(su, "_fetch_latest", in_worker)
+        monkeypatch.setattr(su, "fetch_verified_manifest", in_worker)
+        response = _client().get("/api/v1/system/update", headers=_auth_headers())
+        assert response.status_code == 200
+        assert checked == [True, True]
