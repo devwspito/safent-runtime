@@ -371,6 +371,19 @@ pub enum FailureCode {
     /// Either origin points at the SAME missing resource, never at the
     /// container's own health — this name says exactly that.
     SeccompProfileMissing,
+    /// NOT part of the CLI's vocabulary — synthesized by `engine_adapter.rs`
+    /// when a `failed` event's stderr shows the machine's own gvproxy/vfkit
+    /// is a FOREIGN (non-bundled) binary. MAC3-07 (verificacion-mac-3.md,
+    /// MAC-07/MAC2-13 repeated unfixed): reproduced live — a Mac with its
+    /// own podman.io install running ran ITS gvproxy/vfkit for OUR machine
+    /// (different sha256), because no bundled `containers.conf` steered
+    /// podman's helper resolution and `augmented_path()` added
+    /// `/opt/podman/bin` to the CLI's own PATH. The CLI (`cmd_ensure_
+    /// machine`) reports this generically as `machine_start_failed` (the
+    /// closed 20-code vocabulary has no dedicated code for it); this name
+    /// says exactly what is wrong instead of leaving it as an
+    /// undifferentiated start failure.
+    ForeignEngineHelper,
 }
 
 impl FailureCode {
@@ -407,6 +420,7 @@ impl FailureCode {
             FailureCode::LocalStorageConflict => "local_storage_conflict",
             FailureCode::EngineDigestMissing => "engine_digest_missing",
             FailureCode::SeccompProfileMissing => "seccomp_profile_missing",
+            FailureCode::ForeignEngineHelper => "foreign_engine_helper",
         }
     }
 }

@@ -268,6 +268,43 @@ _ensure_machine() {
   podman info >/dev/null 2>&1 || podman machine start "$name" >/dev/null 2>&1 || true
 }
 
+# MAC3-07 (verificacion-mac-3.md, MAC-07/MAC2-13 repeated unfixed): reports
+# the full path of a gvproxy/vfkit process serving THE MACHINE NAMED $1
+# whose path is NOT the one bundled at $_podman_bundle_dir/bin/<name> —
+# empty when nothing matching is running yet, when there is no bundle to
+# compare against (bare terminal install), or when every match found IS the
+# bundled one. Only ever meaningful on macOS with the pinned podman —
+# guarded exactly like _ensure_machine/cmd_ensure_machine above.
+# `ps -axo pid=,comm=,args=` (never /proc: Darwin-only) — `comm` on macOS is
+# the process's own full invoked path, exactly what the verification report
+# used by hand (`ps -o pid=,comm= -p <pid>`) to catch this live; `args` is
+# scanned for the machine's OWN name so the OWNER's own separate machine
+# (if one happens to be running too) can never produce a false positive.
+# Best-effort: `ps` failing/being unavailable reports "nothing found",
+# never blocks a healthy machine from starting.
+_foreign_engine_helper() {
+  [ "$RTN" = podman ] && [ "$OS" = Darwin ] && [ -n "${_podman_bundle_dir:-}" ] || return 0
+  _machine="$1"
+  _ps_tmp="$(mktemp)" || return 0
+  ps -axo pid=,comm=,args= >"$_ps_tmp" 2>/dev/null || true
+  _found=""
+  while IFS= read -r _line; do
+    _comm="$(printf '%s\n' "$_line" | awk '{print $2}')"
+    case "$_comm" in
+      */gvproxy|gvproxy) _want="$_podman_bundle_dir/bin/gvproxy" ;;
+      */vfkit|vfkit) _want="$_podman_bundle_dir/bin/vfkit" ;;
+      *) continue ;;
+    esac
+    case "$_line" in *"$_machine"*) ;; *) continue ;; esac
+    if [ "$_comm" != "$_want" ]; then
+      _found="$_comm"
+      break
+    fi
+  done < "$_ps_tmp"
+  rm -f "$_ps_tmp"
+  [ -z "$_found" ] || printf '%s' "$_found"
+}
+
 # Resolves $SECCOMP to a path podman can actually open — bundled first
 # (tier 0, below), otherwise fetched under the now-canonicalized
 # $SECCOMP_DIR (on macOS the VM mounts /Users, /private and /var/folders
@@ -1965,6 +2002,16 @@ cmd_ensure_machine() {
   [ "$rootful" = "true" ] || _die_porcelain machine_create_failed "La maquina existente es rootless" false
   "$RT" machine start "$name" >&2 2>/dev/null || "$RT" info >/dev/null 2>&1 \
     || _die_porcelain machine_start_failed "No se pudo arrancar la maquina" true
+
+  # MAC3-07: fail loudly instead of shipping a machine silently run by a
+  # foreign (non-bundled) gvproxy/vfkit — see _foreign_engine_helper above.
+  # engine_adapter.rs's reclassify_from_stderr recognizes "foreign helper
+  # binary" and turns this into the precise, adapter-only
+  # FailureCode::ForeignEngineHelper instead of a generic machine_start_failed.
+  _foreign="$(_foreign_engine_helper "$name")"
+  [ -z "$_foreign" ] \
+    || _die_porcelain machine_start_failed "foreign helper binary in use for $name: $_foreign" false
+
   _stage_done
 }
 

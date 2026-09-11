@@ -432,6 +432,13 @@ _stage_macos() {
     echo "    staged bin/$bin ($(SHA256 "$DEST/bin/$bin"))"
   done
 
+  # MAC3-07 (verificacion-mac-3.md, MAC-07/MAC2-13 repeated unfixed): see
+  # lib/patch-containers-conf.sh's write_macos_containers_conf for why this
+  # exists and why it differs from the Linux patch.
+  write_macos_containers_conf "$DEST/containers.conf"
+  chmod 0644 "$DEST/containers.conf"
+  echo "    wrote containers.conf (helper_binaries_dir -> \$BINDIR, $(SHA256 "$DEST/containers.conf"))"
+
   # krunkit: alternative (libkrun/GPU) machine provider, bundled so the app can
   # start a pre-existing libkrun machine it adopts (see T024 quickstart) without
   # requiring the owner to already have krunkit installed.

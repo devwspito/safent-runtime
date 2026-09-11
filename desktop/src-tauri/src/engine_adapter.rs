@@ -362,6 +362,21 @@ fn wait_bounded(
 /// A GUI-launched app inherits a minimal PATH (main.rs's `augmented_path`
 /// carries the same note for the legacy install flow) — hand the child the
 /// common install locations too.
+///
+/// MAC3-07 (verificacion-mac-3.md, MAC-07/MAC2-13 repeated unfixed):
+/// `/opt/podman/bin` used to be in this list — it is the OFFICIAL podman.io
+/// macOS installer's own default location, so a Mac that already had podman
+/// installed there silently ran ITS gvproxy/vfkit instead of the bundled,
+/// hash-verified ones once `podman machine start` fell through to PATH-based
+/// helper resolution (confirmed live: different sha256). This spawn path
+/// ALWAYS pins `SAFENT_PODMAN` (`EmbeddedCliDriver::spawn` sets it
+/// unconditionally) — the CLI never needs PATH to find podman itself here —
+/// so the only real effect of leaving `/opt/podman/bin` in this list was
+/// letting a foreign gvproxy/vfkit win. The actual fix is
+/// stage-runtime.sh's bundled `containers.conf` (`helper_binaries_dir`,
+/// checked BEFORE any PATH fallback); removing this entry too is
+/// defense-in-depth, matching app-engine.md §1's "nunca el del PATH del
+/// usuario" rule that already applies to podman itself.
 fn augmented_path() -> String {
     let mut parts = Vec::new();
     if let Ok(p) = std::env::var("PATH") {
@@ -369,16 +384,34 @@ fn augmented_path() -> String {
             parts.push(p);
         }
     }
-    for extra in [
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        "/opt/podman/bin",
-        "/usr/bin",
-        "/bin",
-    ] {
+    for extra in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
         parts.push(extra.to_string());
     }
     parts.join(":")
+}
+
+/// MAC3-07 (verificacion-mac-3.md): `/opt/podman/bin` must never reappear in
+/// this list — see the doc comment on `augmented_path` for why.
+#[cfg(test)]
+mod augmented_path_tests {
+    use super::*;
+
+    #[test]
+    fn never_includes_the_official_installers_own_podman_directory() {
+        let path = augmented_path();
+        assert!(
+            !path.contains("/opt/podman/bin"),
+            "augmented_path must never let a foreign gvproxy/vfkit under /opt/podman/bin win over the bundled ones: {path}"
+        );
+    }
+
+    #[test]
+    fn still_includes_the_other_common_install_locations() {
+        let path = augmented_path();
+        for expected in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
+            assert!(path.contains(expected), "expected {expected} in {path}");
+        }
+    }
 }
 
 /// Maps the closed `RepairAction` vocabulary onto the CLI's verb table
@@ -457,6 +490,20 @@ fn reclassify_from_stderr(cause: FailureCause, stderr_tail: &str) -> FailureCaus
             retryable: true,
         };
     }
+    // MAC3-07 (verificacion-mac-3.md, MAC-07/MAC2-13 repeated unfixed):
+    // `cmd_ensure_machine`'s own honest detection (`_foreign_engine_helper`)
+    // reports this generically as `machine_start_failed` — the closed
+    // 20-code CLI vocabulary has no dedicated code for "the machine is
+    // running fine but its gvproxy/vfkit is not the bundled one". Not
+    // retryable: retrying `machine start` alone never changes which helper
+    // binary wins — the environment (containers.conf/PATH) needs to change.
+    if lower.contains("foreign helper binary") {
+        return FailureCause {
+            code: FailureCode::ForeignEngineHelper,
+            message: stderr_tail.to_string(),
+            retryable: false,
+        };
+    }
     cause
 }
 
@@ -499,6 +546,20 @@ mod reclassify_from_stderr_tests {
         let reclassified =
             reclassify_from_stderr(cause.clone(), "systemd unit hermes-runtime.service failed");
         assert_eq!(reclassified, cause);
+    }
+
+    #[test]
+    fn a_foreign_engine_helper_report_is_reclassified_and_never_retryable() {
+        let generic_machine_start_failed = FailureCause {
+            code: FailureCode::MachineStartFailed,
+            message: "No se pudo arrancar la maquina".to_string(),
+            retryable: true,
+        };
+        let stderr = "foreign helper binary in use for safent-engine: /opt/podman/bin/gvproxy";
+        let reclassified = reclassify_from_stderr(generic_machine_start_failed, stderr);
+        assert_eq!(reclassified.code, FailureCode::ForeignEngineHelper);
+        assert!(!reclassified.retryable);
+        assert_eq!(reclassified.message, stderr);
     }
 }
 
