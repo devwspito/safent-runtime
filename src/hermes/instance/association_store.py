@@ -14,16 +14,19 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from hermes.security.configuration_lock import configuration_lock
 
 if TYPE_CHECKING:
     from hermes.shell_server.security.secrets import SecretsVault
 
 logger = logging.getLogger("hermes.instance.association_store")
 
-_SECRET_ID = "instance:secret"  # AAD label for AES-GCM (stable — do NOT change after rows are written)
+# Stable AES-GCM AAD label, not a credential; changing it breaks existing rows.
+_SECRET_ID = "instance:secret"  # noqa: S105
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS instance_association (
@@ -42,18 +45,27 @@ CREATE TABLE IF NOT EXISTS instance_association (
 """
 
 
+def _serialized_write(method):
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        with configuration_lock(self._db_path):
+            return method(self, *args, **kwargs)
+
+    return guarded
+
+
 @dataclass(frozen=True, slots=True)
 class InstanceAssociation:
     """Public view of the pairing — no secret material."""
 
     instance_id: str
     tenant_id: str
-    paired_at: str          # ISO-8601 UTC
+    paired_at: str  # ISO-8601 UTC
     cloud_endpoint: str
     signing_pubkey_hex: str
-    license: dict           # noqa: ANN001 — arbitrary JSON from the control plane
+    license: dict  # noqa: ANN001 — arbitrary JSON from the control plane
     last_applied_version: int
-    state: str              # "active" | "revoked"
+    state: str  # "active" | "revoked"
     # Fase 3 (department-scoped visibility): the DirectorySpec dump
     # ({"entries": [...]}) delivered by the latest applied bundle, or None
     # when no directory was pushed (visibility_scope="all", the default —
@@ -69,11 +81,11 @@ class SQLiteAssociationStore:
     as plaintext — they are non-sensitive configuration.
     """
 
-    def __init__(self, *, db_path: Path, vault: "SecretsVault") -> None:
+    def __init__(self, *, db_path: Path, vault: SecretsVault) -> None:
         self._db_path = db_path
         self._vault = vault
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
+        with configuration_lock(db_path), self._connect() as conn:
             conn.executescript("PRAGMA journal_mode=WAL;")
             conn.executescript(_SCHEMA)
             self._migrate(conn)
@@ -90,17 +102,13 @@ class SQLiteAssociationStore:
     def is_associated(self) -> bool:
         """True when a pairing row with state='active' exists."""
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT state FROM instance_association WHERE id = 1"
-            ).fetchone()
+            row = conn.execute("SELECT state FROM instance_association WHERE id = 1").fetchone()
         return row is not None and row["state"] == "active"
 
     def get(self) -> InstanceAssociation | None:
         """Return the association (no secret) or None."""
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM instance_association WHERE id = 1"
-            ).fetchone()
+            row = conn.execute("SELECT * FROM instance_association WHERE id = 1").fetchone()
         if row is None:
             return None
         return self._row_to_association(row)
@@ -120,6 +128,7 @@ class SQLiteAssociationStore:
         blob = bytes(row["instance_secret_ciphertext"])
         return self._vault.decrypt(secret_id=_SECRET_ID, blob=blob)
 
+    @_serialized_write
     def save(self, *, association: InstanceAssociation, instance_secret: str) -> None:
         """Upsert the single pairing row, encrypting the secret."""
         blob = self._vault.encrypt(secret_id=_SECRET_ID, plaintext=instance_secret)
@@ -157,18 +166,21 @@ class SQLiteAssociationStore:
             )
         logger.info("hermes.instance.association_saved", extra={"tenant_id": association.tenant_id})
 
+    @_serialized_write
     def set_last_applied_version(self, version: int) -> None:
         """Advance the last-applied policy version (monotonic; only call on success)."""
         with self._connect() as conn:
             conn.execute(
-                "UPDATE instance_association SET last_applied_version = ? WHERE id = 1",
-                (int(version),),
+                "UPDATE instance_association SET last_applied_version = ? "
+                "WHERE id = 1 AND state='active' AND last_applied_version < ?",
+                (int(version), int(version)),
             )
         logger.info(
             "hermes.instance.last_applied_version_updated",
             extra={"version": version},
         )
 
+    @_serialized_write
     def update_license(self, license_data: dict) -> None:
         """Persist the license section of the latest applied bundle."""
         import json as _json  # noqa: PLC0415 — avoid top-level import cycle risk
@@ -181,6 +193,7 @@ class SQLiteAssociationStore:
             )
         logger.info("hermes.instance.license_updated")
 
+    @_serialized_write
     def update_directory(self, directory: dict | None) -> None:
         """Persist the Fase-3 department-scoped directory (replace-on-apply).
 
@@ -201,14 +214,14 @@ class SQLiteAssociationStore:
             extra={"entries": len(directory.get("entries", [])) if directory else 0},
         )
 
+    @_serialized_write
     def mark_revoked(self) -> None:
         """Flip state to 'revoked' without deleting the row (audit trail)."""
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE instance_association SET state = 'revoked' WHERE id = 1"
-            )
+            conn.execute("UPDATE instance_association SET state = 'revoked' WHERE id = 1")
         logger.info("hermes.instance.association_revoked")
 
+    @_serialized_write
     def clear(self) -> None:
         """Securely delete the pairing row (unpair / factory reset).
 
@@ -225,17 +238,21 @@ class SQLiteAssociationStore:
         Use mark_revoked() when you need to preserve the row for auditing.
         """
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "UPDATE instance_association SET instance_secret_ciphertext = NULL WHERE id = 1"
             )
             conn.execute("DELETE FROM instance_association WHERE id = 1")
             # Explicit unpair ends LLM management. Revocation deliberately does
             # not take this path, so its fail-closed tombstone remains in force.
-            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if 'managed_llm_policy' in tables:
-                conn.execute('DELETE FROM managed_llm_policy')
-            if 'providers' in tables:
+            tables = {
+                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if "managed_llm_policy" in tables:
+                conn.execute("DELETE FROM managed_llm_policy")
+            if "providers" in tables:
                 conn.execute("DELETE FROM providers WHERE managed_by='cloud'")
+            conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         # VACUUM must run outside the WAL transaction (it implicitly commits).
         with self._connect() as conn:
@@ -260,11 +277,13 @@ class SQLiteAssociationStore:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(instance_association)")}
         if "signing_pubkey_hex" not in cols:
             conn.execute(
-                "ALTER TABLE instance_association ADD COLUMN signing_pubkey_hex TEXT NOT NULL DEFAULT ''"
+                "ALTER TABLE instance_association "
+                "ADD COLUMN signing_pubkey_hex TEXT NOT NULL DEFAULT ''"
             )
         if "directory_json" not in cols:
             conn.execute(
-                "ALTER TABLE instance_association ADD COLUMN directory_json TEXT NOT NULL DEFAULT ''"
+                "ALTER TABLE instance_association "
+                "ADD COLUMN directory_json TEXT NOT NULL DEFAULT ''"
             )
 
     def _row_to_association(self, row: sqlite3.Row) -> InstanceAssociation:
