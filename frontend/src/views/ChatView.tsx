@@ -14,14 +14,16 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type KeyboardEvent,
   type ChangeEvent,
+  type RefObject,
 } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
-import { GitBranch, Loader2, CheckCircle2, AlertTriangle, FileText, X, Plus, Paperclip, FolderOpen, Zap, Check, Maximize2, ChevronDown, ChevronRight, ChevronLeft } from 'lucide-react'
+import { ArrowUp, Square, GitBranch, Loader2, CheckCircle2, AlertTriangle, FileText, X, Plus, Paperclip, FolderOpen, Zap, Check, Maximize2, ChevronDown, ChevronRight, ChevronLeft } from 'lucide-react'
 import { VncFrame } from '../components/VncView'
 import type { ChatMessage, ToolStep } from '../hooks/useChat'
-import { listProviders, uploadWorkspaceFile, getRuntimeStatus, listSkills, ApiError } from '../api/client'
+import { listProviders, uploadWorkspaceFile, getRuntimeStatus, listSkills } from '../api/client'
 import type { Provider, Skill } from '../api/types'
 import {
   uploadDirectoryToBridge,
@@ -38,6 +40,7 @@ import { useT } from '../lib/i18n'
 import { toolLabel } from '../lib/toolLabels'
 import { isLiveSkill } from '../lib/skills'
 import { useFeatures } from '../hooks/useFeatures'
+import { ChatDraft, type PendingAttachment } from '../lib/chatDrafts'
 import styles from './ChatView.module.css'
 
 /** Map raw backend/stream errors to human-readable copy. */
@@ -545,14 +548,6 @@ function AttachmentChip({ name, uploading, error, onRemove }: AttachmentChipProp
 
 // ── Composer ───────────────────────────────────────────────────────────────
 
-interface PendingAttachment {
-  id: string
-  file: File
-  uploading: boolean
-  uploadedPath: string | null
-  error: boolean
-}
-
 interface ComposerProps {
   disabled: boolean
   isStreaming: boolean
@@ -560,23 +555,31 @@ interface ComposerProps {
   onStop(): void
   value: string
   onChange(v: string): void
+  inputRef?: RefObject<HTMLTextAreaElement>
+  draft?: ChatDraft
 }
 
-function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: ComposerProps) {
+export function Composer({ disabled, isStreaming, onSend, onStop, value, onChange, inputRef, draft: suppliedDraft }: ComposerProps) {
   const t = useT()
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const localTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const textareaRef = inputRef ?? localTextareaRef
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const [attachments, setAttachments] = useState<PendingAttachment[]>([])
+  const submissionInFlight = useRef(false)
+  const [localDraft] = useState(() => new ChatDraft('standalone'))
+  const draft = suppliedDraft ?? localDraft
+  const { attachments, selectedSkills, bridge, bridgeBusy, bridgeSyncing } = useSyncExternalStore(draft.subscribe, draft.getSnapshot)
+  const setAttachments = (value: PendingAttachment[] | ((previous: PendingAttachment[]) => PendingAttachment[])) => draft.set('attachments', value)
+  const setSelectedSkills = (value: Skill[] | ((previous: Skill[]) => Skill[])) => draft.set('selectedSkills', value)
+  const setBridge = (value: BridgeSelection | null) => draft.set('bridge', value)
+  const setBridgeBusy = (value: boolean) => draft.set('bridgeBusy', value)
+  const setBridgeSyncing = (value: boolean) => draft.set('bridgeSyncing', value)
 
   // "+" context menu: two-level (root → skills submenu). Non-exclusive.
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuView, setMenuView] = useState<'root' | 'skills'>('root')
   const [skills, setSkills] = useState<Skill[]>([])
   const [skillsLoaded, setSkillsLoaded] = useState(false)
-  const [selectedSkills, setSelectedSkills] = useState<Skill[]>([])
-  const [bridge, setBridge] = useState<BridgeSelection | null>(null)
-  const [bridgeBusy, setBridgeBusy] = useState(false)
-  const [bridgeSyncing, setBridgeSyncing] = useState(false)
+  const [skillsError, setSkillsError] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const plusBtnRef = useRef<HTMLButtonElement>(null)
 
@@ -593,11 +596,14 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
   async function enterSkillsView() {
     setMenuView('skills')
     if (!skillsLoaded) {
+      setSkillsError(false)
       try {
         const list = await listSkills()
         setSkills(Array.isArray(list) ? list : [])
-      } catch { /* fail-soft: empty picker */ }
-      setSkillsLoaded(true)
+        setSkillsLoaded(true)
+      } catch {
+        setSkillsError(true)
+      }
     }
   }
 
@@ -661,6 +667,28 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
     return () => document.removeEventListener('mousedown', onDoc)
   }, [menuOpen])
 
+  // A menu owns focus while open. Keyboard navigation is immediate, including
+  // returning focus to its trigger on Escape; never animate these operations.
+  useEffect(() => {
+    if (menuOpen) menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
+  }, [menuOpen, menuView])
+
+  function handleMenuKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      setMenuOpen(false)
+      plusBtnRef.current?.focus()
+      return
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
+    e.preventDefault()
+    const items = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
+    const current = items.indexOf(document.activeElement as HTMLButtonElement)
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1
+      : (current + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
+    items[next]?.focus()
+  }
+
   // Auto-grow textarea
   useLayoutEffect(() => {
     const el = textareaRef.current
@@ -669,12 +697,14 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`
   }, [value])
 
+  useLayoutEffect(() => { submissionInFlight.current = false }, [value, disabled])
+
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter also commits characters in IME input; that must never submit.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      if (!disabled && (value.trim() || attachments.some((a) => a.uploadedPath))) {
-        handleSend()
-      }
+      handleSend()
     }
   }
 
@@ -706,12 +736,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
               a.id === att.id ? { ...a, uploading: false, uploadedPath: result.path } : a,
             ),
           )
-        } catch (err) {
-          const msg =
-            err instanceof ApiError
-              ? err.message
-              : t('chat.err.attach').replace('{name}', att.file.name)
-          console.error(`Attachment upload failed for ${att.file.name}: ${msg}`)
+        } catch {
           setAttachments((prev) =>
             prev.map((a) =>
               a.id === att.id ? { ...a, uploading: false, error: true } : a,
@@ -727,6 +752,8 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
   }
 
   function handleSend() {
+    // Shared guard for pointer and keyboard paths: no partial attachment sends.
+    if (!canSend || submissionInFlight.current) return
     const uploadedPaths = attachments
       .filter((a) => a.uploadedPath !== null)
       .map((a) => a.uploadedPath as string)
@@ -753,6 +780,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
     }
 
     if (text.trim()) {
+      submissionInFlight.current = true
       onSend(text)
       setAttachments([])
       setSelectedSkills([])
@@ -762,9 +790,10 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
   }
 
   const anyUploading = attachments.some((a) => a.uploading)
+  const anyFailed = attachments.some((a) => a.error)
   const hasContext =
     attachments.some((a) => a.uploadedPath) || selectedSkills.length > 0 || bridge !== null
-  const canSend = !disabled && !anyUploading && !bridgeBusy && (value.trim() !== '' || hasContext)
+  const canSend = !disabled && !isStreaming && !anyUploading && !anyFailed && !bridgeBusy && (value.trim() !== '' || hasContext)
 
   return (
     <div className={styles.composerWrap}>
@@ -827,7 +856,11 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
 
       <div className={styles.composerBox}>
         {menuOpen && (
-          <div ref={menuRef} className={styles.plusMenu} role="menu" aria-label={t('chat.menu.aria')}>
+          <div ref={menuRef} className={styles.plusMenu} role="menu" aria-label={t('chat.menu.aria')}
+            onKeyDown={handleMenuKeyDown}
+            onBlur={e => {
+              if (e.relatedTarget && e.relatedTarget !== plusBtnRef.current && !e.currentTarget.contains(e.relatedTarget)) setMenuOpen(false)
+            }}>
             {menuView === 'root' && (
               <>
                 <button type="button" className={styles.plusItem} role="menuitem"
@@ -853,6 +886,11 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                   <span className={styles.plusItemLabel}>{t('nav.skills')}</span>
                 </button>
                 {(() => {
+                  if (skillsError) return <div className={styles.plusEmpty} role="status">
+                    <p>{t('chat.menu.error')}</p>
+                    <button type="button" role="menuitem" className={styles.plusItem}
+                      onClick={() => void enterSkillsView()}>{t('approval.err.retry')}</button>
+                  </div>
                   if (!skillsLoaded) return <div className={styles.plusEmpty}>{t('chat.menu.loading')}</div>
                   if (skills.length === 0) return <div className={styles.plusEmpty}>{t('chat.menu.none')}</div>
                   return skills.map((sk) => {
@@ -877,10 +915,10 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
           className={styles.composerTextarea}
           placeholder={t('chat.placeholder')}
           aria-label={t('chat.aria.textarea')}
+          aria-describedby="community-composer-hint"
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          disabled={disabled}
           rows={1}
         />
         <div className={styles.composerToolbar}>
@@ -917,8 +955,9 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                 className={styles.stopBtn}
                 onClick={onStop}
                 aria-label={t('chat.aria.stop')}
+                title={t('chat.aria.stop')}
               >
-                {t('chat.stop')}
+                <Square size={13} fill="currentColor" aria-hidden="true" />
               </button>
             ) : (
               <button
@@ -928,14 +967,16 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                 disabled={!canSend}
                 aria-label={t('chat.aria.send')}
                 aria-busy={anyUploading}
+                title={anyUploading ? t('chat.uploading') : t('chat.aria.send')}
               >
-                {anyUploading ? t('chat.uploading') : t('chat.send')}
+                {anyUploading ? <Loader2 size={16} className="spin" aria-hidden="true" /> : <ArrowUp size={18} aria-hidden="true" />}
               </button>
             )}
           </div>
         </div>
       </div>
-      <p className={styles.composerFooter}>{t('chat.disclaimer')}</p>
+      {anyFailed && <p className={styles.attachmentError} role="alert">{t('chat.attach.failed')}</p>}
+      <p id="community-composer-hint" className={styles.composerFooter}>{t('chat.composer.hint')}</p>
     </div>
   )
 }
@@ -1057,13 +1098,15 @@ function LiveBrowserPanel() {
 
 export default function ChatView() {
   const t = useT()
-  const { convId, agentName, messages, status, sendMessage, stopStream, approvalRefreshTick, liveBrowserActive } =
+  const { convId, agentName, messages, status, sendMessage, stopStream, approvalRefreshTick, liveBrowserActive, draft } =
     useOutletContext<ChatOutletContext>()
-  const [composerText, setComposerText] = useState('')
+  const { text: composerText } = useSyncExternalStore(draft.subscribe, draft.getSnapshot)
+  const setComposerText = useCallback((text: string) => draft.set('text', text), [draft])
   const [panelOpen, setPanelOpen] = useState(false)
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const [showNoModel, setShowNoModel] = useState(false)
   const [noProvider, setNoProvider] = useState(false)
+  const composerInputRef = useRef<HTMLTextAreaElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const userScrolledRef = useRef(false)
   const pinRef = useRef(true)
@@ -1086,6 +1129,7 @@ export default function ChatView() {
 
   const isStreaming = status.phase === 'streaming' || status.phase === 'sending'
   const showWelcome = messages.length === 0
+  const conversationTitle = messages.find(message => message.type === 'user')
 
   // Detect no-model 409
   useEffect(() => {
@@ -1135,14 +1179,15 @@ export default function ChatView() {
       setShowNoModel(false)
       void sendMessage(text)
     },
-    [sendMessage],
+    [sendMessage, setComposerText],
   )
 
   const handleSuggestion = useCallback(
     (text: string) => {
-      handleSend(text)
+      setComposerText(text)
+      composerInputRef.current?.focus()
     },
-    [handleSend],
+    [setComposerText],
   )
 
   const statusText =
@@ -1168,7 +1213,7 @@ export default function ChatView() {
                 ? t('chat.topbar.talking_to').replace('{name}', agentName)
                 : showWelcome
                   ? t('chat.topbar.new_conversation')
-                  : t('nav.chat')}
+                  : conversationTitle?.type === 'user' ? conversationTitle.text.split('\n')[0] : t('nav.chat')}
             </span>
             <button
               className={styles.topbarPanelBtn}
@@ -1233,6 +1278,9 @@ export default function ChatView() {
           )}
 
           <Composer
+            key={draft.key}
+            draft={draft}
+            inputRef={composerInputRef}
             disabled={status.phase === 'sending' || status.phase === 'streaming'}
             isStreaming={isStreaming}
             onSend={handleSend}

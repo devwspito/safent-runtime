@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { PanelLeft, Search, MessageSquare, RefreshCw } from 'lucide-react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { listConversations } from '../api/client'
 import { useChat } from '../hooks/useChat'
@@ -13,6 +14,8 @@ import KillSwitchBanner from './KillSwitchBanner'
 import { SystemUpdateFooter } from './SystemUpdateFooter'
 import { useT, useLocale } from '../lib/i18n'
 import { CAPACIDADES_VIEW_IDS, SISTEMA_VIEW_IDS } from '../views/SectionHubs'
+import styles from './Layout.module.css'
+import { ChatDrafts, type ChatDraft } from '../lib/chatDrafts'
 
 // activeProviderReload lets child views (ProvidersView) trigger a re-check after
 // connecting a model. The "Falta conectar un modelo" nudge was removed — the chat
@@ -102,7 +105,7 @@ function useNavItems(): HubNavItem[] {
 
 // ── Recientes ─────────────────────────────────────────────────────────────────
 
-const PREVIEW_COUNT = 3
+const PREVIEW_COUNT = 8
 
 function relativeTime(iso: string | undefined, t: ReturnType<typeof useT>): string {
   if (!iso) return ''
@@ -115,13 +118,10 @@ function relativeTime(iso: string | undefined, t: ReturnType<typeof useT>): stri
   return t('layout.time.days_ago').replace('{n}', String(Math.floor(hrs / 24)))
 }
 
-function truncate(s: string, n: number) {
-  return s.length > n ? s.slice(0, n) + '…' : s
-}
-
 // ── ChatOutletContext — shared between RecentsSection (in nav) and ChatView ──
 
 export interface ChatOutletContext {
+  draft: ChatDraft
   convId: string | null
   /** Agent bound to the current conversation (null = CEO / default). */
   agentId: string | null
@@ -153,46 +153,60 @@ interface RecentsSectionProps {
   loadConversation(id: string): Promise<void>
 }
 
-function RecentsSection({ activeConvId, conversationsTick, loadConversation }: RecentsSectionProps) {
+export function RecentsSection({ activeConvId, conversationsTick, loadConversation }: RecentsSectionProps) {
   const t = useT()
   const navigate = useNavigate()
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState(false)
-  const hasMounted = useRef(false)
+  const [error, setError] = useState(false)
+  const [query, setQuery] = useState('')
+  const [opening, setOpening] = useState<string | null>(null)
+  const request = useRef(0)
+  const selecting = useRef(false)
 
   const load = useCallback(() => {
+    const version = ++request.current
+    setLoading(true)
+    setError(false)
     listConversations()
       .then(data => {
+        if (version !== request.current) return
         setConversations(Array.isArray(data) ? data : [])
         setLoading(false)
       })
-      .catch(() => { setLoading(false) })
+      .catch(() => {
+        if (version !== request.current) return
+        setError(true)
+        setLoading(false)
+      })
   }, [])
 
   useEffect(() => {
-    if (!hasMounted.current) {
-      hasMounted.current = true
-      load()
-    }
-  }, [load])
-
-  // Re-load when the active conversation changes (new conversation started) AND when a
-  // turn finishes (conversationsTick) — the latter is when a brand-new chat is finally
-  // persisted to the mirror, so this is what makes it appear without a full reload.
-  useEffect(() => {
-    if (hasMounted.current) load()
+    load()
+    return () => { request.current += 1 }
   }, [activeConvId, conversationsTick, load])
 
   async function handleSelect(id: string) {
-    navigate('/chat')
-    await loadConversation(id)
+    if (selecting.current) return
+    selecting.current = true
+    setOpening(id)
+    try {
+      await loadConversation(id)
+      navigate('/chat')
+    } catch {
+      setError(true)
+    } finally {
+      selecting.current = false
+      setOpening(null)
+    }
   }
 
-  const visible = expanded ? conversations : conversations.slice(0, PREVIEW_COUNT)
+  const filtered = conversations.filter(c => (c.title ?? t('layout.recents.untitled')).toLocaleLowerCase().includes(query.toLocaleLowerCase()))
+  const visible = query || expanded ? filtered : filtered.slice(0, PREVIEW_COUNT)
   const overflow = conversations.length - PREVIEW_COUNT
 
-  if (loading) {
+  if (loading && conversations.length === 0) {
     return (
       <div className="sidebar-recents" aria-label={t('layout.recents.aria')}>
         <div className="sidebar-section-label">{t('layout.recents.label')}</div>
@@ -211,7 +225,7 @@ function RecentsSection({ activeConvId, conversationsTick, loadConversation }: R
     )
   }
 
-  if (conversations.length === 0) {
+  if (conversations.length === 0 && !error) {
     return (
       <div className="sidebar-recents" aria-label={t('layout.recents.aria')}>
         <div className="sidebar-section-label">{t('layout.recents.label')}</div>
@@ -223,7 +237,19 @@ function RecentsSection({ activeConvId, conversationsTick, loadConversation }: R
   return (
     <div className="sidebar-recents" aria-label={t('layout.recents.aria')}>
       <div className="sidebar-section-label">{t('layout.recents.label')}</div>
-      <ul role="listbox" aria-label={t('layout.recents.aria')}>
+      {conversations.length > 0 && <label className={styles.search}>
+        <Search size={14} aria-hidden="true" />
+        <input type="search" value={query} onChange={e => setQuery(e.target.value)}
+          aria-label={t('layout.recents.search')} placeholder={t('layout.recents.search')} />
+      </label>}
+      {error && <div className={styles.recentsError} role="status">
+        <span>{t('layout.recents.error')}</span>
+        <button type="button" onClick={load} disabled={loading} aria-label={t('approval.err.retry')}>
+          <RefreshCw size={14} aria-hidden="true" />
+        </button>
+      </div>}
+      {query && visible.length === 0 && <p className="recent-empty">{t('layout.recents.no_results')}</p>}
+      <ul aria-label={t('layout.recents.aria')} aria-busy={loading}>
         {visible.map(c => {
           const id = (c as ConversationSummary & { conversation_id?: string }).conversation_id ?? c.id
           if (!id) return null
@@ -237,20 +263,24 @@ function RecentsSection({ activeConvId, conversationsTick, loadConversation }: R
           const isActive = id === activeConvId
 
           return (
-            <li key={id} role="option" aria-selected={isActive}>
+            <li key={id}>
               <button
                 className={`recent-item${isActive ? ' recent-item--active' : ''}`}
                 onClick={() => handleSelect(id)}
                 type="button"
                 title={title}
+                aria-current={isActive ? 'page' : undefined}
+                aria-busy={opening === id}
+                disabled={opening !== null}
               >
-                <span className="recent-title">{truncate(title, 38)}</span>
+                <MessageSquare size={14} aria-hidden="true" />
+                <span className="recent-title">{title}</span>
                 {time && <span className="recent-time">{time}</span>}
               </button>
             </li>
           )
         })}
-        {overflow > 0 && (
+        {!query && overflow > 0 && (
           <li>
             <button
               className="recent-item text-accent"
@@ -285,8 +315,33 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
   // Chat state lives here, above both the sidebar nav (RecentsSection) and
   // the main content area (ChatView). ChatView receives it via outlet context.
   const chat = useChat()
+  const [drafts] = useState(() => new ChatDrafts())
+  const [draft, setDraft] = useState(() => chat.convId ? drafts.forConversation(chat.convId) : drafts.forNew(chat.agentId))
+  const pendingDraft = useRef<{ draft: ChatDraft; agentId: string | null } | null>(null)
+  useLayoutEffect(() => {
+    if (!chat.convId) {
+      setDraft(drafts.forNew(chat.agentId))
+    } else if (pendingDraft.current) {
+      const pending = pendingDraft.current
+      pendingDraft.current = null
+      setDraft(drafts.bind(chat.convId, pending.agentId, pending.draft))
+    } else {
+      setDraft(drafts.forConversation(chat.convId))
+    }
+  }, [chat.convId, chat.agentId, drafts])
   // Display name for the agent bound to the current chat (cleared on new chat).
   const [boundAgentName, setBoundAgentName] = useState<string | null>(null)
+  const [sidebarOpen, setSidebarOpen] = useState(() => !window.matchMedia?.('(max-width: 700px)').matches)
+  const sidebarToggle = useRef<HTMLButtonElement>(null)
+  const sidebarReopen = useRef<HTMLButtonElement>(null)
+
+  function toggleSidebar() {
+    setSidebarOpen(open => !open)
+    requestAnimationFrame(() => {
+      if (sidebarOpen) sidebarReopen.current?.focus()
+      else sidebarToggle.current?.focus()
+    })
+  }
 
   // Bumped each time the user sends a message so PendingApprovalsInChat can
   // fire an immediate poll without waiting for the 3 s interval.
@@ -305,32 +360,49 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
     usePendingInboundDelegations(6000, approvalRefreshTick).length
 
   async function handleSendMessage(text: string) {
+    if (!chat.convId) pendingDraft.current = { draft, agentId: chat.agentId }
     await chat.sendMessage(text)
     setApprovalRefreshTick(t => t + 1)
   }
 
   function handleNewChat() {
+    pendingDraft.current = null
     chat.startNew()
     setBoundAgentName(null)
     navigate('/chat')
   }
 
   function handleStartNewWithAgent(agentId: string, agentName: string) {
+    pendingDraft.current = null
     chat.startNewWithAgent(agentId)
     setBoundAgentName(agentName)
     navigate('/chat')
   }
 
+  async function handleLoadConversation(id: string) {
+    pendingDraft.current = null
+    setBoundAgentName(null)
+    await chat.loadConversation(id)
+  }
+
   return (
-    <div className="app-shell">
-      <nav className="sidebar" aria-label={t('layout.nav.aria')}>
+    <div className={`app-shell ${styles.shell}`} data-sidebar-open={sidebarOpen}>
+      <a className={styles.skipLink} href="#main-content">{t('layout.skip')}</a>
+      {!sidebarOpen && <button ref={sidebarReopen} className={styles.reopen} type="button"
+        aria-label={t('layout.sidebar.open')} aria-expanded={false} aria-controls="community-sidebar"
+        onClick={toggleSidebar}><PanelLeft size={18} aria-hidden="true" /></button>}
+      <nav id="community-sidebar" className={`sidebar ${styles.sidebar}`} hidden={!sidebarOpen} aria-label={t('layout.nav.aria')}>
         {/* Wordmark */}
         <div className="sidebar-wordmark">
           <div className="sidebar-wordmark-inner">
-            <div className="sidebar-mark" aria-hidden="true">L</div>
             <span className="sidebar-name">Safent</span>
           </div>
-          <NotificationsPanel loadConversation={chat.loadConversation} />
+          <div className={styles.headerActions}>
+            <NotificationsPanel loadConversation={handleLoadConversation} />
+            <button ref={sidebarToggle} type="button" className={styles.iconButton}
+              aria-label={t('layout.sidebar.close')} aria-expanded={true} aria-controls="community-sidebar"
+              onClick={toggleSidebar}><PanelLeft size={18} aria-hidden="true" /></button>
+          </div>
         </div>
 
         {/* New chat button — always resets the conversation */}
@@ -346,13 +418,6 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
 
         {/* Scrollable area */}
         <div className="sidebar-scroll">
-          {/* Recientes — reads activeConvId directly from the lifted chat state */}
-          <RecentsSection
-            activeConvId={chat.convId}
-            conversationsTick={chat.conversationsTick}
-            loadConversation={chat.loadConversation}
-          />
-
           {/* Four clean entries; the hubs are visible when ANY of their child
               views is allowed. Pending-approvals badge rides on Sistema. */}
           <div className="sidebar-nav">
@@ -405,6 +470,8 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
               </ul>
             )}
           </div>
+          <RecentsSection activeConvId={chat.convId} conversationsTick={chat.conversationsTick}
+            loadConversation={handleLoadConversation} />
         </div>
 
         {/* Language selector + user chip */}
@@ -436,16 +503,17 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
         <SystemUpdateFooter />
       </nav>
 
-      <main className="main-content page-enter" id="main-content" tabIndex={-1}>
+      <main className="main-content" id="main-content" tabIndex={-1}>
         {/* Freno de emergencia (025 Top-KILL) — visible on EVERY view, not just Seguridad. */}
         <KillSwitchBanner />
         {/* Pass the shared chat state down to ChatView via outlet context */}
         <Outlet context={{
+          draft,
           convId: chat.convId,
           agentId: chat.agentId,
           agentName: boundAgentName,
-          loadConversation: chat.loadConversation,
-          startNew: chat.startNew,
+          loadConversation: handleLoadConversation,
+          startNew: handleNewChat,
           startNewWithAgent: handleStartNewWithAgent,
           sendMessage: handleSendMessage,
           messages: chat.messages,

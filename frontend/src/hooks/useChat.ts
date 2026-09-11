@@ -44,6 +44,18 @@ function genUUID(): string {
   })
 }
 
+/** Closing a transport does not retract callbacks already queued by it. */
+function scopedCallbacks(callbacks: StreamCallbacks, isCurrent: () => boolean): StreamCallbacks {
+  return {
+    onDelta: text => { if (isCurrent()) callbacks.onDelta(text) },
+    onThinking: text => { if (isCurrent()) callbacks.onThinking(text) },
+    onToolCall: frame => { if (isCurrent()) callbacks.onToolCall(frame) },
+    onStatus: text => { if (isCurrent()) callbacks.onStatus(text) },
+    onDone: () => { if (isCurrent()) callbacks.onDone() },
+    onError: text => { if (isCurrent()) callbacks.onError(text) },
+  }
+}
+
 export interface ToolStep {
   name: string
   label: string
@@ -346,8 +358,8 @@ export function useChat(): UseChatReturn {
   const streamRef = useRef<{ close(): void } | null>(null)
   // Stable ref to the assistant message id currently streaming
   const activeAssistantIdRef = useRef<string | null>(null)
-  // Tracks whether the mount-restore has already run
-  const restoredRef = useRef(false)
+  // Invalidates every pending request/transport callback on navigation or stop.
+  const generation = useRef(0)
   // "reconectando…" status while re-attaching a stream after refresh
   const [reconnecting, setReconnecting] = useState(false)
 
@@ -456,6 +468,7 @@ export function useChat(): UseChatReturn {
    */
   const startPoll = useCallback((convId: string, baselineCount: number) => {
     clearPoll()
+    const epoch = generation.current
     baselineAssistantCountRef.current = baselineCount
 
     pollIntervalRef.current = setInterval(() => {
@@ -471,7 +484,7 @@ export function useChat(): UseChatReturn {
       //     closure always sees the correct value via the ref (no stale capture).
       void getRuntimeStatus()
         .then(runtimeStatus => {
-          if (activeAssistantIdRef.current !== currentAssistantId) return
+          if (generation.current !== epoch || activeAssistantIdRef.current !== currentAssistantId) return
 
           // Browser chip = REAL jailed-browser page state (backend probe) AND-ed with
           // "this conversation used the browser". A failed browser_navigate / web_search
@@ -510,7 +523,7 @@ export function useChat(): UseChatReturn {
       // (2) Final-answer guarantee — adopt the mirror answer if the WS missed done
       void getConversation(convId)
         .then(detail => {
-          if (activeAssistantIdRef.current !== currentAssistantId) return
+          if (generation.current !== epoch || activeAssistantIdRef.current !== currentAssistantId) return
 
           // Adopt THIS turn's mirror row ONLY once it flips to a terminal status.
           // Keyed on the in-flight task_id (not a fragile count of assistant rows):
@@ -551,6 +564,7 @@ export function useChat(): UseChatReturn {
   }, [clearPoll])
 
   const stopStream = useCallback(() => {
+    generation.current += 1
     clearPoll()
     // Flush any coalesced frames before closing so no data is silently dropped.
     flushPending()
@@ -586,6 +600,8 @@ export function useChat(): UseChatReturn {
 
   const startNewWithAgent = useCallback((agentId: string) => {
     stopStream()
+    setLiveBrowserActive(false)
+    browserUsedRef.current = false
     sessionStorage.removeItem(SS_CONV_ID)
     sessionStorage.removeItem(SS_TASK_ID)
     sessionStorage.setItem(SS_AGENT_ID, agentId)
@@ -610,8 +626,7 @@ export function useChat(): UseChatReturn {
   // Also starts the polling safety-net so that long silent tool calls never freeze
   // the UI and the final answer is always rendered even if the WS done frame was missed.
   useEffect(() => {
-    if (restoredRef.current) return
-    restoredRef.current = true
+    const epoch = generation.current
 
     const savedConvId = sessionStorage.getItem(SS_CONV_ID)
     const savedTaskId = sessionStorage.getItem(SS_TASK_ID)
@@ -626,6 +641,7 @@ export function useChat(): UseChatReturn {
     // Load the conversation history first.
     getConversation(savedConvId)
       .then(detail => {
+        if (generation.current !== epoch) return
         // The in-flight turn's PARTIAL (status='streaming') for the task we are about
         // to reattach: do NOT render it as a finished bubble — seed it into the live
         // streaming bubble below (mirror-first: shows instantly = no blank on refresh,
@@ -831,10 +847,12 @@ export function useChat(): UseChatReturn {
               setReconnecting(false)
             },
           }
-          streamRef.current = openTaskStream(savedTaskId, callbacks)
+          streamRef.current = openTaskStream(savedTaskId, scopedCallbacks(callbacks,
+            () => generation.current === epoch && activeAssistantIdRef.current === assistantMsgId))
         }
       })
       .catch(() => {
+        if (generation.current !== epoch) return
         // Stale session — clear and start fresh.
         sessionStorage.removeItem(SS_CONV_ID)
         sessionStorage.removeItem(SS_TASK_ID)
@@ -845,8 +863,11 @@ export function useChat(): UseChatReturn {
   // Clear the poll and any pending flush timer on unmount.
   useEffect(() => {
     return () => {
+      generation.current += 1
       clearPoll()
       clearFlushTimer()
+      streamRef.current?.close()
+      streamRef.current = null
     }
   }, [clearPoll, clearFlushTimer])
 
@@ -854,6 +875,7 @@ export function useChat(): UseChatReturn {
     if (!text.trim()) return
 
     stopStream()
+    const epoch = generation.current
 
     // Own the conversation id client-side (generate it locally before the first send)
     let convId = state.convId
@@ -882,8 +904,10 @@ export function useChat(): UseChatReturn {
         dedup_key: `chat:${Date.now()}:${Math.random().toString(36).slice(2)}`,
         ...(agentIdToSend ? { agent_id: agentIdToSend } : {}),
       })
+      if (generation.current !== epoch) return
       taskId = res.task_id
     } catch (err) {
+      if (generation.current !== epoch) return
       const msg = err instanceof Error ? err.message : 'Error al enviar'
       dispatch({ type: 'STATUS_ERROR', message: msg })
       return
@@ -996,15 +1020,18 @@ export function useChat(): UseChatReturn {
       },
     }
 
-    streamRef.current = openTaskStream(taskId, callbacks)
-  }, [state.convId, stopStream, startPoll, clearPoll, flushPending, clearFlushTimer])
+    streamRef.current = openTaskStream(taskId, scopedCallbacks(callbacks,
+      () => generation.current === epoch && activeAssistantIdRef.current === assistantMsgId))
+  }, [state.convId, state.agentId, state.messages, stopStream, startPoll, clearPoll, flushPending, clearFlushTimer])
 
   const loadConversation = useCallback(async (id: string) => {
     stopStream()
+    const epoch = generation.current
     setLiveBrowserActive(false) // switching conversations — new live context
     browserUsedRef.current = false  // new conversation — forget the browser marker
     try {
       const detail = await getConversation(id)
+      if (generation.current !== epoch) return
       // Null-guard messages + content (parity with the mount-restore path): the
       // mirror can return a null content for some message kinds; m.content used
       // raw threw inside the try and made the conversation unopenable.
@@ -1028,6 +1055,7 @@ export function useChat(): UseChatReturn {
         })
       dispatch({ type: 'LOAD_MESSAGES', convId: id, messages })
     } catch {
+      if (generation.current !== epoch) return
       dispatch({ type: 'STATUS_ERROR', message: 'No se pudo cargar la conversación.' })
     }
   }, [stopStream])
