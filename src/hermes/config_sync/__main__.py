@@ -285,7 +285,8 @@ async def _sync_once(
         return
 
     applier = PolicyApplier(proxy, directory_store=store)
-    apply_result = await applier.apply(bundle.payload, tenant_id=bundle.tenant_id)
+    apply_result = await applier.apply(bundle.payload, tenant_id=bundle.tenant_id,
+                                      signed_bundle_json=bundle.model_dump_json())
 
     if apply_result.ok:
         store.set_last_applied_version(bundle.version)

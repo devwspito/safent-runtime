@@ -36,7 +36,7 @@ CARDINALIY CAPS (P1-3, enforced at Pydantic parse time):
 from __future__ import annotations
 
 import json
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_serializer
 
@@ -231,6 +231,14 @@ class ProviderSpec(BaseModel):
     set_active: bool = False
     # Enterprise-supplied API key — signed by the cloud, stored in vault on landing.
     api_key: str | None = Field(default=None, max_length=512)
+    credential_kind: Literal['direct', 'instance_gateway'] = 'direct'
+
+    @model_serializer(mode='wrap')
+    def _serialize_provider(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if self.credential_kind == 'direct':
+            data.pop('credential_kind', None)
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +432,7 @@ class PolicyPayload(BaseModel):
     # regression). Present only when an agent's effective visibility_scope is
     # "department" or "none" — see DirectorySpec's docstring.
     directory: DirectorySpec | None = None
+    llm_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @model_serializer(mode="wrap")
     def _serialize_payload(self, handler: Any) -> dict[str, Any]:
@@ -433,6 +442,8 @@ class PolicyPayload(BaseModel):
         data = handler(self)
         if self.directory is None:
             data.pop("directory", None)
+        if self.llm_instance_id is None:
+            data.pop('llm_instance_id', None)
         return data
 
 

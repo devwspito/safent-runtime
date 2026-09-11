@@ -31,6 +31,17 @@ from hermes.config_sync.policy_document import (
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.asyncio
+async def test_managed_gateway_requires_explicit_positive_ack():
+    class UnacknowledgedProxy(FakeDbusProxy):
+        async def call_mutator(self, member, *args):
+            return {}
+    result = await PolicyApplier(UnacknowledgedProxy()).apply(
+        PolicyPayload(llm_instance_id='instance-test'), current_agents=[],
+        signed_bundle_json='test-envelope')
+    assert 'providers:managed_gateway_failed' in result.failed
+
+
 # ---------------------------------------------------------------------------
 # FakeDbusProxy
 # ---------------------------------------------------------------------------
@@ -141,10 +152,11 @@ class TestApplicationOrder:
         )
 
         applier = PolicyApplier(proxy)
-        await applier.apply(payload, current_agents=[])
+        payload.llm_instance_id = 'instance-test'
+        await applier.apply(payload, current_agents=[], signed_bundle_json='signed-envelope-forwarded')
 
         verbs = proxy.called_verbs()
-        assert verbs.index("add_provider") < verbs.index("create_agent")
+        assert verbs.index("apply_managed_llm_gateway") < verbs.index("create_agent")
         assert verbs.index("add_mcp_server") < verbs.index("create_agent")
         assert verbs.index("set_composio_api_key") < verbs.index("create_agent")
         last_agent_idx = max(i for i, v in enumerate(verbs) if v == "create_agent")
@@ -240,28 +252,28 @@ class TestEgressDomainValidation:
 
 class TestProviderReconcile:
     @pytest.mark.asyncio
-    async def test_provider_draft_stamps_managed_by_cloud(self) -> None:
+    async def test_legacy_provider_draft_is_not_forwarded(self) -> None:
         import json  # noqa: PLC0415
 
         proxy = FakeDbusProxy()
         payload = _empty_payload(
             providers=[{"alias": "openai", "kind": "openai", "default_model": "gpt-4"}]
         )
-        await PolicyApplier(proxy).apply(payload, current_agents=[])
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
         add_calls = [(v, args) for v, args in proxy.calls if v == "add_provider"]
-        assert len(add_calls) == 1
-        draft = json.loads(add_calls[0][1][0])
-        assert draft["managed_by"] == "cloud"
+        assert not add_calls
+        assert 'providers:instance_gateway_required' in result.failed
 
     @pytest.mark.asyncio
-    async def test_deletes_cloud_managed_provider_absent_from_bundle(self) -> None:
+    async def test_revocation_forwards_signed_empty_managed_bundle(self) -> None:
         proxy = FakeDbusProxy()
         proxy._existing_providers = [
             {"provider_id": "stale", "alias": "old-vllm", "managed_by": "cloud"}
         ]
-        payload = _empty_payload(providers=[])
-        await PolicyApplier(proxy).apply(payload, current_agents=[])
-        assert "delete_provider" in proxy.called_verbs()
+        payload = _empty_payload(providers=[], llm_instance_id='instance-test')
+        await PolicyApplier(proxy).apply(payload, current_agents=[], signed_bundle_json='signed-revocation')
+        assert "apply_managed_llm_gateway" in proxy.called_verbs()
+        assert "delete_provider" not in proxy.called_verbs()
 
     @pytest.mark.asyncio
     async def test_does_not_delete_local_provider(self) -> None:
@@ -426,7 +438,7 @@ class TestFailureHandling:
 
         result = await PolicyApplier(proxy).apply(payload, current_agents=[])
 
-        assert any("provider:openai" in f for f in result.failed)
+        assert 'providers:instance_gateway_required' in result.failed
         assert "create_agent" in proxy.called_verbs()
 
     @pytest.mark.asyncio
@@ -710,7 +722,7 @@ class TestProviderBaseUrlSsrfCheck:
         result = await PolicyApplier(proxy).apply(payload, current_agents=[])
 
         assert "add_provider" not in proxy.called_verbs()
-        assert any("unsafe_base_url" in f for f in result.failed)
+        assert 'providers:instance_gateway_required' in result.failed
 
     @pytest.mark.asyncio
     async def test_localhost_base_url_rejected(self) -> None:
@@ -764,7 +776,8 @@ class TestProviderBaseUrlSsrfCheck:
 
         result = await PolicyApplier(proxy).apply(payload, current_agents=[])
 
-        assert "add_provider" in proxy.called_verbs()
+        assert "add_provider" not in proxy.called_verbs()
+        assert 'providers:instance_gateway_required' in result.failed
 
     def test_is_safe_base_url_unit(self) -> None:
         assert _is_safe_base_url("https://api.openai.com/v1") is True

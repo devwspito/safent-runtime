@@ -606,7 +606,13 @@ def _build_nous_engine(
     # and the engine falls back to the global active provider.
     _model_config_for_alias = _build_model_config_for_alias(_DB_PATH)
 
-    initial_model = _nous_model_source()
+    from hermes.runtime.model_config import ManagedProviderUnavailableError
+    try:
+        initial_model = _nous_model_source()
+    except ManagedProviderUnavailableError:
+        # Start the daemon/control plane so a newer signed policy can restore
+        # service. Per-turn resolution remains fail-closed, never personal.
+        initial_model = None
     if initial_model is None:
         logger.warning(
             "hermes.runtime.nous_model_not_configured — engine degradado hasta "
@@ -672,16 +678,28 @@ def _build_model_config_for_alias(db_path):
         return None
 
     def _resolve_by_alias(alias: str) -> "ModelConfig | None":
+        from hermes.runtime.managed_llm import resolve_managed_config
+        managed = resolve_managed_config(db_path, alias)
+        if managed is not None:
+            return managed
         resolved = resolver.resolve_by_alias(alias)
         if resolved is None:
             return None
         provider = resolved.provider
+        if not provider.enabled:
+            return None
         model = provider_model_string(provider, provider.default_model)
-        return ModelConfig.from_provider(
+        from dataclasses import replace  # noqa: PLC0415
+        config = ModelConfig.from_provider(
             model=model,
             api_key=resolved.api_key,
             base_url=resolved.base_url,
         )
+        if provider.managed_by == 'cloud':
+            if not resolved.api_key or not resolved.base_url:
+                raise RuntimeError('Managed provider credential is unavailable')
+            config = replace(config, managed=True)
+        return config
 
     return _resolve_by_alias
 

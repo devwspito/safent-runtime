@@ -299,9 +299,9 @@ _SYSTEM_PROMPT_CACHE: dict[tuple[int, int], str] = {}
 _MEMORY_PROMPT_CACHE: dict[str, tuple[float, str]] = {}  # key → (expires_at, value)
 _MEMORY_PROMPT_TTL_S: float = 20.0
 
-# resolve_runtime_provider cache: keyed by engine_id. TTL 30s — mirrors the
-# ActiveProviderService TTL so a provider switch takes effect within one period.
-_RUNTIME_PROVIDER_CACHE: dict[int, tuple[float, tuple]] = {}  # key → (expires_at, (rt, bare))
+# Native resolution cache: engine + selected model/provider/endpoint/key digest.
+# Managed selection is checked separately every turn, including revocation.
+_RUNTIME_PROVIDER_CACHE: dict[tuple, tuple[float, tuple]] = {}  # credential-bound identity → (expires_at, (rt, bare))
 _RUNTIME_PROVIDER_TTL_S: float = 30.0
 # Bumped by clear_runtime_provider_cache() on every provider switch. Guards a
 # write-after-clear race (specs/025-safent-repaso PROV-05): _resolve_hermes_
@@ -423,7 +423,7 @@ def _cached_enrich_prompt(base_prompt: str, tenant_id: "UUID") -> str:
 
 
 def _cached_resolve_hermes_runtime(engine_id: int, model_config: "ModelConfig") -> "tuple[dict, str]":
-    """Return _resolve_hermes_runtime with a 30s TTL keyed by engine_id.
+    """Cache native resolution for 30s by engine and complete selected identity.
 
     FIX D: resolving the provider reads disk / an in-memory registry. Caching
     for 30s avoids re-reading per-message while still reacting to provider
@@ -434,16 +434,23 @@ def _cached_resolve_hermes_runtime(engine_id: int, model_config: "ModelConfig") 
     fresher post-switch cache entry once it finally finishes — see the epoch
     comment above _RUNTIME_PROVIDER_EPOCH for the exact race.
     """
+    import hashlib  # noqa: PLC0415
+    key_digest = hashlib.sha256((model_config.api_key or '').encode()).digest()
+    cache_key = (engine_id, model_config.model, model_config.native_provider,
+                 model_config.base_url, key_digest, model_config.managed)
     now = _time.monotonic()
     with _CACHE_LOCK:
-        entry = _RUNTIME_PROVIDER_CACHE.get(engine_id)
+        entry = _RUNTIME_PROVIDER_CACHE.get(cache_key)
         epoch_at_read = _RUNTIME_PROVIDER_EPOCH
     if entry is not None and now < entry[0]:
         return entry[1]  # type: ignore[return-value]
     value = _resolve_hermes_runtime(model_config)
     with _CACHE_LOCK:
         if _RUNTIME_PROVIDER_EPOCH == epoch_at_read:
-            _RUNTIME_PROVIDER_CACHE[engine_id] = (now + _RUNTIME_PROVIDER_TTL_S, value)
+            # Bound storage across rotations; never retain expired credentials.
+            for expired in [key for key, item in _RUNTIME_PROVIDER_CACHE.items() if item[0] <= now]:
+                _RUNTIME_PROVIDER_CACHE.pop(expired, None)
+            _RUNTIME_PROVIDER_CACHE[cache_key] = (now + _RUNTIME_PROVIDER_TTL_S, value)
         # else: a switch landed while this resolve was in flight — `value` is
         # still the RIGHT answer for THIS turn (it reflects whatever config
         # was on disk when we started), but caching it would serve the OLD
@@ -1021,48 +1028,29 @@ def _resolve_hermes_runtime(model_config: ModelConfig) -> "tuple[dict, str]":
             f"Detalle: {exc}"
         ) from exc
 
-    # ── CAMINO NATIVO (el que el dueño pidió) ──────────────────────────────
-    # Si config.yaml tiene model.provider configurado (CUALQUIER provider nativo
-    # de la tabla de hermes_cli: openai-api directo, openai-codex/ChatGPT OAuth,
-    # nous, copilot, gemini…), resolvemos DIRECTO con hermes_cli leyendo
-    # .env/config.yaml/auth-store — sin el catálogo spec-016 ni el vault. Es
-    # EXACTAMENTE lo que hace `hermes --provider <id>`. requested=None hace que
-    # resolve_requested_provider lea config.yaml. Backward-compatible: si no hay
-    # model.provider (setups vault legacy), cae al camino de abajo.
-    try:
-        from hermes_cli.config import load_config  # noqa: PLC0415
-        _cfg_model = (load_config() or {}).get("model") or {}
-        _native_prov = (_cfg_model.get("provider") or "").strip()
-        _native_model = (_cfg_model.get("default") or _cfg_model.get("model") or "").strip()
-        if _native_prov and _native_prov != "auto":
-            runtime = resolve_runtime_provider(target_model=_native_model or None)
-            bare = _native_model or (
-                runtime.get("model") if isinstance(runtime, dict) else ""
-            ) or ""
-            logger.info(
-                "hermes.nous_engine.native_provider_resolved provider=%s model=%s",
-                _native_prov, bare,
-            )
-            _align_auxiliary_with_runtime(runtime, bare, fallback_provider=_native_prov)
-            return runtime, bare
-    except Exception as _nexc:  # noqa: BLE001 — el camino vault sigue disponible
-        logger.debug("hermes.nous_engine.native_resolve_skip: %r", _nexc)
-
     from hermes.providers.infrastructure.nous_provider_adapter import (  # noqa: PLC0415
         nous_request_from_model_config,
     )
 
+    # The selected snapshot is authoritative. Never re-read global config here:
+    # doing so silently overrides per-agent assignments and concurrent turns.
     req, bare = nous_request_from_model_config(model_config)
+    requested = model_config.native_provider or req.requested
+    if model_config.managed and (not model_config.api_key or not model_config.base_url):
+        raise RuntimeError('Managed provider credentials or endpoint unavailable')
     runtime = resolve_runtime_provider(
-        requested=req.requested,
+        requested=requested,
         explicit_api_key=req.explicit_api_key,
         explicit_base_url=req.explicit_base_url,
         target_model=req.target_model,
     )
-    _align_auxiliary_with_runtime(
-        runtime, bare, fallback_provider=req.requested,
-        fallback_key=req.explicit_api_key, fallback_url=req.explicit_base_url,
-    )
+    # Auxiliary routing is process-global in Hermes. Managed requests must not
+    # export their scoped credential into that shared environment.
+    if not model_config.managed:
+        _align_auxiliary_with_runtime(
+            runtime, bare, fallback_provider=requested,
+            fallback_key=req.explicit_api_key, fallback_url=req.explicit_base_url,
+        )
     return runtime, bare
 
 
@@ -2047,6 +2035,9 @@ class NousReasoningEngine:
         self._dbus_emit_end = emit_end
 
     def _resolve_model_config(self, agent_id: str | None = None) -> ModelConfig:
+        # Consult dynamic authority even for engines constructed with an explicit
+        # personal config; a later signed assignment must govern the next turn.
+        source_cfg = self._model_config_source() if self._model_config_source is not None else None
         # Per-agent provider binding (Fase 3c): if the agent has a provider_alias,
         # resolve that specific provider before falling back to the global path.
         if agent_id and self._agent_registry is not None and self._model_config_for_alias is not None:
@@ -2054,6 +2045,8 @@ class NousReasoningEngine:
             if alias:
                 per_agent_cfg = self._model_config_for_alias(alias)
                 if per_agent_cfg is not None:
+                    if source_cfg is not None and source_cfg.managed and not per_agent_cfg.managed:
+                        raise RuntimeError('Assigned enterprise provider cannot use a personal credential')
                     logger.info(
                         "hermes.nous_engine.per_agent_provider: "
                         "agent_id=%s alias=%s model=%s",
@@ -2062,17 +2055,20 @@ class NousReasoningEngine:
                         per_agent_cfg.model,
                     )
                     return per_agent_cfg
+                agent = self._agent_registry.get_agent(agent_id)
+                if getattr(agent, 'managed_by', None) == 'cloud':
+                    raise RuntimeError('Assigned enterprise provider is unavailable')
 
+        if source_cfg is not None and source_cfg.managed:
+            return source_cfg
         if self._model_config is not None:
             return self._model_config
         # Prefer the active Hermes provider (onboarding/Settings), resolved per
         # cycle so connecting/switching a provider in the UI takes effect on the
         # next task without restarting the daemon. Fall back to env only if no
         # provider is configured and no source was wired.
-        if self._model_config_source is not None:
-            cfg = self._model_config_source()
-            if cfg is not None:
-                return cfg
+        if source_cfg is not None:
+            return source_cfg
         return ModelConfig.from_env()
 
     def _agent_provider_alias(self, agent_id: str) -> str | None:
@@ -2976,6 +2972,13 @@ class NousReasoningEngine:
         consent_context: per-cycle override que propaga el operator_id real del
         WorkItem (spec 014 inc. 3 / CTRL-13). Si None, cae al consent de clase.
         """
+        if model_config.managed:
+            # Hermes 0.21.1 turn_context publishes api_key to global auxiliary
+            # mirrors unconditionally. No supported per-agent opt-out exists.
+            # Keep the signed binding usable for inspection/revocation, but do
+            # not leak its scoped credential into another session's routing.
+            from hermes.runtime.model_config import ManagedProviderUnavailableError, MANAGED_EXECUTION_UNAVAILABLE
+            raise ManagedProviderUnavailableError(MANAGED_EXECUTION_UNAVAILABLE)
         effective_consent = consent_context if consent_context is not None else self._consent_context
         # FIX D — use cached variants to avoid re-reading memory/disk every message.
         enriched_prompt = _cached_enrich_prompt(system_prompt, tenant_id)

@@ -229,6 +229,13 @@ class SQLiteAssociationStore:
                 "UPDATE instance_association SET instance_secret_ciphertext = NULL WHERE id = 1"
             )
             conn.execute("DELETE FROM instance_association WHERE id = 1")
+            # Explicit unpair ends LLM management. Revocation deliberately does
+            # not take this path, so its fail-closed tombstone remains in force.
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if 'managed_llm_policy' in tables:
+                conn.execute('DELETE FROM managed_llm_policy')
+            if 'providers' in tables:
+                conn.execute("DELETE FROM providers WHERE managed_by='cloud'")
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         # VACUUM must run outside the WAL transaction (it implicitly commits).
         with self._connect() as conn:

@@ -45,7 +45,7 @@ async def _reject_if_cloud_managed(
     try:
         providers = await proxy.call_list("list_providers")
     except AgentUnavailable:
-        return
+        raise HTTPException(status_code=503, detail='No se pudo verificar la gestión del proveedor.')
     for p in providers:
         if p.get("managed_by") != "cloud":
             continue

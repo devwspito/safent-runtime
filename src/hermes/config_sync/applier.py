@@ -131,7 +131,6 @@ from hermes.config_sync.policy_document import (
     LicenseSpec,
     McpSpec,
     PolicyPayload,
-    ProviderSpec,
     SkillSpec,
 )
 
@@ -146,6 +145,7 @@ _ALLOWED_VERBS: frozenset[str] = frozenset(
         # Read verbs (safe to call anytime)
         "list_agents",
         "list_providers",
+        "apply_managed_llm_gateway",
         "list_mcp_servers",
         "list_consents",
         "list_egress_grants",
@@ -338,6 +338,7 @@ class PolicyApplier:
         *,
         current_agents: list[dict] | None = None,
         tenant_id: str = "",
+        signed_bundle_json: str | None = None,
     ) -> ApplyResult:
         """Reconcile all sections in dependency order (P1-4: deletes at end).
 
@@ -348,7 +349,18 @@ class PolicyApplier:
         result = ApplyResult()
 
         # Phase 1: upsert everything
-        await self._apply_providers(payload.providers, result)
+        if payload.llm_instance_id is not None:
+            if signed_bundle_json is None:
+                result.failed.append('providers:signed_envelope_required')
+            else:
+                response = await self._call_mutator('apply_managed_llm_gateway', signed_bundle_json)
+                if response.get('ok') is True:
+                    result.applied += 1
+                else:
+                    result.failed.append('providers:managed_gateway_failed')
+        elif payload.providers:
+            # Never send upstream API keys through the legacy cloud path.
+            result.failed.append('providers:instance_gateway_required')
         await self._apply_integrations(payload.integrations, result)
         await self._apply_mcp(payload.mcp, result)
         await self._apply_skills(payload.skills, result)
@@ -381,59 +393,6 @@ class PolicyApplier:
     # ------------------------------------------------------------------
     # Section appliers
     # ------------------------------------------------------------------
-
-    async def _apply_providers(
-        self, providers: list[ProviderSpec], result: ApplyResult
-    ) -> None:
-        """Upsert cloud providers, then reconcile (the cloud owns the set).
-
-        P2: base_url validated against SSRF blocklist before calling the daemon.
-
-        UpdateProvider requires (provider_id, draft_json): the existing list is
-        indexed by alias to retrieve the provider_id before calling the verb.
-
-        Reconciliation: any provider previously stamped managed_by="cloud" whose
-        alias is no longer in the bundle is deleted — so removing a provider in
-        the console removes it on the associate. Locally-owned providers
-        (managed_by=None) are never touched.
-        """
-        existing = await self._proxy.call_list("list_providers")
-        existing_by_alias = {p.get("alias", ""): p for p in existing}
-
-        for spec in providers:
-            if spec.base_url and not _is_safe_base_url(spec.base_url):
-                logger.warning(
-                    "hermes.config_sync.applier.provider_unsafe_base_url",
-                    extra={"alias": spec.alias},
-                )
-                result.failed.append(f"provider:{spec.alias}:unsafe_base_url")
-                continue
-
-            draft = _provider_draft(spec)
-            if spec.alias not in existing_by_alias:
-                resp = await self._call_mutator("add_provider", json.dumps(draft))
-            else:
-                provider_id = existing_by_alias[spec.alias].get("provider_id", "")
-                resp = await self._call_mutator(
-                    "update_provider", provider_id, json.dumps(draft)
-                )
-
-            if _is_ok_lenient(resp):
-                result.applied += 1
-            else:
-                result.failed.append(f"provider:{spec.alias}")
-
-        # Reconcile: drop cloud-managed providers the bundle no longer lists.
-        bundle_aliases = {spec.alias for spec in providers}
-        for p in existing:
-            if p.get("managed_by") != "cloud" or p.get("alias", "") in bundle_aliases:
-                continue
-            pid = p.get("provider_id", "")
-            resp = await self._call_mutator("delete_provider", pid)
-            if _is_ok_lenient(resp):
-                result.applied += 1
-            else:
-                result.failed.append(f"provider:delete:{p.get('alias', '')}")
 
     async def _apply_integrations(
         self, integrations: list[IntegrationSpec], result: ApplyResult
@@ -1031,27 +990,3 @@ def _agent_draft(spec: AgentSpec) -> dict:
         "department": spec.department,
         "provider_alias": spec.provider_alias,
     }
-
-
-def _provider_draft(spec: ProviderSpec) -> dict:
-    """Build the draft dict sent to add_provider / update_provider.
-
-    api_key is included when the cloud bundle carries one.  The daemon
-    stores it encrypted in the SecretsVault — identical to how a locally-
-    configured key is stored.  NEVER log or expose the key here.
-    """
-    draft: dict = {
-        "kind": spec.kind,
-        "alias": spec.alias,
-        "default_model": spec.default_model,
-        "set_active": spec.set_active,
-        # Stamp ownership so the daemon marks the row cloud-managed: the local
-        # operator may not edit/delete it, and the applier can reconcile stale
-        # cloud providers. Mirrors how cloud agents carry managed_by="cloud".
-        "managed_by": "cloud",
-    }
-    if spec.base_url:
-        draft["base_url"] = spec.base_url
-    if spec.api_key:
-        draft["api_key"] = spec.api_key
-    return draft

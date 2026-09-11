@@ -701,6 +701,11 @@ class Runtime1ServiceInterface(ServiceInterface):
         )
 
     @method()
+    async def ApplyManagedLlmGateway(self, bundle_json: "s") -> "s":  # noqa: N802,F821,UP037
+        sender_uid = await self._resolve_current_sender_uid()
+        return json.dumps(self._wiring.apply_managed_llm_gateway(bundle_json=bundle_json, sender_uid=sender_uid))
+
+    @method()
     async def AddProvider(self, draft_json: "s") -> "s":  # noqa: N802,F821,UP037
         """Crea provider. draft: {kind, alias, default_model, base_url, api_key, set_active}."""
         sender_uid = await self._resolve_current_sender_uid()

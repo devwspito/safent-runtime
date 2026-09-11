@@ -831,34 +831,31 @@ class DbusRuntimeServiceWiring:
         *,
         set_active: bool = False,
     ) -> None:
-        """Write provider config to hermes_cli NATIVO path (fail-soft).
+        """Mirror the active local provider to Hermes's native configuration.
 
-        Maps ProviderKind → native provider_id via native_sync.kind_to_native_target,
-        then mirrors to HERMES_HOME/.env + config.yaml using the same helpers as
-        configure_native_provider.  If hermes_cli is unavailable or the kind has
-        no api_key (e.g. NOUS OAuth), this is a no-op — the SQL store remains the
-        fallback source as before.
-
-        The call is intentionally fire-and-log: native write failures MUST NOT
-        break the Safent flow (the SQL store is still valid fallback per the cascade
-        in provider_config_source.resolve_model_config).
+        Inactive aliases stay vault-only. Cloud credentials must use the signed
+        gateway path and can never be mirrored into process-global environment.
         """
+        if getattr(provider, 'managed_by', None) == 'cloud':
+            raise RuntimeError('Managed provider requires signed instance gateway')
+        if not set_active:
+            return
         try:
             from hermes.shell_server.providers.native_sync import kind_to_native_target  # noqa: PLC0415
             from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
         except Exception as exc:  # noqa: BLE001
+            if getattr(provider, 'managed_by', None) == 'cloud':
+                raise RuntimeError('Managed provider native synchronization unavailable') from None
             logger.debug("hermes.dbus.native_sync_unavailable: %s", exc)
             return
 
         try:
             target = kind_to_native_target(provider.kind)
 
-            # NOUS and OAuth providers have no api_key path — skip write.
-            if not target.env_var:
-                return
-
             key = (api_key or "").strip()
-            if not key:
+            # Inactive aliases stay in the vault. Providers sharing an env-var
+            # must never overwrite the active provider's credential on save.
+            if not set_active:
                 return
 
             # Validate env_var against PROVIDER_REGISTRY so we never write to
@@ -871,9 +868,14 @@ class DbusRuntimeServiceWiring:
                 if declared_vars:
                     env_var = declared_vars[0]
 
-            _write_hermes_env(env_var, key)
+            if env_var:
+                _write_hermes_env(env_var, key)
 
             bu = (provider.base_url or "").strip()
+            if not bu and target.base_url_env_var:
+                _write_hermes_env(target.base_url_env_var, '')
+                import os as _os
+                _os.environ.pop(target.base_url_env_var, None)
             if bu and target.base_url_env_var:
                 _write_hermes_env(target.base_url_env_var, bu)
                 if registry_cfg is not None:
@@ -892,7 +894,10 @@ class DbusRuntimeServiceWiring:
             # key on the next cycle without restart (mirrors configure_native_provider).
             try:
                 import os as _os  # noqa: PLC0415
-                _os.environ[env_var] = key
+                if env_var and key:
+                    _os.environ[env_var] = key
+                elif env_var:
+                    _os.environ.pop(env_var, None)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("hermes.dbus.native_sync_env_load_failed: %s", exc)
 
@@ -910,6 +915,8 @@ class DbusRuntimeServiceWiring:
                 },
             )
         except Exception as exc:  # noqa: BLE001
+            if getattr(provider, 'managed_by', None) == 'cloud':
+                raise RuntimeError('Managed provider native synchronization failed') from exc
             logger.warning(
                 "hermes.dbus.native_sync_failed kind=%s: %s",
                 getattr(provider, "kind", "?"),
@@ -967,6 +974,7 @@ class DbusRuntimeServiceWiring:
     def add_provider(self, *, draft_json: str, sender_uid: int) -> dict:
         """Crea provider. draft: {kind, alias, default_model, base_url, api_key, set_active}."""
         self._authorize_and_resolve(sender_uid, operation="add_provider")
+        self._reject_local_llm_mutation()
         if self._provider_repo is None:
             raise RuntimeError("provider_repo no inyectado en el daemon")
         from hermes.shell_server.providers.domain import (  # noqa: PLC0415
@@ -975,6 +983,8 @@ class DbusRuntimeServiceWiring:
         )
 
         d = json.loads(draft_json)
+        if d.get('managed_by'):
+            raise PermissionError('Managed providers require a signed Enterprise policy')
         api_key = d.get("api_key") or None
         provider = new_provider(
             alias=d["alias"],
@@ -983,9 +993,6 @@ class DbusRuntimeServiceWiring:
             base_url=d.get("base_url") or None,
             has_api_key=api_key is not None,
         )
-        # Ownership: the config-sync applier stamps managed_by="cloud" so the row
-        # is gated against local edits/deletes (REST layer) + reconcilable.
-        provider.managed_by = d.get("managed_by") or None
         saved = self._provider_repo.add(provider=provider, api_key=api_key)
         set_active = bool(d.get("set_active"))
         if set_active:
@@ -997,28 +1004,29 @@ class DbusRuntimeServiceWiring:
     def update_provider(self, *, provider_id: str, draft_json: str, sender_uid: int) -> dict:
         """Actualiza alias/default_model/base_url/enabled/api_key."""
         self._authorize_and_resolve(sender_uid, operation="update_provider")
+        self._reject_local_llm_mutation()
         from uuid import UUID as _UUID  # noqa: PLC0415
 
         pid = _UUID(provider_id)
         current = self._provider_repo.get(provider_id=pid)
         d = json.loads(draft_json)
+        if current.managed_by == 'cloud' or d.get('managed_by'):
+            raise PermissionError('Managed providers require a signed Enterprise policy')
         if d.get("alias") is not None:
             current.alias = d["alias"]
         if d.get("default_model") is not None:
             current.default_model = d["default_model"]
-        if d.get("base_url") is not None:
+        if "base_url" in d:
             current.base_url = d["base_url"]
         if d.get("enabled") is not None:
             current.enabled = bool(d["enabled"])
-        if d.get("managed_by") is not None:
-            current.managed_by = d["managed_by"]
         api_key = d.get("api_key") or None
         self._provider_repo.update(provider=current, api_key=api_key)
-        # Honor set_active on update too (parity with add_provider): the cloud
-        # bundle marks the agent's provider_alias active, and re-publishes route
-        # through update_provider once the row exists. Without this the engine
-        # keeps no active model and chat fails with "HERMES_MODEL no definido".
-        set_active = bool(d.get("set_active"))
+        if api_key is None and current.has_api_key:
+            api_key = self._provider_repo.reveal_api_key(provider_id=pid)
+        # Editing the active local alias must refresh native selection even
+        # when the request did not repeat set_active.
+        set_active = bool(d.get("set_active")) or current.is_active
         if set_active:
             self._provider_repo.set_active(provider_id=pid)
         updated = self._provider_repo.get(provider_id=pid)
@@ -1027,10 +1035,32 @@ class DbusRuntimeServiceWiring:
 
     def delete_provider(self, *, provider_id: str, sender_uid: int) -> bool:
         self._authorize_and_resolve(sender_uid, operation="delete_provider")
+        self._reject_local_llm_mutation()
         from uuid import UUID as _UUID  # noqa: PLC0415
 
-        self._provider_repo.delete(provider_id=_UUID(provider_id))
+        provider = self._provider_repo.get(provider_id=_UUID(provider_id))
+        if provider.managed_by == 'cloud':
+            raise PermissionError('Managed providers require a signed Enterprise policy')
+        if provider.is_active:
+            from hermes_cli.config import load_config, save_config
+            cfg = load_config() or {}
+            cfg.pop('model', None)
+            save_config(cfg)
+        self._provider_repo.delete(provider_id=provider.provider_id)
+        if self._active_provider_svc is not None:
+            self._active_provider_svc.force_refresh()
+        _clear_engine_runtime_cache()
         return True
+
+    def _reject_local_llm_mutation(self) -> None:
+        from hermes.runtime.managed_llm import read_policy
+        if self._provider_repo is not None and read_policy(self._provider_repo._db_path) is not None:
+            raise PermissionError('LLM configuration is managed by Enterprise')
+
+    def apply_managed_llm_gateway(self, *, bundle_json: str, sender_uid: int) -> dict:
+        self._authorize_and_resolve(sender_uid, operation='apply_managed_llm_gateway')
+        from hermes.runtime.managed_llm import apply_signed_gateway
+        return apply_signed_gateway(self, bundle_json)
 
     def set_active_provider(self, *, provider_id: str, sender_uid: int) -> dict:
         """Activa un provider — endpoint ÚNICO que la UI llama para CUALQUIER
@@ -1043,6 +1073,7 @@ class DbusRuntimeServiceWiring:
         api key — ver specs/025-safent-repaso hallazgo #1.
         """
         self._authorize_and_resolve(sender_uid, operation="set_active_provider")
+        self._reject_local_llm_mutation()
         from uuid import UUID as _UUID  # noqa: PLC0415
 
         try:
@@ -1175,6 +1206,7 @@ class DbusRuntimeServiceWiring:
         fallo (se conserva el mensaje real del proveedor en `error`).
         """
         self._authorize_and_resolve(sender_uid, operation="test_provider")
+        self._reject_local_llm_mutation()
         from uuid import UUID as _UUID  # noqa: PLC0415
 
         try:
@@ -1402,6 +1434,7 @@ class DbusRuntimeServiceWiring:
         en executor para no bloquear el event loop del daemon.
         """
         self._authorize_and_resolve(sender_uid, operation="start_provider_oauth")
+        self._reject_local_llm_mutation()
         import os  # noqa: PLC0415
         import threading  # noqa: PLC0415
         import time as _time  # noqa: PLC0415
@@ -2749,6 +2782,7 @@ class DbusRuntimeServiceWiring:
         groq, mistral, copilot…). Para OAuth/suscripción → start_provider_oauth.
         """
         self._authorize_and_resolve(sender_uid, operation="configure_native_provider")
+        self._reject_local_llm_mutation()
         try:
             from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
         except Exception as exc:  # noqa: BLE001
@@ -6775,6 +6809,8 @@ def _write_hermes_model_config(provider_id: str, model: str, base_url: str = "")
         m["default"] = model
     if base_url:
         m["base_url"] = base_url
+    else:
+        m.pop("base_url", None)
     cfg["model"] = m
     save_config(cfg)
 

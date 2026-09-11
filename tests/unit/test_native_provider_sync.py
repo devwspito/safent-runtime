@@ -246,7 +246,7 @@ class TestSyncToNativeProvider:
                     sender_uid=1000,
                 )
 
-        mock_write_env.assert_called_once_with("OPENAI_API_KEY", "sk-test-123")
+        mock_write_env.assert_not_called()  # inactive alias remains in vault
         mock_write_model.assert_not_called()  # set_active=False → no model config write
 
     def test_add_provider_with_set_active_writes_model_config(
@@ -318,7 +318,8 @@ class TestSyncToNativeProvider:
             ):
                 wiring.set_active_provider(provider_id=pid, sender_uid=1000)
 
-        mock_write_env.assert_called_once_with("OPENAI_API_KEY", "sk-test-123")
+        mock_write_env.assert_any_call("OPENAI_API_KEY", "sk-test-123")
+        mock_write_env.assert_any_call("OPENAI_BASE_URL", "")
         mock_write_model.assert_called_once_with("openai-api", "gpt-5.4-nano", "")
 
     def test_native_sync_skipped_for_nous_oauth_kind(self, tmp_path: Path) -> None:

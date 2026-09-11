@@ -27,13 +27,26 @@ class HermesModelNotConfiguredError(RuntimeError):
     """HERMES_MODEL no está definido (ni en env, ni en ModelConfig, ni en provider)."""
 
 
+class ManagedProviderUnavailableError(HermesModelNotConfiguredError):
+    """A managed assignment must never fall back to personal credentials."""
+
+
+MANAGED_EXECUTION_UNAVAILABLE = (
+    'Enterprise LLM execution is unavailable: Hermes 0.21.1 cannot isolate '
+    'auxiliary credentials per agent. Local fallback is disabled.'
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
     """Override explícito de la configuración del modelo."""
 
     model: str
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     base_url: str | None = None
+    # A native registry id is explicit, never re-selected from global config.
+    native_provider: str | None = None
+    managed: bool = False
     max_iterations: int = _DEFAULT_MAX_ITERATIONS
     timeout_seconds: int = _DEFAULT_TIMEOUT_S
     temperature: float = _DEFAULT_TEMPERATURE

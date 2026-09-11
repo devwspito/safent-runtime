@@ -759,16 +759,17 @@ class TestClearRuntimeProviderCache:
         calls: list[str] = []
 
         def _fake_resolve(model_config):
-            calls.append(model_config)
-            return ({"provider": model_config}, "bare-model")
+            calls.append(model_config.model)
+            return ({"provider": model_config.model}, "bare-model")
 
         with patch.object(nous_engine, "_resolve_hermes_runtime", side_effect=_fake_resolve):
             engine_id = 777
-            first = nous_engine._cached_resolve_hermes_runtime(engine_id, "gemini")
+            from hermes.runtime.model_config import ModelConfig
+            first = nous_engine._cached_resolve_hermes_runtime(engine_id, ModelConfig(model="gemini"))
             # Still within TTL: same engine_id, DIFFERENT model_config (switch
             # happened) — the stale cache would incorrectly win without clear().
             nous_engine.clear_runtime_provider_cache()
-            second = nous_engine._cached_resolve_hermes_runtime(engine_id, "anthropic")
+            second = nous_engine._cached_resolve_hermes_runtime(engine_id, ModelConfig(model="anthropic"))
 
         assert first[0]["provider"] == "gemini"
         assert second[0]["provider"] == "anthropic"
@@ -792,16 +793,17 @@ class TestClearRuntimeProviderCache:
         calls: list[str] = []
 
         def _fake_resolve(model_config):
-            calls.append(model_config)
+            calls.append(model_config.model)
             if len(calls) == 1:
                 # The owner switches providers (and the daemon clears the
                 # cache) WHILE this first resolve is still running.
                 nous_engine.clear_runtime_provider_cache()
-            return ({"provider": model_config}, "bare-model")
+            return ({"provider": model_config.model}, "bare-model")
 
         with patch.object(nous_engine, "_resolve_hermes_runtime", side_effect=_fake_resolve):
-            first = nous_engine._cached_resolve_hermes_runtime(engine_id, "gemini")
-            second = nous_engine._cached_resolve_hermes_runtime(engine_id, "anthropic")
+            from hermes.runtime.model_config import ModelConfig
+            first = nous_engine._cached_resolve_hermes_runtime(engine_id, ModelConfig(model="gemini"))
+            second = nous_engine._cached_resolve_hermes_runtime(engine_id, ModelConfig(model="anthropic"))
 
         assert first[0]["provider"] == "gemini"
         assert second[0]["provider"] == "anthropic"

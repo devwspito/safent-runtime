@@ -128,23 +128,23 @@ def _load_native_model_config() -> ModelConfig | None:
         "hermes.provider_config.native_active",
         extra={"provider": pid, "model": model_string, "has_key": api_key is not None},
     )
-    return ModelConfig.from_provider(
+    from dataclasses import replace  # noqa: PLC0415
+    return replace(ModelConfig.from_provider(
         model=model_string, api_key=api_key, base_url=base_url
-    )
+    ), native_provider=pid)
 
 
-def resolve_model_config(db_path: Path) -> ModelConfig | None:  # noqa: ARG001
-    """Cascade: native config (hermes_cli config.yaml/.env) → env. None si ninguno.
+def resolve_model_config(db_path: Path) -> ModelConfig | None:
+    """Per-turn source: signed Enterprise assignment, otherwise native → env.
 
-    Esta es la fuente que el engine consulta POR CICLO. El path NATIVO
-    (hermes_cli config.yaml + HERMES_HOME/.env) es la ÚNICA fuente de
-    resolución desde R5 Stage C. El path SQL (Safent store) fue retirado del
-    cascade: al arrancar, `migrate_active_provider_to_native` lo sincroniza al
-    nativo UNA SOLA VEZ de forma idempotente.
-
-    `db_path` se mantiene en la firma por compatibilidad de llamadas existentes;
-    ya no se usa en este cascade.
+    The database holds only the verified managed selection and vault reference.
+    Native Hermes still resolves the inference client. A managed tombstone or
+    unverifiable policy raises instead of falling back to personal credentials.
     """
+    from hermes.runtime.managed_llm import resolve_managed_config  # noqa: PLC0415
+    managed = resolve_managed_config(db_path)
+    if managed is not None:
+        return managed
     config = _load_native_model_config()
     if config is not None:
         return config
