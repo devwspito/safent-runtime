@@ -532,6 +532,9 @@ export interface SecurityDecisionPayload {
   score: number
   verdict: string
   risks_json: string
+  mcp_approval?:
+    | { operation: 'add'; server_id: string; label?: string; argv: string[]; env: Record<string, string> }
+    | { operation: 'managed_remote'; slug: string; url: string }
 }
 
 export interface SecurityDecisionResponse {

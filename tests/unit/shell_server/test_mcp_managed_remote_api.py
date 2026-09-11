@@ -203,14 +203,14 @@ class TestConnectManagedRemote:
         client = TestClient(_make_app(p))
         client.post(
             "/api/v1/mcp/managed-remote/safent-ads/connect",
-            json={"url": "https://ads.tenant.ts.net/mcp", "force": True},
+            json={"url": "https://ads.tenant.ts.net/mcp", "force": False},
         )
         _, second_call = p.call_mutator.call_args_list
         draft = _json.loads(second_call.args[1])
         assert draft["server_id"] == "safent-ads"
         assert draft["argv"] == ["npx", "-y", "mcp-remote@0.8.6", "https://ads.tenant.ts.net/mcp"]
         assert draft["label"] == "Safent Ads"
-        assert draft["force"] is True
+        assert draft["force"] is False
 
     def test_endpoint_rejection_short_circuits_before_add_returns_400(self) -> None:
         p = _proxy(mutator_return={"ok": False, "error": "managed_remote endpoint must use https://"})

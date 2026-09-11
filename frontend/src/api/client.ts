@@ -451,7 +451,7 @@ export function listMcpServers(): Promise<McpServer[]> {
   return request<McpServer[]>('/mcp')
 }
 
-export function addMcpServer(payload: Record<string, unknown>): Promise<McpAddResponse> {
+export function addMcpServer(payload: Record<string, unknown>, approvalGrant?: string): Promise<McpAddResponse> {
   // The daemon connects eagerly; a rejection (bad draft, disallowed runner,
   // security-scan block, ...) is now a 400/403 — request<T>'s !res.ok branch
   // throws ApiError(message, status, body) with the daemon's {ok, error, ...}
@@ -460,6 +460,7 @@ export function addMcpServer(payload: Record<string, unknown>): Promise<McpAddRe
   // still resolves — callers surface that warning separately.
   return request<McpAddResponse>('/mcp', {
     method: 'POST',
+    headers: approvalGrant ? { 'X-Owner-Approval-Grant': approvalGrant } : undefined,
     body: JSON.stringify(payload),
     timeoutMs: 300_000,
   })
@@ -481,9 +482,10 @@ export function listManagedRemoteEndpoints(): Promise<ManagedRemoteEndpointsResp
     .catch(() => ({ endpoints: {} }))
 }
 
-export function connectManagedRemote(slug: string, url: string, force = false): Promise<McpAddResponse> {
+export function connectManagedRemote(slug: string, url: string, force = false, approvalGrant?: string): Promise<McpAddResponse> {
   return request<McpAddResponse>(`/mcp/managed-remote/${encodeURIComponent(slug)}/connect`, {
     method: 'POST',
+    headers: approvalGrant ? { 'X-Owner-Approval-Grant': approvalGrant } : undefined,
     body: JSON.stringify({ url, force }),
     timeoutMs: 300_000,
   })
@@ -689,7 +691,7 @@ export function getConversation(id: string): Promise<ConversationDetail> {
 /** List conversation summaries. */
 export function listConversations(agentId?: string): Promise<ConversationSummary[]> {
   const qs = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ''
-  return request<ConversationSummary[]>(`/chat/conversations${qs}`).catch(() => [])
+  return request<ConversationSummary[]>(`/chat/conversations${qs}`)
 }
 
 // ── Security ──────────────────────────────────────────────────────────────────
@@ -947,9 +949,7 @@ export function mfaEnroll(totp: string | null = null): Promise<{ otpauth_uri?: s
 // ── Security policies ─────────────────────────────────────────────────────────
 
 export function getPolicies(): Promise<PoliciesResponse> {
-  return request<PoliciesResponse>('/policies').catch(
-    () => ({ preset: 'equilibrado', tools: {}, approval_on_dangers: true }),
-  )
+  return request<PoliciesResponse>('/policies')
 }
 
 export function setPolicyPreset(preset: string): Promise<unknown> {

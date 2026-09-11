@@ -43,6 +43,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from hermes.shell_server.security.mcp_approval import McpApproval, mcp_approval_identifier
 from hermes.shell_server.security.owner_confirmation import (
     issue_owner_approval,
     require_owner_session,
@@ -79,6 +80,7 @@ class RecordInstallDecisionRequest(BaseModel):
     score: int = -1
     verdict: str = ""
     risks_json: str = "[]"
+    mcp_approval: McpApproval | None = None
 
 
 class KillSwitchRequest(BaseModel):
@@ -92,7 +94,7 @@ class KillSwitchRequest(BaseModel):
 # ------------------------------------------------------------------
 
 
-def create_security_router() -> APIRouter:
+def create_security_router() -> APIRouter:  # noqa: PLR0915 — related REST routes
     router = APIRouter(prefix="/api/v1/security", tags=["security"])
 
     @router.get("/scans")
@@ -182,6 +184,8 @@ def create_security_router() -> APIRouter:
         is_override = body.decision.strip().lower() in _OVERRIDE_DECISIONS
         if is_override:
             require_owner_session(request)
+            if body.kind == "mcp" and body.mcp_approval is None:
+                raise HTTPException(status_code=422, detail={"code": "mcp_approval_required"})
         proxy = request.app.state.dbus_proxy
         try:
             result = await proxy.call_mutator(
@@ -204,6 +208,13 @@ def create_security_router() -> APIRouter:
         if is_override and body.kind == "skill" and body.identifier:
             grant = issue_owner_approval(
                 request, identifier=body.identifier, action="install_hub_skill"
+            )
+            result = {**result, "approval_grant": grant}
+        elif is_override and body.kind == "mcp" and body.mcp_approval is not None:
+            grant = issue_owner_approval(
+                request,
+                identifier=mcp_approval_identifier(body.mcp_approval),
+                action="install_mcp",
             )
             result = {**result, "approval_grant": grant}
         return result

@@ -135,7 +135,7 @@ def test_failed_decision_never_yields_an_approval(
     assert not getattr(app.state, "owner_approval_grants", {})
 
 
-@pytest.mark.parametrize("changes", [{"kind": "mcp"}, {"decision": "deny"}])
+@pytest.mark.parametrize("changes", [{"kind": "rpm"}, {"decision": "deny"}])
 def test_non_skill_and_denied_decisions_yield_no_grant(client: TestClient, changes: dict) -> None:
     response = client.post("/api/v1/security/decisions", json={**_DECISION, **changes})
     assert response.status_code == 201

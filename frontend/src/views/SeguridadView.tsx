@@ -483,10 +483,19 @@ export function GovernanceSection() {
   const approvalDisabled = pol?.approval_on_dangers === false
 
   const load = useCallback(async () => {
-    const p = await getPolicies()
-    setPol(p)
-    setLoading(false)
-    setToolPending({})
+    setLoading(true)
+    try {
+      const p = await getPolicies()
+      setPol(p)
+    } catch {
+      // Unknown policy is not the default preset, nor a stale editable policy.
+      setPol(null)
+      setPendingPreset(null)
+      setPendingAction(null)
+    } finally {
+      setLoading(false)
+      setToolPending({})
+    }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -649,7 +658,14 @@ export function GovernanceSection() {
   if (loading) {
     return <GovernanceSkeletonBlock />
   }
-  if (!pol) return null
+  if (!pol) return (
+    <section className="cv-section" role="alert">
+      <p>{t('seg.policies.unavailable')}</p>
+      <Button variant="secondary" size="sm" onClick={() => void load()}>
+        {t('seg.policies.retry')}
+      </Button>
+    </section>
+  )
 
   const hasCatalog = (pol.catalog?.length ?? 0) > 0
   const currentPreset = pendingPreset ?? pol.preset

@@ -7,15 +7,27 @@ The network/HTTP authentication boundary still protects reads.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from hermes.capabilities.tool_policy import Preset, ToolPolicyStore
+from hermes.capabilities.tool_policy import PolicyUnavailableError, Preset, ToolPolicyStore
 from hermes.shell_server.security.owner_confirmation import require_owner_session
 
 logger = logging.getLogger("hermes.shell_server.cowork.policies_api")
+
+
+def _policy_call[T](operation: Callable[[], T]) -> T:
+    try:
+        return operation()
+    except (PolicyUnavailableError, OSError) as exc:
+        # No fabricated preset and no raw file contents/paths in the response.
+        raise HTTPException(status_code=503, detail={
+            "error": "policy_unavailable",
+            "message": "Política no disponible. Las herramientas siguen protegidas.",
+        }) from exc
 
 
 class _PolicyBody(BaseModel):
@@ -47,11 +59,11 @@ def create_policies_router(policy: ToolPolicyStore | None = None) -> APIRouter:
 
     @router.get("/api/v1/policies")
     async def get_policies() -> dict:
-        return store.snapshot()
+        return _policy_call(store.snapshot)
 
     @writes.post("/api/v1/policies/preset")
     async def set_preset(body: PresetBody) -> dict:
-        store.apply_preset(Preset(body.preset))
+        _policy_call(lambda: store.apply_preset(Preset(body.preset)))
         try:
             from hermes.shell_server.egress_api import (  # noqa: PLC0415
                 apply_browser_egress_for_preset,
@@ -65,19 +77,19 @@ def create_policies_router(policy: ToolPolicyStore | None = None) -> APIRouter:
 
     @writes.post("/api/v1/policies/tool")
     async def set_tool(body: ToolBody) -> dict:
-        store.set_tool(body.tool, body.enabled)
+        _policy_call(lambda: store.set_tool(body.tool, body.enabled))
         logger.info("hermes.cowork.policies.tool_set tool=%s enabled=%s", body.tool, body.enabled)
         return {"ok": True, "tool": body.tool, "enabled": body.enabled}
 
     @writes.post("/api/v1/policies/tools")
     async def set_tools(body: ToolsBody) -> dict:
-        store.set_tools(body.tools)
+        _policy_call(lambda: store.set_tools(body.tools))
         logger.info("hermes.cowork.policies.tools_set count=%d", len(body.tools))
         return {"ok": True, "count": len(body.tools)}
 
     @writes.post("/api/v1/policies/approval_on_dangers")
     async def set_approval_on_dangers(body: DangerApprovalBody) -> dict:
-        store.set_approval_on_dangers(body.enabled)
+        _policy_call(lambda: store.set_approval_on_dangers(body.enabled))
         logger.info("hermes.cowork.policies.approval_on_dangers_set enabled=%s", body.enabled)
         return {"ok": True, "approval_on_dangers": body.enabled}
 

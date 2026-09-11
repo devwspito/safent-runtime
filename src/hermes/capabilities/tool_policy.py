@@ -251,6 +251,10 @@ def _preset_default(preset: Preset, tool: str) -> bool:
     return default_enabled_equilibrado(tool)  # Equilibrado ← single delicacy source
 
 
+class PolicyUnavailableError(RuntimeError):
+    """Existing owner policy cannot be safely interpreted; never use defaults."""
+
+
 class ToolPolicyStore:
     """Owner-controlled per-tool enable map, backed by an owner-only JSON file."""
 
@@ -260,9 +264,26 @@ class ToolPolicyStore:
     def _load(self) -> dict:
         try:
             d = json.loads(self._path.read_text(encoding="utf-8"))
-            return d if isinstance(d, dict) else {}
-        except (FileNotFoundError, ValueError, OSError):
+        except FileNotFoundError:
+            # Only a genuinely unconfigured installation receives defaults.
+            if self._path.is_symlink():
+                raise PolicyUnavailableError("Owner policy is unavailable") from None
             return {}
+        except (ValueError, OSError) as exc:
+            raise PolicyUnavailableError("Owner policy is unavailable") from exc
+        if not isinstance(d, dict):
+            raise PolicyUnavailableError("Owner policy must be an object")
+        raw_preset = d.get("preset", Preset.EQUILIBRADO.value)
+        if not isinstance(raw_preset, str) or raw_preset not in {p.value for p in Preset}:
+            raise PolicyUnavailableError("Owner policy has an invalid preset")
+        overrides = d.get("overrides", {})
+        if not isinstance(overrides, dict) or any(
+            not name or type(enabled) is not bool for name, enabled in overrides.items()
+        ):
+            raise PolicyUnavailableError("Owner policy has invalid overrides")
+        if "approval_on_dangers" in d and type(d["approval_on_dangers"]) is not bool:
+            raise PolicyUnavailableError("Owner policy has an invalid approval setting")
+        return d
 
     def _save(self, data: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -289,11 +310,10 @@ class ToolPolicyStore:
             self._save(change(self._load()))
 
     def _preset(self) -> Preset:
-        raw = self._load().get("preset", Preset.EQUILIBRADO.value)
         try:
-            return Preset(raw)
-        except ValueError:
-            return Preset.EQUILIBRADO
+            return Preset(self._load().get("preset", Preset.EQUILIBRADO.value))
+        except PolicyUnavailableError:
+            return Preset.BLOQUEADO
 
     def is_enabled(self, tool: str) -> bool:
         """Deterministic: explicit override wins, else the active preset's default.
@@ -302,11 +322,14 @@ class ToolPolicyStore:
         (Equilibrado → enabled unless high-risk; Bloqueado → off). Fail-safe leans on
         the preset, never silently allows a high-risk tool.
         """
-        d = self._load()
+        try:
+            d = self._load()
+        except PolicyUnavailableError:
+            return False
         overrides = d.get("overrides", {})
         if tool in overrides:
-            return bool(overrides[tool])
-        return _preset_default(self._preset(), tool)
+            return overrides[tool]
+        return _preset_default(Preset(d.get("preset", Preset.EQUILIBRADO.value)), tool)
 
     def is_owner_disabled(self, tool: str) -> bool:
         """True ONLY if the owner has CONSCIOUSLY disabled this tool.
@@ -319,17 +342,18 @@ class ToolPolicyStore:
             before Step 1.6 can surface the approval card to the owner.
           - PERMISIVO preset → False (everything is on)
 
-        Fail-safe: any read error → False (do not block; let the HITL gate decide).
+        Unreadable or malformed policy also blocks: loss of an explicit owner
+        restriction must not silently become an approval-eligible default.
         """
         try:
             d = self._load()
             overrides = d.get("overrides", {})
             if tool in overrides:
                 return not bool(overrides[tool])
-            preset = self._preset()
+            preset = Preset(d.get("preset", Preset.EQUILIBRADO.value))
             return preset is Preset.BLOQUEADO
-        except Exception:  # noqa: BLE001 — policy is usability layer; fail-open here
-            return False
+        except PolicyUnavailableError:
+            return True
 
     def approval_on_dangers(self) -> bool:
         """Whether dangerous outbound commands ask for owner approval (default ON).
@@ -372,8 +396,10 @@ class ToolPolicyStore:
         )
         from hermes.capabilities.tool_delicacy import delicacy  # noqa: PLC0415
 
-        preset = self._preset()
-        overrides = self._load().get("overrides", {})
+        # One coherent version of the policy, even during concurrent updates.
+        data = self._load()
+        preset = Preset(data.get("preset", Preset.EQUILIBRADO.value))
+        overrides = data.get("overrides", {})
 
         # Backwards-compat: the flat tools:{name:bool} map over the STATIC catalog.
         tools = {
@@ -414,7 +440,7 @@ class ToolPolicyStore:
             "preset": preset.value,
             "tools": tools,
             "overridden": sorted(overrides),
-            "approval_on_dangers": self.approval_on_dangers(),
+            "approval_on_dangers": data.get("approval_on_dangers", True),
             "catalog": catalog,
         }
 

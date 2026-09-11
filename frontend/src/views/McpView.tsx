@@ -257,7 +257,7 @@ export default function McpView() {
     }
   }
 
-  async function doAddMcpServer(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void, force = false) {
+  async function doAddMcpServer(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void, force = false, approvalGrant?: string) {
     const argv = Array.isArray(entry.argv)
       ? entry.argv
       : String(entry.argv ?? '').split(/\s+/).filter(Boolean)
@@ -268,10 +268,9 @@ export default function McpView() {
         label: entry.label ?? entry.name,
         argv,
         env: { ...collectedEnv },
-        // Owner sovereign override after a FAIL/WARN scan was approved with MFA — the
-        // daemon's add gate re-blocks FAIL/WARN unless force carries the approval.
+        // Only the one-use grant authorizes this exact owner-reviewed draft.
         force,
-      })
+      }, approvalGrant)
       const name = entry.label ?? entry.name ?? ''
       if (res && res.tool_count === 0) {
         show(t('mcp.toast.no_tools').replace('{name}', name), 'warn', 7000)
@@ -328,7 +327,7 @@ export default function McpView() {
     const { scan, entry, collectedEnv, onDone } = pendingInstall
     setPendingInstall(null)
     try {
-      await recordSecurityDecision({
+      const decision = await recordSecurityDecision({
         scan_id: scan.scan_id,
         decision: 'approve',
         identifier: scan.identifier ?? entry.server_id ?? entry.id ?? '',
@@ -336,9 +335,15 @@ export default function McpView() {
         score: scan.score,
         verdict: scan.verdict,
         risks_json: JSON.stringify(scan.risks),
-
+        mcp_approval: {
+          operation: 'add',
+          server_id: entry.server_id ?? entry.id ?? slugify(entry.name ?? ''),
+          label: entry.label ?? entry.name,
+          argv: Array.isArray(entry.argv) ? entry.argv : String(entry.argv ?? '').split(/\s+/).filter(Boolean),
+          env: { ...collectedEnv },
+        },
       })
-      await doAddMcpServer(entry, collectedEnv, onDone, true)
+      await doAddMcpServer(entry, collectedEnv, onDone, true, decision.approval_grant)
     } catch (e) {
       show(e instanceof Error ? e.message : t('mcp.err.decision'), 'error')
       onDone()
@@ -749,7 +754,7 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
   const t = useT()
   const [url, setUrl] = useState('')
   const [connecting, setConnecting] = useState(false)
-  const [pendingScan, setPendingScan] = useState<InstallScanResponse | null>(null)
+  const [pendingScan, setPendingScan] = useState<{ scan: InstallScanResponse; url: string } | null>(null)
   // 029: the self-host URL is an escape hatch now, collapsed and off by
   // default — CompanionInstallAction ("Instalar") is the default path.
   const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -767,10 +772,10 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
       .catch(() => undefined)
   }, [connectedServer])
 
-  async function doConnect(force: boolean) {
+  async function doConnect(force: boolean, targetUrl = url.trim(), approvalGrant?: string) {
     setConnecting(true)
     try {
-      const res = await connectManagedRemote(SAFENT_ADS_SLUG, url.trim(), force)
+      const res = await connectManagedRemote(SAFENT_ADS_SLUG, targetUrl, force, approvalGrant)
       if (res && res.tool_count === 0) {
         show(t('mcp.toast.no_tools').replace('{name}', t('mcp.managed.ads.title')), 'warn', 7000)
       } else {
@@ -796,7 +801,7 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
       if (blocked === true) {
         try {
           const scan = await scanInstall('mcp', SAFENT_ADS_SCAN_TARGET)
-          setPendingScan(scan)
+          setPendingScan({ scan, url: targetUrl })
           return
         } catch {
           show(e instanceof Error ? e.message : t('mcp.err.generic'), 'error')
@@ -820,10 +825,10 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
 
   async function handleScanApprove() {
     if (!pendingScan) return
-    const scan = pendingScan
+    const { scan, url: approvedUrl } = pendingScan
     setPendingScan(null)
     try {
-      await recordSecurityDecision({
+      const decision = await recordSecurityDecision({
         scan_id: scan.scan_id,
         decision: 'approve',
         identifier: scan.identifier ?? SAFENT_ADS_SCAN_TARGET,
@@ -831,9 +836,9 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
         score: scan.score,
         verdict: scan.verdict,
         risks_json: JSON.stringify(scan.risks),
-
+        mcp_approval: { operation: 'managed_remote', slug: SAFENT_ADS_SLUG, url: approvedUrl },
       })
-      await doConnect(true)
+      await doConnect(true, approvedUrl, decision.approval_grant)
     } catch (e) {
       show(e instanceof Error ? e.message : t('mcp.err.decision'), 'error')
     }
@@ -847,7 +852,7 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
     <>
       {pendingScan && (
         <InstallScanModal
-          scan={pendingScan}
+          scan={pendingScan.scan}
           name={t('mcp.managed.ads.title')}
           onApprove={handleScanApprove}
           onCancel={() => setPendingScan(null)}

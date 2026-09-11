@@ -85,3 +85,19 @@ def test_legacy_mfa_endpoint_is_not_exposed(tmp_path: Path) -> None:
     response = client.post("/api/v1/policies/mfa_on_dangers", json={"enabled": False})
     assert response.status_code == 404
     assert "mfa_on_dangers" not in store.snapshot()
+
+
+@pytest.mark.parametrize(("path", "payload"), _MUTATIONS)
+def test_corrupt_policy_is_unavailable_not_reset(tmp_path: Path, path: str, payload: dict) -> None:
+    app, _store = _app(tmp_path)
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"private":')
+    client = TestClient(app, headers={"Authorization": "Bearer owner-ui"})
+    for response in (
+        client.get("/api/v1/policies"),
+        client.post(f"/api/v1/policies/{path}", json=payload),
+    ):
+        assert response.status_code == 503
+        assert response.json()["detail"]["error"] == "policy_unavailable"
+        assert "private" not in response.text
+    assert policy.read_text() == '{"private":'

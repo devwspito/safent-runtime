@@ -23,3 +23,19 @@ it('transports an exact-action grant only in its header and never retries a reje
   const { getAuthStatus } = await import('../lib/token')
   expect(getAuthStatus()).toEqual({ kind: 'authenticated' })
 })
+
+it.each(['add', 'managed'])('passes an MCP %s grant without replaying a rejected operation', async (kind) => {
+  localStorage.setItem('safent_token', 'test-owner-session')
+  const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+    detail: { code: 'invalid_owner_approval' },
+  }), { status: 401 }))
+  vi.stubGlobal('fetch', fetch)
+  const { addMcpServer, connectManagedRemote } = await import('./client')
+  const operation = kind === 'add'
+    ? addMcpServer({ server_id: 'example', force: true }, 'mcp-grant')
+    : connectManagedRemote('safent-ads', 'https://ads.example.com/mcp', true, 'mcp-grant')
+  await expect(operation).rejects.toMatchObject({ code: 'invalid_owner_approval' })
+  expect(fetch).toHaveBeenCalledTimes(1)
+  expect(fetch.mock.calls[0][1].headers['X-Owner-Approval-Grant']).toBe('mcp-grant')
+  expect(fetch.mock.calls[0][1].body).not.toContain('mcp-grant')
+})
