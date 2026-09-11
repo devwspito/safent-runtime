@@ -66,6 +66,26 @@ SECCOMP_URL="${SAFENT_SECCOMP_URL:-https://raw.githubusercontent.com/devwspito/s
 # a bundled install never touches a terminal user's ~/.safent; a bare
 # terminal install keeps today's default unchanged.
 SAFENT_STATE_HOME="${SAFENT_STATE_HOME:-${HOME:-/tmp}/.safent}"
+# MAC3-03 (verificacion-mac-3.md, MAC2-07 repeated unfixed): on macOS the
+# engine actually runs INSIDE the podman-machine VM, which virtiofs-mounts
+# /Users, /private and /var/folders from the host at their OWN canonical
+# (symlink-resolved) paths — never at every alias that happens to point
+# into them. /tmp is a symlink to /private/tmp on the HOST, but the guest
+# VM is a different OS with its own separate /tmp, so a literal "/tmp/..."
+# host path handed to a VM-side command (e.g. --security-opt seccomp=...)
+# is invisible even though the real underlying directory (/private/tmp/...)
+# IS mounted and would have worked. Reproduced live: the exact same folder
+# given as "/tmp/safent-mac-test3/state" failed and "/private/tmp/
+# safent-mac-test3/state" succeeded. Canonicalizing here — once, before
+# anything derives a path from it below (SECCOMP_DIR, COMPANION_STATE,
+# podman's own storage/runroot) — makes the default ($HOME/.safent, already
+# canonical on every real install) a no-op and makes any override safe
+# instead of "working by coincidence" only when it happens to already be
+# spelled in canonical form.
+mkdir -p "$SAFENT_STATE_HOME" 2>/dev/null || true
+if _canon="$(CDPATH='' cd -- "$SAFENT_STATE_HOME" 2>/dev/null && pwd -P)"; then
+  SAFENT_STATE_HOME="$_canon"
+fi
 SECCOMP_DIR="$SAFENT_STATE_HOME"
 SECCOMP="$SECCOMP_DIR/safent-seccomp.json"
 # Where `safent update` fetches the newest CLI from (same source the installer uses).
@@ -152,7 +172,14 @@ OS="$(uname -s 2>/dev/null || echo unknown)"
 # because that path is only known at runtime. An existing
 # CONTAINERS_CONF/CONTAINERS_STORAGE_CONF from the caller always wins.
 if [ -n "${SAFENT_PODMAN:-}" ]; then
-  _podman_bundle_dir="$(CDPATH='' cd -- "$(dirname "$SAFENT_PODMAN")" 2>/dev/null && pwd)"
+  # `pwd -P` (physical, symlink-resolved), not plain `pwd` (logical — keeps
+  # whatever symlink components the caller's own $SAFENT_PODMAN happened to
+  # spell) — MAC3-03's same VM-visibility rule applies to this directory
+  # too: the bundled seccomp profile _ensure_seccomp resolves from here
+  # (below) is a host path a VM-side podman must be able to open, so it
+  # must be canonical regardless of how the desktop app spelled
+  # $SAFENT_PODMAN.
+  _podman_bundle_dir="$(CDPATH='' cd -- "$(dirname "$SAFENT_PODMAN")" 2>/dev/null && pwd -P)"
   if [ -z "${CONTAINERS_CONF:-}" ] && [ -f "$_podman_bundle_dir/containers.conf" ]; then
     CONTAINERS_CONF="$_podman_bundle_dir/containers.conf"
     export CONTAINERS_CONF
@@ -241,10 +268,32 @@ _ensure_machine() {
   podman info >/dev/null 2>&1 || podman machine start "$name" >/dev/null 2>&1 || true
 }
 
-# seccomp profile under $HOME (on macOS the VM mounts $HOME but NOT /tmp).
+# Resolves $SECCOMP to a path podman can actually open — bundled first
+# (tier 0, below), otherwise fetched under the now-canonicalized
+# $SECCOMP_DIR (on macOS the VM mounts /Users, /private and /var/folders
+# at their real, symlink-resolved paths — see SAFENT_STATE_HOME's own
+# canonicalization above).
 _ensure_seccomp() {
   mkdir -p "$SECCOMP_DIR" 2>/dev/null || true
-  # 1. Preferred: pull the profile straight out of the image — v0.8.29+ ship it baked
+  # 0. Preferred, and the only tier with NO network and NO dependency on an
+  #    already-pulled image: ops/container/seccomp/safent.json (the SAME
+  #    file the Containerfile bakes at /usr/share/hermes/seccomp/safent.json
+  #    — see tier 1 below) ships as a bundled, hash-verified runtime asset
+  #    exactly like podman/gvproxy/vfkit (stage-runtime.sh's APP_FILES,
+  #    verified end to end by cmd_stage_runtime before it is ever copied
+  #    next to the pinned podman binary). MAC3-03 (verificacion-mac-3.md):
+  #    tiers 1/2 below both fetch INTO $SECCOMP_DIR at runtime and can
+  #    legitimately fail there (image not pulled yet, no network) — exactly
+  #    what made "first boot always fails" (MAC-10) worse for this one
+  #    dependency. Only for the PINNED podman ($_podman_bundle_dir set,
+  #    same distinction TestBundledPodmanGetsItsOwnStorage draws) — a bare
+  #    terminal install has no bundle to look in and keeps tiers 1-3
+  #    unchanged.
+  if [ -n "${_podman_bundle_dir:-}" ] && [ -s "$_podman_bundle_dir/safent.json" ]; then
+    SECCOMP="$_podman_bundle_dir/safent.json"
+    return 0
+  fi
+  # 1. Pull the profile straight out of the image — v0.8.29+ ship it baked
   #    at /usr/share/hermes/seccomp/safent.json, version-matched and with NO network.
   # $RT (the resolved/pinned binary), never $RTN (its bare basename) — the
   # latter would execve whatever "podman"/"docker" the PATH resolves to,
@@ -267,9 +316,15 @@ _ensure_seccomp() {
     echo "[!] Using the cached seccomp profile (could not refresh from image or $SECCOMP_URL)."
     return 0
   fi
-  echo "[x] Could not obtain the seccomp profile (image + $SECCOMP_URL failed, no cache)."
-  echo "    Check the image pulled correctly, or export SAFENT_SECCOMP_URL to a reachable URL."
-  exit 1
+  # MAC3-03: a clean, porcelain-shaped failure (not a bare `echo`+`exit 1`,
+  # which broke the NDJSON stream — every stdout line in --porcelain mode
+  # must parse as JSON, app-engine.md §2). The message names "seccomp
+  # profile" on purpose: engine_adapter.rs's reclassify_from_stderr matches
+  # that phrase (shared with podman's own raw error for the same missing
+  # resource) and turns this generic daemon_unhealthy into the precise,
+  # adapter-only FailureCode::SeccompProfileMissing before it reaches the UI.
+  _die_porcelain daemon_unhealthy \
+    "Could not obtain the seccomp profile (bundle, image and $SECCOMP_URL all failed, no cache)" true
 }
 
 # Fetch ONE companion file ($1: provision.sh / compose.yaml / caps.template.yaml)

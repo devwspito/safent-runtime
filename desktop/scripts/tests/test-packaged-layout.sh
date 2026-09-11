@@ -59,7 +59,7 @@ rm -rf "$DEST" "$CACHE_DIR"
 [ -f "$MANIFEST" ] || fail "no runtime-bundle.json under $DEST after staging"
 
 # ---- regression 1: the safent CLI + neighbors must be in the package -----
-EXPECTED_APP_FILES="safent run-safent.sh provision.sh compose.yaml caps.template.yaml"
+EXPECTED_APP_FILES="safent run-safent.sh safent.json provision.sh compose.yaml caps.template.yaml"
 for name in $EXPECTED_APP_FILES; do
   [ -f "$DEST/$name" ] || fail "expected app file missing from staged tree: $name"
 
@@ -72,7 +72,7 @@ for name in $EXPECTED_APP_FILES; do
   [ -n "$lock_sha" ] || fail "runtime-manifest.lock .app_files has no entry for $name"
   [ "$lock_sha" = "$got_sha" ] || fail "$name: staged sha256 disagrees with runtime-manifest.lock's .app_files record"
 done
-pass "all 5 app files present, hash-matched in both records: $EXPECTED_APP_FILES"
+pass "all 6 app files present, hash-matched in both records: $EXPECTED_APP_FILES"
 
 for name in safent run-safent.sh provision.sh; do
   mode="$(jq -r --arg p "$name" '.entries[] | select(.path == $p) | .mode' "$MANIFEST")"
@@ -114,8 +114,13 @@ done
 pass "all $n pinned podman toolchain entries from runtime-manifest.lock present (nested on disk, flattened in runtime-bundle.json)"
 
 total="$(jq '.entries | length' "$MANIFEST")"
-want_total=$((n + 1 + 5)) # +1 for bin/pasta (staged as a real copy, not counted in .targets[].entries)
-[ "$total" -eq "$want_total" ] || fail "runtime-bundle.json has $total entries, want $want_total ($n podman + 1 pasta + 5 app files)"
+# MAC3-03 (verificacion-mac-3.md): +6, not +5 — ops/container/seccomp/
+# safent.json joined APP_FILES (stage-runtime.sh) as a 6th bundled,
+# hash-verified app file, so _ensure_seccomp can resolve it from the
+# packaged resources instead of fetching it into $SAFENT_STATE_HOME at
+# runtime (a host path that must be VM-visible on macOS).
+want_total=$((n + 1 + 6)) # +1 for bin/pasta (staged as a real copy, not counted in .targets[].entries)
+[ "$total" -eq "$want_total" ] || fail "runtime-bundle.json has $total entries, want $want_total ($n podman + 1 pasta + 6 app files)"
 pass "runtime-bundle.json entry count matches exactly: $total"
 
 # ---- regression 2: no raw archives/partials/dotdirs under resources/ -----

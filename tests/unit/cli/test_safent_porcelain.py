@@ -1331,6 +1331,84 @@ class TestBundledPodmanGetsItsOwnStorage:
         assert not (state_home / "podman" / "storage.conf").exists()
 
 
+class TestSeccompProfileResolvesFromTheBundleNotTheStateDir:
+    """MAC3-03 (verificacion-mac-3.md, MAC2-07 repeated unfixed): a real Mac
+    run failed with a raw podman error — "opening seccomp profile failed:
+    open <path>: no such file or directory" — because the profile was
+    fetched INTO $SAFENT_STATE_HOME at runtime (image extraction or a
+    raw.githubusercontent download), and podman actually runs INSIDE the
+    podman-machine VM, which only ever virtiofs-mounts /Users, /private and
+    /var/folders. Shipping the profile as a bundled, hash-verified runtime
+    asset (like podman/gvproxy/vfkit) removes the network/image dependency
+    entirely for the PINNED-podman (desktop app) case."""
+
+    def test_bundled_profile_is_used_instead_of_fetching_at_runtime(
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        # ops/container/seccomp/safent.json, staged flat exactly as
+        # stage-runtime.sh's APP_FILES would (see runtime-manifest.lock's
+        # app_files.entries) — content is irrelevant to this test, only
+        # its PATH being the one actually used matters.
+        bundled_profile = pinned_dir / "safent.json"
+        bundled_profile.write_text('{"defaultAction":"SCMP_ACT_ERRNO"}')
+
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, port=healthz_server
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert ticket.strip() == f"http://127.0.0.1:{healthz_server}/?k={_SECRET_TOKEN}"
+        run_calls = [c for c in _podman_calls(podman_log) if c.startswith("run -d ")]
+        assert len(run_calls) == 1, run_calls
+        assert f"--security-opt seccomp={bundled_profile}" in run_calls[0], run_calls[0]
+
+    def test_state_home_given_as_a_symlink_is_canonicalized_before_use(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """Reproduces the exact shape of the real failure: verificacion-mac-3.md's
+        own harness set SAFENT_STATE_HOME to a /tmp path, which is itself a
+        symlink to /private/tmp on macOS — the HOST resolves it fine, but
+        the guest VM (a different OS, no such symlink) cannot. The report's
+        own pass 2 proved the CANONICAL form of the identical folder works;
+        this asserts safent now canonicalizes any override itself instead
+        of depending on the caller already spelling it that way."""
+        real_state = tmp_path / "real-state"
+        real_state.mkdir()
+        alias_state = tmp_path / "alias-state"
+        alias_state.symlink_to(real_state)
+
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        env["SAFENT_PODMAN"] = str(pinned)
+        env["SAFENT_STATE_HOME"] = str(alias_state)
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+
+        storage_conf = real_state / "podman" / "storage.conf"
+        assert storage_conf.is_file(), "safent must generate its own storage.conf under the CANONICAL state home"
+        content = storage_conf.read_text()
+        assert str(real_state / "podman" / "storage") in content
+        assert str(alias_state) not in content, (
+            f"storage.conf must record the canonical path, not the symlink alias: {content}"
+        )
+
+
 class TestMachineInitUsesTheBundledImage:
     """MAC-06 (verificacion-mac-1.md): `machine init` shipped with no
     `--image` at all, so the bundled 932 MB `podman-machine.aarch64.

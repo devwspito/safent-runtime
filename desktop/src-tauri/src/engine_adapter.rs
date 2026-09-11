@@ -441,7 +441,65 @@ fn reclassify_from_stderr(cause: FailureCause, stderr_tail: &str) -> FailureCaus
             retryable: false,
         };
     }
+    // MAC3-03 (verificacion-mac-3.md): "seccomp profile" appears BOTH in
+    // podman's own raw error ("opening seccomp profile failed: open
+    // <path>: no such file or directory" — reached because `safent`'s
+    // `_run` runs under `set -e` with no dedicated failure branch, so this
+    // aborted before any `_die_porcelain` call) and in the CLI's own honest
+    // last-resort message ("Could not obtain the seccomp profile...") —
+    // one phrase, one precise code, regardless of which of the two
+    // produced it. Retryable: a transient network hiccup fetching the
+    // fallback (or a not-yet-finished stage-runtime) can resolve on retry.
+    if lower.contains("seccomp profile") {
+        return FailureCause {
+            code: FailureCode::SeccompProfileMissing,
+            message: stderr_tail.to_string(),
+            retryable: true,
+        };
+    }
     cause
+}
+
+/// MAC3-03 (verificacion-mac-3.md): `reclassify_from_stderr` must recognize
+/// the seccomp-profile failure from EITHER of its two real origins (raw
+/// podman stderr, or the CLI's own last-resort message) and must NOT
+/// over-fire on an unrelated `daemon_unhealthy` that happens to share
+/// neither phrase.
+#[cfg(test)]
+mod reclassify_from_stderr_tests {
+    use super::*;
+
+    fn generic_daemon_unhealthy() -> FailureCause {
+        FailureCause {
+            code: FailureCode::DaemonUnhealthy,
+            message: "El servicio de Safent no arranco".to_string(),
+            retryable: true,
+        }
+    }
+
+    #[test]
+    fn podmans_own_raw_seccomp_error_is_reclassified() {
+        let stderr = "Error: opening seccomp profile failed: open /tmp/safent-mac-test3/state/safent-seccomp.json: no such file or directory";
+        let reclassified = reclassify_from_stderr(generic_daemon_unhealthy(), stderr);
+        assert_eq!(reclassified.code, FailureCode::SeccompProfileMissing);
+        assert!(reclassified.retryable);
+        assert_eq!(reclassified.message, stderr);
+    }
+
+    #[test]
+    fn the_clis_own_last_resort_seccomp_message_is_also_reclassified() {
+        let stderr = "[x] Could not obtain the seccomp profile (bundle, image and https://example/safent.json all failed, no cache)";
+        let reclassified = reclassify_from_stderr(generic_daemon_unhealthy(), stderr);
+        assert_eq!(reclassified.code, FailureCode::SeccompProfileMissing);
+    }
+
+    #[test]
+    fn an_unrelated_daemon_unhealthy_stderr_is_left_alone() {
+        let cause = generic_daemon_unhealthy();
+        let reclassified =
+            reclassify_from_stderr(cause.clone(), "systemd unit hermes-runtime.service failed");
+        assert_eq!(reclassified, cause);
+    }
 }
 
 // ---------------------------------------------------------------------------

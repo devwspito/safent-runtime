@@ -109,9 +109,20 @@ RESOURCES_ROOT="$DESKTOP_DIR/src-tauri/resources/runtime"
 # §"Comprobación 2"). Paths are repo-root-relative; staged FLAT (basename),
 # matching the same glob-flattened `resources/runtime/*/**/*` convention
 # every podman file already uses (RUNTIME-BUNDLE.md).
+# MAC3-03 (verificacion-mac-3.md, MAC2-07 repeated unfixed): ops/container/
+# seccomp/safent.json is the SAME file ops/container/Containerfile bakes
+# into the image at /usr/share/hermes/seccomp/safent.json — bundling it
+# here too means `safent`'s _ensure_seccomp can resolve it straight from
+# the packaged, hash-verified resources sitting beside the pinned podman
+# binary, with no network fetch and no dependency on the image already
+# being pulled (both of which can legitimately fail on first boot, and
+# both of which stage a copy under $SAFENT_STATE_HOME — a host path that
+# must be VM-visible on macOS, see safent's own SAFENT_STATE_HOME
+# canonicalization comment).
 APP_FILES=(
   "safent"
   "ops/container/run-safent.sh"
+  "ops/container/seccomp/safent.json"
   "ops/container/companions/ads/provision.sh"
   "ops/container/companions/ads/compose.yaml"
   "ops/container/companions/ads/caps.template.yaml"
