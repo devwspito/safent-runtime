@@ -24,6 +24,10 @@ tauri-plugin-updater = "2"
 # Verifies runtime-manifest.json's signature ourselves — the updater plugin
 # only knows about latest.json (contracts/update.md §2).
 minisign-verify = "0.2"
+# Native save dialog for "Exportar diagnóstico" (UI-NATIVE) — the official
+# Tauri plugin, matching the project's existing pattern of using the
+# upstream tauri-plugin-* crates rather than a third-party file-dialog crate.
+tauri-plugin-dialog = "2"
 
 # Unix-only: engine_adapter.rs lands the bootstrap secret on a dedicated fd via dup2 (app-engine.md §5).
 [target.'cfg(unix)'.dependencies]

@@ -237,7 +237,9 @@ impl BootService {
                     });
                     return LoopOutcome::Ready { ticket, lifecycle };
                 }
-                Err(EngineError::Cancelled) => return LoopOutcome::Cancelled { lifecycle },
+                Err(EngineError::Cancelled) => {
+                    return self.notify_cancelled(&lifecycle, notifier);
+                }
                 Err(error) => {
                     // A failure is a DIFFERENT episode than a silent no-op
                     // success — EngineLifecycle::fail() owns detecting
@@ -315,9 +317,7 @@ impl BootService {
                     lifecycle: lifecycle.clone(),
                 }
             }
-            Err(EngineError::Cancelled) => LoopOutcome::Cancelled {
-                lifecycle: lifecycle.clone(),
-            },
+            Err(EngineError::Cancelled) => self.notify_cancelled(lifecycle, notifier),
             Err(error) => {
                 self.notify_if_reconnecting(lifecycle, &error, notifier);
                 notifier.notify(&DomainEvent::EngineDegraded {
@@ -327,6 +327,26 @@ impl BootService {
                     lifecycle: lifecycle.clone(),
                 }
             }
+        }
+    }
+
+    /// contract app-engine.md §6: a cancellation is "just a `failed` event"
+    /// on the wire (`FailureCode::CancelledByOwner`, `retryable: false`) —
+    /// there is no separate "cancelled" UI state (`lifecycle.test.ts`: "same
+    /// one screen, no separate cancelled UI state"). Both call sites that can
+    /// receive `EngineError::Cancelled` route through here so the owner's
+    /// window always lands on the ONE failure screen instead of freezing on
+    /// a preparing screen that will never move again.
+    fn notify_cancelled(
+        &self,
+        lifecycle: &EngineLifecycle,
+        notifier: &dyn Notifier,
+    ) -> LoopOutcome {
+        notifier.notify(&DomainEvent::EngineDegraded {
+            cause: EngineError::Cancelled.to_failure_cause(),
+        });
+        LoopOutcome::Cancelled {
+            lifecycle: lifecycle.clone(),
         }
     }
 
@@ -428,7 +448,7 @@ const QUIT_REQUESTED_EVENT: &str = "safent://quit-requested";
 /// Mirrors contract app-engine.md §3's `EngineEvent` union — `kind` is the
 /// wire tag the UI switches on, matching the CLI's own vocabulary rather
 /// than this module's internal `DomainEvent` names.
-#[derive(Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum EngineEventPayload {
     Stage {
@@ -472,6 +492,22 @@ struct TauriNotifier {
     app: AppHandle,
 }
 
+impl TauriNotifier {
+    /// Single choke point for everything on `ENGINE_EVENT_CHANNEL`: emits to
+    /// the window AND records into the app-managed `DiagnosticsLog` (when
+    /// present — best-effort, `try_state` so a headless/test `AppHandle`
+    /// never panics here). `EngineEventPayload` is already the redacted wire
+    /// shape (app-engine.md §3 invariant 1: no ticket, no port, no
+    /// credential), so recording it duplicates nothing about what is safe to
+    /// keep for "Exportar diagnóstico" (`diagnostics.rs`).
+    fn emit_engine_event(&self, payload: EngineEventPayload) {
+        if let Some(log) = self.app.try_state::<crate::diagnostics::DiagnosticsLog>() {
+            log.record(payload.clone());
+        }
+        let _ = self.app.emit(ENGINE_EVENT_CHANNEL, payload);
+    }
+}
+
 impl Notifier for TauriNotifier {
     fn notify(&self, event: &DomainEvent) {
         match event {
@@ -480,15 +516,12 @@ impl Notifier for TauriNotifier {
                 label,
                 total_bytes,
             } => {
-                let _ = self.app.emit(
-                    ENGINE_EVENT_CHANNEL,
-                    EngineEventPayload::Stage {
-                        stage: stage.wire_name(),
-                        label: label.clone(),
-                        total_bytes: *total_bytes,
-                        point_of_no_return: bootstrap_point_of_no_return(*stage),
-                    },
-                );
+                self.emit_engine_event(EngineEventPayload::Stage {
+                    stage: stage.wire_name(),
+                    label: label.clone(),
+                    total_bytes: *total_bytes,
+                    point_of_no_return: bootstrap_point_of_no_return(*stage),
+                });
             }
             DomainEvent::StageProgressed {
                 stage,
@@ -496,44 +529,32 @@ impl Notifier for TauriNotifier {
                 total,
                 unit,
             } => {
-                let _ = self.app.emit(
-                    ENGINE_EVENT_CHANNEL,
-                    EngineEventPayload::Progress {
-                        stage: stage.wire_name(),
-                        done: *done,
-                        total: *total,
-                        unit: unit.wire_name(),
-                    },
-                );
+                self.emit_engine_event(EngineEventPayload::Progress {
+                    stage: stage.wire_name(),
+                    done: *done,
+                    total: *total,
+                    unit: unit.wire_name(),
+                });
             }
             DomainEvent::StageCompleted { stage, duration_ms } => {
-                let _ = self.app.emit(
-                    ENGINE_EVENT_CHANNEL,
-                    EngineEventPayload::Done {
-                        stage: stage.wire_name(),
-                        ms: *duration_ms,
-                    },
-                );
+                self.emit_engine_event(EngineEventPayload::Done {
+                    stage: stage.wire_name(),
+                    ms: *duration_ms,
+                });
             }
             DomainEvent::EngineDegraded { cause } => {
-                let _ = self.app.emit(
-                    ENGINE_EVENT_CHANNEL,
-                    EngineEventPayload::Failed {
-                        code: cause.code.wire_name(),
-                        detail: cause.message.clone(),
-                        retryable: cause.retryable,
-                    },
-                );
+                self.emit_engine_event(EngineEventPayload::Failed {
+                    code: cause.code.wire_name(),
+                    detail: cause.message.clone(),
+                    retryable: cause.retryable,
+                });
             }
             DomainEvent::EngineReady { version_set } => {
-                let _ = self.app.emit(
-                    ENGINE_EVENT_CHANNEL,
-                    EngineEventPayload::Ready {
-                        app_version: version_set.app.as_str().to_string(),
-                        engine_digest: version_set.engine.digest.clone(),
-                        companion_digest: version_set.companion.as_ref().map(|c| c.digest.clone()),
-                    },
-                );
+                self.emit_engine_event(EngineEventPayload::Ready {
+                    app_version: version_set.app.as_str().to_string(),
+                    engine_digest: version_set.engine.digest.clone(),
+                    companion_digest: version_set.companion.as_ref().map(|c| c.digest.clone()),
+                });
             }
             DomainEvent::Reconnecting { reason } => {
                 let _ = self.app.emit(
@@ -574,6 +595,29 @@ pub fn cancel_bootstrap(cancel: tauri::State<'_, CancelSignal>) {
     cancel.set();
 }
 
+/// The ONE `CancelSignal` "Cancelar" (`cancel_bootstrap`) ever reads —
+/// `app.manage()`'d exactly once, in `start()`. Every NEW bootstrap attempt
+/// (a retry, a restart) MUST reuse this same shared instance, reset to
+/// unset: constructing a fresh, unmanaged `CancelSignal::new()` for a retry
+/// silently orphans "Cancelar" (it keeps setting the OLD signal, which
+/// nothing still running reads) — the exact bug this helper closes.
+fn shared_cancel_signal(app: &AppHandle) -> CancelSignal {
+    match app.try_state::<CancelSignal>() {
+        Some(existing) => {
+            existing.reset();
+            existing.inner().clone()
+        }
+        // Defensive only — `start()` always manages one before any retry/
+        // restart listener can fire. Still manage it here so a future
+        // "Cancelar" click has SOMETHING to read rather than erroring.
+        None => {
+            let fresh = CancelSignal::new();
+            app.manage(fresh.clone());
+            fresh
+        }
+    }
+}
+
 /// FR-033's single "Reintentar": re-runs the whole loop from a fresh
 /// observation. No separate "resume from where it degraded" state — reconcile
 /// re-derives the plan from what is ACTUALLY true on the host each time, so a
@@ -581,7 +625,8 @@ pub fn cancel_bootstrap(cancel: tauri::State<'_, CancelSignal>) {
 /// still needs it.
 #[tauri::command]
 pub fn retry_bootstrap(app: AppHandle) {
-    std::thread::spawn(move || run_once(app, CancelSignal::new()));
+    let cancel = shared_cancel_signal(&app);
+    std::thread::spawn(move || run_once(app, cancel));
 }
 
 /// Starts the bootstrap loop off the main thread (so the window never
@@ -604,7 +649,8 @@ pub fn start(app: AppHandle) {
             .notify(&DomainEvent::Reconnecting {
                 reason: crate::domain::ReconnectReason::EngineRestarted,
             });
-            run_once(handle, CancelSignal::new());
+            let cancel = shared_cancel_signal(&handle);
+            run_once(handle, cancel);
         });
     });
 
@@ -1259,6 +1305,43 @@ mod tests {
             service.run(&notifier, &cancel),
             LoopOutcome::Cancelled { .. }
         ));
+    }
+
+    /// Regression: a cancel used to return `LoopOutcome::Cancelled` WITHOUT
+    /// ever notifying — the owner's window froze on the preparing screen
+    /// forever (no `failed` event ever arrived on `safent://engine-event`),
+    /// contradicting contract app-engine.md §6 ("el CLI [...] emite
+    /// {t:'failed', code:…}") and `lifecycle.test.ts`'s own expectation that
+    /// a cancel is "just a `failed` event [...], same one screen".
+    #[test]
+    fn cancelling_notifies_a_failed_event_with_cancelled_by_owner_so_the_ui_never_freezes() {
+        let mut fresh = converged_facts();
+        fresh.runtime_staged = false;
+        fresh.runtime_hash_ok = false;
+
+        let probe = ScriptedProbe::new(vec![Ok(fresh)]);
+        let driver = ScriptedDriver::new(vec![]);
+        let (service, _clock) = service(probe, driver);
+        let notifier = RecordingNotifier::new();
+        let cancel = CancelSignal::new();
+        cancel.set();
+
+        service.run(&notifier, &cancel);
+
+        assert!(
+            notifier.events().iter().any(|e| matches!(
+                e,
+                DomainEvent::EngineDegraded {
+                    cause: FailureCause {
+                        code: FailureCode::CancelledByOwner,
+                        retryable: false,
+                        ..
+                    }
+                }
+            )),
+            "expected a cancelled_by_owner failed event, got {:?}",
+            notifier.events()
+        );
     }
 
     #[test]

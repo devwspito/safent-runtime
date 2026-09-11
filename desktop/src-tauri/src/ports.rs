@@ -33,6 +33,52 @@ impl CancelSignal {
     pub fn is_set(&self) -> bool {
         self.0.load(Ordering::SeqCst)
     }
+
+    /// Clears a signal for reuse across a NEW bootstrap attempt over the SAME
+    /// shared instance — `boot.rs`'s `retry_bootstrap`/`safent://restart-
+    /// engine-requested` handler must call this on the app-MANAGED
+    /// `CancelSignal` (never construct a fresh, unmanaged `CancelSignal::new()`
+    /// for a retry) or the "Cancelar" command — which only ever reads the ONE
+    /// instance registered with `app.manage()` — silently stops doing
+    /// anything the moment a retry starts (cancel-after-retry bug).
+    pub fn reset(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod cancel_signal_tests {
+    use super::*;
+
+    #[test]
+    fn reset_clears_a_previously_set_signal_for_reuse() {
+        let cancel = CancelSignal::new();
+        cancel.set();
+        assert!(cancel.is_set());
+
+        cancel.reset();
+
+        assert!(!cancel.is_set(), "reset must clear the signal for the next attempt");
+    }
+
+    #[test]
+    fn reset_is_observed_through_every_clone_of_the_same_shared_signal() {
+        // `retry_bootstrap` clones the app-managed instance rather than
+        // constructing a new one — this is the exact sharing property that
+        // fix depends on: a reset on one clone must be visible through every
+        // other clone (same underlying Arc<AtomicBool>), and a clone taken
+        // BEFORE reset must still observe it (not a snapshot).
+        let cancel = CancelSignal::new();
+        let handle_held_by_running_loop = cancel.clone();
+        cancel.set();
+        assert!(handle_held_by_running_loop.is_set());
+
+        let handle_held_by_cancel_command = cancel.clone();
+        cancel.reset();
+
+        assert!(!handle_held_by_running_loop.is_set());
+        assert!(!handle_held_by_cancel_command.is_set());
+    }
 }
 
 /// Observes the host + engine and reports what is actually true right now.
