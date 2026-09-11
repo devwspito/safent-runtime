@@ -30,6 +30,7 @@ def _make_client(control_plane) -> TestClient:
 
 class _FakeControlPlaneApproveRaises:
     async def approve(self, *, channel, proposal_id, mfa_factors=None):
+        del channel, mfa_factors  # Interface inputs intentionally unused by this denial stub.
         raise ApprovalGateError(
             f"proposal_id={proposal_id} está enrutada a Enterprise.",
             reason="enterprise_route_requires_cloud_decision",
@@ -38,7 +39,7 @@ class _FakeControlPlaneApproveRaises:
 
 class _FakeControlPlaneRejectOk:
     async def reject(self, *, channel, proposal_id, reason):
-        return None
+        del channel, proposal_id, reason  # Interface-only inputs for the successful denial stub.
 
 
 class TestEnterpriseRouteApproveRejectedWith403:
