@@ -15,7 +15,7 @@ Endpoints:
 
 Feature policy (placeholder until Fase 4 delivers cloud-pushed policies):
   community : ALL views (CE is full-featured).
-  associate : chat + coste + tablero (minimum; expanded by Fase 4 policies).
+  associate : chat + coste (minimum; expanded by cloud policies).
 """
 
 from __future__ import annotations
@@ -51,15 +51,8 @@ _ALL_VIEWS: list[str] = [
     "coste",
 ]
 
-# NOTE: `tablero` is intentionally NOT in _ALL_VIEWS above. It is an always-on
-# pure-UI dashboard with no /api/v1 feature surface (useFeatures forces it on),
-# so it is not a governable native view. Do NOT "fix" this by adding tablero to
-# _ALL_VIEWS — the cloud console mirrors _ALL_VIEWS as its authorable vocabulary
-# and treats chat+tablero as always-on (see safent-control-enterprise Agents.tsx
-# ALWAYS_ON_VIEWS + tests/test_view_vocabulary_mirror).
-
 # Minimum view set for an associate instance before Fase 4 cloud policies arrive.
-_ASSOCIATE_DEFAULT_VIEWS: list[str] = ["chat", "coste", "tablero"]
+_ASSOCIATE_DEFAULT_VIEWS: list[str] = ["chat", "coste"]
 
 # Inc 5' (2026-07-07): Community drops the agents/org surface entirely — the
 # 27-template roster is not seeded (sqlite_agent_registry.py) and its view is

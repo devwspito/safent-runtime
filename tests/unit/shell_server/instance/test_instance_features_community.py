@@ -7,8 +7,7 @@ Coverage:
     travel via license.views, `agentes` included when the cloud grants it).
   - The community fail-soft error path also excludes `agentes` (consistency —
     a storage error must not resurrect a module that was removed).
-  - `tablero`/`chat` always-on discipline is untouched (tablero never enters
-    _ALL_VIEWS at all; chat is never excluded).
+  - Chat is never excluded; the removed Community dashboard is never granted.
 """
 
 from __future__ import annotations
@@ -22,6 +21,7 @@ from fastapi.testclient import TestClient
 
 from hermes.shell_server.instance.api import (
     _ALL_VIEWS,
+    _ASSOCIATE_DEFAULT_VIEWS,
     _COMMUNITY_EXCLUDED_VIEWS,
     _community_views,
     create_instance_router,
@@ -45,6 +45,10 @@ class TestCommunityViewsHelper:
 
     def test_chat_never_excluded(self) -> None:
         assert "chat" in _community_views()
+
+    def test_default_grants_are_real_views(self) -> None:
+        assert set(_ASSOCIATE_DEFAULT_VIEWS) <= set(_ALL_VIEWS)
+        assert "tablero" not in _ASSOCIATE_DEFAULT_VIEWS
 
 
 def _build_store(edition: str, views: list[str] | None = None) -> MagicMock:
