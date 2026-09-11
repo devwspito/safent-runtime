@@ -27,8 +27,12 @@ puede tratarse de una revocación Enterprise o de autoridad no verificable.
   base `e58eaad` + tres archivos del corte; logs
   `/tmp/safent-native-result-{red,focus,full}.log`.
 
-La suite completa está ejecutándose al escribir esta entrega. La reproducción
-nativa después del cambio y la clasificación general de flags `failed/interrupted`
+Suite completa del snapshot: **5879 PASS,19 SKIP,64 deselected**, siete warnings,
+266,77 s. Los SKIP son SDKs/plantillas/escáner y gate de release ausentes en ese
+entorno; el log los identifica. No incluye las diez pruebas del harness guest,
+que fue integrado como otro corte mientras corría esta suite.
+
+La reproducción nativa después del cambio y la clasificación general de flags `failed/interrupted`
 del SDK son cortes separados; este arreglo no abre ninguno de los gates managed.
 No certifica herramientas/servicios auxiliares, la imagen final ni una revocación
 externa todavía no recibida. No deshace efectos ya ejecutados por un proveedor.
