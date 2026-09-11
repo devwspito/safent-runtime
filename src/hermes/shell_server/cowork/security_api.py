@@ -221,14 +221,15 @@ def create_security_router() -> APIRouter:  # noqa: PLR0915 — related REST rou
 
     @router.get("/kill-switch")
     async def get_kill_switch(request: Request) -> dict:
-        """Estado del freno de emergencia. Fail-soft: {engaged: false, ...} si
-        el daemon no está disponible (nunca 503 en una lectura de estado)."""
+        """Report known daemon state; unavailable never means running or stopped."""
         proxy = request.app.state.dbus_proxy
         try:
             status = await proxy.call_dict("get_kill_switch_status")
-        except AgentUnavailable:
-            return {"engaged": False, "reason": None, "changed_by": None, "changed_at": None}
-        return status or {"engaged": False, "reason": None, "changed_by": None, "changed_at": None}
+        except AgentUnavailable as exc:
+            _raise_503(exc, "get_kill_switch_status")
+        if not isinstance(status, dict) or type(status.get("engaged")) is not bool:
+            raise HTTPException(status_code=503, detail={"code": "kill_switch_state_unknown"})
+        return status
 
     @router.post("/kill-switch", status_code=200)
     async def set_kill_switch(request: Request, body: KillSwitchRequest) -> dict:

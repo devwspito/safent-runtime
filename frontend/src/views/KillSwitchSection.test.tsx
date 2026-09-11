@@ -89,4 +89,18 @@ describe('KillSwitchSection — release dialog shows which proof is asked', () =
     expect(mfaStatus).not.toHaveBeenCalled()
     expect(sileoSuccess).toHaveBeenCalledTimes(1)
   })
+
+  it('shows unknown state on error, permits stopping, and retries without offering release', async () => {
+    getKillSwitch.mockRejectedValueOnce(new Error('offline')).mockResolvedValue(ENGAGED)
+    act(() => { root.render(React.createElement(KillSwitchSection)) })
+    await flush()
+    expect(container.textContent).toContain('Estado del freno desconocido')
+    expect(container.textContent).not.toContain('Todo en marcha')
+    expect(container.textContent).not.toContain('Liberar freno')
+    expect(container.textContent).toContain('Activar freno')
+    clickButton(container, text => text === 'Reintentar')
+    await flush()
+    expect(container.textContent).toContain('Liberar freno')
+    expect(releaseKillSwitch).not.toHaveBeenCalled()
+  })
 })

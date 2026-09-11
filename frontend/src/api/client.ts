@@ -876,9 +876,7 @@ export function revokeSshHost(host: string): Promise<SshHostsResponse> {
 
 /** Emergency brake status. Fail-soft: never throws, defaults to not-engaged. */
 export function getKillSwitch(): Promise<KillSwitchStatus> {
-  return request<KillSwitchStatus>('/security/kill-switch').catch(() => ({
-    engaged: false, reason: null, changed_by: null, changed_at: null,
-  }))
+  return request<KillSwitchStatus>('/security/kill-switch')
 }
 
 /** Engage the brake — no MFA required, one click (it's a brake). */

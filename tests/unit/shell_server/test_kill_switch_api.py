@@ -60,3 +60,18 @@ def test_get_reflects_persisted_daemon_state(app: FastAPI) -> None:
     response = TestClient(app).get("/api/v1/security/kill-switch")
     assert response.status_code == 200
     assert response.json() == {"engaged": True, "reason": "freno"}
+
+
+@pytest.mark.parametrize("state", [None, {}, {"engaged": "false"}, {"engaged": 0}])
+def test_invalid_state_is_unknown_not_released(app: FastAPI, state: object) -> None:
+    app.state.dbus_proxy.call_dict.return_value = state
+    response = TestClient(app).get("/api/v1/security/kill-switch")
+    assert response.status_code == 503
+    assert "engaged" not in response.json()
+
+
+def test_unavailable_state_is_unknown_not_released(app: FastAPI) -> None:
+    app.state.dbus_proxy.call_dict.side_effect = AgentUnavailable("offline")
+    response = TestClient(app).get("/api/v1/security/kill-switch")
+    assert response.status_code == 503
+    assert "engaged" not in response.json()

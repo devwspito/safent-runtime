@@ -1787,8 +1787,7 @@ function SecurityCenterSection() {
 
 /**
  * Emergency brake card (025 Top-KILL). Engaging needs only the operator
- * bearer (one click, it's a brake); releasing is a sovereign action gated by
- * MfaModal/TOTP, same pattern as EgressSection's mode toggle above.
+ * bearer (one click, it's a brake); releasing requires owner confirmation.
  */
 export function KillSwitchSection() {
   const t = useT()
@@ -1796,15 +1795,16 @@ export function KillSwitchSection() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [confirmRelease, setConfirmRelease] = useState(false)
-  // 025 hallazgo C: release needs TOTP when MFA is enrolled, the device
-  // password otherwise (sovereign fallback — a brake engaged before the
-  // owner ever enrolled TOTP used to have NO release path at all). null
-  // while loading = don't show the wrong dialog for a beat.
-
   const load = useCallback(async () => {
-    const res = await getKillSwitch()
-    setStatus(res)
-    setLoading(false)
+    setLoading(true)
+    try {
+      setStatus(await getKillSwitch())
+    } catch {
+      setStatus(null)
+      setConfirmRelease(false)
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => { void load() }, [load])
@@ -1860,6 +1860,15 @@ export function KillSwitchSection() {
       >
         {loading ? (
           <div aria-busy="true" aria-label="Cargando…" className="skeleton skeleton--block" />
+        ) : !status ? (
+          <div className={s.settingsRow} role="alert">
+            <div className={s.settingsRowInfo}>
+              <span className={s.settingsRowLabel}>Estado del freno desconocido</span>
+              <span className={s.settingsRowHint}>No se pudo consultar al agente. No se puede confirmar si está detenido.</span>
+            </div>
+            <Button variant="secondary" size="sm" disabled={busy} onClick={() => void load()}>Reintentar</Button>
+            <Button variant="danger-solid" size="sm" loading={busy} onClick={handleEngage}>Activar freno</Button>
+          </div>
         ) : engaged ? (
           <div className={s.settingsRow}>
             <div className={s.settingsRowInfo}>

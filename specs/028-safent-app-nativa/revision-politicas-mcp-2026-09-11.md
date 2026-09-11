@@ -34,8 +34,9 @@ completo ni publica imagen. Community mantiene confirmación humana sin MFA.
 - Ruff de los módulos cambiados y pruebas nuevas correcto.
 - Frontend compartido: 154 pruebas / 30 archivos y TypeScript/Vite correctos antes
   de añadir las dos pruebas de transporte MCP; se repetirá al integrar los agentes.
-- Suite completa runtime iniciada en DGX con `PYTHONPATH=src`, no contra el paquete
-  instalado global del host. Registro: `/tmp/safent-runtime-parallel-security-tests-20260911.log`.
+- Suite completa runtime `39f4cea` en DGX: **5.411 correctas, 19 omitidas,
+  38 deseleccionadas y 4 avisos**, 179,86 s, con `PYTHONPATH=src`, no contra el
+  paquete instalado global del host. Registro: `/tmp/safent-runtime-parallel-security-tests-20260911.log`.
 
 ## Límites / siguientes pasos
 
@@ -45,5 +46,8 @@ completo ni publica imagen. Community mantiene confirmación humana sin MFA.
   de todos los riesgos TOCTOU o una aprobación criptográfica del paquete binario.
 - Recuperación de archivo de políticas dañado requiere restauración verificada;
   no existe botón UI que lo sustituya automáticamente por permisos por defecto.
-- El estado del freno ante daemon no disponible sigue pendiente de revisión.
+- Seguimiento posterior: API del freno devuelve 503 ante daemon ausente o
+  estado malformado, y cliente propaga ese fallo. La UI muestra estado desconocido
+  con reintento, no «Todo en marcha»; permite intentar activar el freno, pero
+  no liberarlo desde un estado desconocido. Esto no cambia el estado real del daemon.
 - No se han desplegado estos cambios ni modificado credenciales reales.
