@@ -1290,7 +1290,7 @@ export default function ChatView() {
           />
         </div>
 
-        {panelOpen && <ContextPanel onClose={() => setPanelOpen(false)} busy={status.phase === 'streaming'} />}
+        {panelOpen && <ContextPanel key={draft.key} onClose={() => setPanelOpen(false)} busy={status.phase === 'streaming'} />}
       </div>
     </>
   )

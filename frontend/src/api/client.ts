@@ -1001,7 +1001,7 @@ export function forgetMemoryItem(id: string): Promise<unknown> {
  */
 export function listWorkspaceFiles(path?: string): Promise<WorkspaceFile[]> {
   const qs = path ? `?path=${encodeURIComponent(path)}` : ''
-  return request<WorkspaceFile[]>(`/workspace/files${qs}`).catch(() => [])
+  return request<WorkspaceFile[]>(`/workspace/files${qs}`)
 }
 
 /**
