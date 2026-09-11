@@ -16,12 +16,21 @@ env:
   IMAGE: ghcr.io/devwspito/safent
 
 jobs:
-  build-push:
-    name: Build & push multi-arch (amd64+arm64)
-    runs-on: ubuntu-latest
+  build:
+    name: Build native ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -32,12 +41,34 @@ jobs:
         with:
           context: .
           file: ops/container/Containerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
           build-args: |
             GIT_SHA=${{ github.sha }}
-          tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ github.ref_type == 'tag' && github.ref_name || 'edge' }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ env.IMAGE }}:build-${{ github.run_id }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=runtime-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=runtime-${{ matrix.arch }}
+
+  publish-index:
+    name: Publish multi-arch index
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Merge exact native images
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'edge' }}
+        run: |
+          set -euo pipefail
+          AMD64="${IMAGE}:build-${GITHUB_RUN_ID}-amd64"
+          ARM64="${IMAGE}:build-${GITHUB_RUN_ID}-arm64"
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${RELEASE_TAG}" \
+            --tag "${IMAGE}:latest" \
+            "$AMD64" "$ARM64"
+          docker buildx imagetools inspect "${IMAGE}:${RELEASE_TAG}"

@@ -18,6 +18,11 @@ def test_published_image_uses_content_cache_not_commit_cachebust():
     assert "FE_CACHEBUST" not in workflow
     assert "APP_CACHEBUST" not in containerfile
     assert "FE_CACHEBUST" not in containerfile
+    assert "setup-qemu-action" not in workflow
+    assert "runner: ubuntu-22.04-arm" in workflow
+    assert "platforms: ${{ matrix.platform }}" in workflow
+    assert "needs: build" in workflow
+    assert "docker buildx imagetools create" in workflow
 
 
 def test_local_build_does_not_rebuild_wheel_twice_or_mutate_checkout():
