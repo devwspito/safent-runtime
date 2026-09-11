@@ -346,22 +346,19 @@ class AgentLoopOrchestrator:
             return
         except Exception as exc:
             _latency_ms = int((time.monotonic() - _cycle_start) * 1000)
-            # exc_info + traceback explícito en el MENSAJE: el handler stderr→journald
-            # NO serializa `extra=` (se perdía el detalle: "engine_error" a secas, sin
-            # causa). El chat fallaba en silencio y era indebugable. Metemos la traza
-            # completa en el texto para que journalctl la muestre siempre.
-            import traceback as _tb  # noqa: PLC0415
+            # SDK exceptions may contain request headers, prompts, response
+            # bodies or signed URLs. Neither logs nor the persisted chat/task
+            # may echo them (including exception chains/tracebacks). Keep an
+            # operational correlation ID; structured native failures above
+            # supply the actionable, application-owned messages when available.
             logger.error(
-                "hermes.tasks.loop.engine_error task=%s error=%s\n%s",
-                str(item.id), str(exc), _tb.format_exc(),
-                extra={"task_id": str(item.id), "error": str(exc)},
+                "hermes.tasks.loop.engine_error task=%s category=%s latency_ms=%s",
+                str(item.id), type(exc).__name__, _latency_ms,
             )
-            # Surface the real cause to the operator (chat UI shows this). A bare
-            # exception class name is undebuggable; include the message so a
-            # provider error (model/param/quota) is actionable, not opaque.
-            _detail = str(exc).strip().replace("\n", " ")
-            error_reason = f"{type(exc).__name__}: {_detail}" if _detail else type(exc).__name__
-            error_reason = error_reason[:400]
+            error_reason = (
+                "El motor no pudo completar la solicitud. Revisa la conexión y "
+                f"la configuración del modelo. Referencia: {item.id}."
+            )
             await self._handle_engine_failure(item, error_reason, effective_sink, is_chat)
             return
 
