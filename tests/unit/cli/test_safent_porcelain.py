@@ -546,6 +546,53 @@ class TestFactsIsPureObservation:
         assert json.loads(result2.stdout.strip())["localCompanionImageDigest"] is None
 
 
+class TestFactsFailsClosedInsteadOfSilentlyOnAnIncompleteCompanionScaffold:
+    """MAC4-04 (verificacion-mac-4.md, "mina"): a companion compose scaffold
+    can exist (a prior `safent up` without --no-companion ran
+    provision.sh's --scaffold step) while its persisted image marker does
+    not (an incomplete/transitional state) — `cmd_facts`'s own
+    `_companion_container_counts` reaches `_persisted_ads_image`, which
+    used to `echo ...; exit 1` raw: rc=1, ZERO bytes on stdout, breaking
+    --porcelain's own contract (app-engine.md §2) and translated by the
+    adapter into an undifferentiated daemon_unhealthy."""
+
+    def test_facts_emits_a_closed_failed_event_instead_of_dying_silently(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        companion_bin_dir = home_dir / ".safent" / "companions" / "ads" / "bin"
+        companion_bin_dir.mkdir(parents=True)
+        (companion_bin_dir / "compose.yaml").write_text("services: {}\n")
+        # Deliberately NOT writing .../ads/image — the incomplete state.
+
+        result = _run_safent("facts", "--porcelain", env=env)
+
+        assert result.returncode == 25, f"stdout={result.stdout}\nstderr={result.stderr}"  # companion_network_conflict
+        lines = [line for line in result.stdout.splitlines() if line]
+        assert len(lines) == 1, f"--porcelain must emit exactly one NDJSON line, got: {result.stdout!r}"
+        event = json.loads(lines[0])  # raises if it is not valid JSON at all
+        assert event["t"] == "failed"
+        assert event["code"] == "companion_network_conflict"
+        assert "image" in event["detail"]
+        assert event["retryable"] is False
+
+    def test_non_porcelain_still_prints_a_clear_message_on_stderr(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        companion_bin_dir = home_dir / ".safent" / "companions" / "ads" / "bin"
+        companion_bin_dir.mkdir(parents=True)
+        (companion_bin_dir / "compose.yaml").write_text("services: {}\n")
+
+        result = _run_safent("facts", env=env)
+
+        assert result.returncode == 25, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert result.stdout == ""
+        assert "image" in result.stderr
+
+
 class TestEnsureMachineOnLinuxIsANoOp:
     def test_ensure_machine_closes_immediately_without_touching_podman_machine(
         self, tmp_path: Path, fake_bin_dir: Path

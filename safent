@@ -1115,14 +1115,26 @@ _companion_env_common() {
 # Fail closed instead: refuse with a clear recovery step rather than guess.
 # `safent companion update` is the ONE place a missing marker is still a
 # legitimate bootstrap case (see _companion_update_env) — never here.
+# MAC4-04 (verificacion-mac-4.md): returns 1 with NO output at all when the
+# marker is missing — deliberately NEVER calls _die_porcelain (or prints
+# anything) from HERE. This function is only ever invoked as
+# `VAR="$(_persisted_ads_image)"` (see _companion_env below), i.e. INSIDE a
+# command substitution subshell: an `exit` from within that subshell only
+# ever terminates the SUBSHELL, not the real process — confirmed live, this
+# is exactly why the ORIGINAL raw `echo ...; exit 1` silently produced rc=1
+# with ZERO bytes on stdout instead of a clean --porcelain failure, and why
+# a first attempt at fixing it by calling _die_porcelain FROM HERE also
+# failed silently (its `exit` killed the subshell; the JSON it printed got
+# captured into $SAFENT_ADS_IMAGE as if it were the image name, and the
+# calling shell carried on with a garbage value instead of aborting).
+# _die_porcelain must run in the CALLING shell, not in here — see
+# _companion_env's own `|| _die_porcelain` immediately after the assignment.
 _persisted_ads_image() {
   if [ -f "$COMPANION_STATE/image" ]; then
     cat "$COMPANION_STATE/image"
     return 0
   fi
-  echo "[x] $COMPANION_STATE/image not found — refusing to guess the companion's image." >&2
-  echo "    Run 'safent companion update' once to record it, then retry." >&2
-  exit 1
+  return 1
 }
 
 # Exports the three vars compose.yaml interpolates (SAFENT_STATE,
@@ -1141,7 +1153,12 @@ _persisted_ads_image() {
 # _companion_update_env — and the only one that overwrites the marker.
 _companion_env() {
   _companion_env_common
-  SAFENT_ADS_IMAGE="$(_persisted_ads_image)"
+  # MAC4-04: `|| _die_porcelain` runs IN THIS SHELL (never inside the `$(...)`
+  # that captures _persisted_ads_image's stdout) — its `exit` therefore
+  # actually terminates the process, and nothing ever gets a chance to
+  # treat a `failed` JSON line as if it were the image name.
+  SAFENT_ADS_IMAGE="$(_persisted_ads_image)" || _die_porcelain companion_network_conflict \
+    "$COMPANION_STATE/image not found — refusing to guess the companion's image. Run 'safent companion update' once to record it, then retry." false
   export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
 }
 
