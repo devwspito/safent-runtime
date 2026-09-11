@@ -2,14 +2,19 @@ import { lazy, Suspense, useSyncExternalStore } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from 'sileo'
 import Layout from './components/Layout'
-import ChatView from './views/ChatView'
-import AdsView from './views/AdsView'
-import { CapacidadesView, SistemaView } from './views/SectionHubs'
 import { useActiveProvider } from './hooks/useActiveProvider'
 import { ReconnectScreen } from './components/ReconnectScreen'
 import { getAuthStatus, subscribeAuthStatus } from './lib/token'
 
+const ChatView = lazy(() => import('./views/ChatView'))
+const AdsView = lazy(() => import('./views/AdsView'))
 const TasksView = lazy(() => import('./views/TasksView'))
+const CapacidadesView = lazy(() =>
+  import('./views/SectionHubs').then(module => ({ default: module.CapacidadesView })),
+)
+const SistemaView = lazy(() =>
+  import('./views/SectionHubs').then(module => ({ default: module.SistemaView })),
+)
 
 
 /** Shared route-boundary skeleton: stacked lines that mirror a view header. */
@@ -72,7 +77,11 @@ export default function App() {
         <Route element={<Shell />}>
           <Route index element={<Navigate to="/chat" replace />} />
           {/* chat is always allowed — no guard needed */}
-          <Route path="chat" element={<ChatView />} />
+          <Route path="chat" element={
+            <Suspense fallback={<RouteFallback label="Abriendo el chat…" />}>
+              <ChatView />
+            </Suspense>
+          } />
           {/* tablero removed (owner: "no es útil para nada") — /tablero now falls through to index → /chat */}
           <Route path="tareas" element={
             <Suspense fallback={<TasksFallback />}>
@@ -83,8 +92,16 @@ export default function App() {
           <Route path="office" element={<Navigate to="/tareas" replace />} />
           {/* The two hubs (owner decision): everything that isn't Chat/Tareas
               lives inside them as tabs. Hubs gate their own tabs by features. */}
-          <Route path="capacidades" element={<CapacidadesView />} />
-          <Route path="sistema" element={<SistemaView />} />
+          <Route path="capacidades" element={
+            <Suspense fallback={<RouteFallback label="Abriendo capacidades…" />}>
+              <CapacidadesView />
+            </Suspense>
+          } />
+          <Route path="sistema" element={
+            <Suspense fallback={<RouteFallback label="Abriendo sistema…" />}>
+              <SistemaView />
+            </Suspense>
+          } />
           {/* Anuncios: the one exception to "everything else is a hub tab" — the
               ads vertical is its own connected product surface (026, contracts/
               sso.md), same-origin at /ads/* through the session bridge. The
@@ -92,7 +109,11 @@ export default function App() {
               useAdsAvailability drives only its disabled presentation). No
               ViewGuard: visibility isn't a license feature, and the view itself
               renders every FR-003 availability state honestly. */}
-          <Route path="anuncios" element={<AdsView />} />
+          <Route path="anuncios" element={
+            <Suspense fallback={<RouteFallback label="Abriendo anuncios…" />}>
+              <AdsView />
+            </Suspense>
+          } />
           {/* Back-compat: old standalone paths (deep-links, the agent app-map)
               → the owning hub tab. */}
           <Route path="skills" element={<Navigate to="/capacidades?tab=skills" replace />} />

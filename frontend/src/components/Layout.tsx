@@ -13,7 +13,7 @@ import NotificationsPanel from './NotificationsPanel'
 import KillSwitchBanner from './KillSwitchBanner'
 import { SystemUpdateFooter } from './SystemUpdateFooter'
 import { useT, useLocale } from '../lib/i18n'
-import { CAPACIDADES_VIEW_IDS, SISTEMA_VIEW_IDS } from '../views/SectionHubs'
+import { CAPACIDADES_VIEW_IDS, SISTEMA_VIEW_IDS } from '../views/sectionHubIds'
 import styles from './Layout.module.css'
 import { ChatDrafts, type ChatDraft } from '../lib/chatDrafts'
 
@@ -73,7 +73,7 @@ function SistemaIcon() {
 
 interface HubNavItem extends NavItem {
   /** Visible when ANY of these backend view ids is allowed (hub aggregates them). */
-  anyOf?: string[]
+  anyOf?: readonly string[]
   /** Show the pending-approvals badge on this item. */
   showsPendingBadge?: boolean
 }

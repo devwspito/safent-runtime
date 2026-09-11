@@ -10,7 +10,7 @@ vi.mock('../api/client', () => ({ listConversations: vi.fn() }))
 vi.mock('./NotificationsPanel', () => ({ default: () => null }))
 vi.mock('./KillSwitchBanner', () => ({ default: () => null }))
 vi.mock('./SystemUpdateFooter', () => ({ SystemUpdateFooter: () => null }))
-vi.mock('../views/SectionHubs', () => ({ CAPACIDADES_VIEW_IDS: [], SISTEMA_VIEW_IDS: [] }))
+vi.mock('../views/sectionHubIds', () => ({ CAPACIDADES_VIEW_IDS: [], SISTEMA_VIEW_IDS: [] }))
 
 describe('Community recent conversations', () => {
   let host: HTMLDivElement

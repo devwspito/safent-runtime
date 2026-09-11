@@ -25,7 +25,7 @@ vi.mock('../components/SystemUpdateFooter', () => ({ SystemUpdateFooter: () => n
 vi.mock('../components/PendingApprovalsInChat', () => ({ default: () => null }))
 vi.mock('../components/ContextPanel', () => ({ default: () => null }))
 vi.mock('../components/VncView', () => ({ VncFrame: () => null }))
-vi.mock('./SectionHubs', () => ({ CAPACIDADES_VIEW_IDS: [], SISTEMA_VIEW_IDS: [] }))
+vi.mock('./sectionHubIds', () => ({ CAPACIDADES_VIEW_IDS: [], SISTEMA_VIEW_IDS: [] }))
 vi.mock('../api/client', () => ({
   listConversations: vi.fn().mockResolvedValue([]), listProviders: vi.fn().mockResolvedValue([]),
   listSkills: vi.fn().mockResolvedValue([]), uploadWorkspaceFile: vi.fn(), ApiError: class extends Error {},

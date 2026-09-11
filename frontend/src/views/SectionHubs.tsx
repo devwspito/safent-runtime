@@ -109,9 +109,9 @@ const SISTEMA_TABS: HubTab[] = [
   { key: 'archivos',    labelKey: 'nav.archivos',    render: () => <ArchivosView /> },
 ]
 
-/** View ids each hub aggregates — Layout uses this to gate the nav items. */
-export const CAPACIDADES_VIEW_IDS = CAPACIDADES_TABS.map((t) => t.key)
-export const SISTEMA_VIEW_IDS = SISTEMA_TABS.map((t) => t.key)
+// Keep the public exports for callers while their tiny definitions stay outside
+// this lazy route. Importing navigation metadata must not eagerly load every view.
+export { CAPACIDADES_VIEW_IDS, SISTEMA_VIEW_IDS } from './sectionHubIds'
 
 export function CapacidadesView() {
   return <Hub tabs={CAPACIDADES_TABS} ariaLabelKey="nav.section.capabilities" />
