@@ -64,34 +64,20 @@ Dos escrituras distintas, con semántica distinta:
    (repo+digest, copiados de `runtime-manifest.lock`'s campos del mismo
    nombre) — `boot.rs`/`selftest.rs` los leen de aquí, nunca de un env var.
 
-   **Verificación por fichero** (MAC-02, verificacion-mac-1.md): cada
-   entrada trae `sha256` **y** `cdhash` (`null` si no aplica/aún no
-   firmado). Un Mach-O (`podman`, `vfkit`, `krunkit`, `gvproxy`, y los
-   cuatro `.dylib` de krunkit) cambia de bytes en el momento en que se
-   firma — su `sha256` pre-firma deja de coincidir para siempre en cuanto
-   el pipeline de firma reescribe el binario (el mismo fallo que este lock
-   ya documentaba para AppImage, aplicado ahora al DMG notarizado). Para
-   esos ficheros `cmd_stage_runtime` verifica `codesign --verify --strict`
-   + igualdad de `cdhash` en vez de sha256; todo lo demás (scripts, YAML,
-   la imagen de máquina, el firmware EFI) sigue verificándose por sha256
-   exactamente como antes. `stage-runtime.sh <triple>` (staging normal, PRE
-   firma) escribe `cdhash: null` para cada Mach-O — codesign aún no tiene
-   nada que reportar en ese momento. `stage-runtime.sh --refresh-bundle-json
-   <triple> [dir]` — invocado por el pipeline justo DESPUÉS de firmar, nunca
-   antes — re-escanea `dir` YA STAGEADO (sin descargar nada) y reescribe
-   `runtime-bundle.json` con el `cdhash` real de cada Mach-O.
-
-   **`dir` importa de verdad (MAC2-08, verificacion-mac-2.md)**: un DMG
-   notarizado real envió los 15 `cdhash` en `null` a pesar de que el sha256
-   SÍ casaba post-firma — la firma se aplicó al `.app` YA CONSTRUIDO
-   (`Contents/Resources/runtime/`, la COPIA que `bundle.resources` produce
-   al compilar), nunca a este árbol de staging
-   (`resources/runtime/<triple>/`), que nadie vuelve a tocar después del
-   staging normal. Omitir `dir` reescanea el árbol de STAGING — sha256
-   sigue coincidiendo (nada cambió ahí) pero el `cdhash` se queda `null`
-   para siempre, por diseño, no por fallo. El pipeline debe apuntar `dir`
-   al `Contents/Resources/runtime/` real del `.app` YA FIRMADO para que
-   la vía `cdhash` llegue a ejercitarse alguna vez.
+   **Verificación por fichero (decisión del dueño, 11-sep-2026 — "el
+   código más simple es el que funciona mejor")**: en macOS, la integridad
+   es la propia firma de Apple, nada más — `cmd_stage_runtime` ejecuta UN
+   `codesign --verify --strict` superficial sobre el `.app` que contiene el
+   runtime (su sello `CodeResources` ya cubre criptográficamente cada
+   fichero bajo `Contents/Resources/`); en Linux, el manifiesto `sha256`
+   sigue exactamente igual que siempre (se calcula en el staging y nada
+   muta los ficheros después). El mecanismo anterior — un `cdhash` por
+   fichero, `stage-runtime.sh --refresh-bundle-json` reescaneando el `.app`
+   YA FIRMADO tras notarizar — quedaba re-verificando lo que Apple ya
+   verifica, y fue el origen directo de dos bloqueantes reales (MAC4-01:
+   el propio consumidor leía el canal equivocado de `codesign -d`;
+   MAC5-02: el manifiesto del `.app.tar.gz` del actualizador quedaba
+   caducado frente a sus propios binarios). Retirado por completo.
 
 `normalize-staged-tree.sh`'s `_EXECUTABLE_BASENAMES` incluye `safent`,
 `run-safent.sh` y `provision.sh` (0755); `compose.yaml`/`caps.template.yaml`

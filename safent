@@ -1296,7 +1296,14 @@ _run_with_heartbeat() {
   while kill -0 "$_hb_pid" 2>/dev/null; do
     sleep 1
     _hb_elapsed=$((_hb_elapsed + 1))
-    [ $((_hb_elapsed % 5)) -eq 0 ] && _stage_progress "$_hb_elapsed" "" seconds
+    # MAC5-01 (verificacion-mac-5.md): "seconds" is not in the closed
+    # progress-unit vocabulary (app-engine.md §3: bytes|layers|steps) —
+    # engine_adapter.rs's map_progress_unit rejected it as
+    # cli_porcelain_unsupported on EVERY cold boot the instant this
+    # heartbeat fired (MAC4-05's own fix). "steps" is the same generic
+    # tick-count unit _pull_with_heartbeat already uses for its own
+    # heartbeat — never widen the vocabulary to add "seconds" for this.
+    [ $((_hb_elapsed % 5)) -eq 0 ] && _stage_progress "$_hb_elapsed" "" steps
   done
   wait "$_hb_pid"
 }
@@ -1922,44 +1929,40 @@ cmd_stage_runtime() {
   target="$SAFENT_STATE_HOME/runtime/$version"
   mkdir -p "$target" 2>/dev/null || _die_porcelain runtime_hash_mismatch "No se pudo crear $target" false
 
+  # Owner's decision (11-sep-2026, "el codigo mas simple es el que
+  # funciona mejor"): macOS integrity is Apple's OWN code-signing seal,
+  # nothing else. `codesign --verify --strict` on the ENCLOSING .app
+  # cryptographically covers every file under Contents/Resources (its
+  # CodeResources manifest) in ONE shallow call — re-deriving our own
+  # per-file sha256/cdhash list on top of that was redundant work that
+  # only ever verified what Apple had already verified, and (MAC4-01,
+  # MAC5-02) was a real source of bugs of its own. `bundle_dir` for a
+  # real packaged run is .../Contents/Resources/runtime — strip back to
+  # the .app itself. On Linux nothing changes: the sha256 manifest below
+  # is still the full check (computed at staging, nothing mutates the
+  # files afterward).
+  if [ "$OS" = Darwin ]; then
+    app_bundle="${bundle_dir%%/Contents/*}"
+    case "$app_bundle" in
+      *.app) ;;
+      *) _die_porcelain runtime_hash_mismatch "No se pudo ubicar el .app que contiene el runtime empaquetado" false ;;
+    esac
+    codesign_bin="${SAFENT_CODESIGN:-codesign}"
+    "$codesign_bin" --verify --strict "$app_bundle" >/dev/null 2>&1 \
+      || _die_porcelain runtime_hash_mismatch "El paquete no supera codesign --verify --strict" false
+  fi
+
   paths="$(grep -o '"path": *"[^"]*"' "$manifest" | sed -E 's/.*"([^"]*)"$/\1/')"
   total="$(printf '%s\n' "$paths" | grep -c .)"
-  codesign_bin="${SAFENT_CODESIGN:-codesign}"
   done_n=0
   for path in $paths; do
     entry_block="$(awk -v p="\"path\": \"$path\"" 'index($0,p){f=1} f{print; if(/}/){exit}}' "$manifest")"
     sha="$(printf '%s\n' "$entry_block" | sed -n 's/.*"sha256": *"\([^"]*\)".*/\1/p' | head -1)"
-    cdhash="$(printf '%s\n' "$entry_block" | sed -n 's/.*"cdhash": *"\([^"]*\)".*/\1/p' | head -1)"
     mode="$(printf '%s\n' "$entry_block" | sed -n 's/.*"mode": *"\([^"]*\)".*/\1/p' | head -1)"
     mode="${mode:-0755}"
     src="$bundle_dir/$path"
     [ -f "$src" ] || _die_porcelain runtime_hash_mismatch "Falta $path en el paquete" false
-    if [ -n "$cdhash" ]; then
-      # MAC-02 (verificacion-mac-1.md): codesigning rewrites a Mach-O's own
-      # bytes, so sha256 (still recorded above, but no longer the check for
-      # THIS file) never matches a real signed package again — verify
-      # identity+integrity the way the platform itself does instead.
-      "$codesign_bin" --verify --strict "$src" >/dev/null 2>&1 \
-        || _die_porcelain runtime_hash_mismatch "$path no supera codesign --verify" false
-      # `|| true` on the WHOLE pipeline — under `set -e`, a corrupt/edge-
-      # case signature making `codesign -dvvv` exit non-zero here must
-      # still reach the explicit, porcelain-aware comparison below (an
-      # honest runtime_hash_mismatch), never a raw, uncaught shell abort
-      # with no `failed` event at all.
-      # MAC4-01 (verificacion-mac-4.md), same class as 70330e4 (which fixed
-      # the producer, stage-runtime.sh — this is the CONSUMER's own copy of
-      # the identical bug): `codesign -d`/`-dvvv` writes its report to
-      # STDERR (Apple's own convention), never stdout. `2>/dev/null` threw
-      # away the one line this needs (`CDHash=...`), so `real_cdhash` was
-      # ALWAYS empty and could never equal a real manifest cdhash — every
-      # signed, correctly-bundled binary failed closed as
-      # runtime_hash_mismatch on a real Mac. Unreachable while cdhash
-      # entries all shipped null (MAC3-05); populating them (MAC3-05 fixed)
-      # lit this up for the first time. `2>&1` merges the report onto the
-      # SAME stream `sed`/`head` already read from.
-      real_cdhash="$("$codesign_bin" -dvvv "$src" 2>&1 | sed -n 's/^CDHash=\(.*\)$/\1/p' | head -1 || true)"
-      [ "$real_cdhash" = "$cdhash" ] || _die_porcelain runtime_hash_mismatch "$path no coincide con el cdhash del manifiesto" false
-    else
+    if [ "$OS" != Darwin ]; then
       [ "$(_sha256 "$src")" = "$sha" ] || _die_porcelain runtime_hash_mismatch "$path no coincide con el manifiesto" false
     fi
     dst="$target/$path"
