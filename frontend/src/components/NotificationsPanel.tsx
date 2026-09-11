@@ -1,258 +1,147 @@
-/**
- * NotificationsPanel — bell icon + dropdown panel for the sidebar.
- *
- * - Polls unread-count every ~10s (matching the approvals badge pattern).
- * - On open: loads full notification list; marks individual reads on click;
- *   offers "Marcar todo como leído" bulk action.
- * - Clicking a notification with a conversation_id navigates to /chat and
- *   loads that conversation.
- */
-
-import { createPortal } from 'react-dom'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { Popover } from '@base-ui/react/popover'
+import { Bell, ChevronRight, RefreshCw, X } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { sileo } from 'sileo'
-import { Circle } from 'lucide-react'
-import {
-  listNotifications,
-  getUnreadCount,
-  markNotificationRead,
-  markAllNotificationsRead,
-} from '../api/client'
-import type { Notification, NotificationStatus } from '../api/types'
-import Badge, { type BadgeVariant } from './Badge'
+import { listNotifications, getUnreadCount, markNotificationRead, markAllNotificationsRead } from '../api/client'
+import type { Notification } from '../api/types'
+import { useLocale, useT } from '../lib/i18n'
+import { Button } from './ui/Button'
+import css from './NotificationsPanel.module.css'
 
-const STATUS_VARIANT: Record<NotificationStatus, BadgeVariant> = {
-  ok: 'ok',
-  error: 'danger',
-  info: 'info',
-}
+interface Props { loadConversation(id: string): Promise<void> }
 
-function relativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime()
-  const mins = Math.floor(diff / 60_000)
-  if (mins < 1) return 'Ahora'
-  if (mins < 60) return `Hace ${mins} min`
-  const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `Hace ${hrs} h`
-  return `Hace ${Math.floor(hrs / 24)} d`
-}
-
-function truncate(s: string, n: number) {
-  return s.length > n ? s.slice(0, n) + '…' : s
-}
-
-function BellIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path
-        d="M8 2a5 5 0 0 1 5 5v2.5l1 1.5H2l1-1.5V7a5 5 0 0 1 5-5ZM6.5 13.5a1.5 1.5 0 0 0 3 0"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
-}
-
-interface NotificationsPanelProps {
-  /** Called when the user navigates to a conversation from the panel */
-  loadConversation(id: string): Promise<void>
-}
-
-export default function NotificationsPanel({ loadConversation }: NotificationsPanelProps) {
+/** The server confirms read state; opening a notification is not an approval. */
+export default function NotificationsPanel({ loadConversation }: Props) {
   const navigate = useNavigate()
+  const t = useT()
+  const { locale } = useLocale()
   const [open, setOpen] = useState(false)
-  const [unreadCount, setUnreadCount] = useState(0)
+  const [count, setCount] = useState<number | null>(null)
   const [notifications, setNotifications] = useState<Notification[]>([])
-  const [panelLoading, setPanelLoading] = useState(false)
-  const [markingAll, setMarkingAll] = useState(false)
-  const btnRef = useRef<HTMLButtonElement>(null)
-  const panelRef = useRef<HTMLDivElement>(null)
-  const aliveRef = useRef(true)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [pending, setPending] = useState<string | null>(null)
+  const closeButton = useRef<HTMLButtonElement>(null)
+  const state = useRef({ active: false, open: false, list: 0, count: 0, counting: false, action: false })
 
-  // Poll unread count every 10 s
-  useEffect(() => {
-    aliveRef.current = true
-    const poll = () => {
-      getUnreadCount()
-        .then(r => { if (aliveRef.current) setUnreadCount(r.count ?? 0) })
-        .catch(() => { /* keep last known */ })
-    }
-    poll()
-    const id = setInterval(poll, 10_000)
-    return () => {
-      aliveRef.current = false
-      clearInterval(id)
-    }
-  }, [])
-
-  const loadPanel = useCallback(() => {
-    setPanelLoading(true)
-    listNotifications()
-      .then(data => {
-        if (aliveRef.current) {
-          setNotifications(Array.isArray(data) ? data : [])
-        }
-      })
-      .catch(() => { /* silent */ })
-      .finally(() => { if (aliveRef.current) setPanelLoading(false) })
-  }, [])
-
-  function handleOpen() {
-    setOpen(v => !v)
-    if (!open) loadPanel()
-  }
-
-  // Close on Escape or outside click
-  useEffect(() => {
-    if (!open) return
-    function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        setOpen(false)
-        btnRef.current?.focus()
-      }
-    }
-    function handleClick(e: MouseEvent) {
-      if (
-        panelRef.current && !panelRef.current.contains(e.target as Node) &&
-        btnRef.current && !btnRef.current.contains(e.target as Node)
-      ) {
-        setOpen(false)
-      }
-    }
-    document.addEventListener('keydown', handleKey, true)
-    document.addEventListener('mousedown', handleClick)
-    return () => {
-      document.removeEventListener('keydown', handleKey, true)
-      document.removeEventListener('mousedown', handleClick)
-    }
-  }, [open])
-
-  async function handleNotificationClick(n: Notification) {
-    if (!n.read) {
-      markNotificationRead(n.id).catch(() => { /* silent */ })
-      setNotifications(prev => prev.map(x => x.id === n.id ? { ...x, read: true } : x))
-      setUnreadCount(c => Math.max(0, c - 1))
-    }
-    if (n.conversation_id) {
-      setOpen(false)
-      navigate('/chat')
-      await loadConversation(n.conversation_id)
-    }
-  }
-
-  async function handleMarkAll() {
-    setMarkingAll(true)
+  async function refreshCount(force = false) {
+    const current = state.current
+    if (!current.active || (current.counting && !force)) return
+    current.counting = true
+    const revision = ++current.count
     try {
-      await markAllNotificationsRead()
-      setNotifications(prev => prev.map(n => ({ ...n, read: true })))
-      setUnreadCount(0)
-      sileo.success({ title: 'Todas las notificaciones marcadas como leídas' })
+      const value = await getUnreadCount()
+      if (!Number.isSafeInteger(value.count) || value.count < 0) throw new Error('invalid_count')
+      if (current.active && current.count === revision) setCount(value.count)
     } catch {
-      sileo.error({ title: 'No se pudieron marcar las notificaciones' })
+      if (current.active && current.count === revision) setCount(null)
     } finally {
-      setMarkingAll(false)
+      if (current.count === revision) current.counting = false
     }
   }
-
-  // Position the floating panel relative to the button
-  const [panelPos, setPanelPos] = useState({ top: 0, left: 0 })
   useEffect(() => {
-    if (!open || !btnRef.current) return
-    const rect = btnRef.current.getBoundingClientRect()
-    // Place below the button, aligned to its left edge
-    setPanelPos({ top: rect.bottom + 8, left: rect.left })
-  }, [open])
+    const current = { active: true, open: false, list: 0, count: 0, counting: false, action: false }
+    state.current = current
+    void refreshCount()
+    const timer = setInterval(() => void refreshCount(), 10_000)
+    return () => { current.active = false; clearInterval(timer) }
+  }, [])
 
-  const hasUnread = unreadCount > 0
+  async function loadPanel() {
+    const current = state.current
+    if (!current.active || !current.open || current.action) return
+    const revision = ++current.list
+    setLoading(true)
+    setError('')
+    try {
+      const values = await listNotifications()
+      if (!Array.isArray(values)) throw new Error('invalid_list')
+      if (current.active && current.open && revision === current.list) setNotifications(values)
+    } catch {
+      if (current.active && current.open && revision === current.list) setError(t('notifications.load_error'))
+    } finally {
+      if (current.active && current.open && revision === current.list) setLoading(false)
+    }
+  }
+  function changeOpen(value: boolean) {
+    const current = state.current
+    current.open = value
+    current.list++
+    setOpen(value)
+    if (value) void loadPanel()
+  }
+  async function actOnNotification(notification: Notification | null) {
+    const current = state.current
+    if (current.action || loading || !current.active || !current.open) return
+    current.action = true
+    const revision = ++current.list
+    setPending(notification?.id ?? 'all')
+    setError('')
+    try {
+      if (!notification) await markAllNotificationsRead()
+      else if (!notification.read) await markNotificationRead(notification.id)
+      if (!current.active || !current.open || current.list !== revision) return
+      setNotifications(values => values.map(value => !notification || value.id === notification.id ? { ...value, read: true } : value))
+      void refreshCount(true)
+      if (notification?.conversation_id) {
+        try {
+          await loadConversation(notification.conversation_id)
+          if (!current.active || !current.open || current.list !== revision) return
+          changeOpen(false)
+          navigate('/chat')
+        } catch {
+          if (current.active && current.open && current.list === revision) setError(t('notifications.open_error'))
+        }
+      }
+    } catch {
+      if (current.active && current.open && current.list === revision) setError(t('notifications.read_error'))
+    } finally {
+      current.action = false
+      if (current.active) {
+        setPending(null)
+        if (current.open && current.list !== revision) void loadPanel()
+      }
+    }
+  }
+  const label = count === null ? t('notifications.count_unknown') : count > 0
+    ? t('notifications.unread').replace('{count}', String(count)) : t('notifications.title')
 
-  return (
-    <>
-      {/* Bell trigger */}
-      <button
-        ref={btnRef}
-        type="button"
-        className="notif-bell-btn"
-        aria-label={hasUnread ? `${unreadCount} notificaciones sin leer` : 'Notificaciones'}
-        aria-expanded={open}
-        aria-haspopup="true"
-        onClick={handleOpen}
-      >
-        <BellIcon />
-        {hasUnread && (
-          <span
-            className="notif-bell-badge"
-            aria-hidden="true"
-          >
-            {unreadCount > 99 ? '99+' : unreadCount}
-          </span>
-        )}
-      </button>
-
-      {/* Floating panel via portal */}
-      {open && createPortal(
-        <div
-          ref={panelRef}
-          className="notif-panel"
-          role="dialog"
-          aria-label="Notificaciones"
-          aria-modal="false"
-          style={{ top: panelPos.top, left: panelPos.left }}
-        >
-          <div className="notif-panel__header">
-            <span className="notif-panel__title">Notificaciones</span>
-            {notifications.some(n => !n.read) && (
-              <button
-                type="button"
-                className="cv-btn cv-btn--ghost cv-btn--sm"
-                onClick={handleMarkAll}
-                disabled={markingAll}
-              >
-                {markingAll ? 'Marcando…' : 'Marcar todo como leído'}
-              </button>
-            )}
+  return <Popover.Root open={open} onOpenChange={changeOpen}>
+    <Popover.Trigger className="notif-bell-btn" aria-label={label}>
+      <Bell size={16} aria-hidden />
+      {count !== null && count > 0 && <span className="notif-bell-badge" aria-hidden>{count > 99 ? '99+' : count}</span>}
+    </Popover.Trigger>
+    <Popover.Portal>
+      <Popover.Positioner side="bottom" align="start" sideOffset={8} collisionPadding={8} className={css.positioner}>
+        <Popover.Popup className={css.panel} initialFocus={closeButton}>
+          <header className={css.header}>
+            <Popover.Title>{t('notifications.title')}</Popover.Title>
+            <div className={css.actions}>
+              <Button size="sm" variant="ghost" disabled={loading || pending !== null} aria-label={t('notifications.refresh')} onClick={() => { void loadPanel(); void refreshCount(true) }}><RefreshCw size={14} aria-hidden /></Button>
+              <Popover.Close ref={closeButton} className="cv-btn cv-btn--ghost cv-btn--sm" aria-label={t('dialog.close')}><X size={15} aria-hidden /></Popover.Close>
+            </div>
+          </header>
+          <Popover.Description className={css.description}>{t('notifications.description')}</Popover.Description>
+          {error && <div role="alert" className={css.error}><p>{error}</p><Button size="sm" variant="ghost" disabled={pending !== null} onClick={() => void loadPanel()}>{t('notifications.retry')}</Button></div>}
+          <div className={css.body} aria-busy={loading}>
+            {loading ? <p role="status" className={css.empty}>{t('notifications.loading')}</p>
+              : !error && notifications.length === 0 ? <p className={css.empty}>{t('notifications.empty')}</p>
+              : <ul className={css.list}>{notifications.map(notification => <li key={notification.id}>
+                <button className={css.item} data-unread={!notification.read} disabled={pending !== null} onClick={() => void actOnNotification(notification)}>
+                  <span className={css.dot} data-status={notification.status} aria-hidden />
+                  <span className={css.content}>
+                    <span className={css.title}>{notification.title}</span>
+                    {notification.body && <span className={css.summary}>{notification.body}</span>}
+                    <time className={css.time} dateTime={notification.created_at}>{Number.isFinite(Date.parse(notification.created_at)) ? new Date(notification.created_at).toLocaleString(locale, { dateStyle: 'short', timeStyle: 'short' }) : t('notifications.time_unknown')}</time>
+                    {pending === notification.id && <span role="status">{t('notifications.opening')}</span>}
+                  </span>
+                  {notification.conversation_id && <ChevronRight size={14} aria-hidden />}
+                </button>
+              </li>)}</ul>}
           </div>
-
-          <div className="notif-panel__body" role="list">
-            {panelLoading && (
-              <div className="notif-panel__loading" aria-busy="true">
-                <div className="cv-skeleton" style={{ height: 52 }} />
-                <div className="cv-skeleton" style={{ height: 52 }} />
-              </div>
-            )}
-            {!panelLoading && notifications.length === 0 && (
-              <div className="notif-panel__empty" role="listitem">Sin notificaciones.</div>
-            )}
-            {!panelLoading && notifications.map(n => (
-              <button
-                key={n.id}
-                type="button"
-                role="listitem"
-                className={`notif-item${n.read ? '' : ' notif-item--unread'}${n.conversation_id ? ' notif-item--link' : ''}`}
-                onClick={() => handleNotificationClick(n)}
-              >
-                <div className="notif-item__left">
-                  <Badge variant={STATUS_VARIANT[n.status]}><Circle size={8} aria-hidden="true" style={{ display: 'block', fill: 'currentColor' }} /></Badge>
-                </div>
-                <div className="notif-item__body">
-                  <div className="notif-item__title">{n.title}</div>
-                  {n.body && (
-                    <div className="notif-item__body-text" title={n.body}>
-                      {truncate(n.body, 80)}
-                    </div>
-                  )}
-                  <div className="notif-item__time">{relativeTime(n.created_at)}</div>
-                </div>
-                {n.conversation_id && (
-                  <div className="notif-item__arrow" aria-hidden="true">›</div>
-                )}
-              </button>
-            ))}
-          </div>
-        </div>,
-        document.body,
-      )}
-    </>
-  )
+          {!error && notifications.some(value => !value.read) && <footer className={css.footer}><Button size="sm" variant="ghost" disabled={loading || pending !== null} loading={pending === 'all'} onClick={() => void actOnNotification(null)}>{t('notifications.mark_all')}</Button></footer>}
+        </Popover.Popup>
+      </Popover.Positioner>
+    </Popover.Portal>
+  </Popover.Root>
 }

@@ -28,29 +28,38 @@ export interface AdsAvailability {
   reason: AdsAvailabilityReason | null
   /** Re-checks immediately, outside the poll interval (e.g. a "Retry" CTA). */
   refresh: () => void
+  refreshing?: boolean
 }
 
 export function useAdsAvailability(pollMs = ADS_AVAILABILITY_POLL_MS): AdsAvailability {
   const [state, setState] = useState<{ status: 'loading' | 'ready' | 'unavailable'; reason: AdsAvailabilityReason | null }>(
     { status: 'loading', reason: null },
   )
-  const aliveRef = useRef(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const scope = useRef({ active: false, pending: false })
 
   const poll = useCallback(() => {
-    // mintAdsBridgeSession never rejects (fail-soft in the client) — a
-    // transient failure already resolves to "unavailable".
-    mintAdsBridgeSession().then((res) => {
-      if (!aliveRef.current) return
-      setState({ status: res.status, reason: res.reason })
+    const current = scope.current
+    if (!current.active || current.pending) return
+    current.pending = true
+    setRefreshing(true)
+    void mintAdsBridgeSession().then((res) => {
+      if (current.active) setState({ status: res.status, reason: res.reason })
+    }).catch(() => {
+      if (current.active) setState({ status: 'unavailable', reason: 'unreachable' })
+    }).finally(() => {
+      current.pending = false
+      if (current.active) setRefreshing(false)
     })
   }, [])
 
   useEffect(() => {
-    aliveRef.current = true
+    const current = { active: true, pending: false }
+    scope.current = current
     poll()
     const id = setInterval(poll, pollMs)
-    return () => { aliveRef.current = false; clearInterval(id) }
+    return () => { current.active = false; clearInterval(id) }
   }, [poll, pollMs])
 
-  return { ...state, refresh: poll }
+  return { ...state, refreshing, refresh: poll }
 }

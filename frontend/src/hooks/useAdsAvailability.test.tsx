@@ -138,4 +138,33 @@ describe('useAdsAvailability', () => {
       await Promise.resolve()
     })
   })
+
+  it('does not overlap polling and manual refresh while an availability check is pending', async () => {
+    let finish!: (value: { status: 'unavailable'; reason: 'unauthorized' }) => void
+    mintAdsBridgeSession.mockReturnValue(new Promise(resolve => { finish = resolve }))
+    act(() => root.render(React.createElement(Harness, { pollMs: 1000 })))
+    await act(async () => {
+      container.querySelector('button')!.click()
+      vi.advanceTimersByTime(5000)
+    })
+    expect(mintAdsBridgeSession).toHaveBeenCalledTimes(1)
+    await act(async () => finish({ status: 'unavailable', reason: 'unauthorized' }))
+    expect(container.querySelector('div')?.dataset.reason).toBe('unauthorized')
+  })
+
+  it('ignores a previous effect response after polling configuration changes', async () => {
+    let old!: (value: { status: 'ready'; reason: null }) => void
+    mintAdsBridgeSession.mockReturnValueOnce(new Promise(resolve => { old = resolve }))
+      .mockResolvedValueOnce({ status: 'unavailable', reason: 'unauthorized' })
+    act(() => root.render(React.createElement(Harness, { pollMs: 1000 })))
+    await act(async () => root.render(React.createElement(Harness, { pollMs: 2000 })))
+    await act(async () => old({ status: 'ready', reason: null }))
+    expect(container.querySelector('div')?.dataset.reason).toBe('unauthorized')
+  })
+
+  it('handles a rejected check as unavailable rather than leaving loading forever', async () => {
+    mintAdsBridgeSession.mockRejectedValue(new Error('offline'))
+    await act(async () => root.render(React.createElement(Harness)))
+    expect(container.querySelector('div')?.dataset.reason).toBe('unreachable')
+  })
 })

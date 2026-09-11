@@ -65,7 +65,7 @@ describe('AdsView', () => {
 
   it.each([
     ['not_installed', 'El servicio de anuncios no está instalado', 'Ir a Herramientas'],
-    ['unreachable', 'El servicio de anuncios está arrancando', 'Reintentar'],
+    ['unreachable', 'No se pudo conectar con el servicio de anuncios', 'Reintentar'],
     ['unauthorized', 'El servicio de anuncios necesita configuración', 'Ir a Herramientas'],
   ] as const)(
     'shows the honest blocked state (never a generic error) for %s',
@@ -101,5 +101,31 @@ describe('AdsView', () => {
     })
 
     expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows document loading and reloads only on explicit request, without putting credentials in the URL', () => {
+    setAvailability('ready')
+    render()
+    const first = container.querySelector('iframe')!
+    expect(container.textContent).toContain('Abriendo el panel')
+    act(() => first.dispatchEvent(new Event('load')))
+    expect(container.textContent).not.toContain('Abriendo el panel')
+    const reload = [...container.querySelectorAll('button')].find(button => button.textContent?.includes('Recargar panel'))!
+    act(() => reload.click())
+    expect(container.querySelector('iframe')).not.toBe(first)
+    expect(container.querySelector('iframe')?.getAttribute('src')).toBe('/ads/')
+    expect(container.textContent).toContain('Abriendo el panel')
+  })
+
+  it('removes the panel on loss of authorization and does not restore its previous document state', () => {
+    setAvailability('ready')
+    render()
+    act(() => container.querySelector('iframe')!.dispatchEvent(new Event('load')))
+    setAvailability('unavailable', 'unauthorized')
+    render()
+    expect(container.querySelector('iframe')).toBeNull()
+    setAvailability('ready')
+    render()
+    expect(container.textContent).toContain('Abriendo el panel')
   })
 })

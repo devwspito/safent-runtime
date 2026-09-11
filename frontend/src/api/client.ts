@@ -648,11 +648,11 @@ export function recordSecurityDecision(
 export function listNotifications(limit = 100, unreadOnly = false): Promise<Notification[]> {
   return request<Notification[]>(
     `/notifications?limit=${limit}&unread_only=${unreadOnly}`,
-  ).catch(() => [])
+  )
 }
 
 export function getUnreadCount(): Promise<UnreadCountResponse> {
-  return request<UnreadCountResponse>('/notifications/unread-count').catch(() => ({ count: 0 }))
+  return request<UnreadCountResponse>('/notifications/unread-count')
 }
 
 export function markNotificationRead(id: string): Promise<unknown> {

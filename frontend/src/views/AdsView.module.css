@@ -1,26 +1,11 @@
-/* ── AdsView — scoped styles ──────────────────────────────────────────────── */
-/* All tokens come from tokens.css via styles.css. No hex / px hardcoded.    */
-
-.hint {
-  font-size: var(--text-xs);
-  color: var(--color-text-dim);
-  margin-bottom: var(--space-3);
-}
-
-.frameWrap {
-  position: relative;
-  width: 100%;
-  height: min(78vh, 860px);
-  min-height: 420px;
-  background: var(--color-bg);
-  border: 1px solid var(--color-border-subtle);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-}
-
-.frame {
-  display: block;
-  width: 100%;
-  height: 100%;
-  border: none;
-}
+.workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 10px 16px 10px max(16px, var(--shell-header-inset, 0px)); border-bottom: 1px solid var(--color-border-subtle); }
+.toolbar h1 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: var(--text-sm); font-weight: var(--weight-medium); }
+.hint { padding: 10px 16px; margin: 0; font-size: var(--text-xs); color: var(--color-text-muted); border-bottom: 1px solid var(--color-border-subtle); }
+.frameWrap { position: relative; flex: 1; min-height: 0; width: 100%; background: var(--color-bg); overflow: hidden; }
+.frame { display: block; width: 100%; height: 100%; border: 0; }
+.loading { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; font-size: var(--text-sm); color: var(--color-text-muted); background: var(--color-bg); pointer-events: none; }
+.state { display: flex; flex: 1; min-height: 0; overflow-y: auto; flex-direction: column; align-items: flex-start; justify-content: center; gap: 12px; max-width: 520px; padding: 24px; margin: 0 auto; }
+.state h2 { margin: 0; font-size: var(--text-lg); font-weight: var(--weight-medium); }
+.state p { margin: 0; color: var(--color-text-muted); font-size: var(--text-sm); line-height: 1.6; }
+.stateIcon { color: var(--color-text-muted); }

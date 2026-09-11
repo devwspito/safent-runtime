@@ -12,13 +12,11 @@
  * companion's own panel guides account connection, so Ads stays visible and
  * usable either way (Assumption 7 — never hidden for lack of accounts).
  */
-import type { ReactNode } from 'react'
-import { Loader2, Megaphone, RefreshCw, ShieldAlert, Wrench } from 'lucide-react'
+import { useState, type ReactNode } from 'react'
+import { Loader2, Megaphone, RefreshCw, ShieldAlert, Wrench, Unplug } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useT } from '../lib/i18n'
 import { useAdsAvailability } from '../hooks/useAdsAvailability'
-import { PageHeader } from '../components/ui/PageHeader'
-import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
 import type { AdsAvailabilityReason } from '../api/types'
 import css from './AdsView.module.css'
@@ -27,7 +25,7 @@ const ADS_IFRAME_SRC = '/ads/'
 
 const BLOCKED_STATE_ICON: Record<AdsAvailabilityReason, ReactNode> = {
   not_installed: <Wrench size={28} aria-hidden="true" />,
-  unreachable: <Loader2 size={28} aria-hidden="true" className="spin" />,
+  unreachable: <Unplug size={28} aria-hidden="true" />,
   unauthorized: <ShieldAlert size={28} aria-hidden="true" />,
   no_accounts: <Megaphone size={28} aria-hidden="true" />,
 }
@@ -38,34 +36,20 @@ export default function AdsView() {
   const availability = useAdsAvailability()
 
   if (availability.status === 'loading') {
-    return (
-      <>
-        <PageHeader title={t('nav.ads')} subtitle={t('ads.subtitle')} />
-        <div className="view-body">
-          <EmptyState
-            icon={<Loader2 size={28} aria-hidden="true" className="spin" />}
-            title={t('ads.state.loading.title')}
-          />
-        </div>
-      </>
-    )
+    return <AdsState icon={<Loader2 size={24} aria-hidden className="spin" />} title={t('ads.state.loading.title')} loading />
   }
 
   const isBlocked = availability.status === 'unavailable' && availability.reason !== 'no_accounts'
 
   if (isBlocked) {
     const reason = availability.reason ?? 'unreachable'
-    return (
-      <>
-        <PageHeader title={t('nav.ads')} subtitle={t('ads.subtitle')} />
-        <div className="view-body">
-          <EmptyState
+    return <AdsState
             icon={BLOCKED_STATE_ICON[reason]}
             title={t(`ads.state.${reason}.title`)}
             description={t(`ads.state.${reason}.desc`)}
             action={
               reason === 'unreachable' ? (
-                <Button variant="secondary" size="sm" onClick={availability.refresh}>
+                <Button variant="secondary" size="sm" loading={availability.refreshing} onClick={availability.refresh}>
                   <RefreshCw size={13} aria-hidden="true" />
                   {t('ads.state.retry')}
                 </Button>
@@ -76,22 +60,44 @@ export default function AdsView() {
               )
             }
           />
-        </div>
-      </>
-    )
   }
 
-  return (
-    <>
-      <PageHeader title={t('nav.ads')} subtitle={t('ads.subtitle')} />
-      <div className="view-body">
-        {availability.reason === 'no_accounts' && (
-          <p className={css.hint}>{t('ads.state.no_accounts.desc')}</p>
-        )}
-        <div className={css.frameWrap}>
-          <iframe src={ADS_IFRAME_SRC} title={t('ads.iframe.title')} className={css.frame} />
-        </div>
-      </div>
-    </>
-  )
+  return <AdsPanel noAccounts={availability.reason === 'no_accounts'} />
+}
+
+function AdsState({ icon, title, description, action, loading = false }: {
+  icon: ReactNode; title: string; description?: string; action?: ReactNode; loading?: boolean
+}) {
+  const t = useT()
+  return <section className={css.workspace} aria-label={t('nav.ads')}>
+    <header className={css.toolbar}><h1><Megaphone size={16} aria-hidden />{t('nav.ads')}</h1></header>
+    <div className={css.state} aria-busy={loading}>
+      <div className={css.stateIcon}>{icon}</div>
+      <h2 role={loading ? 'status' : undefined}>{title}</h2>
+      {description && <p>{description}</p>}
+      {action && <div>{action}</div>}
+    </div>
+  </section>
+}
+
+function AdsPanel({ noAccounts }: { noAccounts: boolean }) {
+  const t = useT()
+  const [revision, setRevision] = useState(0)
+  const [state, setState] = useState<'loading' | 'loaded' | 'error'>('loading')
+  return <section className={css.workspace} aria-label={t('nav.ads')}>
+    <header className={css.toolbar}>
+      <h1><Megaphone size={16} aria-hidden />{t('nav.ads')}</h1>
+      <Button size="sm" variant="ghost" onClick={() => { setState('loading'); setRevision(value => value + 1) }}>
+        <RefreshCw size={13} aria-hidden />{t('ads.frame.reload')}
+      </Button>
+    </header>
+    {noAccounts && <p className={css.hint}>{t('ads.state.no_accounts.desc')}</p>}
+    <div className={css.frameWrap}>
+      {state !== 'loaded' && <div className={css.loading} role={state === 'error' ? 'alert' : 'status'}>
+        {state === 'loading' ? t('ads.frame.loading') : t('ads.frame.error')}
+      </div>}
+      <iframe key={revision} src={ADS_IFRAME_SRC} title={t('ads.iframe.title')} className={css.frame}
+        onLoad={() => setState('loaded')} onError={() => setState('error')} />
+    </div>
+  </section>
 }
