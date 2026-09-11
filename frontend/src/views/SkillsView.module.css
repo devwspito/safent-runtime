@@ -4,6 +4,11 @@
    ─────────────────────────────────────────────────────────────────────────── */
 
 /* ── Section header row ─────────────────────────────────────────────────── */
+@media (max-width: 600px) {
+  .viewBody :global(.ds-empty-state--compact) { display: grid; grid-template-columns: 32px minmax(0,1fr); gap: 12px; padding: 16px 0; }
+  .viewBody :global(.ds-empty-state__text) { min-width: 0; }
+  .viewBody :global(.ds-empty-state--compact .ds-empty-state__action) { grid-column: 2; margin: 0; justify-self: start; }
+}
 
 .sectionHead {
   display: flex;

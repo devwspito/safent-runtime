@@ -23,9 +23,6 @@ import {
   AnimatedListItem,
   AnimatedExpanderContent,
   AnimatedChevron,
-  FadeIn,
-  Stagger,
-  StaggerItem,
   HoverRow,
   motion,
   SPRING,
@@ -216,20 +213,28 @@ export default function McpView() {
   const [pendingInstall, setPendingInstall] = useState<PendingInstall | null>(null)
   const regInputRef = useRef<HTMLInputElement>(null)
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
+  const loadGeneration = useRef(0)
+  const searchGeneration = useRef(0)
+  const alive = useRef(true)
 
   function load() {
+    const request = ++loadGeneration.current
     dispatch({ type: 'LOADING' })
     listMcpServers()
       // Ruflo is a first-class Safent integration, not a user-managed tool set.
       // The backend already hides it but we filter defensively client-side too.
-      .then(servers => dispatch({ type: 'LOADED', servers: servers.filter(s => s.slug !== 'ruflo') }))
-      .catch((e: unknown) => dispatch({
+      .then(servers => {
+        if (request !== loadGeneration.current) return
+        if (!Array.isArray(servers)) throw new Error('invalid MCP list')
+        dispatch({ type: 'LOADED', servers: servers.filter(s => s.slug !== 'ruflo') })
+      })
+      .catch(() => { if (request === loadGeneration.current) dispatch({
         type: 'FAILED',
-        message: e instanceof ApiError ? e.message : t('mcp.err.load'),
-      }))
+        message: t('mcp.err.load'),
+      }) })
   }
 
-  useEffect(() => { load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { alive.current = true; load(); return () => { alive.current = false; loadGeneration.current++; searchGeneration.current++ } }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const installedIds = state.status === 'success'
     ? new Set(state.servers.map(s => s.server_id ?? s.id ?? ''))
@@ -286,6 +291,7 @@ export default function McpView() {
   }
 
   async function installEntry(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void) {
+    if (state.status !== 'success') { show(t('mcp.err.load'), 'error'); onDone(); return }
     // npx (npm) and uvx (PyPI) both resolve to a published package the content +
     // CVE scanners can fetch and statically analyze, so the verdict is REAL. Other
     // runners (local node/python3 scripts, inline commands) have no inspectable
@@ -308,8 +314,12 @@ export default function McpView() {
 
     try {
       const scan = await scanInstall('mcp', scanTarget)
+      if (!alive.current) return
+      if (!scan || !['PASS','WARN','FAIL'].includes(scan.verdict)
+        || typeof scan.scan_id !== 'string' || !scan.scan_id.trim()
+        || typeof scan.requires_owner_approval !== 'boolean') throw new Error('unverified scan')
       // WARN and FAIL always route through the approval modal so the owner can
-      // review and confirm with TOTP — no silent toast degradation.
+      // review and confirm the exact action — no silent toast degradation.
       if (scan.requires_owner_approval || scan.verdict === 'WARN' || scan.verdict === 'FAIL') {
         setPendingInstall({ scan, entry, collectedEnv, onDone })
         return
@@ -317,8 +327,9 @@ export default function McpView() {
       // PASS → proceed directly
       await doAddMcpServer(entry, collectedEnv, onDone)
     } catch {
-      // Scan endpoint unavailable — fall back to direct install
-      await doAddMcpServer(entry, collectedEnv, onDone)
+      if (!alive.current) return
+      show(t('skills.scan.unavailable'), 'error')
+      onDone()
     }
   }
 
@@ -353,15 +364,19 @@ export default function McpView() {
   async function searchRegistry() {
     const q = regInputRef.current?.value.trim() ?? ''
     if (q.length < 2) return
+    const request = ++searchGeneration.current
     setRegistryState({ status: 'loading' })
     try {
       const results = await searchMcpRegistry(q)
-      const arr = Array.isArray(results) ? results : []
+      if (request !== searchGeneration.current) return
+      if (!Array.isArray(results)) throw new Error('invalid MCP search')
+      const arr = results
       setRegistryState({ status: 'success', results: arr })
-    } catch (e) {
+    } catch {
+      if (request !== searchGeneration.current) return
       setRegistryState({
         status: 'error',
-        message: e instanceof ApiError ? e.message : t('mcp.err.registry_search'),
+        message: t('mcp.err.registry_search'),
       })
     }
   }
@@ -385,11 +400,11 @@ export default function McpView() {
         subtitle={t('mcp.subtitle')}
       />
 
-      <div className="view-body cv-view-body">
-        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+      <div className={`view-body cv-view-body ${styles.viewBody}`}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
 
           {/* ── Active servers ──────────────────────────────────────────────── */}
-          <StaggerItem>
+          <div>
             <section className="cv-section" aria-label={t('mcp.active.aria')}>
               <h2 className={styles.sectionLabel}>{t('mcp.active')}</h2>
 
@@ -421,7 +436,7 @@ export default function McpView() {
               )}
 
               {state.status === 'error' && (
-                <FadeIn>
+                <div>
                   <div role="alert" className={styles.errorBlock}>
                     <p className={styles.errorMessage}>{state.message}</p>
                     <div>
@@ -430,7 +445,7 @@ export default function McpView() {
                       </Button>
                     </div>
                   </div>
-                </FadeIn>
+                </div>
               )}
 
               {state.status === 'success' && (
@@ -470,10 +485,10 @@ export default function McpView() {
                   )
               )}
             </section>
-          </StaggerItem>
+          </div>
 
           {/* ── Managed presets (Safent-operated MCP bridges) ────────────────── */}
-          <StaggerItem>
+          <div>
             <section className="cv-section" aria-label={t('mcp.managed.section.aria')}>
               <h2 className={styles.sectionLabel}>{t('mcp.managed.section')}</h2>
               <ul className="cv-list" role="list">
@@ -486,10 +501,10 @@ export default function McpView() {
                 </AnimatedListItem>
               </ul>
             </section>
-          </StaggerItem>
+          </div>
 
           {/* ── Suggested catalog ───────────────────────────────────────────── */}
-          <StaggerItem>
+          <div>
             <section className="cv-section" aria-label={t('mcp.suggested.aria')}>
               <h2 className={styles.sectionLabel}>{t('mcp.suggested')}</h2>
               <ul className="cv-list" role="list">
@@ -506,10 +521,10 @@ export default function McpView() {
                 </AnimatePresence>
               </ul>
             </section>
-          </StaggerItem>
+          </div>
 
           {/* ── Official registry search ─────────────────────────────────── */}
-          <StaggerItem>
+          <div>
             <section className="cv-section" aria-label={t('mcp.search.aria')}>
               <h2 className={styles.sectionLabel}>{t('mcp.search.title')}</h2>
               <div className={styles.searchBar}>
@@ -544,7 +559,7 @@ export default function McpView() {
               </p>
 
               {registryState.status === 'error' && (
-                <FadeIn>
+                <div>
                   <div role="alert" className={styles.errorBlock}>
                     <p className={styles.errorMessage}>{registryState.message}</p>
                     <div>
@@ -553,7 +568,7 @@ export default function McpView() {
                       </Button>
                     </div>
                   </div>
-                </FadeIn>
+                </div>
               )}
 
               {registryState.status === 'success' && registryState.results.length > 0 && (
@@ -580,10 +595,10 @@ export default function McpView() {
                 />
               )}
             </section>
-          </StaggerItem>
+          </div>
 
           {/* ── Manual add ──────────────────────────────────────────────────── */}
-          <StaggerItem>
+          <div>
             <section className="cv-section" aria-label={t('mcp.manual.aria')}>
               <h2 className={styles.sectionLabel}>{t('mcp.manual.aria')}</h2>
               <AddMcpForm
@@ -591,9 +606,9 @@ export default function McpView() {
                 onToast={show}
               />
             </section>
-          </StaggerItem>
+          </div>
 
-        </Stagger>
+        </div>
       </div>
     </>
   )
@@ -858,7 +873,7 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
           onCancel={() => setPendingScan(null)}
         />
       )}
-      <motion.div className={styles.catalogCard} whileHover={{ y: -1 }} transition={SPRING} layout>
+      <motion.div className={styles.catalogCard} transition={SPRING} layout>
         <div className={styles.catalogCardMain}>
           <span className={styles.catalogCardIcon} aria-hidden="true">
             <Megaphone size={14} />
@@ -973,7 +988,6 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
   return (
     <motion.div
       className={styles.catalogCard}
-      whileHover={{ y: -1 }}
       transition={SPRING}
       layout
     >
@@ -1132,7 +1146,6 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
   return (
     <motion.div
       className={styles.addForm}
-      whileHover={{ y: -1 }}
       transition={TWEEN_FAST}
       layout
     >

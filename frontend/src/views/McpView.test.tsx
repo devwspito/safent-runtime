@@ -10,11 +10,13 @@ import React from 'react'
 
 const {
   listMcpServers, listManagedRemoteEndpoints, postInstallRequest, getInstallRequests,
+  scanInstall, addMcpServer,
 } = vi.hoisted(() => ({
   listMcpServers: vi.fn(),
   listManagedRemoteEndpoints: vi.fn(),
   postInstallRequest: vi.fn(),
   getInstallRequests: vi.fn(),
+  scanInstall: vi.fn(), addMcpServer:vi.fn(),
 }))
 
 const { useAdsAvailability } = vi.hoisted(() => ({ useAdsAvailability: vi.fn() }))
@@ -29,6 +31,7 @@ vi.mock('../api/client', async () => {
     listManagedRemoteEndpoints,
     postInstallRequest,
     getInstallRequests,
+    scanInstall, addMcpServer,
   }
 })
 
@@ -40,6 +43,7 @@ describe('McpView — Ads card (029 SC-001)', () => {
 
   beforeEach(() => {
     listMcpServers.mockReset().mockResolvedValue([])
+    scanInstall.mockReset();addMcpServer.mockReset()
     listManagedRemoteEndpoints.mockReset().mockResolvedValue({ endpoints: {} })
     postInstallRequest.mockReset()
     getInstallRequests.mockReset().mockResolvedValue({ requests: [] })
@@ -62,6 +66,26 @@ describe('McpView — Ads card (029 SC-001)', () => {
       for (let i = 0; i < 5; i++) await Promise.resolve()
     })
   }
+  it.each(['offline','unknown','empty-pass'])('does not request MCP install on unverifiable scan: %s',async mode=>{
+    if(mode==='offline') scanInstall.mockRejectedValue(new Error('offline'))
+    else if(mode==='empty-pass') scanInstall.mockResolvedValue({verdict:'PASS',scan_id:'',requires_owner_approval:false})
+    else scanInstall.mockResolvedValue({verdict:'UNKNOWN'})
+    await render()
+    const card=Array.from(container.querySelectorAll('div')).find(el=>el.className.includes('catalogCard') && el.textContent?.includes('Context7') && el.querySelector('button'))
+    const install=Array.from(card?.querySelectorAll('button')??[]).find(el=>el.textContent==='Añadir')
+    expect(install).toBeTruthy()
+    await act(async()=>{install!.click();for(let i=0;i<6;i++)await Promise.resolve()})
+    expect(scanInstall).toHaveBeenCalled();expect(addMcpServer).not.toHaveBeenCalled()
+  })
+  it('does not add MCP when a scan arrives after leaving',async()=>{
+    let resolve!:(value:unknown)=>void;scanInstall.mockReturnValue(new Promise(r=>{resolve=r}))
+    await render()
+    const card=Array.from(container.querySelectorAll('div')).find(el=>el.className.includes('catalogCard') && el.textContent?.includes('Context7') && el.querySelector('button'))!
+    const button=Array.from(card.querySelectorAll('button')).find(el=>el.textContent==='Añadir')!
+    await act(async()=>button.click());act(()=>root.render(null))
+    await act(async()=>resolve({verdict:'PASS',requires_owner_approval:false}))
+    expect(addMcpServer).not.toHaveBeenCalled()
+  })
 
   it('shows ONLY "Instalar" by default — zero connection/URL fields on screen', async () => {
     await render()

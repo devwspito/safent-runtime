@@ -6,24 +6,20 @@ import React from 'react'
 // No @testing-library in this project yet — render directly via react-dom
 // (mirrors TailnetSection.test.tsx).
 
-// Regression (matriz 10-sep, hallazgo C): the emergency-brake release dialog
-// always asked for a TOTP, even when MFA was never enrolled — a dead end
-// (403 mfa_not_enrolled, no path forward). Pins the fixed UI: the release
-// dialog shows WHICH proof it's asking for, based on GET /mfa/status.
+// Owner confirmation remains mandatory; Community has no MFA flow.
 
-const { getKillSwitch, engageKillSwitch, releaseKillSwitch, mfaStatus, sileoSuccess, sileoError } =
+const { getKillSwitch, engageKillSwitch, releaseKillSwitch, sileoSuccess, sileoError } =
   vi.hoisted(() => ({
     getKillSwitch: vi.fn(),
     engageKillSwitch: vi.fn(),
     releaseKillSwitch: vi.fn(),
-    mfaStatus: vi.fn(),
     sileoSuccess: vi.fn(),
     sileoError: vi.fn(),
   }))
 
 vi.mock('../api/client', async () => {
   const actual = await vi.importActual<typeof import('../api/client')>('../api/client')
-  return { ...actual, getKillSwitch, engageKillSwitch, releaseKillSwitch, mfaStatus }
+  return { ...actual, getKillSwitch, engageKillSwitch, releaseKillSwitch }
 })
 vi.mock('sileo', () => ({ sileo: { success: sileoSuccess, error: sileoError } }))
 
@@ -58,7 +54,6 @@ describe('KillSwitchSection — release dialog shows which proof is asked', () =
     getKillSwitch.mockReset()
     engageKillSwitch.mockReset()
     releaseKillSwitch.mockReset()
-    mfaStatus.mockReset()
     sileoSuccess.mockReset()
     sileoError.mockReset()
     container = document.createElement('div')
@@ -72,9 +67,8 @@ describe('KillSwitchSection — release dialog shows which proof is asked', () =
     document.body.querySelectorAll('.mfa-modal-backdrop').forEach(el => el.remove())
   })
 
-  it.each([false, true])('releases only after owner confirmation, irrespective of legacy enrollment %s', async enrolled => {
+  it('releases only after explicit owner confirmation without an MFA endpoint', async () => {
     getKillSwitch.mockResolvedValue(ENGAGED)
-    mfaStatus.mockResolvedValue({ enrolled })
     releaseKillSwitch.mockResolvedValue({ ok: true })
     act(() => { root.render(React.createElement(KillSwitchSection)) })
     await flush()
@@ -86,7 +80,6 @@ describe('KillSwitchSection — release dialog shows which proof is asked', () =
     clickButton(document.body, t => t === 'Confirmar')
     await flush()
     expect(releaseKillSwitch).toHaveBeenCalledExactlyOnceWith()
-    expect(mfaStatus).not.toHaveBeenCalled()
     expect(sileoSuccess).toHaveBeenCalledTimes(1)
   })
 

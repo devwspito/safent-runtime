@@ -17,9 +17,6 @@ import {
   AnimatePresence,
   AnimatedListItem,
   AnimatedExpanderContent,
-  FadeIn,
-  Stagger,
-  StaggerItem,
   motion,
   useReducedMotion,
   SPRING,
@@ -133,81 +130,108 @@ function show(message: string, kind: 'ok' | 'warn' | 'error' = 'ok') {
 // ── Device-code OAuth connect — shared by any provider row (native catalogue
 // or the Codex onboarding card) so the polling state machine lives in ONE place ─
 
-function useProviderOAuthConnect(onConnected: () => void) {
+export function useProviderOAuthConnect(onConnected: () => void) {
   const t = useT()
   const [connectingId, setConnectingId] = useState<string | null>(null)
+  const [notice, setNotice] = useState<{ text:string; url?:string; code?:string; error?:boolean } | null>(null)
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const generation = useRef(0)
+  const pending = useRef(false)
+  const connected = useRef(onConnected)
+  connected.current = onConnected
 
   useEffect(() => () => {
+    generation.current++
+    pending.current = false
     if (pollRef.current) clearTimeout(pollRef.current)
   }, [])
 
   async function startOAuthConnect(providerId: string, name: string) {
+    if (pending.current) return
+    pending.current = true
+    const request = ++generation.current
+    const current = () => request === generation.current
+    const finish = (text:string, error = true) => {
+      if (!current()) return
+      pending.current = false
+      setConnectingId(null)
+      setNotice({text,error})
+    }
     setConnectingId(providerId)
+    setNotice({text:t('providers.oauth.waiting').replace('{name}', name)})
     let r: Record<string, unknown>
     try {
       r = await startProviderOAuth(providerId)
-    } catch (e) {
-      show(e instanceof Error ? e.message : t('providers.oauth.err.connect'), 'error')
-      setConnectingId(null)
+    } catch {
+      finish(t('providers.oauth.err.connect'))
       return
     }
+    if (!current()) return
 
     if (!r || r['error']) {
-      show(t('providers.oauth.err.connect_reason').replace('{reason}', (r?.['error'] as string) ?? t('providers.err.unknown')), 'error')
-      setConnectingId(null)
+      finish(t('providers.oauth.err.connect'))
       return
     }
 
-    const session = r['session_id'] as string | undefined
-    const url = (r['auth_url'] ?? r['verification_url']) as string | undefined
-    const code = r['user_code'] as string | undefined
-
-    if (url) {
-      window.open(url, '_blank', 'noopener,noreferrer')
-      show(t('providers.oauth.opening').replace('{name}', name), 'ok')
-    }
-    if (code) {
-      show(t('providers.oauth.go_and_code').replace('{url}', url ?? '').replace('{code}', code), 'ok')
-    } else {
-      show(t('providers.oauth.waiting').replace('{name}', name), 'ok')
-    }
-
-    if (!session) { setConnectingId(null); return }
-
-    const intervalMs = Math.max(2000, ((r['poll_interval'] as number | undefined) ?? 4) * 1000)
-    const deadline = Date.now() + Math.max(60, ((r['expires_in'] as number | undefined) ?? 600)) * 1000
+    const session = typeof r.session_id === 'string' ? r.session_id : ''
+    const rawUrl = r.auth_url ?? r.verification_url
+    let url:string
+    try {
+      const parsed = new URL(String(rawUrl ?? ''))
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error('invalid OAuth URL')
+      url = parsed.href
+    } catch { finish(t('providers.oauth.err.connect')); return }
+    if (!session) { finish(t('providers.oauth.err.connect')); return }
+    const code = typeof r.user_code === 'string' ? r.user_code : undefined
+    setNotice({text:t('providers.oauth.waiting').replace('{name}', name),url,code})
+    // The persistent link also works when the browser blocks an asynchronous popup.
+    try { window.open(url, '_blank', 'noopener,noreferrer') } catch { /* link remains available */ }
+    const seconds = (value:unknown, fallback:number) => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
+    const intervalMs = Math.min(30000, Math.max(2000, seconds(r.poll_interval,4)*1000))
+    const deadline = Date.now() + Math.min(1800, seconds(r.expires_in,600))*1000
 
     const poll = async () => {
+      if (!current()) return
       if (Date.now() > deadline) {
-        show(t('providers.oauth.expired'), 'warn')
-        setConnectingId(null)
+        finish(t('providers.oauth.expired'))
         return
       }
-      const st = await getProviderOAuthStatus(session)
+      let st: Awaited<ReturnType<typeof getProviderOAuthStatus>>
+      try { st = await getProviderOAuthStatus(session) }
+      catch { finish(t('providers.oauth.unverified')); return }
+      if (!current()) return
       const status = String(st?.status ?? '').toLowerCase()
       if (status === 'approved' || status === 'connected' || status === 'success') {
         show(t('providers.oauth.connected').replace('{name}', name), 'ok')
-        setConnectingId(null)
-        onConnected()
+        finish(t('providers.oauth.connected').replace('{name}', name), false)
+        connected.current()
         return
       }
       if (status === 'error' || status === 'failed') {
-        show(t('providers.oauth.err.connect_reason').replace('{reason}', String(st?.error_message ?? st?.error ?? t('providers.err.unknown'))), 'error')
-        setConnectingId(null)
+        finish(t('providers.oauth.err.connect'))
         return
       }
       if (status === 'expired') {
-        show(t('providers.oauth.expired'), 'warn')
-        setConnectingId(null)
+        finish(t('providers.oauth.expired'))
         return
       }
+      if (status !== 'pending') { finish(t('providers.oauth.unverified')); return }
       pollRef.current = setTimeout(poll, intervalMs)
     }
     pollRef.current = setTimeout(poll, intervalMs)
   }
 
-  return { connectingId, startOAuthConnect }
+  return { connectingId, startOAuthConnect, notice }
+}
+
+function OAuthNotice({ notice }: { notice:ReturnType<typeof useProviderOAuthConnect>['notice'] }) {
+  const t = useT()
+  if (!notice) return null
+  return <div className={css.oauthNotice} role={notice.error ? 'alert' : 'status'}>
+    <span>{notice.text}</span>
+    {notice.code && <code aria-label={t('providers.oauth.code')}>{notice.code}</code>}
+    {notice.url && <a href={notice.url} target="_blank" rel="noopener noreferrer">{t('providers.oauth.open')}</a>}
+  </div>
 }
 
 // ── Provider kind icon ────────────────────────────────────────────────────────
@@ -230,9 +254,9 @@ function ProviderTypeChip({ provider }: { provider: Provider }) {
 
 function SkeletonRows({ count }: { count: number }) {
   return (
-    <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
       {[...Array(count)].map((_, i) => (
-        <StaggerItem key={i}>
+        <div key={i}>
           <div
             className={css.skeletonRow}
             role="presentation"
@@ -248,9 +272,9 @@ function SkeletonRows({ count }: { count: number }) {
               <div className="skeleton skeleton--chip" />
             </div>
           </div>
-        </StaggerItem>
+        </div>
       ))}
-    </Stagger>
+    </div>
   )
 }
 
@@ -260,12 +284,16 @@ export default function ProvidersView() {
   const t = useT()
   const [state, dispatch] = useReducer(reducer, { status: 'loading' })
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
+  const loadGeneration = useRef(0)
 
   function load() {
+    const request = ++loadGeneration.current
     dispatch({ type: 'RELOAD' })
     Promise.all([listProviders(), listNativeProviders(), getNativeActive()])
       .then(([configured, native, nativeActive]) => {
-        const cfg = Array.isArray(configured) ? configured : []
+        if (request !== loadGeneration.current) return
+        if (!Array.isArray(configured) || !Array.isArray(native)) throw new Error('invalid provider catalog')
+        const cfg = configured
         // Native-configured providers live in a separate store from the repo;
         // surface the active one in the configured list so a just-added native
         // catalogue provider is actually visible + marked active. But when a
@@ -300,15 +328,16 @@ export default function ProvidersView() {
           native: filteredNative,
         })
       })
-      .catch((err: unknown) => {
+      .catch(() => {
+        if (request !== loadGeneration.current) return
         dispatch({
           type: 'FAILED',
-          message: err instanceof ApiError ? err.message : t('providers.err.load'),
+          message: t('providers.err.load'),
         })
       })
   }
 
-  useEffect(() => { load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); return () => { loadGeneration.current++ } }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const configuredIds = state.status === 'success'
     ? new Set(state.configured.map(p => p.provider_id))
@@ -321,12 +350,13 @@ export default function ProvidersView() {
   return (
     <>
       {ConfirmDialogNode}
-      <PageHeader
+      <div className={css.header}><PageHeader
         title={t('providers.title')}
         subtitle={t('providers.subtitle')}
+        actions={<Button variant="secondary" size="sm" onClick={load} disabled={state.status === 'loading'}>{t('providers.refresh')}</Button>}
       />
 
-      <div className={`view-body ${css.body}`}>
+      </div><div className={`view-body ${css.body}`}>
         {state.status === 'loading' && (
           <section className={css.section} aria-label={t('providers.loading_aria')}>
             <div className={css.sectionLabel} aria-hidden="true">{t('providers.section.configured')}</div>
@@ -335,7 +365,7 @@ export default function ProvidersView() {
         )}
 
         {state.status === 'error' && (
-          <FadeIn>
+          <div>
             <div className={css.errorBox} role="alert">
               <AlertCircle size={16} style={{ color: 'var(--color-danger)', flexShrink: 0, marginTop: 1 }} aria-hidden="true" />
               <span className={css.errorText}>{state.message}</span>
@@ -343,14 +373,14 @@ export default function ProvidersView() {
                 {t('providers.retry')}
               </Button>
             </div>
-          </FadeIn>
+          </div>
         )}
 
         {state.status === 'success' && (
-          <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
 
             {/* ── Configured providers ── */}
-            <StaggerItem>
+            <div>
               <section className={css.section} aria-label={t('providers.section.configured.aria')}>
                 <h2 className={css.sectionLabel}>{t('providers.section.configured')}</h2>
                 {state.configured.length === 0 ? (
@@ -361,7 +391,7 @@ export default function ProvidersView() {
                     description={t('providers.empty.desc')}
                     action={
                       <Button variant="primary" size="sm" onClick={() => {
-                        document.getElementById('pv-catalogue')?.scrollIntoView({ behavior: 'smooth' })
+                        document.getElementById('pv-catalogue')?.scrollIntoView({ behavior: 'instant' })
                       }}>
                         {t('providers.empty.cta')}
                       </Button>
@@ -385,28 +415,28 @@ export default function ProvidersView() {
                   </ul>
                 )}
               </section>
-            </StaggerItem>
+            </div>
 
             {/* ── Custom / local model ── */}
-            <StaggerItem>
+            <div>
               <section className={css.section} aria-label={t('providers.section.custom.aria')}>
                 <h2 className={css.sectionLabel}>{t('providers.section.custom')}</h2>
                 <CustomProviderCard onAdded={load} onToast={show} />
               </section>
-            </StaggerItem>
+            </div>
 
             {/* ── OpenAI Codex / ChatGPT (suscripción) ── */}
             {!codexAlreadyConfigured && (
-              <StaggerItem>
+              <div>
                 <section className={css.section} aria-label={t('providers.section.codex.aria')}>
                   <h2 className={css.sectionLabel}>{t('providers.section.codex')}</h2>
                   <CodexProviderCard onAdded={load} onToast={show} />
                 </section>
-              </StaggerItem>
+              </div>
             )}
 
             {/* ── Native Hermes catalogue ── */}
-            <StaggerItem>
+            <div>
               <section
                 id="pv-catalogue"
                 className={css.section}
@@ -443,9 +473,9 @@ export default function ProvidersView() {
                   </ul>
                 )}
               </section>
-            </StaggerItem>
+            </div>
 
-          </Stagger>
+          </div>
         )}
       </div>
     </>
@@ -476,7 +506,11 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
   const [modelInput, setModelInput] = useState(provider.default_model ?? '')
   const [addingKey, setAddingKey] = useState(false)
   const [addConnFailed, setAddConnFailed] = useState(false)
-  const { connectingId, startOAuthConnect } = useProviderOAuthConnect(onRefresh)
+  const [busy, setBusy] = useState(false)
+  const inFlight = useRef(false)
+  const alive = useRef(true)
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
+  const { connectingId, startOAuthConnect, notice } = useProviderOAuthConnect(onRefresh)
 
   const label = badgeLabel(provider)
   const displayLabel = badgeDisplayLabel(label, t)
@@ -492,30 +526,37 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
   const oauthPending = connectingId === id
 
   async function handleActivate() {
+    if (inFlight.current || isCloudManaged) return
+    inFlight.current = true; setBusy(true)
     try {
       await setActiveProvider(id)
+      if (!alive.current) return
       onToast(t('providers.toast.activated').replace('{name}', name), 'ok')
       onRefresh()
-    } catch (e) {
-      onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
-    }
+    } catch { if (alive.current) onToast(t('providers.err.generic'), 'error') }
+    finally { inFlight.current = false; if (alive.current) setBusy(false) }
   }
 
   async function handleTest() {
+    if (inFlight.current) return
+    inFlight.current = true; setBusy(true)
     setTesting(true)
     try {
       const r = await testProvider(id)
+      if (!alive.current) return
       // PROV-03: r.error is the provider's own honest reason (invalid key,
       // wrong endpoint...) once ok is false — show it instead of a generic
       // "failed" toast so the owner knows whether to fix the key or the URL.
-      const message = r?.ok ? t('providers.test.ok') : (r?.error || t('providers.test.fail'))
+      const message = r?.ok ? t('providers.test.ok') : t('providers.test.fail')
       onToast(message, r?.ok ? 'ok' : 'warn')
-    } catch (e) {
-      onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
-    } finally { setTesting(false) }
+    } catch { if (alive.current) onToast(t('providers.err.generic'), 'error') }
+    finally { inFlight.current = false; if (alive.current) { setTesting(false); setBusy(false) } }
   }
 
   async function handleDelete() {
+    if (inFlight.current || isCloudManaged) return
+    inFlight.current = true; setBusy(true)
+    try {
     const ok = await onConfirm({
       title: t('providers.delete.confirm.title').replace('{name}', name),
       description: isActive
@@ -524,23 +565,23 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
       confirmLabel: t('providers.delete'),
       variant: 'danger',
     })
-    if (!ok) return
-    try {
+    if (!ok || !alive.current) return
       await deleteProvider(id)
+      if (!alive.current) return
       onToast(t('providers.toast.deleted'), 'ok')
       onRefresh()
-    } catch (e) {
-      onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
-    }
+    } catch { if (alive.current) onToast(t('providers.err.generic'), 'error') }
+    finally { inFlight.current = false; if (alive.current) setBusy(false) }
   }
 
   async function handleAddConfirm() {
+    if (inFlight.current) return
     if (!apiKeyInput.trim()) { onToast(t('providers.err.enter_key'), 'warn'); return }
     // PROV-02: a provider saved with no model leaves config.yaml with
     // model.provider set and no model.default — the first chat then dies
     // with HermesModelNotConfiguredError instead of failing here, clearly.
     if (!modelInput.trim()) { onToast(t('providers.err.enter_model'), 'warn'); return }
-    setAddingKey(true)
+    inFlight.current = true; setBusy(true); setAddingKey(true)
     try {
       // Native catalogue providers go through /providers/native by their registry
       // provider_id (the daemon resolves env var + default model). Sending `kind`
@@ -549,7 +590,9 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
         provider_id: provider.provider_id ?? id,
         api_key: apiKeyInput.trim(),
         model: modelInput.trim(),
+        set_active: false,
       })
+      if (!alive.current) return
       const realId = created?.provider_id || id
       setShowKeyForm(false)
       setApiKeyInput('')
@@ -561,6 +604,7 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
       } catch {
         testPassed = false
       }
+      if (!alive.current) return
 
       if (testPassed) {
         await setActiveProvider(realId)
@@ -572,6 +616,7 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
         onRefresh()
       }
     } catch (e) {
+      if (!alive.current) return
       if (isOAuthRequiredError(e)) {
         // This native row needs OAuth (its registry auth_type isn't api_key) —
         // pivot straight to the device-code flow instead of surfacing the raw
@@ -582,9 +627,10 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
         void startOAuthConnect(provider.provider_id ?? id, name)
         return
       }
-      onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
+      onToast(t('providers.err.generic'), 'error')
     } finally {
-      setAddingKey(false)
+      inFlight.current = false
+      if (alive.current) { setAddingKey(false); setBusy(false) }
     }
   }
 
@@ -604,6 +650,7 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
 
       <div className={css.rowLeft}>
         <span className={css.rowName}>{name}</span>
+        <OAuthNotice notice={notice} />
         <div className={css.rowMeta}>
           {/* Per-kind colour pill — CSS custom property set inline */}
           <span
@@ -639,7 +686,7 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
         {isConfigured ? (
           <>
             {!provider.is_active && !isCloudManaged && (
-              <Button variant="secondary" size="sm" onClick={handleActivate}>
+              <Button variant="secondary" size="sm" onClick={handleActivate} disabled={busy}>
                 {t('providers.activate')}
               </Button>
             )}
@@ -647,7 +694,7 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
               variant="ghost"
               size="sm"
               onClick={handleTest}
-              disabled={testing}
+              disabled={busy}
               loading={testing}
             >
               {testing ? t('providers.testing') : t('providers.test')}
@@ -657,6 +704,7 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
                 variant="danger"
                 size="sm"
                 onClick={handleDelete}
+                disabled={busy}
                 aria-label={t('providers.delete.aria').replace('{name}', name)}
               >
                 {t('providers.delete')}
@@ -756,8 +804,12 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
   const urlRef = useRef<HTMLInputElement>(null)
   const modelRef = useRef<HTMLInputElement>(null)
   const keyRef = useRef<HTMLInputElement>(null)
+  const pending = useRef(false)
+  const alive = useRef(true)
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
 
   async function handleSave() {
+    if (pending.current) return
     const base_url = urlRef.current?.value.trim() ?? ''
     const default_model = modelRef.current?.value.trim() ?? ''
     const alias = aliasRef.current?.value.trim() || default_model || t('providers.custom.default_alias')
@@ -768,9 +820,10 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
       return
     }
 
-    setSaving(true)
+    pending.current = true; setSaving(true)
     try {
-      const added = await addProvider({ kind: 'openai_compatible', alias, default_model, base_url, api_key })
+      const added = await addProvider({ kind: 'openai_compatible', alias, default_model, base_url, api_key, set_active:false })
+      if (!alive.current) return
       const newId = (added as { provider_id?: string }).provider_id ?? alias
 
       let testPassed = false
@@ -780,9 +833,11 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
       } catch {
         testPassed = false
       }
+      if (!alive.current) return
 
       if (testPassed) {
         await setActiveProvider(newId)
+        if (!alive.current) return
         setConnFailed(false)
         setOpen(false)
         if (aliasRef.current) aliasRef.current.value = ''
@@ -795,9 +850,8 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
         setConnFailed(true)
         onAdded()
       }
-    } catch (e) {
-      onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
-    } finally { setSaving(false) }
+    } catch { if (alive.current) onToast(t('providers.err.generic'), 'error') }
+    finally { pending.current = false; if (alive.current) setSaving(false) }
   }
 
   return (
@@ -904,6 +958,7 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
               variant="ghost"
               size="sm"
               onClick={() => { setOpen(false); setConnFailed(false) }}
+              disabled={saving}
             >
               {t('providers.cancel')}
             </Button>
@@ -936,20 +991,25 @@ function CodexProviderCard({ onAdded, onToast }: CodexProviderCardProps) {
   const [showKeyForm, setShowKeyForm] = useState(false)
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [savingKey, setSavingKey] = useState(false)
-  const { connectingId, startOAuthConnect } = useProviderOAuthConnect(onAdded)
+  const pending = useRef(false)
+  const alive = useRef(true)
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
+  const { connectingId, startOAuthConnect, notice } = useProviderOAuthConnect(onAdded)
   const oauthPending = connectingId === CODEX_PROVIDER_ID
 
   async function handleApiKeySave() {
+    if (pending.current || oauthPending) return
     if (!apiKeyInput.trim()) { onToast(t('providers.err.enter_key'), 'warn'); return }
-    setSavingKey(true)
+    pending.current = true; setSavingKey(true)
     try {
       const created = await addProvider({
         kind: CODEX_KIND,
         alias: t('providers.codex.alias'),
         default_model: model,
         api_key: apiKeyInput.trim(),
-        set_active: true,
+        set_active: false,
       })
+      if (!alive.current) return
       const newId = (created as { provider_id?: string }).provider_id
       setApiKeyInput('')
       setShowKeyForm(false)
@@ -963,6 +1023,9 @@ function CodexProviderCard({ onAdded, onToast }: CodexProviderCardProps) {
           testPassed = false
         }
       }
+      if (!alive.current) return
+      if (testPassed && newId) await setActiveProvider(newId)
+      if (!alive.current) return
       onToast(
         testPassed
           ? t('providers.toast.connected_verified').replace('{name}', t('providers.codex.alias'))
@@ -970,10 +1033,11 @@ function CodexProviderCard({ onAdded, onToast }: CodexProviderCardProps) {
         testPassed ? 'ok' : 'warn',
       )
       onAdded()
-    } catch (e) {
-      onToast(e instanceof Error ? e.message : t('providers.err.generic'), 'error')
+    } catch {
+      if (alive.current) onToast(t('providers.err.generic'), 'error')
     } finally {
-      setSavingKey(false)
+      pending.current = false
+      if (alive.current) setSavingKey(false)
     }
   }
 
@@ -982,6 +1046,7 @@ function CodexProviderCard({ onAdded, onToast }: CodexProviderCardProps) {
       <div className={css.customCardHeader}>
         <p className={css.customCardIntro}>{t('providers.codex.explain')}</p>
       </div>
+      <OAuthNotice notice={notice} />
 
       <div className={css.formStack}>
         <div className={css.formField}>
@@ -996,6 +1061,7 @@ function CodexProviderCard({ onAdded, onToast }: CodexProviderCardProps) {
           >
             {CODEX_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
+          <p className={css.formHint}>{t('providers.codex.model_scope')}</p>
         </div>
 
         <div className={css.formActions}>
@@ -1003,7 +1069,7 @@ function CodexProviderCard({ onAdded, onToast }: CodexProviderCardProps) {
             variant="primary"
             size="sm"
             onClick={() => void startOAuthConnect(CODEX_PROVIDER_ID, t('providers.codex.alias'))}
-            disabled={oauthPending}
+            disabled={oauthPending || savingKey}
             loading={oauthPending}
           >
             {oauthPending ? t('providers.connecting') : t('providers.codex.login_btn')}

@@ -9,7 +9,6 @@ import {
   listSkills, searchSkillsHub, listHubSkills, installSkill, getHubOpStatus,
   uninstallHubSkill, promoteSkill,
   getSkillDetails, scanInstall, recordSecurityDecision,
-  ApiError,
 } from '../api/client'
 import type { Skill, HubSkillResult, HubInstallResponse, InstallScanResponse, SkillDetails } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
@@ -21,11 +20,7 @@ import { Button } from '../components/ui/Button'
 import {
   AnimatePresence,
   AnimatedListItem,
-  FadeIn,
-  Stagger,
-  StaggerItem,
   motion,
-  useReducedMotion,
   SPRING,
 } from '../components/ui/motion'
 import s from './SkillsView.module.css'
@@ -45,7 +40,9 @@ function pollHubOp(opId: string, t: ReturnType<typeof useT>, { onDone, onError }
   const tick = async () => {
     if (cancelled) return
     if (tries++ > 40) { onError?.('timeout'); return }
-    const st = await getHubOpStatus(opId)
+    let st: Awaited<ReturnType<typeof getHubOpStatus>>
+    try { st = await getHubOpStatus(opId) }
+    catch { if (!cancelled) onError?.(t('skills.hub.op_lost')); return }
     if (cancelled) return
     const status = String(st?.status ?? '').toLowerCase()
     if (status === 'done' || status === 'completed' || status === 'success') { onDone?.(); return }
@@ -130,9 +127,18 @@ export default function SkillsView() {
   const [loadingDetailsId, setLoadingDetailsId] = useState<string | null>(null)
 
   const pollHandlesRef = useRef<PollHandle[]>([])
+  const alive = useRef(true)
+  const installedGeneration = useRef(0)
+  const searchGeneration = useRef(0)
+  const [searchError, setSearchError] = useState(false)
+  const [searchedQuery, setSearchedQuery] = useState('')
 
   useEffect(() => {
+    alive.current = true
     return () => {
+      alive.current = false
+      installedGeneration.current++
+      searchGeneration.current++
       for (const h of pollHandlesRef.current) h.cancel()
       pollHandlesRef.current = []
     }
@@ -143,10 +149,13 @@ export default function SkillsView() {
   }
 
   const loadInstalled = useCallback(async () => {
+    const request = ++installedGeneration.current
     dispatch({ type: 'LOADING' })
     try {
-      const [skills, hub] = await Promise.all([listSkills(), listHubSkills().catch(() => [])])
-      const hubArr = Array.isArray(hub) ? hub : []
+      const [skills, hub] = await Promise.all([listSkills(), listHubSkills()])
+      if (request !== installedGeneration.current) return
+      if (!Array.isArray(skills) || !Array.isArray(hub)) throw new Error('invalid skill list')
+      const hubArr = hub
       const names = new Set(hubArr.flatMap(h => [h.name, h.skill_name, h.identifier].filter(Boolean) as string[]))
       setInstalledHubNames(names)
       // INSTALADAS must show BOTH native skills AND hub-installed packages. listSkills
@@ -172,10 +181,11 @@ export default function SkillsView() {
           }
         })
       dispatch({ type: 'LOADED', skills: [...native, ...hubOnly] })
-    } catch (e) {
+    } catch {
+      if (request !== installedGeneration.current) return
       dispatch({
         type: 'FAILED',
-        message: e instanceof ApiError ? e.message : t('skills.err.load'),
+        message: t('skills.err.load'),
       })
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -187,37 +197,47 @@ export default function SkillsView() {
   async function runSearch() {
     const q = hubQuery.trim()
     if (!q) return
-    setHubSearching(true)
-    try {
-      const results = await searchSkillsHub(q)
-      const arr = Array.isArray(results) ? results : ((results as { results?: HubSkillResult[] })?.results ?? [])
-      setHubResults(arr)
-    } finally { setHubSearching(false) }
+    await runSearchFor(q)
   }
 
   async function runSearchFor(q: string) {
+    const request = ++searchGeneration.current
     setHubQuery(q)
+    setSearchError(false)
+    setHubResults([])
     setHubSearching(true)
     try {
       const results = await searchSkillsHub(q)
-      const arr = Array.isArray(results) ? results : ((results as { results?: HubSkillResult[] })?.results ?? [])
+      if (request !== searchGeneration.current) return
+      const arr = Array.isArray(results) ? results : results?.results
+      if (!Array.isArray(arr)) throw new Error('invalid search results')
       setHubResults(arr)
-    } finally { setHubSearching(false) }
+      setSearchedQuery(q)
+    } catch { if (request === searchGeneration.current) setSearchError(true) }
+    finally { if (request === searchGeneration.current) setHubSearching(false) }
   }
 
   async function handleInstall(item: HubSkillResult, onBtnUpdate: (state: 'installing' | 'installed' | 'ready') => void) {
+    if (state.status !== 'success') { show(t('skills.err.load'), 'error'); onBtnUpdate('ready'); return }
     const identifier = item.identifier ?? item.slug ?? item.name ?? ''
     const name = item.name ?? identifier
     onBtnUpdate('installing')
 
     try {
       const scan = await scanInstall('skill', identifier)
+      if (!alive.current) return
+      if (!scan || !['PASS','WARN','FAIL'].includes(scan.verdict)
+        || typeof scan.scan_id !== 'string' || !scan.scan_id.trim()
+        || typeof scan.requires_owner_approval !== 'boolean') throw new Error('unverified scan')
       if (scan.requires_owner_approval || scan.verdict === 'WARN' || scan.verdict === 'FAIL') {
         setPendingSkillInstall({ scan, item, onBtnUpdate })
         return
       }
     } catch {
-      // Scan unavailable — fall through to direct install
+      if (!alive.current) return
+      show(t('skills.scan.unavailable'), 'error')
+      onBtnUpdate('ready')
+      return
     }
 
     await doInstallSkill(identifier, name, onBtnUpdate, false)
@@ -397,10 +417,10 @@ export default function SkillsView() {
       />
 
       <div className={s.viewBody}>
-        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
 
           {/* ── Installed skills ─────────────────────────────────────────── */}
-          <StaggerItem>
+          <div>
             <section className={s.section} aria-label={t('skills.installed.aria')}>
               <div className={s.sectionHead}>
                 <span className={s.sectionLabel}>{t('skills.installed.label')}</span>
@@ -424,7 +444,7 @@ export default function SkillsView() {
 
               {/* Error */}
               {state.status === 'error' && (
-                <FadeIn>
+                <div>
                   <div role="alert" className={s.errorInline}>
                     <span className={s.errorIcon} aria-hidden="true">
                       <AlertTriangle size={16} />
@@ -439,14 +459,14 @@ export default function SkillsView() {
                       </div>
                     </div>
                   </div>
-                </FadeIn>
+                </div>
               )}
 
               {/* Success */}
               {state.status === 'success' && (
                 state.skills.length === 0
                   ? (
-                    <FadeIn>
+                    <div>
                       <EmptyState
                         compact
                         icon={<Zap size={28} />}
@@ -458,14 +478,14 @@ export default function SkillsView() {
                             size="sm"
                             onClick={() => {
                               hubInputRef.current?.focus()
-                              hubInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                              hubInputRef.current?.scrollIntoView({ behavior: 'instant', block: 'center' })
                             }}
                           >
                             {t('skills.explore_catalog')}
                           </Button>
                         }
                       />
-                    </FadeIn>
+                    </div>
                   )
                   : (
                     <ul className={s.list} role="list">
@@ -476,10 +496,10 @@ export default function SkillsView() {
                   )
               )}
             </section>
-          </StaggerItem>
+          </div>
 
           {/* ── Hub search ──────────────────────────────────────────────── */}
-          <StaggerItem>
+          <div>
             <section className={s.section} aria-label={t('skills.catalog.label')}>
               <div className={s.sectionHead}>
                 <span className={s.sectionLabel}>{t('skills.catalog.label')}</span>
@@ -544,14 +564,15 @@ export default function SkillsView() {
               </div>
 
               {/* Empty search results */}
-              {!hubSearching && hubQuery && hubResults.length === 0 && (
-                <FadeIn>
+              {searchError && <div role="alert" className={s.errorInline}>{t('skills.search.unavailable')} <Button size="sm" variant="secondary" onClick={runSearch}>{t('providers.retry')}</Button></div>}
+              {!hubSearching && !searchError && searchedQuery && hubResults.length === 0 && (
+                <div>
                   <EmptyState
                     icon={<SearchIcon size={28} />}
-                    title={t('skills.search.empty.title').replace('{query}', hubQuery)}
+                    title={t('skills.search.empty.title').replace('{query}', searchedQuery)}
                     description={t('skills.search.empty.desc')}
                   />
-                </FadeIn>
+                </div>
               )}
 
               {/* Results list */}
@@ -582,9 +603,9 @@ export default function SkillsView() {
                 )}
               </AnimatePresence>
             </section>
-          </StaggerItem>
+          </div>
 
-        </Stagger>
+        </div>
       </div>
     </>
   )
@@ -635,7 +656,6 @@ interface SkillRowProps {
 
 function SkillRow({ skill, loadingDetails, onView, onVerify, onPromote, onUninstall }: SkillRowProps) {
   const t = useT()
-  const reduced = useReducedMotion()
   const name = skill.skill_name ?? skill.name ?? skill.slug ?? ''
   const meta = useStateMeta(skill.state ?? '')
   const version = skill.version ? `v${skill.version}` : ''
@@ -651,7 +671,6 @@ function SkillRow({ skill, loadingDetails, onView, onVerify, onPromote, onUninst
   return (
     <motion.div
       className={`${s.skillRow}${isAutonomous ? ' ' + s['skillRow--autonomous'] : ''}`}
-      whileHover={reduced ? undefined : { y: -2 }}
       transition={SPRING}
       layout
     >
@@ -735,7 +754,6 @@ interface HubResultRowProps {
 
 function HubResultRow({ item, installedNames, onInstall }: HubResultRowProps) {
   const t = useT()
-  const reduced = useReducedMotion()
   const [btnState, setBtnState] = useState<'ready' | 'installing' | 'installed'>('ready')
   const name = item.name ?? item.identifier ?? item.slug ?? ''
   const already = installedNames.has(name) || installedNames.has(item.identifier ?? '')
@@ -750,7 +768,6 @@ function HubResultRow({ item, installedNames, onInstall }: HubResultRowProps) {
   return (
     <motion.div
       className={s.hubRow}
-      whileHover={reduced ? undefined : { y: -1 }}
       transition={SPRING}
       layout
     >

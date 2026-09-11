@@ -37,7 +37,6 @@ import type {
   KillSwitchStatus,
   PendingApproval,
   InboundDelegation,
-  MfaStatus,
   PoliciesResponse,
   InstallDecisionPayload,
   WorkspaceFile,
@@ -293,8 +292,11 @@ export function configureNativeProvider(payload: {
  *  Returns null when none is configured. Merged into the configured list by the UI. */
 export function getNativeActive(): Promise<Provider | null> {
   return request<Provider | Record<string, never>>('/providers/native/active')
-    .then(p => (p && (p as Provider).provider_id ? (p as Provider) : null))
-    .catch(() => null)
+    .then(p => {
+      if (p === null || (p && typeof p === 'object' && !Array.isArray(p) && Object.keys(p).length === 0)) return null
+      if (p && typeof p.provider_id === 'string' && p.provider_id) return p as Provider
+      throw new ApiError('No se pudo verificar el proveedor activo.', 502, null)
+    })
 }
 
 export function setActiveProvider(providerId: string): Promise<unknown> {
@@ -328,7 +330,7 @@ export function startProviderOAuth(providerId: string): Promise<Record<string, u
 export function getProviderOAuthStatus(sessionId: string): Promise<{ status?: string; error?: string; error_message?: string }> {
   return request<{ status?: string; error?: string; error_message?: string }>(
     `/providers/oauth/${encodeURIComponent(sessionId)}`,
-  ).catch(() => ({ status: 'unknown' }))
+  )
 }
 
 // ── Skills ────────────────────────────────────────────────────────────────────
@@ -340,11 +342,11 @@ export function listSkills(): Promise<Skill[]> {
 export function searchSkillsHub(query: string): Promise<{ results?: HubSkillResult[] } | HubSkillResult[]> {
   return request<{ results?: HubSkillResult[] } | HubSkillResult[]>(
     `/skills/hub/search?q=${encodeURIComponent(query)}`,
-  ).catch(() => [])
+  )
 }
 
 export function listHubSkills(): Promise<HubSkillResult[]> {
-  return request<HubSkillResult[]>('/skills/hub').catch(() => [])
+  return request<HubSkillResult[]>('/skills/hub')
 }
 
 export function installSkill(
@@ -361,9 +363,7 @@ export function installSkill(
 }
 
 export function getHubOpStatus(opId: string): Promise<HubOpStatus> {
-  return request<HubOpStatus>(`/skills/hub/ops/${encodeURIComponent(opId)}`).catch(
-    () => ({ status: 'unknown' }),
-  )
+  return request<HubOpStatus>(`/skills/hub/ops/${encodeURIComponent(opId)}`)
 }
 
 export function uninstallHubSkill(name: string): Promise<HubInstallResponse> {
@@ -796,12 +796,7 @@ export function engageKillSwitch(reason: string): Promise<unknown> {
   })
 }
 
-/**
- * Release the brake — requires owner proof: the TOTP when MFA is enrolled,
- * or (025 hallazgo C) the device password when it isn't — same PAM
- * root-helper path as disconnectTailnet. Pass whichever proof applies; the
- * caller decides based on getMfaStatus().enrolled.
- */
+/** Release the brake after explicit owner confirmation. No Community MFA. */
 export function releaseKillSwitch(): Promise<unknown> {
   return request<unknown>('/security/kill-switch', {
     method: 'POST', body: JSON.stringify({ engaged: false }),
@@ -838,19 +833,6 @@ export function resolveInboundDelegation(
     `/inbound-delegations/${encodeURIComponent(messageId)}`,
     { method: 'POST', body: JSON.stringify({ decision }) },
   )
-}
-
-// ── MFA enrollment ────────────────────────────────────────────────────────────
-
-export function mfaStatus(): Promise<MfaStatus> {
-  return request<MfaStatus>('/mfa/status').catch(() => ({ enrolled: false }))
-}
-
-export function mfaEnroll(totp: string | null = null): Promise<{ otpauth_uri?: string; secret?: string }> {
-  return request<{ otpauth_uri?: string; secret?: string }>('/mfa/enroll', {
-    method: 'POST',
-    body: JSON.stringify({ totp }),
-  })
 }
 
 // ── Security policies ─────────────────────────────────────────────────────────
@@ -1000,34 +982,17 @@ export function requestSystemUninstall(): Promise<{ ok: boolean }> {
 // ── Usage / Cost ──────────────────────────────────────────────────────────────
 
 export function getUsageSummary(period: UsagePeriod): Promise<UsageSummary> {
-  return request<UsageSummary>(`/usage/summary?period=${encodeURIComponent(period)}`).catch(() => ({
-    available: false,
-    period,
-    currency: 'USD',
-    total_cost_usd: 0,
-    projected_cost_usd: 0,
-    total_tokens: 0,
-    cycles: 0,
-    failures: 0,
-    self_hosted_cycles: 0,
-    top_models: [],
-  }))
+  return request<UsageSummary>(`/usage/summary?period=${encodeURIComponent(period)}`)
 }
 
 export function getUsageByAgent(period: UsagePeriod): Promise<UsageByAgent> {
-  return request<UsageByAgent>(`/usage/by-agent?period=${encodeURIComponent(period)}`).catch(() => ({
-    available: false,
-    agents: [],
-  }))
+  return request<UsageByAgent>(`/usage/by-agent?period=${encodeURIComponent(period)}`)
 }
 
 export function getUsageTimeseries(period: UsagePeriod, dimension: UsageDimension): Promise<UsageTimeseries> {
   return request<UsageTimeseries>(
     `/usage/timeseries?period=${encodeURIComponent(period)}&dimension=${encodeURIComponent(dimension)}`,
-  ).catch(() => ({
-    available: false,
-    points: [],
-  }))
+  )
 }
 
 export function getConversationUsage(id: string): Promise<ConversationUsage> {

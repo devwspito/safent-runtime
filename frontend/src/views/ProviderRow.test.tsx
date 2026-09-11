@@ -144,6 +144,21 @@ describe('ProviderRow — Add/Connect always sends a model', () => {
       provider_id: 'anthropic',
       api_key: 'sk-ant-real',
       model: 'claude-opus-4-7',
+      set_active: false,
     })
+  })
+  it('never activates a provider whose connection test failed',async()=>{
+    configureNativeProvider.mockResolvedValue({provider_id:'anthropic'});testProvider.mockResolvedValue({ok:false})
+    const {container}=track(renderRow(NATIVE_ANTHROPIC));clickButton(container,t=>t==='Añadir');await flush()
+    typeInto(container.querySelector<HTMLInputElement>('#pv-key-anthropic')!,'fictitious-key')
+    clickButton(container,t=>t==='Guardar');await flush();expect(setActiveProvider).not.toHaveBeenCalled()
+  })
+  it('does not activate after leaving while the connection test is pending',async()=>{
+    let resolve!:(v:{ok:boolean})=>void
+    configureNativeProvider.mockResolvedValue({provider_id:'anthropic'});testProvider.mockReturnValue(new Promise(r=>{resolve=r}))
+    const {container,root}=track(renderRow(NATIVE_ANTHROPIC));clickButton(container,t=>t==='Añadir');await flush()
+    typeInto(container.querySelector<HTMLInputElement>('#pv-key-anthropic')!,'fictitious-key')
+    clickButton(container,t=>t==='Guardar');await flush();act(()=>root.render(null))
+    await act(async()=>resolve({ok:true}));expect(setActiveProvider).not.toHaveBeenCalled()
   })
 })

@@ -6,16 +6,10 @@ import React from 'react'
 // No @testing-library in this project yet — render directly via react-dom
 // (mirrors KillSwitchSection.test.tsx / TailnetSection.test.tsx).
 
-// Regression (specs/025-safent-repaso SEG-15): with approval_on_dangers OFF, the UI
-// used to send totp:'' for the toggle ITSELF too — the owner could never turn
-// verification back ON from the UI (backend 401, no modal shown to fix it).
-// Pins the sovereign rule: the approval_on_dangers toggle always requires only explicit confirmation
-// while MFA is enrolled — turning it ON or OFF, and REGARDLESS of its current
-// value — and only skips the prompt when MFA was never enrolled at all.
+// Policy changes require explicit owner confirmation, independent of removed MFA.
 
-const { mfaStatus, getPolicies, setPolicyPreset, setPolicyTools, setApprovalOnDangers, sileoSuccess, sileoError } =
+const { getPolicies, setPolicyPreset, setPolicyTools, setApprovalOnDangers, sileoSuccess, sileoError } =
   vi.hoisted(() => ({
-    mfaStatus: vi.fn(),
     getPolicies: vi.fn(),
     setPolicyPreset: vi.fn(),
     setPolicyTools: vi.fn(),
@@ -26,7 +20,7 @@ const { mfaStatus, getPolicies, setPolicyPreset, setPolicyTools, setApprovalOnDa
 
 vi.mock('../api/client', async () => {
   const actual = await vi.importActual<typeof import('../api/client')>('../api/client')
-  return { ...actual, mfaStatus, getPolicies, setPolicyPreset, setPolicyTools, setApprovalOnDangers }
+  return { ...actual, getPolicies, setPolicyPreset, setPolicyTools, setApprovalOnDangers }
 })
 vi.mock('sileo', () => ({ sileo: { success: sileoSuccess, error: sileoError } }))
 
@@ -60,7 +54,6 @@ describe('GovernanceSection — the approval_on_dangers toggle is sovereign', ()
   let root: Root
 
   beforeEach(() => {
-    mfaStatus.mockReset()
     getPolicies.mockReset()
     setPolicyPreset.mockReset()
     setPolicyTools.mockReset()
@@ -79,7 +72,6 @@ describe('GovernanceSection — the approval_on_dangers toggle is sovereign', ()
   })
 
   it('MFA enrolled + approval_on_dangers ON: turning it OFF requires only explicit confirmation', async () => {
-    mfaStatus.mockResolvedValue({ enrolled: true })
     getPolicies.mockResolvedValue(policiesWith(true))
     setApprovalOnDangers.mockResolvedValue({ ok: true, approval_on_dangers: false })
 
@@ -99,7 +91,6 @@ describe('GovernanceSection — the approval_on_dangers toggle is sovereign', ()
   })
 
   it('MFA enrolled + approval_on_dangers OFF: turning it back ON STILL requires only explicit confirmation (the SEG-15 dead-end)', async () => {
-    mfaStatus.mockResolvedValue({ enrolled: true })
     getPolicies.mockResolvedValue(policiesWith(false))
     setApprovalOnDangers.mockResolvedValue({ ok: true, approval_on_dangers: true })
 
@@ -123,7 +114,6 @@ describe('GovernanceSection — the approval_on_dangers toggle is sovereign', ()
   })
 
   it('MFA never enrolled: toggling approval_on_dangers requires confirmation but no enrollment', async () => {
-    mfaStatus.mockResolvedValue({ enrolled: false })
     getPolicies.mockResolvedValue(policiesWith(false))
     setApprovalOnDangers.mockResolvedValue({ ok: true, approval_on_dangers: true })
 

@@ -447,10 +447,6 @@ export interface InboundDelegation {
   created_at: string
 }
 
-export interface MfaStatus {
-  enrolled: boolean
-}
-
 export interface PolicyCatalogEntry {
   name: string
   label: string

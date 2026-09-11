@@ -3,10 +3,18 @@
 /* explicit pixel values that tokens cannot express (e.g. chart hairlines).   */
 
 /* ── Hero stat cards ──────────────────────────────────────────────────────── */
+.body { max-width: 1100px; width: 100%; }
+.header { display: contents; }
+@media (max-width: 600px) {
+  .body .heroGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .header > :global(.ds-page-header) { flex-direction: column; align-items: stretch; gap: 16px; }
+  .header :global(.ds-page-header__actions) { align-self: flex-start; }
+}
+.unavailable { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 16px; color: var(--color-text-dim); font-size: var(--text-sm); }
 
 .heroGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-3);
 }
 
@@ -14,7 +22,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-5);
+  padding: var(--space-4);
   background:
     linear-gradient(180deg, rgba(255,255,255,0.025) 0%, rgba(255,255,255,0) 100%),
     var(--slate-4);
@@ -109,7 +117,7 @@
 
 .breakdownGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(308px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 308px), 1fr));
   gap: var(--space-6);
   align-items: start;
 }

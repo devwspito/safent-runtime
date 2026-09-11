@@ -2,6 +2,15 @@
 /* All tokens come from tokens.css via styles.css. No hex / px hardcoded.   */
 
 /* ── Section header ─────────────────────────────────────────────────────── */
+.viewBody { min-width: 0; }
+@media (max-width: 600px) {
+  .viewBody :global(.ds-empty-state--compact) { display: grid; grid-template-columns: 32px minmax(0,1fr); gap: 12px; padding: 16px 0; }
+  .viewBody :global(.ds-empty-state__text) { min-width: 0; }
+  .viewBody :global(.ds-empty-state--compact .ds-empty-state__action) { grid-column: 2; margin: 0; justify-self: start; }
+  .viewBody .catalogCardMain { flex-wrap: wrap; }
+  .viewBody .catalogCardInfo { flex-basis: calc(100% - 52px); }
+  .viewBody .catalogCardActions { width: 100%; justify-content: flex-end; }
+}
 
 .sectionLabel {
   font-size: var(--text-xs);
