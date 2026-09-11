@@ -6,18 +6,28 @@ container rootfs and offline current-source wheel. Never formats or mounts a hos
 
 from __future__ import annotations
 
+import argparse
 import base64
 import json
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
+from input_manifest import record_inputs
 from run_guest import validate_scratch
 
 
 def main() -> None:
-    root = validate_scratch(Path(sys.argv[1]))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("scratch", type=Path)
+    parser.add_argument("--source-revision", required=True)
+    parser.add_argument("--overlay", action="append", default=[])
+    parser.add_argument("--record-inputs-only", action="store_true")
+    args = parser.parse_args()
+    root = validate_scratch(args.scratch)
+    record_inputs(root, args.source_revision, args.overlay)
+    if args.record_inputs_only:
+        return
     here = Path(__file__).resolve().parent
     media = root / "media"
     seed = root / "seed"

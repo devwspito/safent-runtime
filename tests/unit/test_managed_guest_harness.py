@@ -12,6 +12,9 @@ HARNESS = Path(__file__).resolve().parents[1] / "integration/managed_guest"
 SPEC = importlib.util.spec_from_file_location("managed_guest_runner", HARNESS / "run_guest.py")
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
+INPUT_SPEC = importlib.util.spec_from_file_location("guest_inputs", HARNESS / "input_manifest.py")
+inputs = importlib.util.module_from_spec(INPUT_SPEC)
+INPUT_SPEC.loader.exec_module(inputs)
 
 
 def test_only_private_explicit_scratch():
@@ -93,3 +96,42 @@ def test_failed_guest_is_not_successful_runner_exit(payload):
 
 def test_successful_report_accepts_only_observed_ready():
     assert runner.validate_runtime_report('SAFENT_GUEST_REPORT {"ready": true}') == {"ready": True}
+
+
+def seed_input_files(tmp_path):
+    source = tmp_path / "source/src/hermes/a.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("pass\n")
+    wheel = tmp_path / "wheels/hermes_runtime-0.9.0-py3-none-any.whl"
+    wheel.parent.mkdir()
+    wheel.write_bytes(b"fixture-not-an-installable-wheel")
+    return source, wheel
+
+
+def test_input_manifest_records_actual_source_and_artifact_hashes(tmp_path):
+    seed_input_files(tmp_path)
+    recorded = inputs.record_inputs(tmp_path, "a" * 40, ["src/hermes/a.py"])
+    assert inputs.read_inputs(tmp_path) == recorded
+    assert recorded["base_revision"] == "a" * 40
+    assert (
+        recorded["overlay_sha256"]["src/hermes/a.py"]
+        == recorded["source_sha256"]["src/hermes/a.py"]
+    )
+
+
+@pytest.mark.parametrize("which", ["source", "wheel"])
+def test_manifest_rejects_source_or_wheel_changed_since_recording(tmp_path, which):
+    source, wheel = seed_input_files(tmp_path)
+    inputs.record_inputs(tmp_path, "a" * 40, [])
+    (source if which == "source" else wheel).write_bytes(b"changed")
+    with pytest.raises(ValueError, match="changed"):
+        inputs.read_inputs(tmp_path)
+
+
+def test_manifest_requires_full_source_revision_and_refuses_overwrite(tmp_path):
+    seed_input_files(tmp_path)
+    with pytest.raises(ValueError, match="full revision"):
+        inputs.record_inputs(tmp_path, "66da720", [])
+    inputs.record_inputs(tmp_path, "a" * 40, [])
+    with pytest.raises(FileExistsError):
+        inputs.record_inputs(tmp_path, "a" * 40, [])

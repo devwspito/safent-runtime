@@ -169,7 +169,7 @@ The SSH transport is `ssh -o ControlMaster=no -o ControlPath=none DGX-remote`.
 Preparation inputs must first be verified/exported/built as above; then:
 
 ```sh
-python3 harness/build_bundle.py /tmp/safent-managed-guest.tdTjqe
+python3 harness/build_bundle.py /tmp/safent-managed-guest.tdTjqe --source-revision 66da720bd477af269eb1f95db65d3295ebef7ac3
 python3 harness/run_guest.py /tmp/safent-managed-guest.tdTjqe prepare
 python3 harness/run_guest.py /tmp/safent-managed-guest.tdTjqe runtime
 ```
@@ -201,3 +201,19 @@ needed to regenerate those ISOs remain. No user data was removed.
 Our never-started export container was removed by its exact verified ID after the
 export; the original RC2 image and rootfs archive remain. Final QEMU exited and
 its recorded host PID is absent. No guest/host background VM was left running.
+
+## Follow-up harness provenance (2026-09-12)
+
+Later runs require `input-manifest.json`, recorded by `build_bundle.py` with the
+full source revision obtained at archive creation and explicit `--overlay` paths.
+`--record-inputs-only` supports an updated wheel on a fresh copy of the original
+gate-intact disk. The manifest hashes every source Python file, named overlays,
+actual wheel and harness. Runner verifies them before starting QEMU and embeds
+the manifest instead of a hardcoded source revision. The diagnostic installer
+verifies the wheel hash and every installed Python module before its two explicit
+gate substitutions. No caller-supplied revision alone certifies an artifact.
+
+The refreshed run and result-semantics fixes are tracked separately in
+`llm-native-result-classification-2026-09-12.md`; historical failures/results above
+are not rewritten as if they ran the new source. Updated host safety tests:
+**14 passed** (including artifact/source mutation and manifest overwrite guards).

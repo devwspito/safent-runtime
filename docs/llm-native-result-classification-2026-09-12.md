@@ -1,7 +1,7 @@
 # Native turn result classification — 2026-09-12
 
-Status: implementation, focused/native contract and full regression tests pass;
-refreshed confined guest pending. Production managed inference gates remain
+Status: implementation, focused/native contract, full regression and refreshed
+confined guest tests pass. Production managed inference gates remain
 closed. This fixes result semantics, not credential isolation certification.
 
 ## Evidence and change
@@ -68,7 +68,7 @@ PYTHONPATH=src python3 -m pytest tests/unit tests/tasks -q -rs --tb=short
 podman run --rm --network none -v /tmp/safent-native-result.Q32Bx6:/review:ro --workdir /review --entrypoint python3 -e PYTHONPATH=/review/src 365e584d7f5c1396db6943087d439409b811c166d862351e0dfe3f1343786f0a tests/integration/native_turn_result_smoke.py
 ```
 
-Still required: rerun confined native guest with updated wheel + root lifecycle
-revalidation12479fb, verify cancelled task remains terminal after restart. This
-does not replace pending auxiliary/tool isolation, real Enterprise transport,
+Updated guest now verifies native idle revocation persists CANCELLED after restart;
+see `llm-native-guest-revocation-fix-2026-09-12.md` for pinned wheel/source evidence.
+This does not replace pending auxiliary/tool isolation, real Enterprise transport,
 or final outer-container delivery proofs. No production gate is opened.

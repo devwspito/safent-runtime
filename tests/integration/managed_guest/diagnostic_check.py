@@ -36,6 +36,47 @@ from managed_checks import (
 MANIFEST = Path("/var/lib/safent-diagnostic-gates.json")
 
 
+def install_fixture_wheel() -> dict | None:
+    """Optional explicit wheel upgrade only inside this diagnostic fixture.
+
+    The old runtime is stopped before this function. The root input manifest
+    pins the wheel and every shipped Python source; no host installation occurs.
+    """
+    folder = Path(__file__).parent
+    wheel = folder / "hermes_runtime-0.9.0-py3-none-any.whl"
+    if not wheel.exists():
+        return None
+    inputs = json.loads((folder / "input-manifest.json").read_text())
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    assert digest == inputs["wheel_sha256"], "Fixture wheel does not match manifest"
+    marker = Path("/var/lib/safent-fixture-wheel.json")
+    if marker.exists():
+        assert json.loads(marker.read_text())["wheel_sha256"] == digest
+        return inputs
+    assert not MANIFEST.exists(), "Install the wheel on a preserved gate-intact fixture copy"
+    subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-m",
+            "pip",
+            "install",
+            "--break-system-packages",
+            "--no-deps",
+            "--no-index",
+            "--force-reinstall",
+            str(wheel),
+        ],
+        check=True,
+        timeout=45,
+    )
+    base = Path(importlib.util.find_spec("hermes").origin).parent.parent
+    for relative, expected in inputs["source_sha256"].items():
+        installed = base / relative.removeprefix("src/")
+        assert hashlib.sha256(installed.read_bytes()).hexdigest() == expected, relative
+    marker.write_text(json.dumps(inputs))
+    return inputs
+
+
 def substitute_gates() -> list:
     if MANIFEST.exists():
         entries = json.loads(MANIFEST.read_text())
@@ -285,6 +326,7 @@ def check() -> dict:  # noqa: PLR0915 - sequential, disposable daemon lifecycle 
 
     assert os.getuid() == 0 and Path("/proc/1/comm").read_text().strip() == "systemd"
     subprocess.run(["systemctl", "stop", "hermes-runtime"], check=True, timeout=20)
+    inputs = install_fixture_wheel()
     substitutions = substitute_gates()
     subprocess.run(
         [
@@ -300,7 +342,7 @@ def check() -> dict:  # noqa: PLR0915 - sequential, disposable daemon lifecycle 
         timeout=20,
     )
     server = gateway()
-    result = {"diagnostic_only": True, "substitutions": substitutions}
+    result = {"diagnostic_only": True, "substitutions": substitutions, "installed_inputs": inputs}
     try:
         subprocess.run(["systemctl", "start", "hermes-runtime"], check=True, timeout=90)
         old = runtime_pid()
@@ -351,6 +393,10 @@ def check() -> dict:  # noqa: PLR0915 - sequential, disposable daemon lifecycle 
             result["interrupted_task_observed"] = conn.execute(
                 "SELECT status,last_error FROM agent_tasks WHERE task_id=?", (idle_task_id,)
             ).fetchone()
+        if inputs is not None:
+            assert result["interrupted_task_observed"][0] == "cancelled", (
+                "Updated runtime must persist interrupted execution as cancelled, never completed"
+            )
         assert result["blocked_lifecycle"]["mode"] == "blocked"
         assert all(r["authorized"] and r["model"] == "company" for r in server.records)
         return result

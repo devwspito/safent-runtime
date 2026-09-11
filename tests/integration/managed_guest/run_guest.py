@@ -73,6 +73,9 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - one contiguous owned-VM lifecycl
     parser.add_argument("phase", choices=("prepare", "runtime"))
     args = parser.parse_args()
     root = validate_scratch(args.scratch)
+    from input_manifest import read_inputs
+
+    inputs = read_inputs(root)
     disk = root / "runtime.raw"
     cmd = [
         "qemu-system-aarch64",
@@ -159,7 +162,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - one contiguous owned-VM lifecycl
     manifest = root / (args.phase + "-command.json")
     with manifest.open("x") as stream:
         json.dump(
-            {"argv": cmd, "phase": args.phase, "source": "66da720", "timeout_seconds": 600},
+            {"argv": cmd, "phase": args.phase, "inputs": inputs, "timeout_seconds": 600},
             stream,
             indent=2,
         )

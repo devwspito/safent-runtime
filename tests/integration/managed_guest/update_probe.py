@@ -11,7 +11,7 @@ from pathlib import Path
 from run_guest import validate_scratch
 
 
-def main() -> None:
+def main() -> None:  # noqa: PLR0912 - explicit allowlisted offline fixture updates
     root = validate_scratch(Path(sys.argv[1]))
     files = ["guest_probe.py"]
     options = set(sys.argv[2:])
@@ -19,16 +19,24 @@ def main() -> None:
         files.append("managed_checks.py")
     if "diagnostic" in options:
         files.append("diagnostic_check.py")
-    if options - {"managed", "kmod", "diagnostic"}:
+    if options - {"managed", "kmod", "diagnostic", "wheel"}:
         raise ValueError("Only managed/kmod/diagnostic fixture options are supported")
+    if "wheel" in options and "diagnostic" not in options:
+        raise ValueError("Wheel replacement is only permitted in the diagnostic fixture")
     disk = root / "runtime.raw"
     descriptor = os.open(disk, os.O_RDWR | os.O_NOFOLLOW)
     try:
         # QEMU's image locks overlap this whole-file POSIX lock. Refuse a
         # running VM; retain it through debugfs, preventing a concurrent boot.
         fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if "wheel" in options:
+            files += ["hermes_runtime-0.9.0-py3-none-any.whl", "input-manifest.json"]
         for name in files:
             source = Path(__file__).resolve().parent / name
+            if name.endswith(".whl"):
+                source = root / "wheels" / name
+            elif name == "input-manifest.json":
+                source = root / name
             destination = "/opt/safent-guest-fixture/" + name
             subprocess.run(["debugfs", "-w", "-R", f"rm {destination}", str(disk)], check=True)
             subprocess.run(
