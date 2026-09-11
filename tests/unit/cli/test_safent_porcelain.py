@@ -183,12 +183,18 @@ case "$1" in
         [ "$exists" = "true" ] && exit 0 || exit 1
         ;;
       init)
+        # MAC4-05 (verificacion-mac-4.md): simulates the real, silent
+        # 20.93 s `machine init`/`start` gap so a heartbeat mechanism has
+        # something to actually heartbeat THROUGH, same shape as
+        # FAKE_PULL_DELAY_SECONDS for pull_engine.
+        [ -n "${FAKE_MACHINE_INIT_DELAY_SECONDS:-}" ] && sleep "$FAKE_MACHINE_INIT_DELAY_SECONDS"
         [ "${FAKE_MACHINE_INIT_FAILS:-false}" = "true" ] && exit 1
         mname="$1"
         [ -n "${FAKE_MACHINES_STATE:-}" ] && echo "$mname" >> "$FAKE_MACHINES_STATE"
         exit 0
         ;;
       start)
+        [ -n "${FAKE_MACHINE_START_DELAY_SECONDS:-}" ] && sleep "$FAKE_MACHINE_START_DELAY_SECONDS"
         [ "${FAKE_MACHINE_START_FAILS:-false}" = "true" ] && exit 1
         exit 0
         ;;
@@ -1773,3 +1779,78 @@ class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         events = _parse_ndjson(result.stdout)
         assert events[-1]["t"] == "done"
+
+
+class TestEnsureMachineEmitsHeartbeatsOnASilentInitOrStart:
+    """MAC4-05 (verificacion-mac-4.md, MAC3-06 unchanged): the `machine`
+    stage measured 20.93 s with ZERO `progress` events — the single
+    biggest silent gap in the whole boot. app-engine.md §3 requires
+    progress at least every 5 s while a stage is alive; `pull_engine`
+    already solved this with a heartbeat (_pull_with_heartbeat) —
+    `cmd_ensure_machine` must not be the one stage left behind."""
+
+    def test_a_silent_machine_init_still_emits_progress_heartbeats(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_INIT_DELAY_SECONDS": "6",
+            },
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        progress_events = [e for e in events if e["t"] == "progress" and e["id"] == "machine"]
+        assert len(progress_events) >= 1, f"expected at least one heartbeat during a 6s silent init: {events}"
+
+    def test_a_silent_machine_start_still_emits_progress_heartbeats(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """The machine already exists (a prior boot created it) — only
+        `machine start` (the VM boot itself) is slow this time."""
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("safent-test-engine\n")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_START_DELAY_SECONDS": "6",
+            },
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        progress_events = [e for e in events if e["t"] == "progress" and e["id"] == "machine"]
+        assert len(progress_events) >= 1, f"expected at least one heartbeat during a 6s silent start: {events}"

@@ -2020,12 +2020,21 @@ cmd_ensure_machine() {
       if [ -n "${_podman_bundle_dir:-}" ] && [ -f "$_podman_bundle_dir/$MACHINE_IMAGE_FILE" ]; then
         _machine_image="$_podman_bundle_dir/$MACHINE_IMAGE_FILE"
       fi
+      # MAC4-05 (verificacion-mac-4.md): measured live at 20.93 s with ZERO
+      # `progress` events — the biggest silent gap in the whole boot,
+      # surviving the adapter's stall watchdog only because stderr also
+      # refreshes `last_activity` (engine_adapter.rs:545-551), never
+      # because anything was actually narrated. Same fix already applied
+      # to `pull_engine` (_pull_with_heartbeat) — `_run_with_heartbeat`
+      # (used by companion install/repair) is the ALREADY-GENERIC version
+      # of that same idea (heartbeats every 5s, app-engine.md §3), reused
+      # here as-is rather than inventing a THIRD heartbeat mechanism.
       if [ -n "$_machine_image" ]; then
-        "$RT" machine init "$name" --image "$_machine_image" --provider applehv \
-          --rootful --cpus 4 --memory 8192 --disk-size 60 >&2 \
+        _run_with_heartbeat "$RT" machine init "$name" --image "$_machine_image" --provider applehv \
+          --rootful --cpus 4 --memory 8192 --disk-size 60 \
           || _die_porcelain machine_create_failed "No se pudo crear la maquina" true
       else
-        "$RT" machine init "$name" --rootful --cpus 4 --memory 8192 --disk-size 60 >&2 \
+        _run_with_heartbeat "$RT" machine init "$name" --rootful --cpus 4 --memory 8192 --disk-size 60 \
           || _die_porcelain machine_create_failed "No se pudo crear la maquina" true
       fi
     fi
@@ -2040,7 +2049,9 @@ cmd_ensure_machine() {
 
   rootful="$("$RT" machine inspect "$name" --format '{{.Rootful}}' 2>/dev/null | head -1)"
   [ "$rootful" = "true" ] || _die_porcelain machine_create_failed "La maquina existente es rootless" false
-  "$RT" machine start "$name" >&2 2>/dev/null || "$RT" info >/dev/null 2>&1 \
+  # MAC4-05: same heartbeat treatment as `machine init` above — starting
+  # an already-created machine (VM boot) can be just as silent.
+  _run_with_heartbeat "$RT" machine start "$name" || "$RT" info >/dev/null 2>&1 \
     || _die_porcelain machine_start_failed "No se pudo arrancar la maquina" true
 
   # MAC3-07: fail loudly instead of shipping a machine silently run by a
