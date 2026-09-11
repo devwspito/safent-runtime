@@ -138,12 +138,13 @@ firmas y antirreplay de webhooks, idempotencia, reintentos acotados, cola durade
 límites del proveedor, auditoría redacted y ausencia de duplicados tras reinicios.
 La ejecución aprobada debe seguir siendo exactamente la operación revisada.
 
-Repositorio encontrado: `lumen-control-enterprise`; rama `ee-cure` en `8b16278`
-contiene correcciones de seguridad que aún no están en `master` (`547d1c1`).
-Se revisa desde esa rama en una worktree aislada; no se ha desplegado ni integrado
-esa rama a ciegas. Sus pruebas interoperables apuntaban a un checkout antiguo del
-runtime por ruta absoluta; se está corrigiendo para seleccionar explícitamente
-`SAFENT_RUNTIME_SRC` y validar el runtime actual, no otro código.
+Repositorio Enterprise: `lumen-control-enterprise`. Tras las verificaciones,
+`master` en DGX se adelantó por fast-forward de `547d1c1` a `e7f2cac`,
+incluyendo `ee-cure` (`8b16278`), el inspector CRM (`c4a0b3a`) y el lote UI.
+Community quedó en `5e3b784` tanto en main local como en feat/safent-next DGX.
+No se ha desplegado ni publicado una release. Las pruebas interoperables ahora
+permiten seleccionar explícitamente `SAFENT_RUNTIME_SRC` para no validar por
+accidente otro checkout del runtime.
 
 Los informes históricos y sus etiquetas PASS/FAIL no sustituyen al código actual.
 Las worktrees ajenas con cambios deben conservarse. Integrar commits verificados
