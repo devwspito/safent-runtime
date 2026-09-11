@@ -357,6 +357,11 @@ async def _proxy_once(
     timeout = aiohttp.ClientTimeout(total=_TOTAL_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
     headers["Cookie"] = cookie_header
     headers["X-Forwarded-Prefix"] = _FORWARDED_PREFIX
+    # The origin the BROWSER used, so the companion can build OAuth redirect
+    # URIs the browser can actually reach (127.0.0.1:<port>/ads/...), never its
+    # unroutable internal name. Set server-side: a client value is overwritten.
+    headers["X-Forwarded-Host"] = request.url.netloc
+    headers["X-Forwarded-Proto"] = request.url.scheme
     try:
         async with (
             aiohttp.ClientSession(connector=connector, timeout=timeout) as session,

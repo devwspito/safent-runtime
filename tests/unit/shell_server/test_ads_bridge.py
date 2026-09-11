@@ -22,6 +22,7 @@ Covers the sso.md §7 threat table entries this proxy owns:
   I-1  — Authorization/original Cookie/X-Forwarded-For never reach the companion
   I-2  — ads_session never reaches the browser (retained in the in-process jar)
   T-1  — a client-supplied X-Forwarded-Prefix is ignored; always "/ads"
+  T-1b — X-Forwarded-Host/Proto are the browser origin; client values overwritten
   T-2  — /ads/api/v1/auth/{login,totp} denied (403 LOGIN_NOT_BRIDGED)
   E-4  — no ads_bridge cookie -> 401 on every path, allowed or not
 plus the 504 when the companion is unreachable/times out.
@@ -470,6 +471,28 @@ class TestProxiedRequestCredentialHandling:
 
             assert r.status_code == 200
             assert companion.probe_calls[-1]["headers"]["x-forwarded-prefix"] == "/ads"
+
+    async def test_forwarded_host_and_proto_are_the_browser_origin_not_client_supplied(
+        self, fake_companion, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T-1b: the companion derives OAuth redirect URIs from these two headers,
+        so they must be the origin the browser used and never a client value."""
+        companion, endpoint = fake_companion
+        _patch_companion(monkeypatch, endpoint)
+        ac = _make_client(endpoint=endpoint, proxy=_mint_proxy())
+
+        async with ac.client as client:
+            client.cookies.set("ads_bridge", _valid_bridge_cookie())
+            r = await client.get(
+                "/ads/api/v1/probe",
+                headers={"X-Forwarded-Host": "evil.example", "X-Forwarded-Proto": "ftp"},
+            )
+
+            assert r.status_code == 200
+            sent = companion.probe_calls[-1]["headers"]
+            # the test client's origin is http://test — that, not the client's header
+            assert sent["x-forwarded-host"] == "test"
+            assert sent["x-forwarded-proto"] == "http"
 
     async def test_session_cookie_carries_the_jar_value(
         self, fake_companion, monkeypatch: pytest.MonkeyPatch
