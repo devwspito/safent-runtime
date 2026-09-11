@@ -7,6 +7,7 @@ import { useChat } from './useChat'
 vi.mock('../api/client', () => ({
   postChat: vi.fn(), getConversation: vi.fn(), getRuntimeStatus: vi.fn().mockResolvedValue({ activity: [] }),
   openTaskStream: vi.fn().mockReturnValue({ close: vi.fn() }),
+  cancelTask: vi.fn(),
 }))
 
 let current: ReturnType<typeof useChat>
@@ -83,16 +84,17 @@ it('keeps the most recently requested historical conversation when responses arr
   expect(current.messages[0]).toMatchObject({ text: 'B' })
 })
 
-it('keeps manual stop effective even while the enqueue response is still pending', async () => {
+it('does not pretend to cancel before the enqueue response provides a task handle', async () => {
   const pending = deferred<Awaited<ReturnType<typeof postChat>>>()
   vi.mocked(postChat).mockReturnValueOnce(pending.promise)
   await mount()
   let sent!: Promise<void>
   await act(async () => { sent = current.sendMessage('A') })
   await act(async () => { current.stopStream() })
+  expect(current.status.phase).toBe('sending')
   await act(async () => { pending.resolve({ task_id: 'task-a' }); await sent })
-  expect(current.status.phase).toBe('idle')
-  expect(openTaskStream).not.toHaveBeenCalled()
+  expect(current.status.phase).toBe('streaming')
+  expect(openTaskStream).toHaveBeenCalledOnce()
   expect(postChat).toHaveBeenCalledOnce()
 })
 

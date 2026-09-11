@@ -135,6 +135,8 @@ export interface ChatOutletContext {
   reloadProvider(): void
   /** True while re-attaching to a stream that was in-flight before a page refresh. */
   reconnecting: boolean
+  streamError: boolean
+  cancellation: ReturnType<typeof useChat>['cancellation']
   /** Sticky: the in-flight turn's task is using the browser → chat can show live view. */
   liveBrowserActive: boolean
 }
@@ -537,6 +539,8 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
           conversationsTick: chat.conversationsTick,
           reloadProvider: activeProviderReload,
           reconnecting: chat.reconnecting,
+          streamError: chat.streamError,
+          cancellation: chat.cancellation,
           liveBrowserActive: chat.liveBrowserActive,
         } satisfies ChatOutletContext} />
       </main>

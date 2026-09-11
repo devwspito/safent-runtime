@@ -705,7 +705,8 @@
               color var(--dur-quick) var(--ease);
 }
 
-.stopBtn:hover {
+.stopBtn[aria-disabled='true'] { opacity: .5; cursor: default; }
+.stopBtn:hover:not([aria-disabled='true']) {
   background: var(--color-danger-surface);
   border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
   color: var(--color-danger);

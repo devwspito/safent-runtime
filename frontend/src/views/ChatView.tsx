@@ -44,7 +44,8 @@ import { ChatDraft, type PendingAttachment } from '../lib/chatDrafts'
 import styles from './ChatView.module.css'
 
 /** Map raw backend/stream errors to human-readable copy. */
-function humanizeError(msg: string, t: (key: Parameters<ReturnType<typeof useT>>[0]) => string): string {
+export function humanizeError(msg: string, t: (key: Parameters<ReturnType<typeof useT>>[0]) => string, code?: string): string {
+  if (code === 'kill_switch_engaged') return t('chat.err.kill_switch')
   if (/connection refused|econnrefused|network/i.test(msg)) return t('chat.err.connection')
   if (/stream_error|stream error/i.test(msg)) return t('chat.err.stream')
   if (/timeout|timed out/i.test(msg)) return t('chat.err.timeout')
@@ -553,18 +554,32 @@ interface ComposerProps {
   isStreaming: boolean
   onSend(text: string): void
   onStop(): void
+  stopDisabled?: boolean
+  stopLabel?: string
   value: string
   onChange(v: string): void
   inputRef?: RefObject<HTMLTextAreaElement>
   draft?: ChatDraft
 }
 
-export function Composer({ disabled, isStreaming, onSend, onStop, value, onChange, inputRef, draft: suppliedDraft }: ComposerProps) {
+export function Composer({ disabled, isStreaming, onSend, onStop, stopDisabled = false, stopLabel, value, onChange, inputRef, draft: suppliedDraft }: ComposerProps) {
   const t = useT()
   const localTextareaRef = useRef<HTMLTextAreaElement>(null)
   const textareaRef = inputRef ?? localTextareaRef
   const fileInputRef = useRef<HTMLInputElement>(null)
   const submissionInFlight = useRef(false)
+  const stopHasFocus = useRef(false)
+  useLayoutEffect(() => {
+    if (!isStreaming && stopHasFocus.current) {
+      // React may reuse the stop button as Send. Return keyboard users to their
+      // draft only if they have not deliberately moved focus elsewhere.
+      const focused = document.activeElement
+      if (focused === document.body || focused?.getAttribute('data-chat-action') === 'submit') {
+        textareaRef.current?.focus()
+      }
+      stopHasFocus.current = false
+    }
+  }, [isStreaming, textareaRef])
   const [localDraft] = useState(() => new ChatDraft('standalone'))
   const draft = suppliedDraft ?? localDraft
   const { attachments, selectedSkills, bridge, bridgeBusy, bridgeSyncing } = useSyncExternalStore(draft.subscribe, draft.getSnapshot)
@@ -953,9 +968,13 @@ export function Composer({ disabled, isStreaming, onSend, onStop, value, onChang
               <button
                 type="button"
                 className={styles.stopBtn}
-                onClick={onStop}
-                aria-label={t('chat.aria.stop')}
-                title={t('chat.aria.stop')}
+                data-chat-action="submit"
+                aria-disabled={stopDisabled}
+                onClick={() => { if (!stopDisabled) onStop() }}
+                onFocus={() => { stopHasFocus.current = true }}
+                onBlur={() => { stopHasFocus.current = false }}
+                aria-label={stopLabel ?? t('chat.aria.stop')}
+                title={stopLabel ?? t('chat.aria.stop')}
               >
                 <Square size={13} fill="currentColor" aria-hidden="true" />
               </button>
@@ -963,6 +982,7 @@ export function Composer({ disabled, isStreaming, onSend, onStop, value, onChang
               <button
                 type="button"
                 className={styles.sendBtn}
+                data-chat-action="submit"
                 onClick={handleSend}
                 disabled={!canSend}
                 aria-label={t('chat.aria.send')}
@@ -1098,13 +1118,13 @@ function LiveBrowserPanel() {
 
 export default function ChatView() {
   const t = useT()
-  const { convId, agentName, messages, status, sendMessage, stopStream, approvalRefreshTick, liveBrowserActive, draft } =
+  const { convId, agentName, messages, status, sendMessage, stopStream, approvalRefreshTick, liveBrowserActive, draft,
+    cancellation = 'idle', streamError = false, reconnecting = false } =
     useOutletContext<ChatOutletContext>()
   const { text: composerText } = useSyncExternalStore(draft.subscribe, draft.getSnapshot)
   const setComposerText = useCallback((text: string) => draft.set('text', text), [draft])
   const [panelOpen, setPanelOpen] = useState(false)
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
-  const [showNoModel, setShowNoModel] = useState(false)
   const [noProvider, setNoProvider] = useState(false)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -1120,7 +1140,7 @@ export default function ChatView() {
         if (alive) setNoProvider(arr.length === 0)
       })
       .catch(() => {
-        /* transient — 409 path still covers it */
+        /* Unknown availability must not become an empty provider list. */
       })
     return () => {
       alive = false
@@ -1130,18 +1150,6 @@ export default function ChatView() {
   const isStreaming = status.phase === 'streaming' || status.phase === 'sending'
   const showWelcome = messages.length === 0
   const conversationTitle = messages.find(message => message.type === 'user')
-
-  // Detect no-model 409
-  useEffect(() => {
-    if (status.phase === 'error') {
-      const msg = (status as { phase: 'error'; message: string }).message ?? ''
-      const isNoModel =
-        msg.includes('409') || /sin modelo|no model|no provider|no.*provider/i.test(msg)
-      setShowNoModel(isNoModel)
-    } else {
-      setShowNoModel(false)
-    }
-  }, [status])
 
   // Scroll pinning
   useEffect(() => {
@@ -1176,7 +1184,6 @@ export default function ChatView() {
       userScrolledRef.current = false
       pinRef.current = true
       setComposerText('')
-      setShowNoModel(false)
       void sendMessage(text)
     },
     [sendMessage, setComposerText],
@@ -1191,14 +1198,20 @@ export default function ChatView() {
   )
 
   const statusText =
-    status.phase === 'streaming'
+    cancellation === 'requesting' ? t('chat.cancel.requesting')
+      : cancellation === 'requested' ? t('chat.cancel.requested')
+      : cancellation === 'error' ? t('chat.cancel.error')
+      : streamError ? t('chat.stream.interrupted')
+      : reconnecting ? t('chat.stream.reconnecting')
+      : status.phase === 'streaming'
       ? status.statusText
       : status.phase === 'sending'
         ? t('chat.sending')
-        : status.phase === 'error' && !showNoModel
+        : status.phase === 'error'
           ? humanizeError(
               (status as { phase: 'error'; message: string }).message ?? '',
               t,
+              status.code,
             )
           : undefined
 
@@ -1271,10 +1284,10 @@ export default function ChatView() {
           ><ChevronDown size={16} aria-hidden="true" />{t('chat.latest')}</button>}
           {liveBrowserActive && <LiveBrowserPanel />}
 
-          {showNoModel || noProvider ? (
+          {noProvider && status.phase === 'idle' ? (
             <NoModelBanner />
           ) : (
-            <StatusBar phase={status.phase} text={statusText} />
+            <StatusBar phase={cancellation === 'error' || streamError ? 'error' : status.phase} text={statusText} />
           )}
 
           <Composer
@@ -1285,6 +1298,10 @@ export default function ChatView() {
             isStreaming={isStreaming}
             onSend={handleSend}
             onStop={stopStream}
+            stopDisabled={status.phase === 'sending' || cancellation === 'requesting' || cancellation === 'requested'}
+            stopLabel={status.phase === 'sending' ? t('chat.cancel.awaiting_task')
+              : cancellation === 'requesting' || cancellation === 'requested' ? t('chat.cancel.pending')
+              : undefined}
             value={composerText}
             onChange={setComposerText}
           />
