@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { Check, Plug, Globe } from 'lucide-react'
+import { Check, Plug, Globe, RefreshCw, Search } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import {
   getComposioStatus, listComposioConnected, listComposioApps,
@@ -12,13 +12,6 @@ import type { ComposioStatus, ComposioApp, WebSearchStatus } from '../api/types'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
-import {
-  AnimatePresence,
-  AnimatedListItem,
-  FadeIn,
-  Stagger,
-  StaggerItem,
-} from '../components/ui/motion'
 import styles from './IntegrationsView.module.css'
 
 // Mirrors vanilla integrations.js load order: status first → prevents calling
@@ -28,20 +21,20 @@ type ComposioState =
   | { status: 'loading' }
   | { status: 'no-key' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; info: ComposioStatus; connected: ComposioApp[]; apps: ComposioApp[] }
+  | { status: 'ready'; info: ComposioStatus; connected: ComposioApp[]; apps: ComposioApp[]; connectedError: boolean; appsError: boolean }
 
 type ComposioAction =
   | { type: 'LOADING' }
   | { type: 'NO_KEY' }
   | { type: 'FAILED'; message: string }
-  | { type: 'READY'; info: ComposioStatus; connected: ComposioApp[]; apps: ComposioApp[] }
+  | { type: 'READY'; info: ComposioStatus; connected: ComposioApp[]; apps: ComposioApp[]; connectedError: boolean; appsError: boolean }
 
 function composioReducer(_s: ComposioState, a: ComposioAction): ComposioState {
   switch (a.type) {
-    case 'LOADING': return { status: 'loading' }
+    case 'LOADING': return _s.status === 'ready' ? _s : { status: 'loading' }
     case 'NO_KEY': return { status: 'no-key' }
     case 'FAILED': return { status: 'error', message: a.message }
-    case 'READY': return { status: 'ready', info: a.info, connected: a.connected, apps: a.apps }
+    case 'READY': return { status: 'ready', info: a.info, connected: a.connected, apps: a.apps, connectedError: a.connectedError, appsError: a.appsError }
   }
 }
 
@@ -64,11 +57,10 @@ function AppGridSkeleton() {
   const t = useT()
   return (
     <div className={styles.skeletonGrid} aria-busy="true" aria-label={t('int.loading_apps_aria')}>
-      {Array.from({ length: 6 }, (_, i) => (
+      {Array.from({ length: 3 }, (_, i) => (
         <div
           key={i}
           className={`skeleton skeleton--card ${styles.skeletonCard}`}
-          style={{ animationDelay: `${i * 60}ms` }}
           aria-hidden="true"
         />
       ))}
@@ -81,10 +73,16 @@ export default function IntegrationsView() {
   const [composioState, dispatch] = useReducer(composioReducer, { status: 'loading' })
   const [wsState, setWsState] = useState<WsState>({ status: 'loading' })
   const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const composioRevision = useRef(0)
+  const webRevision = useRef(0)
+  const [refreshing, setRefreshing] = useState(false)
+  const [query, setQuery] = useState('')
 
   // Clear the reload timer on unmount so it never fires on a dead component
   useEffect(() => {
     return () => {
+      composioRevision.current++
+      webRevision.current++
       if (reloadTimerRef.current !== null) clearTimeout(reloadTimerRef.current)
     }
   }, [])
@@ -100,11 +98,15 @@ export default function IntegrationsView() {
   }, [])
 
   async function loadComposio() {
+    const revision = ++composioRevision.current
+    setRefreshing(true)
     dispatch({ type: 'LOADING' })
     let status: ComposioStatus
     try {
       status = await getComposioStatus()
     } catch (e) {
+      if (revision !== composioRevision.current) return
+      setRefreshing(false)
       dispatch({
         type: 'FAILED',
         message: e instanceof ApiError ? e.message : t('int.err.composio'),
@@ -112,31 +114,39 @@ export default function IntegrationsView() {
       return
     }
 
+    if (revision !== composioRevision.current) return
     if (!status.has_key) {
+      setRefreshing(false)
       dispatch({ type: 'NO_KEY' })
       return
     }
 
-    // Connected/apps errors are surfaced individually to avoid blocking the status row.
-    // Returning [] on these is safe — we tell the user which part failed.
     const [connected, apps] = await Promise.allSettled([
       listComposioConnected(),
       listComposioApps(),
     ])
+    if (revision !== composioRevision.current) return
+    setRefreshing(false)
+    const validApps = (result: PromiseSettledResult<ComposioApp[]>): result is PromiseFulfilledResult<ComposioApp[]> => result.status === 'fulfilled' && Array.isArray(result.value) && result.value.every(app => app && typeof app.slug === 'string' && app.slug.length > 0)
     dispatch({
       type: 'READY',
       info: status,
-      connected: connected.status === 'fulfilled' ? connected.value : [],
-      apps: apps.status === 'fulfilled' ? apps.value : [],
+      connected: validApps(connected) ? connected.value : [],
+      apps: validApps(apps) ? apps.value : [],
+      connectedError: !validApps(connected),
+      appsError: !validApps(apps),
     })
   }
 
   async function loadWebSearch() {
+    const revision = ++webRevision.current
     setWsState({ status: 'loading' })
     try {
       const st = await getWebSearchStatus()
+      if (revision !== webRevision.current) return
       setWsState({ status: 'ready', data: st })
     } catch (e) {
+      if (revision !== webRevision.current) return
       setWsState({
         status: 'error',
         message: e instanceof ApiError ? e.message : t('int.err.websearch'),
@@ -158,13 +168,12 @@ export default function IntegrationsView() {
       <PageHeader
         title={t('view.integraciones')}
         subtitle={t('int.subtitle')}
+        actions={<Button variant="ghost" size="sm" disabled={refreshing} onClick={() => void loadComposio()} aria-label={t('int.refresh')}><RefreshCw size={14} aria-hidden />{refreshing ? t('int.refreshing') : t('int.refresh')}</Button>}
       />
 
       <div className={`view-body ${styles.body}`}>
-        <Stagger style={{ display: 'contents' }}>
 
           {/* ── Web search (Brave) ─────────────────────────────────────────── */}
-          <StaggerItem>
             <section className={styles.section} aria-label={t('int.websearch.label')}>
               <h2 className={styles.sectionLabel}>{t('int.websearch.label')}</h2>
 
@@ -178,14 +187,12 @@ export default function IntegrationsView() {
               )}
 
               {wsState.status === 'error' && (
-                <FadeIn>
                   <div role="alert" className={styles.errorRow}>
                     <p className={styles.errorText}>{wsState.message}</p>
                     <Button variant="secondary" size="sm" onClick={loadWebSearch}>
                       {t('int.retry')}
                     </Button>
                   </div>
-                </FadeIn>
               )}
 
               {wsState.status === 'ready' && (
@@ -196,10 +203,8 @@ export default function IntegrationsView() {
                 />
               )}
             </section>
-          </StaggerItem>
 
           {/* ── Composio connection status ────────────────────────────────── */}
-          <StaggerItem>
             <section className={styles.section} aria-label={t('int.connected_services.aria')}>
               <h2 className={styles.sectionLabel}>{t('int.connect_apps')}</h2>
 
@@ -223,18 +228,15 @@ export default function IntegrationsView() {
               )}
 
               {composioState.status === 'error' && (
-                <FadeIn>
                   <div role="alert" className={styles.errorRow}>
                     <p className={styles.errorText}>{composioState.message}</p>
                     <Button variant="secondary" size="sm" onClick={loadComposio}>
                       {t('int.retry')}
                     </Button>
                   </div>
-                </FadeIn>
               )}
 
               {composioState.status === 'ready' && (
-                <FadeIn>
                   <div className={styles.statusBanner} aria-label={t('int.composio.active_aria')}>
                     <Check
                       size={14}
@@ -248,13 +250,10 @@ export default function IntegrationsView() {
                       </code>
                     </span>
                   </div>
-                </FadeIn>
               )}
             </section>
-          </StaggerItem>
 
           {/* ── Connected apps ────────────────────────────────────────────── */}
-          <StaggerItem>
             <section className={styles.section} aria-label={t('int.connected_apps.aria')}>
               <h2 className={styles.sectionLabel}>{t('int.connected_apps.label')}</h2>
 
@@ -267,7 +266,9 @@ export default function IntegrationsView() {
               )}
 
               {composioState.status === 'ready' && (
-                composioState.connected.length === 0
+                composioState.connectedError
+                  ? <SourceError message={t('int.err.connected')} onRetry={loadComposio} busy={refreshing} />
+                  : composioState.connected.length === 0
                   ? (
                     <EmptyState
                       compact
@@ -278,23 +279,25 @@ export default function IntegrationsView() {
                   )
                   : (
                     <ul className={styles.appGrid} role="list">
-                      <AnimatePresence initial={false}>
                         {composioState.connected.map(app => (
-                          <AnimatedListItem key={app.slug}>
+                          <li key={app.slug}>
                             <AppCard app={app} isConnected />
-                          </AnimatedListItem>
+                          </li>
                         ))}
-                      </AnimatePresence>
                     </ul>
                   )
               )}
             </section>
-          </StaggerItem>
 
           {/* ── Available apps ────────────────────────────────────────────── */}
-          <StaggerItem>
             <section className={styles.section} aria-label={t('int.available_apps.aria')}>
-              <h2 className={styles.sectionLabel}>{t('int.catalog.label')}</h2>
+              <div className={styles.catalogHeader}>
+                <h2 className={styles.sectionLabel}>{t('int.catalog.label')}</h2>
+                <label className={styles.searchField}>
+                  <Search size={14} aria-hidden />
+                  <input value={query} onChange={event => setQuery(event.target.value)} placeholder={t('int.search')} aria-label={t('int.search')} />
+                </label>
+              </div>
 
               {composioState.status === 'loading' && <AppGridSkeleton />}
 
@@ -305,23 +308,24 @@ export default function IntegrationsView() {
               )}
 
               {composioState.status === 'ready' && (() => {
-                const remaining = composioState.apps.filter(a => !connectedSlugs.has(a.slug))
+                if (composioState.appsError) return <SourceError message={t('int.err.catalog')} onRetry={loadComposio} busy={refreshing} />
+                const remaining = composioState.apps.filter(a => !connectedSlugs.has(a.slug) && `${a.name ?? ''} ${a.slug} ${a.description ?? ''}`.toLowerCase().includes(query.trim().toLowerCase()))
                 return remaining.length === 0
                   ? (
                     <EmptyState
                       icon={<Globe size={28} />}
-                      title={t('int.empty.all_connected.title')}
-                      description={t('int.empty.all_connected.desc')}
+                      compact
+                      title={t(query.trim() ? 'int.search.empty' : 'int.catalog.empty')}
                     />
                   )
                   : (
                     <ul className={styles.appGrid} role="list">
-                      <AnimatePresence initial={false}>
                         {remaining.map(app => (
-                          <AnimatedListItem key={app.slug}>
+                          <li key={app.slug}>
                             <AppCard
                               app={app}
                               isConnected={false}
+                              disabled={composioState.connectedError || refreshing}
                               onConnect={async (a) => {
                                 try {
                                   const r = await connectComposioApp(a.slug)
@@ -329,22 +333,19 @@ export default function IntegrationsView() {
                                     window.open(r.redirect_url, '_blank', 'noopener,noreferrer')
                                   }
                                   show(t('int.connecting_app_toast').replace('{name}', a.name ?? a.slug), 'info')
+                                  if (reloadTimerRef.current !== null) clearTimeout(reloadTimerRef.current)
                                   reloadTimerRef.current = setTimeout(loadComposio, 3000)
                                 } catch (e) {
                                   show(e instanceof Error ? e.message : t('int.err.generic'), 'error')
                                 }
                               }}
                             />
-                          </AnimatedListItem>
+                          </li>
                         ))}
-                      </AnimatePresence>
                     </ul>
                   )
               })()}
             </section>
-          </StaggerItem>
-
-        </Stagger>
       </div>
     </>
   )
@@ -355,11 +356,18 @@ export default function IntegrationsView() {
 interface AppCardProps {
   app: ComposioApp
   isConnected: boolean
-  onConnect?: (app: ComposioApp) => void
+  disabled?: boolean
+  onConnect?: (app: ComposioApp) => void | Promise<void>
 }
 
-function AppCard({ app, isConnected, onConnect }: AppCardProps) {
+function SourceError({ message, onRetry, busy }: { message: string; onRetry: () => void; busy: boolean }) {
   const t = useT()
+  return <div role="alert" className={styles.errorRow}><p className={styles.errorText}>{message}</p><Button variant="secondary" size="sm" onClick={onRetry} disabled={busy}>{t('int.retry')}</Button></div>
+}
+
+function AppCard({ app, isConnected, onConnect, disabled }: AppCardProps) {
+  const t = useT()
+  const [connecting, setConnecting] = useState(false)
   const displayName =
     app.name ??
     (app as unknown as Record<string, unknown>).toolkit_slug as string | undefined ??
@@ -402,7 +410,13 @@ function AppCard({ app, isConnected, onConnect }: AppCardProps) {
               variant="ghost"
               size="sm"
               aria-label={t('int.connect_aria').replace('{name}', displayName)}
-              onClick={() => onConnect?.(app)}
+              disabled={disabled || connecting}
+              loading={connecting}
+              onClick={async () => {
+                if (connecting || disabled) return
+                setConnecting(true)
+                try { await onConnect?.(app) } finally { setConnecting(false) }
+              }}
             >
               {t('int.connect_btn')}
             </Button>
@@ -426,6 +440,7 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
   const keyRef = useRef<HTMLInputElement>(null)
 
   async function handleSave() {
+    if (saving) return
     const key = keyRef.current?.value.trim() ?? ''
     if (!key) { onToast(t('int.err.enter_key'), 'warn'); return }
     setSaving(true)
@@ -444,14 +459,14 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
       <p className={styles.setupCardBody}>
         {t('int.composio.setup.body')}
       </p>
-      <p className={styles.setupCardSteps}>
+      <details className={styles.setupCardSteps}><summary>{t('int.setup.help')}</summary><p>
         {t('int.composio.setup.step1')}{' '}
         <a href="https://app.composio.dev/developers" target="_blank" rel="noopener noreferrer">
           app.composio.dev
         </a>
         {'  ·  '}{t('int.composio.setup.step2')}{'  ·  '}{t('int.composio.setup.step3_pre')}{' '}
         <strong>Settings → API Keys</strong> {t('int.composio.setup.step3_post')}
-      </p>
+      </p></details>
       <div className={styles.formInline}>
         <label className="sr-only" htmlFor="composio-apikey">{t('int.access_key.label')}</label>
         {/* Secret: password input, never echoed back */}
@@ -462,7 +477,7 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
           type="password"
           placeholder={t('int.access_key.placeholder')}
           autoComplete="new-password"
-          onKeyDown={e => { if (e.key === 'Enter') handleSave() }}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) void handleSave() }}
         />
         <Button
           variant="primary"
@@ -492,6 +507,7 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
   const keyRef = useRef<HTMLInputElement>(null)
 
   async function handleSave() {
+    if (saving) return
     const key = keyRef.current?.value.trim() ?? ''
     if (!key) { onToast(t('int.brave.err.enter_key'), 'warn'); return }
     setSaving(true)
@@ -511,14 +527,14 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
       <p className={styles.setupCardBody}>
         {t('int.brave.setup.body')}
       </p>
-      <p className={styles.setupCardSteps}>
+      <details className={styles.setupCardSteps}><summary>{t('int.setup.help')}</summary><p>
         {t('int.composio.setup.step1')}{' '}
         <a href="https://api.search.brave.com/app/keys" target="_blank" rel="noopener noreferrer">
           api.search.brave.com
         </a>
         {'  ·  '}{t('int.brave.setup.step2')}{'  ·  '}
         {t('int.brave.setup.step3')}
-      </p>
+      </p></details>
 
       <div
         className={[styles.wsStatus, status.brave ? styles.wsStatusActive : ''].filter(Boolean).join(' ')}
@@ -528,7 +544,7 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
         <span>
           {status.brave
             ? t('int.brave.status.active')
-            : t('int.brave.status.fallback')}
+            : t(status.ddgs_fallback ? 'int.brave.status.fallback' : 'int.brave.status.unconfigured')}
         </span>
       </div>
 
@@ -541,7 +557,7 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
           type="password"
           placeholder={t('int.brave.key.label')}
           autoComplete="new-password"
-          onKeyDown={e => { if (e.key === 'Enter') handleSave() }}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) void handleSave() }}
         />
         <Button
           variant="primary"
