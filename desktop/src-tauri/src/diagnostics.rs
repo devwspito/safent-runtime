@@ -89,6 +89,7 @@ struct History {
     sequence: u64,
     last_stage: Option<&'static str>,
     point_of_no_return: bool,
+    attempt_id: u64,
 }
 
 /// Minimal replay, shared by the live channel and getter. Free-text event
@@ -96,6 +97,7 @@ struct History {
 #[derive(Clone, Serialize)]
 pub(crate) struct BootstrapSnapshot {
     sequence: u64,
+    attempt_id: u64,
     event: SafeEvent,
     last_stage: Option<&'static str>,
     point_of_no_return: bool,
@@ -108,6 +110,13 @@ pub struct DiagnosticsState {
 }
 
 impl DiagnosticsState {
+    pub fn start_attempt(&self, attempt_id: u64) -> Result<(), &'static str> {
+        let mut history = self.history.lock().map_err(|_| "history_unavailable")?;
+        history.attempt_id = attempt_id;
+        history.last_stage = None;
+        history.point_of_no_return = false;
+        Ok(())
+    }
     pub fn record(&self, event: &DomainEvent) -> Option<BootstrapSnapshot> {
         let safe = SafeEvent::project(event)?;
         // This telemetry must not break bootstrap. Poisoned history is rejected
@@ -128,6 +137,7 @@ impl DiagnosticsState {
             history.sequence += 1;
             let snapshot = BootstrapSnapshot {
                 sequence: history.sequence,
+                attempt_id: history.attempt_id,
                 event: safe,
                 last_stage: history.last_stage,
                 point_of_no_return: history.point_of_no_return,
@@ -332,6 +342,7 @@ mod tests {
     #[test]
     fn retry_stage_and_snapshot_share_one_monotonic_sequence() {
         let state = DiagnosticsState::default();
+        state.start_attempt(1).unwrap();
         state.record(&DomainEvent::EngineDegraded {
             cause: FailureCause {
                 code: FailureCode::DaemonUnhealthy,
@@ -340,6 +351,8 @@ mod tests {
             },
         });
         let old = state.latest().unwrap().unwrap();
+        assert_eq!(old.attempt_id, 1);
+        state.start_attempt(2).unwrap();
         let live = state
             .record(&DomainEvent::StageEntered {
                 stage: Stage::Container,
@@ -348,9 +361,23 @@ mod tests {
             })
             .unwrap();
         assert!(live.sequence > old.sequence);
+        assert_eq!(live.attempt_id, 2);
+        assert_eq!(serde_json::to_value(&live).unwrap()["attempt_id"], 2);
         assert_eq!(state.latest().unwrap().unwrap().sequence, live.sequence);
         assert!(live.point_of_no_return);
         assert_eq!(live.last_stage, Some("container"));
+        state.start_attempt(3).unwrap();
+        let reset = state
+            .record(&DomainEvent::StageEntered {
+                stage: Stage::Preflight,
+                label: "SECRET".into(),
+                total_bytes: None,
+            })
+            .unwrap();
+        assert!(reset.sequence > live.sequence);
+        assert_eq!(reset.attempt_id, 3);
+        assert!(!reset.point_of_no_return);
+        assert_eq!(reset.last_stage, Some("preflight"));
     }
 
     #[test]

@@ -237,7 +237,7 @@ impl BootService {
                     });
                     return LoopOutcome::Ready { ticket, lifecycle };
                 }
-                Err(EngineError::Cancelled) => return LoopOutcome::Cancelled { lifecycle },
+                Err(EngineError::Cancelled) => return self.notify_cancelled(&lifecycle, notifier),
                 Err(error) => {
                     // A failure is a DIFFERENT episode than a silent no-op
                     // success — EngineLifecycle::fail() owns detecting
@@ -315,9 +315,7 @@ impl BootService {
                     lifecycle: lifecycle.clone(),
                 }
             }
-            Err(EngineError::Cancelled) => LoopOutcome::Cancelled {
-                lifecycle: lifecycle.clone(),
-            },
+            Err(EngineError::Cancelled) => self.notify_cancelled(lifecycle, notifier),
             Err(error) => {
                 self.notify_if_reconnecting(lifecycle, &error, notifier);
                 notifier.notify(&DomainEvent::EngineDegraded {
@@ -327,6 +325,21 @@ impl BootService {
                     lifecycle: lifecycle.clone(),
                 }
             }
+        }
+    }
+
+    /// Honoured local cancellation is terminal for this attempt, but the owner
+    /// may explicitly retry. It never starts another attempt automatically.
+    fn notify_cancelled(
+        &self,
+        lifecycle: &EngineLifecycle,
+        notifier: &dyn Notifier,
+    ) -> LoopOutcome {
+        let mut cause = EngineError::Cancelled.to_failure_cause();
+        cause.retryable = true;
+        notifier.notify(&DomainEvent::EngineDegraded { cause });
+        LoopOutcome::Cancelled {
+            lifecycle: lifecycle.clone(),
         }
     }
 
@@ -481,6 +494,29 @@ impl Notifier for TauriNotifier {
         {
             let _ = self.app.emit("safent://bootstrap-state", snapshot);
         }
+        self.emit_legacy(event);
+    }
+}
+
+impl TauriNotifier {
+    /// Record immediately for replay, but never dispatch webview events from
+    /// an IPC/main-thread failure path. Uses the existing async runtime, not
+    /// another bootstrap worker (which may be the resource that just failed).
+    fn notify_deferred(&self, event: DomainEvent) {
+        let snapshot = self
+            .app
+            .state::<crate::diagnostics::DiagnosticsState>()
+            .record(&event);
+        let app = self.app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Some(snapshot) = snapshot {
+                let _ = app.emit("safent://bootstrap-state", snapshot);
+            }
+            TauriNotifier { app }.emit_legacy(&event);
+        });
+    }
+
+    fn emit_legacy(&self, event: &DomainEvent) {
         match event {
             DomainEvent::StageEntered {
                 stage,
@@ -577,8 +613,11 @@ impl Clock for SystemClock {
 /// already-finished UI lane invokes a different one, it is a one-line rename
 /// here, not a design change.
 #[tauri::command]
-pub fn cancel_bootstrap(cancel: tauri::State<'_, CancelSignal>) {
-    cancel.set();
+pub fn cancel_bootstrap(
+    control: tauri::State<'_, crate::bootstrap_control::BootstrapControl>,
+    attempt_id: u64,
+) -> Result<(), String> {
+    control.cancel(attempt_id).map_err(str::to_owned)
 }
 
 /// FR-033's single "Reintentar": re-runs the whole loop from a fresh
@@ -587,8 +626,52 @@ pub fn cancel_bootstrap(cancel: tauri::State<'_, CancelSignal>) {
 /// full re-run correctly skips everything already done and repeats only what
 /// still needs it.
 #[tauri::command]
-pub fn retry_bootstrap(app: AppHandle) {
-    std::thread::spawn(move || run_once(app, CancelSignal::new()));
+pub fn retry_bootstrap(app: AppHandle, attempt_id: u64) -> Result<(), String> {
+    spawn_attempt(app, Some(attempt_id), false).map_err(str::to_owned)
+}
+
+fn spawn_attempt(
+    app: AppHandle,
+    expected_id: Option<u64>,
+    restart: bool,
+) -> Result<(), &'static str> {
+    let attempt = app
+        .state::<crate::bootstrap_control::BootstrapControl>()
+        .begin(expected_id)?;
+    app.state::<crate::diagnostics::DiagnosticsState>()
+        .start_attempt(attempt.id)?;
+    let failure_app = app.clone();
+    std::thread::Builder::new()
+        .name("safent-bootstrap".into())
+        .spawn(move || {
+            let _attempt = attempt;
+            // Emit from the worker, never the synchronous IPC handler: native
+            // webview dispatch may wait on that UI thread. Publish identity
+            // before observation so stale gestures cannot target this attempt.
+            TauriNotifier { app: app.clone() }.notify(&DomainEvent::StageEntered {
+                stage: Stage::Preflight,
+                label: "Comprobando este equipo".into(),
+                total_bytes: None,
+            });
+            if restart {
+                stop_engine_best_effort(&app);
+                TauriNotifier { app: app.clone() }.notify(&DomainEvent::Reconnecting {
+                    reason: crate::domain::ReconnectReason::EngineRestarted,
+                });
+            }
+            run_once(app, _attempt.signal.clone());
+        })
+        .map(|_| ())
+        .map_err(|_| {
+            TauriNotifier { app: failure_app }.notify_deferred(DomainEvent::EngineDegraded {
+                cause: FailureCause {
+                    code: FailureCode::ContainerStartFailed,
+                    message: "No se pudo iniciar la preparación".into(),
+                    retryable: true,
+                },
+            });
+            "bootstrap_spawn_failed"
+        })
 }
 
 /// Starts the bootstrap loop off the main thread (so the window never
@@ -597,22 +680,12 @@ pub fn retry_bootstrap(app: AppHandle) {
 /// again) and `safent://quit-requested` (explicit engine stop, then exit —
 /// research.md FR-030: closing the WINDOW alone never stops the engine).
 pub fn start(app: AppHandle) {
-    let cancel = CancelSignal::new();
-    app.manage(cancel.clone());
+    app.manage(crate::bootstrap_control::BootstrapControl::default());
 
     let restart_handle = app.clone();
     app.listen(RESTART_REQUESTED_EVENT, move |_event| {
-        let handle = restart_handle.clone();
-        std::thread::spawn(move || {
-            stop_engine_best_effort(&handle);
-            TauriNotifier {
-                app: handle.clone(),
-            }
-            .notify(&DomainEvent::Reconnecting {
-                reason: crate::domain::ReconnectReason::EngineRestarted,
-            });
-            run_once(handle, CancelSignal::new());
-        });
+        // Repeated tray restarts never overlap an active bootstrap worker.
+        let _ = spawn_attempt(restart_handle.clone(), None, true);
     });
 
     let quit_handle = app.clone();
@@ -624,7 +697,19 @@ pub fn start(app: AppHandle) {
         });
     });
 
-    std::thread::spawn(move || run_once(app, cancel));
+    if let Err(error) = spawn_attempt(app.clone(), None, false) {
+        // The acquired attempt already recorded/notified its spawn failure.
+        if error == "bootstrap_spawn_failed" {
+            return;
+        }
+        TauriNotifier { app }.notify_deferred(DomainEvent::EngineDegraded {
+            cause: FailureCause {
+                code: FailureCode::ContainerStartFailed,
+                message: "No se pudo iniciar la preparación".into(),
+                retryable: true,
+            },
+        });
+    }
 }
 
 /// `safent://quit-requested` (FR-030: "Salir" explicitly stops the engine,
@@ -1266,6 +1351,66 @@ mod tests {
             service.run(&notifier, &cancel),
             LoopOutcome::Cancelled { .. }
         ));
+        assert!(
+            notifier.events().iter().any(|event| matches!(
+                event,
+                DomainEvent::EngineDegraded {
+                    cause: FailureCause {
+                        code: FailureCode::CancelledByOwner,
+                        retryable: true,
+                        ..
+                    }
+                }
+            )),
+            "honoured cancellation must reach the renderer, not leave it preparing"
+        );
+    }
+
+    #[test]
+    fn controlled_boot_lifecycle_cancel_retry_cancel_notifies_each_attempt() {
+        let control = crate::bootstrap_control::BootstrapControl::default();
+        let mut previous = None;
+        for _ in 0..2 {
+            let attempt = control.begin(previous).unwrap();
+            assert!(!attempt.signal.is_set());
+            assert!(control.begin(Some(attempt.id)).is_err());
+            control.cancel(attempt.id).unwrap();
+            let mut facts = converged_facts();
+            facts.runtime_staged = false;
+            facts.runtime_hash_ok = false;
+            let (service, _) = service(
+                ScriptedProbe::new(vec![Ok(facts)]),
+                ScriptedDriver::new(vec![]),
+            );
+            let notifier = RecordingNotifier::new();
+            assert!(matches!(
+                service.run(&notifier, &attempt.signal),
+                LoopOutcome::Cancelled { .. }
+            ));
+            assert_eq!(
+                notifier
+                    .events()
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        DomainEvent::EngineDegraded {
+                            cause: FailureCause {
+                                code: FailureCode::CancelledByOwner,
+                                retryable: true,
+                                ..
+                            }
+                        }
+                    ))
+                    .count(),
+                1
+            );
+            previous = Some(attempt.id);
+            drop(attempt);
+            assert_eq!(
+                control.cancel(previous.unwrap()),
+                Err("bootstrap_not_running")
+            );
+        }
     }
 
     #[test]
@@ -1285,8 +1430,10 @@ mod tests {
         )]);
         let (service, _clock) = service(probe, driver);
         let notifier = RecordingNotifier::new();
-        let cancel = CancelSignal::new();
-        cancel.set(); // requested BEFORE this run — must still be rejected once past the gate
+        let control = crate::bootstrap_control::BootstrapControl::default();
+        let attempt = control.begin(None).unwrap();
+        control.cancel(attempt.id).unwrap();
+        let cancel = attempt.signal.clone(); // shared command signal, ignored past the gate
 
         match service.run(&notifier, &cancel) {
             LoopOutcome::Ready { .. } => {}

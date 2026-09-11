@@ -2,6 +2,7 @@ import { reduceLifecycle, type UiState, type StageId, type FailureCode, type Pro
 
 export interface BootstrapSnapshot {
   sequence: number
+  attempt_id: number
   last_stage: StageId | null
   point_of_no_return: boolean
   event:

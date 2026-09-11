@@ -82,7 +82,7 @@ crudo de sistema; éxito sólo después de escritura confirmada. No abre ni sube
 archivo automáticamente.
 
 El loader escucha `safent://bootstrap-state` y después invoca
-`get_bootstrap_state`: snapshot `{sequence,event,last_stage,point_of_no_return}`
+`get_bootstrap_state`: snapshot `{sequence,attempt_id,event,last_stage,point_of_no_return}`
 tipado, sin texto libre. Ignora secuencias antiguas/duplicadas para que un snapshot
 tardío no sustituya eventos nuevos o un reintento. Reutiliza `reduceLifecycle`;
 no hay otro motor de arranque. Corrige el fallo inicial emitido antes de montar
@@ -108,3 +108,23 @@ acción falla explícitamente (no éxito ficticio del preview browser).
 Arranque claro/oscuro neutral sin animación decorativa del logo; progreso
 indeterminado con transform, reduced-motion desactiva movimiento. Cambios
 generados en `ui/` mediante `npm run build`, no editados a mano.
+
+## Cancelar y reintentar un intento concreto (2026-09-11)
+
+La cancelación honrada antes del punto irreversible emite `cancelled_by_owner`
+y habilita **reintento manual**. No reintenta automáticamente ni modifica la
+semántica global del error Cancelled fuera del bootstrap. El acuse del botón no
+es confirmación de que el proceso ya se detuvo: se espera el evento final.
+
+Rust mantiene un único intento activo mediante guard RAII. Cada intento recibe
+una señal nueva; nunca se resetea la señal que conserva un trabajador anterior.
+El snapshot identifica el intento con `attempt_id`; cancelar/reintentar envían
+ese identificador y se rechazan gestos obsoletos, reintentos concurrentes y
+cancelaciones sin trabajador. El botón permanece inactivo hasta recibir una
+identidad real. El punto de no retorno sigue gobernado por el núcleo.
+
+La etapa inicial del reintento se emite desde el trabajador, no desde el handler
+IPC síncrono: evita bloquear el despacho de eventos de la ventana nativa. Véase
+`CANCEL-RETRY-REVIEW-2026-09-11.md` para regresiones, evidencia del binario real y
+límites de la CLI de prueba. Esta revisión no valida el actualizador ni publica
+un instalador.

@@ -80,20 +80,20 @@ export async function subscribeToReconnect(
 
 // Exact names of the `#[tauri::command]`s boot.rs registers (main.rs's
 // `generate_handler!` + capabilities/default.json's `allow-*` entries).
-async function invoke(command: string): Promise<void> {
+async function invoke(command: string, args?: Record<string, unknown>): Promise<void> {
   const api = tauri()
   if (!api) throw new Error('Native Safent runtime is unavailable')
-  await api.core.invoke(command)
+  await api.core.invoke(command, args)
 }
 
 /** "Cancelar": honest per contract §6 — the backend answers with a `failed` event. */
-export function requestCancel(): Promise<void> {
-  return invoke('cancel_bootstrap')
+export function requestCancel(attemptId: number): Promise<void> {
+  return invoke('cancel_bootstrap', { attemptId })
 }
 
 /** "Reintentar" on the one failure screen. */
-export function requestRetry(): Promise<void> {
-  return invoke('retry_bootstrap')
+export function requestRetry(attemptId: number): Promise<void> {
+  return invoke('retry_bootstrap', { attemptId })
 }
 
 export type DiagnosticResult = { status: 'saved' | 'cancelled' }

@@ -40,12 +40,15 @@ function collectElements(): ScreenElements {
 function main(): void {
   const els = collectElements()
   let state: UiState = initialState
+  let attemptId: number | undefined
   render(state, els)
+  els.cancelButton.disabled = true
 
   const apply = (next: UiState): void => {
     const previousKind = state.kind
     state = next
     render(state, els)
+    if (attemptId === undefined) els.cancelButton.disabled = true
     manageFocusOnTransition(previousKind, state, els)
   }
 
@@ -56,13 +59,18 @@ function main(): void {
   }
   const eventError = () => showActionError('No se pudo conectar con el servicio de la aplicación. Cierra y vuelve a abrir Safent.')
   void subscribeToBootstrapState((snapshot) => {
+    attemptId = snapshot.attempt_id
     showActionError('')
     apply(reduceBootstrapSnapshot(state, snapshot))
   }).catch(eventError)
 
-  const cancel = nativeAction(requestCancel, showActionError,
+  const currentAttempt = () => {
+    if (attemptId === undefined) throw new Error('Bootstrap attempt is not available')
+    return attemptId
+  }
+  const cancel = nativeAction(() => requestCancel(currentAttempt()), showActionError,
     'No se pudo solicitar la cancelación. Safent puede seguir preparando tu espacio; comprueba el estado antes de reintentar.')
-  const retry = nativeAction(requestRetry, showActionError,
+  const retry = nativeAction(() => requestRetry(currentAttempt()), showActionError,
     'No se pudo solicitar el reintento. Puedes volver a intentarlo sin perder los detalles del fallo.')
 
   const diagnosticsNote = requireElement('diagnostics-note')
