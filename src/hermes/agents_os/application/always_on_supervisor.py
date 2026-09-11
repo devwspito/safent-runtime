@@ -10,11 +10,13 @@ Aislamiento:
   de infrastructure. Aquí solo dependemos del puerto.
 - Idempotente: aplicar dos veces la misma política no provoca cambios.
 
-Operación `suspend_with_authorization` (FR-040): es la ÚNICA vía
-permitida para suspender el SO. Requiere:
-  1. Operador humano local explícito (firma TOTP del CLI).
+Contrato `suspend_with_authorization` (FR-040): requiere:
+  1. Propietario local autenticado y confirmación humana explícita, sin MFA.
   2. Drain previo (FR-044) — opcional desactivable con `--force`.
-  3. Audit entry firmada antes de invocar `systemctl suspend`.
+El adaptador de entrada debe autenticar al propietario, obtener la confirmación
+y registrar la auditoría antes de llamar a este servicio. El booleano no es una
+credencial ni un permiso que pueda suministrar el agente. Actualmente no hay una
+ruta CLI/UI que invoque este método; no constituye una elevación operativa.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from hermes.agents_os.domain.always_on_policy import (
     AlwaysOnPolicy,
     CriticalService,
     InstallProfile,
+    default_policy_for,
 )
 
 
@@ -108,7 +111,7 @@ class AlwaysOnSupervisor:
         *,
         policy: AlwaysOnPolicy,
         authorizing_human_user_id: UUID,
-        totp_validated: bool,
+        owner_confirmation_validated: bool,
         drain_completed: bool,
         force: bool = False,
     ) -> None:
@@ -116,19 +119,20 @@ class AlwaysOnSupervisor:
 
         Args:
             policy: política activa (debe ser la del nodo).
-            authorizing_human_user_id: UUID del humano que firmó.
-            totp_validated: el CLI validó el TOTP justo antes de invocar.
+            authorizing_human_user_id: UUID del propietario autenticado.
+            owner_confirmation_validated: confirmación comprobada por el adaptador de confianza.
             drain_completed: estado actual del drain (FR-044).
             force: bypass del drain (`hermes suspend --yes --force`).
         """
-        if not totp_validated or authorizing_human_user_id is None:
+        if owner_confirmation_validated is not True or not isinstance(
+            authorizing_human_user_id, UUID
+        ):
             raise SuspendNotAuthorizedError(
-                "suspend requiere TOTP + operador humano local (FR-040)"
+                "suspend requiere confirmación del propietario local (FR-040)"
             )
         if policy.drain_ota_before_promote and not drain_completed and not force:
             raise DrainIncompleteError(
-                "drain incompleto; usa --force solo si entiendes el riesgo "
-                "(FR-044)"
+                "drain incompleto; usa --force solo si entiendes el riesgo (FR-044)"
             )
         self._supervisor.suspend_system()
 
@@ -137,8 +141,4 @@ def supervise_policy_for_profile(
     profile: InstallProfile, *, supervisor: SystemSupervisorPort
 ) -> SupervisorApplicationResult:
     """Helper para boot: aplica la política por defecto del perfil."""
-    from hermes.agents_os.domain.always_on_policy import default_policy_for
-
-    return AlwaysOnSupervisor(supervisor=supervisor).apply(
-        default_policy_for(profile)
-    )
+    return AlwaysOnSupervisor(supervisor=supervisor).apply(default_policy_for(profile))

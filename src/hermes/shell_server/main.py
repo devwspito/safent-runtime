@@ -161,8 +161,9 @@ def _build_audit_tail_writer():
 def _build_prometheus_exporter():
     """Build a PrometheusExporterAdapter with a minimal TelemetryOptInService.
 
-    In production the TelemetryOptInService state is loaded from DB; here we
-    use a minimal in-memory instance (disabled by default per FR-061).
+    This factory currently uses an in-memory instance, disabled on every boot
+    per FR-061. Durable consent and an authenticated enable route are not wired;
+    do not infer a production DB-backed opt-in from this adapter.
 
     Signing key: derived from master.key via HKDF so it is deterministic across
     restarts (the telemetry audit chain is in-memory, but re-derives the same key

@@ -41,24 +41,20 @@ def telemetry_on(signer: AuditHashChainSigner) -> TelemetryOptInService:
     svc = TelemetryOptInService(audit_signer=signer)
     svc.enable(
         human_user_id=uuid4(),
-        totp_validated=True,
+        owner_confirmation_validated=True,
         exporters=frozenset([TelemetryExporter.PROMETHEUS_PUSH]),
     )
     return svc
 
 
 class TestPrometheusExporterAdapter:
-    def test_render_empty_when_telemetry_off(
-        self, telemetry_off: TelemetryOptInService
-    ) -> None:
+    def test_render_empty_when_telemetry_off(self, telemetry_off: TelemetryOptInService) -> None:
         adapter = PrometheusExporterAdapter(telemetry=telemetry_off)
         adapter.record_runtime_state(state="idle")
         # Gate is off — render must return empty string.
         assert adapter.render_textfile() == ""
 
-    def test_render_nonempty_when_telemetry_on(
-        self, telemetry_on: TelemetryOptInService
-    ) -> None:
+    def test_render_nonempty_when_telemetry_on(self, telemetry_on: TelemetryOptInService) -> None:
         adapter = PrometheusExporterAdapter(telemetry=telemetry_on)
         adapter.record_runtime_state(state="running")
         output = adapter.render_textfile()
@@ -66,24 +62,18 @@ class TestPrometheusExporterAdapter:
         assert 'state="running"' in output
         assert "1.0" in output  # current state = 1.0
 
-    def test_active_tasks_recorded(
-        self, telemetry_on: TelemetryOptInService
-    ) -> None:
+    def test_active_tasks_recorded(self, telemetry_on: TelemetryOptInService) -> None:
         adapter = PrometheusExporterAdapter(telemetry=telemetry_on)
         adapter.record_active_tasks(count=3)
         output = adapter.render_textfile()
         assert "hermes_active_tasks" in output
         assert "3.0" in output
 
-    def test_audit_publish_counter_increments(
-        self, telemetry_on: TelemetryOptInService
-    ) -> None:
+    def test_audit_publish_counter_increments(self, telemetry_on: TelemetryOptInService) -> None:
         adapter = PrometheusExporterAdapter(telemetry=telemetry_on)
         adapter.record_audit_publish(count=5)
         adapter.record_audit_publish(count=3)
-        assert (
-            adapter.audit_publish_counter.value() == 8.0
-        )
+        assert adapter.audit_publish_counter.value() == 8.0
 
     def test_landlock_apply_counter_per_capability(
         self, telemetry_on: TelemetryOptInService
