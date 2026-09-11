@@ -9,6 +9,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -16,6 +17,20 @@ from hermes.runtime.model_config import ModelConfig, ManagedProviderUnavailableE
 
 _LOCK = threading.RLock()
 _TABLE = 'managed_llm_policy'
+
+
+@contextmanager
+def local_configuration_write(db_path: Path):
+    """Serialize a local credential commit with signed management changes.
+
+    OAuth can start while local and finish after management is applied. Check
+    at commit time, not only when the login was initiated. Never hold this
+    lock during HTTP polling or other network operations.
+    """
+    with _LOCK:
+        if read_policy(db_path) is not None:
+            raise PermissionError('LLM configuration is managed by Enterprise')
+        yield
 
 
 def read_policy(db_path: Path) -> dict | None:
@@ -115,6 +130,8 @@ def apply_signed_gateway(wiring, bundle_json: str) -> dict:
     if not _check_freshness(bundle.issued_at):
         raise PermissionError('LLM policy expired')
     providers = bundle.payload.providers
+    if len(providers) > 1:
+        raise PermissionError('Community supports at most one managed LLM binding')
     expected_origin = urlparse(association.cloud_endpoint)
     gateway_prefix = expected_origin.path.rstrip('/') + '/v1/inference/'
     for spec in providers:

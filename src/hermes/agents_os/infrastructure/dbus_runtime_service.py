@@ -56,6 +56,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import wraps
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from uuid import UUID
@@ -72,6 +73,17 @@ if TYPE_CHECKING:
     from hermes.tasks.domain.ports import AgentStatePort, WorkQueuePort
 
 logger = logging.getLogger("hermes.agents_os.dbus_runtime_service")
+
+
+def _serialized_local_llm_write(method):
+    """Local synchronous setters commit atomically against signed LLM policy."""
+    @wraps(method)
+    def guarded(self, **kwargs):
+        self._authorize_and_resolve(kwargs['sender_uid'], operation=method.__name__)
+        from hermes.runtime.managed_llm import local_configuration_write
+        with local_configuration_write(self._local_llm_db_path()):
+            return method(self, **kwargs)
+    return guarded
 
 # Suggested default model per NATIVE catalogue provider_id (hermes_cli.auth.
 # PROVIDER_REGISTRY key) — surfaced by list_native_providers() so the UI's
@@ -971,10 +983,9 @@ class DbusRuntimeServiceWiring:
         except Exception as exc:  # noqa: BLE001
             logger.warning("hermes.dbus.migrate_provider.failed: %s", exc)
 
+    @_serialized_local_llm_write
     def add_provider(self, *, draft_json: str, sender_uid: int) -> dict:
         """Crea provider. draft: {kind, alias, default_model, base_url, api_key, set_active}."""
-        self._authorize_and_resolve(sender_uid, operation="add_provider")
-        self._reject_local_llm_mutation()
         if self._provider_repo is None:
             raise RuntimeError("provider_repo no inyectado en el daemon")
         from hermes.shell_server.providers.domain import (  # noqa: PLC0415
@@ -1001,10 +1012,9 @@ class DbusRuntimeServiceWiring:
         self._sync_to_native_provider(saved, api_key, set_active=set_active)
         return self._provider_to_dict(saved)
 
+    @_serialized_local_llm_write
     def update_provider(self, *, provider_id: str, draft_json: str, sender_uid: int) -> dict:
         """Actualiza alias/default_model/base_url/enabled/api_key."""
-        self._authorize_and_resolve(sender_uid, operation="update_provider")
-        self._reject_local_llm_mutation()
         from uuid import UUID as _UUID  # noqa: PLC0415
 
         pid = _UUID(provider_id)
@@ -1033,9 +1043,8 @@ class DbusRuntimeServiceWiring:
         self._sync_to_native_provider(updated, api_key, set_active=set_active)
         return self._provider_to_dict(updated)
 
+    @_serialized_local_llm_write
     def delete_provider(self, *, provider_id: str, sender_uid: int) -> bool:
-        self._authorize_and_resolve(sender_uid, operation="delete_provider")
-        self._reject_local_llm_mutation()
         from uuid import UUID as _UUID  # noqa: PLC0415
 
         provider = self._provider_repo.get(provider_id=_UUID(provider_id))
@@ -1052,9 +1061,16 @@ class DbusRuntimeServiceWiring:
         _clear_engine_runtime_cache()
         return True
 
+    def _local_llm_db_path(self):
+        import os
+        from pathlib import Path
+        if self._provider_repo is not None:
+            return self._provider_repo._db_path
+        return Path(os.environ.get('HERMES_SHELL_DB', '/var/lib/hermes/shell-state.db'))
+
     def _reject_local_llm_mutation(self) -> None:
         from hermes.runtime.managed_llm import read_policy
-        if self._provider_repo is not None and read_policy(self._provider_repo._db_path) is not None:
+        if read_policy(self._local_llm_db_path()) is not None:
             raise PermissionError('LLM configuration is managed by Enterprise')
 
     def apply_managed_llm_gateway(self, *, bundle_json: str, sender_uid: int) -> dict:
@@ -1062,6 +1078,7 @@ class DbusRuntimeServiceWiring:
         from hermes.runtime.managed_llm import apply_signed_gateway
         return apply_signed_gateway(self, bundle_json)
 
+    @_serialized_local_llm_write
     def set_active_provider(self, *, provider_id: str, sender_uid: int) -> dict:
         """Activa un provider — endpoint ÚNICO que la UI llama para CUALQUIER
         fila (custom/SQL o catálogo nativo, ver ProviderRow.handleActivate).
@@ -1072,8 +1089,6 @@ class DbusRuntimeServiceWiring:
         reactivar un provider nativo ya configurado sin volver a pegar la
         api key — ver specs/025-safent-repaso hallazgo #1.
         """
-        self._authorize_and_resolve(sender_uid, operation="set_active_provider")
-        self._reject_local_llm_mutation()
         from uuid import UUID as _UUID  # noqa: PLC0415
 
         try:
@@ -1440,6 +1455,8 @@ class DbusRuntimeServiceWiring:
         import time as _time  # noqa: PLC0415
         import uuid as _uuid  # noqa: PLC0415
 
+        llm_db_path = str(self._local_llm_db_path())
+
         # xAI (SuperGrok): OAuth de NAVEGADOR (loopback PKCE). El daemon levanta
         # un callback server local + construye la authorize URL; la UI la abre en
         # chromium; al volver, el worker intercambia el code y persiste. Port de
@@ -1474,6 +1491,7 @@ class DbusRuntimeServiceWiring:
                     "challenge": challenge, "state": state,
                     "token_endpoint": discovery["token_endpoint"],
                     "discovery": discovery, "error_message": None,
+                    "llm_db_path": llm_db_path,
                 }
             threading.Thread(
                 target=_xai_loopback_worker, args=(sid,), daemon=True,
@@ -1490,6 +1508,7 @@ class DbusRuntimeServiceWiring:
                 _OAUTH_SESSIONS[sid] = {
                     "status": "pending", "provider_id": "openai-codex",
                     "user_code": "", "verification_url": "", "error_message": None,
+                    "llm_db_path": llm_db_path,
                 }
             threading.Thread(
                 target=_codex_oauth_worker, args=(sid,), daemon=True,
@@ -1554,6 +1573,7 @@ class DbusRuntimeServiceWiring:
             "status": "pending",
             "provider_id": "nous",
             "device_code": str(device_data["device_code"]),
+            "llm_db_path": llm_db_path,
             "interval": int(device_data["interval"]),
             "expires_at": _time.time() + int(device_data["expires_in"]),
             "portal_base_url": portal_base_url,
@@ -2754,6 +2774,7 @@ class DbusRuntimeServiceWiring:
         except Exception as exc:  # noqa: BLE001
             return {"op_id": op_id, "status": "unknown", "error_message": str(exc)}
 
+    @_serialized_local_llm_write
     def configure_native_provider(
         self, *, provider_id: str, api_key: str, model: str,
         base_url: str, sender_uid: int, set_active: bool = False,
@@ -2781,8 +2802,6 @@ class DbusRuntimeServiceWiring:
         CUALQUIER provider api-key de la tabla (openai-api, gemini, deepseek,
         groq, mistral, copilot…). Para OAuth/suscripción → start_provider_oauth.
         """
-        self._authorize_and_resolve(sender_uid, operation="configure_native_provider")
-        self._reject_local_llm_mutation()
         try:
             from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
         except Exception as exc:  # noqa: BLE001
@@ -6528,6 +6547,18 @@ _OAUTH_SESSIONS: dict[str, dict] = {}
 _OAUTH_SESSIONS_LOCK = _oauth_threading.Lock()
 
 
+def _oauth_local_commit(session_id: str):
+    """Late callback boundary; session authority was captured by the daemon."""
+    from pathlib import Path
+    from hermes.runtime.managed_llm import local_configuration_write
+    with _OAUTH_SESSIONS_LOCK:
+        sess = _OAUTH_SESSIONS.get(session_id)
+        db_path = sess.get('llm_db_path') if sess else None
+    if not db_path:
+        raise PermissionError('OAuth session has no verified local configuration scope')
+    return local_configuration_write(Path(db_path))
+
+
 def _nous_oauth_poller(session_id: str) -> None:
     """Lleva el device-code de Nous a término y persiste credenciales.
 
@@ -6585,10 +6616,9 @@ def _nous_oauth_poller(session_id: str) -> None:
         full_state = refresh_nous_oauth_from_state(
             auth_state, timeout_seconds=15.0, force_refresh=False
         )
-        persist_nous_credentials(full_state)
-        # NATIVO: fija el provider activo en config.yaml para que el motor
-        # resuelva Nous directo (suscripción), sin vault ni catálogo.
-        _write_hermes_model_config("nous", "hermes-4-405b")
+        with _oauth_local_commit(session_id):
+            persist_nous_credentials(full_state)
+            _write_hermes_model_config("nous", "hermes-4-405b")
         with _OAUTH_SESSIONS_LOCK:
             sess["status"] = "approved"
         logger.info("hermes.dbus.oauth_nous_approved session=%s", session_id[:8])
@@ -6652,17 +6682,18 @@ def _xai_loopback_worker(session_id: str) -> None:
         if not access_token or not refresh_token:
             _fail("xAI: token exchange incompleto"); return
         last_refresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        hauth._save_xai_oauth_tokens(
-            {
-                "access_token": access_token, "refresh_token": refresh_token,
-                "id_token": str(payload.get("id_token", "") or "").strip(),
-                "expires_in": payload.get("expires_in"),
-                "token_type": str(payload.get("token_type") or "Bearer").strip() or "Bearer",
-            },
-            discovery=sess.get("discovery"), redirect_uri=sess["redirect_uri"],
-            last_refresh=last_refresh,
-        )
-        _write_hermes_model_config("xai-oauth", "grok-4")
+        with _oauth_local_commit(session_id):
+            hauth._save_xai_oauth_tokens(
+                {
+                    "access_token": access_token, "refresh_token": refresh_token,
+                    "id_token": str(payload.get("id_token", "") or "").strip(),
+                    "expires_in": payload.get("expires_in"),
+                    "token_type": str(payload.get("token_type") or "Bearer").strip() or "Bearer",
+                },
+                discovery=sess.get("discovery"), redirect_uri=sess["redirect_uri"],
+                last_refresh=last_refresh,
+            )
+            _write_hermes_model_config("xai-oauth", "grok-4")
         with _OAUTH_SESSIONS_LOCK:
             _OAUTH_SESSIONS[session_id]["status"] = "approved"
         logger.info("hermes.dbus.oauth_xai_approved session=%s", session_id[:8])
@@ -6746,16 +6777,17 @@ def _codex_oauth_worker(session_id: str) -> None:
         tokens = tok.json()
         if not tokens.get("access_token"):
             raise RuntimeError("sin access_token")
-        _save_codex_tokens({
-            "access_token": tokens["access_token"],
-            "refresh_token": tokens.get("refresh_token", ""),
-        })
         # Default model comes from the catalog (single source of truth, item 4 /
         # plan.md D-A4) rather than a second hardcoded literal here.
         from hermes.providers.domain.catalog import canonical_for  # noqa: PLC0415
         from hermes.shell_server.providers.domain import ProviderKind  # noqa: PLC0415
         _codex_default_model = canonical_for(ProviderKind.CODEX).default_model or "gpt-6-astra"
-        _write_hermes_model_config("openai-codex", _codex_default_model)
+        with _oauth_local_commit(session_id):
+            _save_codex_tokens({
+                "access_token": tokens["access_token"],
+                "refresh_token": tokens.get("refresh_token", ""),
+            })
+            _write_hermes_model_config("openai-codex", _codex_default_model)
         with _OAUTH_SESSIONS_LOCK:
             _OAUTH_SESSIONS[session_id]["status"] = "approved"
         logger.info("hermes.dbus.oauth_codex_approved session=%s", session_id[:8])
@@ -8497,6 +8529,8 @@ async def _mcp_connect(
                 _os_pv.environ.get("HERMES_SHELL_DB", "/var/lib/hermes/shell-state.db")
             )
             _mc = ActiveProviderService(db_path=_db).resolve()
+            if _mc is not None and _mc.managed:
+                raise PermissionError('Enterprise inference credentials cannot be exported to MCP')
             if _mc is not None:
                 if not resolved_env.get("OPENAI_BASE_URL") and getattr(_mc, "base_url", None):
                     resolved_env["OPENAI_BASE_URL"] = str(_mc.base_url)
