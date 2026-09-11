@@ -89,8 +89,9 @@ ser «mejor esfuerzo» y pasa a **gate duro** del build.
 
 Se **reutiliza** lo que ya existe: `platform_apps_router` (`GET/PUT/DELETE
 /platform-apps`, con reautenticación y cifrado en el bróker) y el panel
-`ConexionesPage` + `ConnectProviderCard`. Única pieza nueva: el campo
-**`developer_token`** de Google Ads, hoy inexistente. El puente `/ads/` es la
+`ConexionesPage` + `ConnectProviderCard`. Google utiliza el proyecto Cloud del
+cliente OAuth para asignar acceso; no se añade ningún developer token (retirado
+el 9-sep-2026). El onboarding debe explicar los bloqueos de acceso. El puente `/ads/` es la
 capa anticorrupción: Safent no modela credenciales de plataformas.
 
 ## Cross-cutting concerns

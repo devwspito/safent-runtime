@@ -279,7 +279,7 @@ punto de no retorno; se poda dejando la última buena.
 ## Migration plan (traspaso a `database-engineer`)
 
 Ninguna migración de base de datos: esta entrega no toca el esquema del daemon ni
-el de safent-ads salvo un campo. Cambios de forma, en modo expandir → contraer:
+el de safent-ads. Cambios de forma, en modo expandir → contraer:
 
 1. **Expandir** — `state.json` nace con `schema_version: 1`. Una instalación sin
    fichero se trata como `fresh` y el reconciliador la converge (adopción de
@@ -290,9 +290,9 @@ el de safent-ads salvo un campo. Cambios de forma, en modo expandir → contraer
 3. **Expandir** — `GET /api/v1/system/update` añade `engine_digest`,
    `companion_digest` y `pieces` **sin quitar** `current_version` /
    `latest_version` / `update_available`. Los consumidores viejos siguen leyendo.
-4. **Expandir (safent-ads)** — `SetGoogleAppCredentialsRequest` y
-   `GoogleAppCredentialsInput` añaden `developer_token` **opcional**; el bróker lo
-   cifra en el mismo almacén y lo devuelve enmascarado. Cuando el panel lo exija,
-   **contraer** a obligatorio en una entrega posterior.
+4. **Corrección (11-sep-2026, safent-ads)** — `SetGoogleAppCredentialsRequest` y
+   `GoogleAppCredentialsInput` conservan solo el cliente OAuth y la gestora
+   opcional. Google retiró los developer tokens el 9-sep-2026: no se añade,
+   cifra ni devuelve ese campo, tampoco como compatibilidad opcional.
 5. **Contraer (más adelante, no aquí)** — retirar `vendor.env` como camino
    documentado una vez la UI cubra las cinco credenciales.

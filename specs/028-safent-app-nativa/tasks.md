@@ -189,17 +189,20 @@ enum y escribe/lee el fichero (condición del Principio 0).
 
 ## Bloque 4 — Onboarding de Ads (ADS)
 
-### T021 [US2 de 029] — `developer_token` de Google Ads de punta a punta · `backend-engineer` + `frontend-engineer`
-**Repo ADS.** Es el **único** hueco real: todo lo demás del onboarding del vendor ya
-existe (`platform_apps_router` + `ConexionesPage` + `ConnectProviderCard`) y se
-**reutiliza**, no se duplica.
+### T021 [US2 de 029] — Acceso Google Ads por proyecto Cloud, sin token retirado
+**Corregida el 11-sep-2026. Repo ADS.** La instrucción anterior de añadir un
+developer token era incorrecta. Se elimina de formulario, contrato y SDK;
+el onboarding existente se reutiliza, no se duplica.
 - `src/safent_ads/accounts/presentation/platform_apps_payloads.py`,
   `src/safent_ads/accounts/application/platform_apps_ports.py`,
   `src/safent_ads/broker/application/app_credentials_service.py`,
   `panel/src/api/schemas/platformApps.ts`, `panel/src/components/connections/ConnectProviderCard.tsx`
-- Opcional en el esquema (expandir), cifrado en el bróker, devuelto **enmascarado**
+- Cliente OAuth del proyecto Cloud; gestora solo si aplica. Ningún token retirado.
+- Un rechazo `CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION` debe explicar dónde
+  gestionar el acceso en Google Cloud, sin prometer aprobación automática.
 - **Test**: `tests/integration/accounts/test_platform_apps_router.py` +
-  `tests/unit/accounts/presentation/test_platform_apps_payloads.py` — el token **nunca** vuelve en claro.
+  `tests/unit/accounts/presentation/test_platform_apps_payloads.py` — el campo
+  retirado se rechaza y el SDK no lo envía; errores de acceso visibles sin secretos.
 
 ### T022 [P] [US2 de 029] — Estado de onboarding legible desde el puente · `backend-engineer`
 **Repo ADS.** Qué falta para `ready`: credenciales del vendor por plataforma y

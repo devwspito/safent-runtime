@@ -204,7 +204,7 @@ alternativas rechazadas viven en `../028-safent-app-nativa/research.md`.
 ### CL-001 — alcance del onboarding: **incluye las credenciales del vendor**
 
 La UI recoge **las credenciales de la app desarrolladora del vendor** (cliente OAuth
-de Google Cloud con su **developer token**, y app de Meta con `app_id`/`app_secret`)
+de Google Cloud y app de Meta con `app_id`/`app_secret`)
 **y** conecta las cuentas por OAuth. Nunca por `vendor.env`, nunca por entorno,
 nunca por línea de comandos.
 
@@ -215,9 +215,11 @@ onboarding lo **encadena**, no lo duplica.
 
 - **FR-010 (revisado)**: el onboarding DEBE recoger en la UI las credenciales del
   vendor **y** conectar las cuentas, reutilizando el panel existente del compañero.
-- **Hueco real detectado**: no existe campo **`developer_token` de Google Ads** en el
-  esquema de credenciales del vendor. Es la **única** pieza nueva que 029 necesita en
-  safent-ads (tarea T021 de `../028-safent-app-nativa/tasks.md`).
+- **Corrección del 11-sep-2026**: Google retiró los developer tokens el 9-sep-2026.
+  No se piden, almacenan ni envían, ni siquiera como campo opcional. El nivel de
+  acceso depende del proyecto propietario del cliente OAuth. T021 debe comprobar
+  este contrato y explicar el bloqueo de acceso a cuentas reales, no añadir secretos.
+  Fuente: [migración oficial](https://developers.google.com/google-ads/api/docs/api-policy/developer-token).
 
 ### CL-002 — «Instalar» **no** reinicia Safent en el caso normal
 

@@ -92,8 +92,9 @@ a **`listo`** · las herramientas de anuncios del agente aparecen al listarlas.
 
 Dentro del panel, sin salir de la ventana de Safent:
 
-1. Introducir el cliente OAuth de Google Cloud (`client_id`, `client_secret`, el
-   **developer token** y, si aplica, el `login_customer_id`).
+1. Introducir el cliente OAuth de Google Cloud (`client_id`, `client_secret` y,
+   solo si se opera mediante una gestora, `login_customer_id`). No se solicita
+   developer token. Verificar acceso a cuentas reales en el mismo proyecto Cloud.
 2. Introducir la app de Meta (`app_id`, `app_secret`).
 3. Conectar **una** cuenta por OAuth de cada plataforma.
 

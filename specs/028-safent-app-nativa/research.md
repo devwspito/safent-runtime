@@ -313,18 +313,19 @@ hallazgo que cambia la condición exacta del ayudante.
   duplica.
 - **Por qué**: reutilizar antes de escribir. El camino de `vendor.env` que hoy
   documenta `provision.sh` queda relegado a operadores; la UI es el camino normal.
-- **Hueco real detectado**: no existe campo **`developer_token` de Google Ads** en
-  `SetGoogleAppCredentialsRequest` ni en `GoogleAppCredentialsInput` — hoy sólo
-  `client_id`, `client_secret`, `login_customer_id`. Sin el developer token la API
-  de Google Ads no responde. Es la **única** pieza nueva que 029 necesita en
-  safent-ads.
+- **Corrección del 11-sep-2026**: la conclusión anterior sobre un token faltante era
+  incorrecta. Google retiró ese mecanismo el 9-sep-2026. Las credenciales son
+  `client_id`, `client_secret` y `login_customer_id` solo cuando se opera mediante
+  una cuenta gestora. El acceso se gestiona en el proyecto Google Cloud del cliente
+  OAuth; no añadir un token opcional ni obligatorio.
 - **Descartadas**: *limitarse a conectar cuentas* — dejaría al dueño editando
   `vendor.env` a mano en el host, prohibido por A-3 · *recoger las credenciales en
   la UI de Safent y escribirlas al host por el agente* — ampliaría la superficie
   de escritura de secretos en el host justo donde el propio riesgo de 029 avisa.
-- **Riesgos**: el developer token es un secreto nuevo; entra por el mismo camino
-  cifrado que los demás y nunca sale enmascarado a medias.
-- **Links**: 029 CL-001/FR-010/NFR-003.
+- **Riesgos**: no confundir OAuth completado con acceso autorizado a cuentas reales.
+  `CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION` debe tener un mensaje accionable.
+- **Links**: 029 CL-001/FR-010/NFR-003;
+  [migración oficial de Google](https://developers.google.com/google-ads/api/docs/api-policy/developer-token).
 
 ## Decisión: 029 CL-002 — «Instalar» sin reiniciar Safent
 
