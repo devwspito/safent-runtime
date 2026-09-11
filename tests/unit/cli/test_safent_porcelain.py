@@ -622,12 +622,14 @@ def _fake_codesign(fake_bin_dir: Path, *, verify_ok: bool, cdhash: str) -> None:
 
 
 def _fake_ps(fake_bin_dir: Path, output: str) -> None:
-    """Fakes the REAL `ps` binary `_foreign_engine_helper` (MAC3-07) shells
-    out to — `output` is exactly what `ps -axo pid=,comm=,args=` would
-    print: one process per line, "<pid> <comm> <args...>". Ignores its own
-    argv (the fake never needs to distinguish invocations, unlike
-    `_FAKE_PODMAN`) since `_foreign_engine_helper` only ever calls `ps` one
-    way."""
+    """Fakes the REAL `ps` binary `_foreign_engine_helper` (MAC3-07,
+    MAC4-03) shells out to — `output` is exactly what `ps -axo args=`
+    would print: one process per line, "<full-path> <rest-of-args...>",
+    no pid column (MAC4-03: combining `comm=` with any other field
+    truncates it to 16 characters on real macOS `ps` — dropped entirely).
+    Ignores its own argv (the fake never needs to distinguish invocations,
+    unlike `_FAKE_PODMAN`) since `_foreign_engine_helper` only ever calls
+    `ps` one way."""
     ps = fake_bin_dir / "ps"
     ps.write_text(f"#!/bin/sh\ncat <<'PSEOF'\n{output}\nPSEOF\n")
     ps.chmod(0o755)
@@ -1567,7 +1569,14 @@ class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
     `/opt/podman/bin/gvproxy`/`vfkit` actually serving it (different
     sha256) — no bundled containers.conf steered podman's helper
     resolution. `cmd_ensure_machine` must now catch this and fail loudly
-    instead of shipping silently."""
+    instead of shipping silently.
+
+    MAC4-03 (verificacion-mac-4.md): the ORIGINAL guard was dead code on a
+    real Mac — `ps -o comm=` truncates to 16 characters once combined with
+    any other field, and the expected bundled path had a spurious `bin/`
+    component the REAL .app never has (it ships its runtime FLAT). Both
+    fixed; these fixtures now reflect the FLAT layout and a `ps -axo
+    args=`-only shape (no pid column, no truncation)."""
 
     def test_a_foreign_gvproxy_serving_our_own_machine_fails_the_machine_stage(
         self, tmp_path: Path, fake_bin_dir: Path
@@ -1578,15 +1587,14 @@ class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
         pinned = pinned_dir / "podman"
         pinned.write_text(_FAKE_PODMAN)
         pinned.chmod(0o755)
-        (pinned_dir / "bin").mkdir()
-        (pinned_dir / "bin" / "gvproxy").write_bytes(b"bundled gvproxy")
-        (pinned_dir / "bin" / "vfkit").write_bytes(b"bundled vfkit")
+        (pinned_dir / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "vfkit").write_bytes(b"bundled vfkit")
         # The OWNER's own podman.io install — a DIFFERENT path — is what is
         # actually running for OUR machine (safent-test-engine).
         _fake_ps(
             fake_bin_dir,
-            "84104 /opt/podman/bin/gvproxy --listen safent-test-engine\n"
-            "84106 /opt/podman/bin/vfkit --machine safent-test-engine",
+            "/opt/podman/bin/gvproxy --listen safent-test-engine\n"
+            "/opt/podman/bin/vfkit --machine safent-test-engine",
         )
 
         podman_log = tmp_path / "podman.log"
@@ -1612,6 +1620,44 @@ class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
         assert "/opt/podman/bin/gvproxy" in failed["detail"]
         assert failed["retryable"] is False
 
+    def test_a_foreign_gvproxy_under_a_path_longer_than_16_characters_is_still_caught(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """MAC4-03's exact reproduction on the real Mac: both the bundled
+        AND the foreign path happened to be longer than 16 characters
+        ("/opt/podman/bin/" and "/private/tmp/saf" themselves already
+        measure exactly 16) — a fixture whose comparison only "worked" on
+        short paths would hide the same class of bug again."""
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "a-rather-long-bundle-directory-name-on-purpose"
+        pinned_dir.mkdir(parents=True)
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        (pinned_dir / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "vfkit").write_bytes(b"bundled vfkit")
+        foreign = "/Users/someone/.local/share/containers/podman/bin/gvproxy"
+        assert len(foreign) > 16
+        _fake_ps(fake_bin_dir, f"{foreign} --listen safent-test-engine")
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 16, f"stdout={result.stdout}\nstderr={result.stderr}"
+        failed = _parse_ndjson(result.stdout)[-1]
+        assert failed["code"] == "machine_start_failed"
+        assert foreign in failed["detail"], failed["detail"]
+
     def test_the_bundled_gvproxy_serving_our_own_machine_passes(
         self, tmp_path: Path, fake_bin_dir: Path
     ) -> None:
@@ -1621,14 +1667,13 @@ class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
         pinned = pinned_dir / "podman"
         pinned.write_text(_FAKE_PODMAN)
         pinned.chmod(0o755)
-        (pinned_dir / "bin").mkdir()
-        (pinned_dir / "bin" / "gvproxy").write_bytes(b"bundled gvproxy")
-        (pinned_dir / "bin" / "vfkit").write_bytes(b"bundled vfkit")
-        # The comm path matches the BUNDLED one exactly — no problem.
+        (pinned_dir / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "vfkit").write_bytes(b"bundled vfkit")
+        # The comm path matches the BUNDLED one exactly (flat, no bin/) — no problem.
         _fake_ps(
             fake_bin_dir,
-            f"84104 {pinned_dir}/bin/gvproxy --listen safent-test-engine\n"
-            f"84106 {pinned_dir}/bin/vfkit --machine safent-test-engine",
+            f"{pinned_dir}/gvproxy --listen safent-test-engine\n"
+            f"{pinned_dir}/vfkit --machine safent-test-engine",
         )
 
         podman_log = tmp_path / "podman.log"
@@ -1661,10 +1706,9 @@ class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
         pinned = pinned_dir / "podman"
         pinned.write_text(_FAKE_PODMAN)
         pinned.chmod(0o755)
-        (pinned_dir / "bin").mkdir()
-        (pinned_dir / "bin" / "gvproxy").write_bytes(b"bundled gvproxy")
-        (pinned_dir / "bin" / "vfkit").write_bytes(b"bundled vfkit")
-        _fake_ps(fake_bin_dir, "1 /sbin/launchd\n2 /usr/libexec/something-unrelated")
+        (pinned_dir / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "vfkit").write_bytes(b"bundled vfkit")
+        _fake_ps(fake_bin_dir, "/sbin/launchd\n/usr/libexec/something-unrelated")
 
         podman_log = tmp_path / "podman.log"
         machines_state = tmp_path / "machines.state"

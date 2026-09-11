@@ -270,29 +270,41 @@ _ensure_machine() {
 
 # MAC3-07 (verificacion-mac-3.md, MAC-07/MAC2-13 repeated unfixed): reports
 # the full path of a gvproxy/vfkit process serving THE MACHINE NAMED $1
-# whose path is NOT the one bundled at $_podman_bundle_dir/bin/<name> —
-# empty when nothing matching is running yet, when there is no bundle to
-# compare against (bare terminal install), or when every match found IS the
+# whose path is NOT the one bundled at $_podman_bundle_dir/<name> — empty
+# when nothing matching is running yet, when there is no bundle to compare
+# against (bare terminal install), or when every match found IS the
 # bundled one. Only ever meaningful on macOS with the pinned podman —
 # guarded exactly like _ensure_machine/cmd_ensure_machine above.
-# `ps -axo pid=,comm=,args=` (never /proc: Darwin-only) — `comm` on macOS is
-# the process's own full invoked path, exactly what the verification report
-# used by hand (`ps -o pid=,comm= -p <pid>`) to catch this live; `args` is
-# scanned for the machine's OWN name so the OWNER's own separate machine
-# (if one happens to be running too) can never produce a false positive.
+# MAC4-03 (verificacion-mac-4.md): two defects in the ORIGINAL version, both
+# reproduced live against the real Mac's own processes:
+#   1. `comm=` TRUNCATES to 16 characters the instant it shares a `ps -o`
+#      spec with ANY other field ("/opt/podman/bin/" and "/private/tmp/saf"
+#      each measure exactly 16) — the guard's `case` never matched a
+#      gvproxy/vfkit pattern at all, so it always returned empty, a dead
+#      guard. `args=` alone carries the full invocation, no such limit;
+#      the verification report's own manual check that DID see the full
+#      path (`ps -o pid=,comm= -p <pid>`) only ever combined comm with
+#      pid, never with args — that is why it worked there but not here.
+#   2. The expected path was "$_podman_bundle_dir/bin/<name>" — but the
+#      REAL .app ships its runtime FLAT (`Contents/Resources/runtime/
+#      gvproxy`, confirmed via `ls`), never under a bin/ subdirectory
+#      (Tauri's bundle.resources glob flattens the staging tree's own
+#      bin/ at build time, same as podman itself). Left unfixed, fixing
+#      defect 1 alone would have made the guard flag the LEGITIMATE
+#      bundled helper as foreign and block every single boot.
 # Best-effort: `ps` failing/being unavailable reports "nothing found",
 # never blocks a healthy machine from starting.
 _foreign_engine_helper() {
   [ "$RTN" = podman ] && [ "$OS" = Darwin ] && [ -n "${_podman_bundle_dir:-}" ] || return 0
   _machine="$1"
   _ps_tmp="$(mktemp)" || return 0
-  ps -axo pid=,comm=,args= >"$_ps_tmp" 2>/dev/null || true
+  ps -axo args= >"$_ps_tmp" 2>/dev/null || true
   _found=""
   while IFS= read -r _line; do
-    _comm="$(printf '%s\n' "$_line" | awk '{print $2}')"
+    _comm="$(printf '%s\n' "$_line" | awk '{print $1}')"
     case "$_comm" in
-      */gvproxy|gvproxy) _want="$_podman_bundle_dir/bin/gvproxy" ;;
-      */vfkit|vfkit) _want="$_podman_bundle_dir/bin/vfkit" ;;
+      */gvproxy|gvproxy) _want="$_podman_bundle_dir/gvproxy" ;;
+      */vfkit|vfkit) _want="$_podman_bundle_dir/vfkit" ;;
       *) continue ;;
     esac
     case "$_line" in *"$_machine"*) ;; *) continue ;; esac
