@@ -156,23 +156,29 @@ def test_legacy_unknown_and_other_recipient_never_emit(db):
     ]
 
 
-def test_terminal_regression_and_task_rebinding_fail_closed(db):
+@pytest.mark.parametrize("violation", ["terminal", "identity"])
+def test_terminal_regression_and_task_rebinding_fail_closed(db, violation):
     submit(db)
     task(db, "completed")
     collect(db)
     original = events(db)
-    db[1].execute("UPDATE agent_tasks SET status='pending'")
-    db[1].commit()
-    with pytest.raises(ValueError, match="terminal"):
-        collect(db)
+    if violation == "terminal":
+        db[1].execute("UPDATE agent_tasks SET status='pending'")
+        db[1].commit()
+    else:
+        task(db, "completed", "task-2")
+        db[1].execute("UPDATE pending_delegations SET task_id='task-2'")
+        db[1].commit()
+    assert collect(db) == 0
     assert events(db) == original
-    db[1].execute("UPDATE agent_tasks SET status='completed'")
-    db[1].execute("UPDATE pending_delegations SET task_id='task-2'")
-    db[1].commit()
-    task(db, "completed", "task-2")
-    with pytest.raises(ValueError, match="identity"):
-        collect(db)
-    assert events(db) == original
+    assert db[1].execute("SELECT reason FROM delegation_status_quarantine").fetchone() == (
+        "terminal_regressed" if violation == "terminal" else "execution_changed",
+    )
+    # A conflict never rolls back or starves an unrelated request.
+    submit(db, "request-2")
+    assert collect(db) == 1
+    assert collect(db) == 0
+    assert len(events(db)) == 2
 
 
 def test_concurrent_collectors_persist_one_sequence(db):
@@ -243,6 +249,94 @@ def test_bounded_flush_and_encoded_request_id(db, monkeypatch):
     assert post.call_count == 8
     assert post.call_args_list[0].args[0].endswith("/00%2Frequest/status")
     assert flush(db) == 4
+
+
+@pytest.mark.parametrize("failure", [404, 409, 422, 500, "timeout", "bad_receipt"])
+def test_one_bad_request_never_blocks_neighbor_and_retains_original(db, monkeypatch, failure):
+    submit(db)
+    submit(db, "request-2")
+    collect(db)
+    original = events(db)
+
+    def respond(url, **kwargs):
+        if "request-1/" in url:
+            if failure == "timeout":
+                raise httpx.ReadTimeout("PRIVATE response")
+            if failure == "bad_receipt":
+                return httpx.Response(200, json={"accepted": True})
+            return httpx.Response(failure)
+        return receipt(url, **kwargs)
+
+    post = Mock(side_effect=respond)
+    monkeypatch.setattr(ds.httpx, "post", post)
+    assert flush(db) == 1
+    assert post.call_count == 2
+    assert events(db) == original
+    assert db[1].execute(
+        "SELECT delivered FROM delegation_status_outbox ORDER BY request_id"
+    ).fetchall() == [(0,), (1,)]
+    permanent = failure in (409, 422)
+    assert db[1].execute("SELECT COUNT(*) FROM delegation_status_quarantine").fetchone() == (
+        int(permanent),
+    )
+    post.side_effect = receipt
+    assert flush(db) == (0 if permanent else 1)
+
+
+@pytest.mark.parametrize("code", [401, 403, 429])
+def test_sender_failures_stop_batch_without_quarantining_request(db, monkeypatch, code):
+    submit(db)
+    submit(db, "request-2")
+    post = Mock(return_value=httpx.Response(code))
+    monkeypatch.setattr(ds.httpx, "post", post)
+    assert flush(db) == 0
+    assert post.call_count == 1
+    assert db[1].execute("SELECT COUNT(*) FROM delegation_status_quarantine").fetchone() == (0,)
+
+
+def test_failure_rotation_survives_reopen_and_exceeds_first_batch(db, monkeypatch):
+    for n in range(10):
+        submit(db, f"{n:02d}")
+    post = Mock(return_value=httpx.Response(500))
+    monkeypatch.setattr(ds.httpx, "post", post)
+    assert flush(db) == 0
+    first = {call.kwargs["json"]["event_id"] for call in post.call_args_list}
+    assert len(first) == 8
+    post.reset_mock()
+    assert flush(db) == 0
+    next_ids = {call.kwargs["json"]["event_id"] for call in post.call_args_list}
+    assert len(first | next_ids) == 10
+
+
+def test_each_request_sends_oldest_pending_sequence_before_next(db, monkeypatch):
+    submit(db)
+    collect(db)
+    task(db)
+    collect(db)
+    submit(db, "request-2")
+    post = Mock(side_effect=receipt)
+    monkeypatch.setattr(ds.httpx, "post", post)
+    assert flush(db) == 2
+    assert [call.kwargs["json"]["sequence"] for call in post.call_args_list] == [1, 1]
+    assert flush(db) == 1
+    assert post.call_args.kwargs["json"]["sequence"] == 2
+
+
+def test_quarantine_survives_restore_without_erasing_original_evidence(db):
+    submit(db)
+    task(db, "completed")
+    collect(db)
+    original = events(db)
+    db[1].execute("UPDATE agent_tasks SET status='pending'")
+    db[1].commit()
+    assert collect(db) == 0
+    db[1].execute("UPDATE agent_tasks SET status='completed'")
+    db[1].commit()
+    assert collect(db) == 0
+    assert events(db) == original
+    assert db[1].execute("SELECT reason FROM delegation_status_quarantine").fetchone() == (
+        "terminal_regressed",
+    )
 
 
 def test_legacy_schema_migration_preserves_unknown_recipient(tmp_path):

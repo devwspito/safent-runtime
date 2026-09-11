@@ -18,12 +18,23 @@ const filters: [Filter, string][] = [['all', 'Todas'], ['active', 'En curso'], [
 const needsAttention = (status: string) => ['failed', 'pending_approval', 'rejected'].includes(status)
 const date = (value?: string | null) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('es-ES', { dateStyle: 'medium', timeStyle: 'short' }) : 'Sin fecha confirmada'
 const optionalText = (value: unknown) => value == null || typeof value === 'string'
+const syncReasons: Record<string, string> = {
+  recipient_changed: 'Ha cambiado la identidad de la instancia destinataria.',
+  execution_changed: 'El encargo aparece vinculado a otra ejecución.',
+  terminal_regressed: 'El estado no coincide con un resultado final ya registrado.',
+  sequence_exhausted: 'Se ha alcanzado el límite de eventos de este encargo.',
+  remote_conflict: 'Enterprise ha rechazado un evento por conflicto o formato.',
+  unknown_conflict: 'Hay una inconsistencia en el historial de sincronización.',
+}
 function validTask(task: TaskDashboardItem) {
   return task && typeof task.task_id === 'string' && task.task_id.length > 0
     && typeof task.label === 'string' && Object.prototype.hasOwnProperty.call(statuses, task.status)
     && ['local', 'enterprise'].includes(task.source)
     && [task.requested_by, task.created_at, task.updated_at, task.conversation_id, task.result].every(optionalText)
     && (task.approval_ids === undefined || Array.isArray(task.approval_ids) && task.approval_ids.every(id => typeof id === 'string'))
+    && (task.enterprise_sync === undefined || task.source === 'enterprise' && task.enterprise_sync
+      && (task.enterprise_sync.state === 'pending' || task.enterprise_sync.state === 'blocked'
+        && Object.prototype.hasOwnProperty.call(syncReasons, task.enterprise_sync.reason)))
 }
 
 export default function TasksView() {
@@ -81,7 +92,7 @@ function TaskActivity() {
   const tasks = data?.tasks ?? []
   const selected = tasks.find(task => task.task_id === selectedId)
   const filtered = tasks.filter(task => (filter === 'all' || filter === 'active' && ['pending', 'in_progress'].includes(task.status)
-    || filter === 'attention' && needsAttention(task.status) || filter === 'completed' && task.status === 'completed')
+    || filter === 'attention' && (needsAttention(task.status) || task.enterprise_sync?.state === 'blocked') || filter === 'completed' && task.status === 'completed')
     && `${task.label} ${task.requested_by ?? ''}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
   const pending = selected ? approvals.approvals.filter(item => selected.approval_ids?.includes(item.proposal_id)) : approvals.approvals
   async function openConversation() {
@@ -106,11 +117,13 @@ function TaskActivity() {
           {!filtered.length && <div className={styles.empty}><CheckCheck size={24} aria-hidden /><p>{tasks.length ? 'No hay tareas que coincidan con este filtro.' : 'Todavía no hay tareas registradas.'}</p></div>}
           {filtered.map(task => <button key={task.task_id} className={styles.row} aria-pressed={selectedId === task.task_id} disabled={opening} onClick={() => { setSelectedId(task.task_id); setChatError(false) }}>
             <Circle size={13} className={styles.state} data-status={task.status} aria-hidden />
-            <span className={styles.taskText}><strong>{task.label}</strong><span>{task.source === 'enterprise' ? 'Enterprise' : 'Local'}{task.requested_by ? ` · ${task.requested_by}` : ''}</span></span>
+            <span className={styles.taskText}><strong>{task.label}</strong><span>{task.source === 'enterprise' ? 'Enterprise' : 'Local'}{task.requested_by ? ` · ${task.requested_by}` : ''}{task.enterprise_sync?.state === 'blocked' ? ' · Sin sincronizar' : ''}</span></span>
             <span className={styles.status}>{statuses[task.status]}</span><ChevronRight size={14} aria-hidden />
           </button>)}
         </section>
         {selected && <aside className={styles.detail} aria-label="Detalle de tarea"><div className={styles.detailHead}><span>{statuses[selected.status]}</span><button onClick={() => setSelectedId(null)} disabled={opening} aria-label="Cerrar detalle">Cerrar</button></div><h2>{selected.label}</h2><dl><div><dt>Origen</dt><dd>{selected.source === 'enterprise' ? 'Enterprise' : 'Esta instancia'}</dd></div>{selected.requested_by && <div><dt>Encargada por</dt><dd>{selected.requested_by}</dd></div>}<div><dt>Creada</dt><dd>{date(selected.created_at)}</dd></div><div><dt>Última actualización</dt><dd>{date(selected.updated_at)}</dd></div></dl>
+          {selected.enterprise_sync?.state === 'blocked' && <div className={styles.warning} role="status"><strong>El estado no se está sincronizando con Enterprise.</strong><p>{syncReasons[selected.enterprise_sync.reason]} Los eventos se conservan para revisión. Esto no modifica la ejecución ni sus aprobaciones; no repitas la tarea para corregirlo.</p></div>}
+          {selected.enterprise_sync?.state === 'pending' && <p className={styles.hint} role="status">Hay estados pendientes de enviar a Enterprise. Se reintentará automáticamente.</p>}
           <h3>Resultado</h3><div className={styles.result}>{selected.result || (selected.status === 'completed' ? 'La ejecución figura completada, pero todavía no hay un resultado disponible aquí.' : 'El resultado aparecerá cuando el agente lo entregue.')}</div>
           {selected.conversation_id && <Button size="sm" onClick={() => void openConversation()} disabled={error || loading || opening}><Clock3 size={14} aria-hidden />{opening ? 'Abriendo…' : 'Abrir conversación'}</Button>}
           {chatError && <p role="alert">No se pudo abrir la conversación. El encargo se conserva.</p>}

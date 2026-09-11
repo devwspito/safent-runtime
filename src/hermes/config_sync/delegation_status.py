@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote
@@ -39,6 +40,16 @@ CREATE TABLE IF NOT EXISTS delegation_status_outbox (
 );
 CREATE INDEX IF NOT EXISTS delegation_status_to_send
  ON delegation_status_outbox(recipient_instance_id,delivered,request_id,sequence);
+CREATE TABLE IF NOT EXISTS delegation_status_quarantine (
+ request_id TEXT PRIMARY KEY,
+ recipient_instance_id TEXT NOT NULL,
+ reason TEXT NOT NULL,
+ detected_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS delegation_status_delivery (
+ event_id TEXT PRIMARY KEY,
+ last_attempt REAL NOT NULL
+);
 """
 
 
@@ -47,6 +58,15 @@ def _connect(path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+def _quarantine(conn: sqlite3.Connection, row: sqlite3.Row, reason: str) -> None:
+    """Preserve the first conflict and every original event; never retry effects."""
+    conn.execute(
+        "INSERT OR IGNORE INTO delegation_status_quarantine "
+        "(request_id,recipient_instance_id,reason,detected_at) VALUES(?,?,?,?)",
+        (row["request_id"], row["recipient_instance_id"], reason, time.time()),
+    )
 
 
 def collect_status_events(path: Path, *, instance_id: str) -> int:
@@ -60,7 +80,8 @@ def collect_status_events(path: Path, *, instance_id: str) -> int:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             """WITH observed AS (
-                SELECT d.message_id AS request_id,d.to_instance_id,d.task_id,
+                SELECT d.message_id AS request_id,
+                  d.to_instance_id AS recipient_instance_id,d.task_id,
                   CASE d.status
                     WHEN 'pending' THEN 'awaiting_approval'
                     WHEN 'rejected' THEN 'rejected'
@@ -80,25 +101,32 @@ def collect_status_events(path: Path, *, instance_id: str) -> int:
             SELECT o.*,s.sequence AS previous_sequence,s.status AS previous_status,
                 s.task_id AS previous_task_id,s.recipient_instance_id AS previous_recipient
             FROM observed o LEFT JOIN delegation_status_state s ON s.request_id=o.request_id
-            WHERE o.observed_status IS NOT NULL AND (
+            WHERE NOT EXISTS (
+                SELECT 1 FROM delegation_status_quarantine q WHERE q.request_id=o.request_id
+            ) AND o.observed_status IS NOT NULL AND (
                 s.request_id IS NULL OR s.status<>o.observed_status
                 OR COALESCE(s.task_id,'')<>COALESCE(o.task_id,'')
             ) ORDER BY o.request_id LIMIT ?""",
             (instance_id, _COLLECT_LIMIT),
         ).fetchall()
+        collected = 0
         for row in rows:
+            reason = None
             if row["previous_recipient"] and row["previous_recipient"] != instance_id:
-                raise ValueError("delegation recipient changed")
-            if row["previous_task_id"] and row["previous_task_id"] != row["task_id"]:
-                raise ValueError("delegation execution identity changed")
-            if (
+                reason = "recipient_changed"
+            elif row["previous_task_id"] and row["previous_task_id"] != row["task_id"]:
+                reason = "execution_changed"
+            elif (
                 row["previous_status"] in _TERMINAL
                 and row["previous_status"] != row["observed_status"]
             ):
-                raise ValueError("terminal delegation regressed")
+                reason = "terminal_regressed"
             sequence = (row["previous_sequence"] or 0) + 1
             if sequence > _MAX_SEQUENCE:
-                raise ValueError("delegation sequence exhausted")
+                reason = reason or "sequence_exhausted"
+            if reason:
+                _quarantine(conn, row, reason)
+                continue
             event_id = str(uuid4())
             event = {
                 "event_id": event_id,
@@ -120,8 +148,9 @@ def collect_status_events(path: Path, *, instance_id: str) -> int:
                 "sequence=excluded.sequence,status=excluded.status,task_id=excluded.task_id",
                 (row["request_id"], instance_id, sequence, row["observed_status"], row["task_id"]),
             )
+            collected += 1
         conn.execute("COMMIT")
-        return len(rows)
+        return collected
     except BaseException:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
@@ -148,14 +177,28 @@ def push_status_events(
     conn = _connect(path)
     try:
         rows = conn.execute(
-            "SELECT * FROM delegation_status_outbox WHERE recipient_instance_id=? AND delivered=0 "
-            "ORDER BY request_id,sequence LIMIT ?",
+            """SELECT o.* FROM delegation_status_outbox o
+            LEFT JOIN delegation_status_delivery a ON a.event_id=o.event_id
+            WHERE o.recipient_instance_id=? AND o.delivered=0
+              AND NOT EXISTS (SELECT 1 FROM delegation_status_quarantine q
+                              WHERE q.request_id=o.request_id)
+              AND NOT EXISTS (SELECT 1 FROM delegation_status_outbox prior
+                              WHERE prior.request_id=o.request_id AND prior.delivered=0
+                              AND prior.sequence<o.sequence)
+            ORDER BY COALESCE(a.last_attempt,0),o.request_id,o.sequence LIMIT ?""",
             (instance_id, _SEND_LIMIT),
         ).fetchall()
         delivered = 0
         for row in rows:
             if not is_current():
                 break
+            # Durable fair rotation: a dead endpoint/request cannot occupy the
+            # first eight slots forever. One oldest event per request per pass.
+            conn.execute(
+                "INSERT INTO delegation_status_delivery(event_id,last_attempt) VALUES(?,?) "
+                "ON CONFLICT(event_id) DO UPDATE SET last_attempt=excluded.last_attempt",
+                (row["event_id"], time.time()),
+            )
             try:
                 response = httpx.post(
                     f"{cloud_endpoint.rstrip('/')}/v1/delegations/"
@@ -165,8 +208,15 @@ def push_status_events(
                     timeout=2.0,
                     follow_redirects=False,
                 )
-                if response.status_code != httpx.codes.OK:
+                if response.status_code in (401, 403, 429):
+                    # Authentication/revocation/rate limits apply to the sender,
+                    # not proof that this particular event is permanently bad.
                     break
+                if response.status_code in (409, 422):
+                    _quarantine(conn, row, "remote_conflict")
+                    continue
+                if response.status_code != httpx.codes.OK:
+                    continue
                 receipt = response.json()
                 if (
                     not isinstance(receipt, dict)
@@ -176,9 +226,9 @@ def push_status_events(
                     or receipt["sequence"] != row["sequence"]
                     or type(receipt.get("ignored")) is not bool
                 ):
-                    break
+                    continue
             except (httpx.HTTPError, ValueError):
-                break
+                continue
             conn.execute(
                 "UPDATE delegation_status_outbox SET delivered=1 WHERE event_id=? AND payload=?",
                 (row["event_id"], row["payload"]),

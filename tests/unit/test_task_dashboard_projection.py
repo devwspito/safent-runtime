@@ -74,6 +74,45 @@ def test_prompt_cannot_forge_enterprise_provenance(database):
     assert "result" not in task
 
 
+@pytest.mark.parametrize("stage", ["pending", "blocked", "unknown"])
+def test_sync_health_is_readonly_exact_and_never_changes_execution(database, stage):
+    from hermes.config_sync.delegation_status import collect_status_events
+
+    path, conn = database
+    repo = SqlitePendingDelegationRepository(path)
+    try:
+        submit(repo)
+        conn.execute("UPDATE pending_delegations SET to_instance_id='instance-1'")
+        conn.commit()
+        assert collect_status_events(path, instance_id="instance-1") == 1
+        if stage != "pending":
+            conn.execute(
+                "INSERT INTO delegation_status_quarantine VALUES(?,?,?,?)",
+                (
+                    "request-1",
+                    "instance-1",
+                    "execution_changed" if stage == "blocked" else "PRIVATE remote error",
+                    1,
+                ),
+            )
+            conn.commit()
+        task = read_task_dashboard(path)["tasks"][0]
+        assert task["status"] == "pending_approval"
+        assert task["enterprise_sync"]["state"] == ("pending" if stage == "pending" else "blocked")
+        if stage != "pending":
+            assert task["enterprise_sync"]["reason"] == (
+                "execution_changed" if stage == "blocked" else "unknown_conflict"
+            )
+        assert "PRIVATE" not in str(task)
+        assert "delegation_request_id" not in task
+        insert_task(conn, "local")
+        local = next(t for t in read_task_dashboard(path)["tasks"] if t["task_id"] == "local")
+        assert "enterprise_sync" not in local
+        assert conn.execute("SELECT delivered FROM delegation_status_outbox").fetchone() == (0,)
+    finally:
+        repo._conn.close()
+
+
 def test_pending_rejected_and_approved_join_survive_reopen(database):
     path, conn = database
     repo = SqlitePendingDelegationRepository(path)

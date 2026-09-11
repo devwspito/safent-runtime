@@ -269,6 +269,7 @@ export interface TaskDashboardItem {
   conversation_id?: string | null
   result?: string | null
   approval_ids?: string[]
+  enterprise_sync?: { state: 'pending' } | { state: 'blocked'; reason: string }
 }
 
 export interface TaskDashboardResponse {
