@@ -27,6 +27,7 @@ from hermes.capabilities.domain.ports import (
     ConsentContext,
     ExecutionStatus,
 )
+from hermes.domain.reasoning_failure import NativeTurnFailedError
 from hermes.tasks.application.decision_context_builder import build_decision_context
 from hermes.tasks.application.worker_wake_signal import MonoWorkerWakeSignal
 from hermes.tasks.domain.ports import AgentStatePort, WorkItem, WorkItemKind, WorkQueuePort
@@ -335,6 +336,14 @@ class AgentLoopOrchestrator:
             )
             await self._handle_cancelled(item, reason, effective_sink, is_chat)
             return
+        except NativeTurnFailedError as exc:
+            # Structured engine failure: never persist provider bodies or a
+            # misleading successful answer; honor an explicit no-retry verdict.
+            logger.warning("hermes.tasks.loop.native_failure task=%s code=%s", item.id, exc.code)
+            await self._handle_engine_failure(
+                item, str(exc), effective_sink, is_chat, retryable=exc.retryable
+            )
+            return
         except Exception as exc:
             _latency_ms = int((time.monotonic() - _cycle_start) * 1000)
             # exc_info + traceback explícito en el MENSAJE: el handler stderr→journald
@@ -353,34 +362,7 @@ class AgentLoopOrchestrator:
             _detail = str(exc).strip().replace("\n", " ")
             error_reason = f"{type(exc).__name__}: {_detail}" if _detail else type(exc).__name__
             error_reason = error_reason[:400]
-            if is_chat:
-                await self._safe_close_stream(
-                    effective_sink, item, "failed", error=error_reason
-                )
-            # El fallo del motor debe SER VISIBLE en la UI: ChatBar sondea
-            # get_conversation, así que sin un mensaje persistido el usuario ve
-            # "Thinking…" eterno y luego nada (fallo silencioso, indebugable
-            # desde el escritorio). Persistimos el error como turno del
-            # asistente — mismo canal que una respuesta normal. Best-effort.
-            if is_chat and self._conversation_repo is not None:
-                conv_id_str = item.payload.get("conversation_id") or ""
-                if conv_id_str:
-                    try:
-                        from uuid import UUID as _UUID  # noqa: PLC0415
-                        self._conversation_repo.append_message(
-                            conversation_id=_UUID(conv_id_str),
-                            role="assistant",
-                            content=(
-                                "⚠ No he podido completar la respuesta: "
-                                f"{error_reason}"
-                            ),
-                            task_id=item.id,
-                        )
-                    except Exception as _pexc:  # noqa: BLE001
-                        logger.warning(
-                            "hermes.tasks.loop.chat.persist_error_failed: %s", _pexc
-                        )
-            await self._do_mark_failed(item, error_reason)
+            await self._handle_engine_failure(item, error_reason, effective_sink, is_chat)
             return
 
         _latency_ms = int((time.monotonic() - _cycle_start) * 1000)
@@ -708,11 +690,31 @@ class AgentLoopOrchestrator:
                 str(item.id), outcome, exc,
             )
 
-    async def _do_mark_failed(self, item: WorkItem, reason: str) -> None:
+    async def _handle_engine_failure(
+        self, item: WorkItem, reason: str, sink: Any, is_chat: bool, *, retryable: bool = True,
+    ) -> None:
+        if is_chat:
+            await self._safe_close_stream(sink, item, "failed", error=reason)
+        # Persist an explicit error for polling/resume UI, not CHAT_REPLIED.
+        if is_chat and self._conversation_repo is not None:
+            conversation_id = item.payload.get("conversation_id") or ""
+            if conversation_id:
+                try:
+                    from uuid import UUID  # noqa: PLC0415
+                    self._conversation_repo.append_message(
+                        conversation_id=UUID(conversation_id), role="assistant",
+                        content=f"⚠ No he podido completar la respuesta: {reason}", task_id=item.id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("hermes.tasks.loop.chat.persist_error_failed: %s", exc)
+        await self._do_mark_failed(item, reason, retryable=retryable)
+
+    async def _do_mark_failed(self, item: WorkItem, reason: str, *, retryable: bool = True) -> None:
         await self._queue.mark_failed(
             item.id,
             claim_token=item.claim_token,  # type: ignore[arg-type]
             reason=reason,
+            **({"retryable": False} if not retryable else {}),
         )
         await self._emit_failed(item, reason)
         self._emit_notification_failed(item, reason)

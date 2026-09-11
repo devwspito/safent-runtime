@@ -118,12 +118,15 @@ class InMemoryWorkQueue:
         *,
         claim_token: UUID,
         reason: str,  # noqa: ARG002
+        retryable: bool = True,
     ) -> WorkItem:
         """FAILED. Si attempts < max_attempts, re-programa a PENDING con backoff."""
         item = self._get_or_raise(item_id)
         _assert_in_progress_with_token(item, claim_token, "mark_failed")
+        if type(retryable) is not bool:
+            raise ValueError("retryable must be a boolean")
 
-        if item.attempts < item.max_attempts:
+        if retryable and item.attempts < item.max_attempts:
             from hermes.tasks.domain.retry_policy import RetryPolicy  # noqa: PLC0415
             policy = RetryPolicy()
             available_at = policy.next_available_at(item.attempts)

@@ -242,7 +242,7 @@ class SqliteWorkQueue:
             )
 
     async def mark_failed(
-        self, item_id: UUID, *, claim_token: UUID, reason: str
+        self, item_id: UUID, *, claim_token: UUID, reason: str, retryable: bool = True
     ) -> WorkItem:
         """FAILED con backoff — delega transición en la máquina de estados de dominio.
 
@@ -254,7 +254,9 @@ class SqliteWorkQueue:
             raise ValueError(f"WorkItem {item_id} no encontrado")
 
         try:
-            next_state = _domain.mark_failed(item, claim_token=claim_token, reason=reason)
+            next_state = _domain.mark_failed(
+                item, claim_token=claim_token, reason=reason, retryable=retryable
+            )
         except _domain.IllegalTransition as exc:
             raise ClaimTokenMismatch(str(exc)) from exc
 
@@ -264,7 +266,7 @@ class SqliteWorkQueue:
             # Reintento con backoff: next_state.available_at ya lo calculó el dominio.
             next_attempt_iso = _iso(next_state.available_at)
             with self._connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE agent_tasks
                     SET status           = 'pending',
@@ -283,7 +285,7 @@ class SqliteWorkQueue:
         else:
             # Terminal FAILED.
             with self._connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE agent_tasks
                     SET status           = 'failed',
@@ -299,6 +301,8 @@ class SqliteWorkQueue:
                     (reason, now_iso, str(item_id), str(claim_token)),
                 )
 
+        if cursor.rowcount != 1:
+            raise ClaimTokenMismatch("mark_failed: task state or claim changed before persistence")
         updated = await self._load_item(str(item_id))
         assert updated is not None
         return updated

@@ -168,11 +168,12 @@ class WorkQueuePort(Protocol):
         ...
 
     async def mark_failed(
-        self, item_id: UUID, *, claim_token: UUID, reason: str
+        self, item_id: UUID, *, claim_token: UUID, reason: str, retryable: bool = True
     ) -> WorkItem:
         """Transición a FAILED. Si attempts < max_attempts, re-programa a
         PENDING con backoff (available_at = now + base*2^attempts) para
-        reintento idempotente (FR-006). Si no, FAILED terminal.
+        reintento idempotente (FR-006). Si no, FAILED terminal. retryable=False
+        forces terminal FAILED without inflating the actual attempt count.
         """
         ...
 

@@ -2445,6 +2445,9 @@ class NousReasoningEngine:
             lambda: agent._inner.hard_interrupt("Runtime configuration changed"),
         )
 
+        from hermes.runtime.native_turn_result import classify_native_result  # noqa: PLC0415
+        classify_native_result(result, has_pending_proposals=bool(agent._pending_proposals))
+
         # spec streaming-dbus: flush any remaining coalesced text and emit
         # ChatStreamEnd to signal completion to the compositor.
         if _stream_cb is not None and _conv_id_for_dbus:
@@ -3073,7 +3076,9 @@ class NousReasoningEngine:
         tool_steps: descriptores de las tool-calls emitidas en el ciclo (orden de
         ejecución), para persistirlos y reconstruir las tarjetas al recargar.
         """
-        raw_narrative = result.get("final_response") or ""
+        from hermes.runtime.native_turn_result import classify_native_result  # noqa: PLC0415
+        outcome = classify_native_result(result, has_pending_proposals=bool(agent._pending_proposals))
+        raw_narrative = (result.get("final_response") or "") if outcome == "completed" else ""
         narrative_safe = str(raw_narrative).strip()
 
         try:
