@@ -17,7 +17,8 @@ opaque assertion string and exchanges it with the companion.
 
 `AdsSessionJar` holds the companion's `ads_session` cookie IN PROCESS — it
 NEVER reaches the browser (I-2). Lazy exchange fills the jar on first use
-and on any upstream 401, with exactly ONE retry (sso.md §2).
+and on upstream 401, with at most ONE retry (sso.md §2). Confirmed mutations
+are never replayed under a replacement session; they return the original 401.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ _CSRF_COOKIE_NAME = "ads_csrf"
 _FORWARDED_REQUEST_HEADERS = frozenset(
     {
         "accept", "accept-language", "content-type", "content-length",
-        "if-none-match", "x-csrf-token", "x-reauth-token",
+        "if-none-match", "x-csrf-token", "x-action-confirmation",
     }
 )
 _HOP_BY_HOP_RESPONSE_HEADERS = frozenset(
@@ -406,13 +407,16 @@ async def _proxy_request(
         )
         if response.status == _HTTP_UNAUTHORIZED:
             jar.clear()
-            session_cookie = await _ensure_session(
-                dbus_proxy=app_state.dbus_proxy, endpoint=endpoint, jar=jar
-            )
-            response = await _proxy_once(
-                endpoint=endpoint, request=request, path=path,
-                session_cookie=session_cookie, body=body,
-            )
+            # A confirmation belongs to the exact original companion session.
+            # Never silently exchange identity and replay a confirmed mutation.
+            if not request.headers.get("x-action-confirmation"):
+                session_cookie = await _ensure_session(
+                    dbus_proxy=app_state.dbus_proxy, endpoint=endpoint, jar=jar
+                )
+                response = await _proxy_once(
+                    endpoint=endpoint, request=request, path=path,
+                    session_cookie=session_cookie, body=body,
+                )
     except AdsBridgeError as exc:
         return _error_response(exc.status_code, exc.code)
 

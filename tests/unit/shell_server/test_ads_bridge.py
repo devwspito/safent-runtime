@@ -145,6 +145,8 @@ class _FakeCompanion:
                 "headers": {k.lower(): v for k, v in request.headers.items()},
                 "cookies": dict(request.cookies),
                 "method": request.method,
+                "body": await request.read(),
+                "query": request.query_string,
             }
         )
         if request.cookies.get("ads_session") == "stale-session":
@@ -456,6 +458,37 @@ class TestProxiedRequestCredentialHandling:
             assert received["cookies"]["ads_csrf"] == "browser-csrf-value"
             assert received["headers"]["x-csrf-token"] == "browser-csrf-value"
 
+    async def test_owner_confirmation_preserves_exact_request_without_legacy_otp(
+        self, fake_companion, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        companion, endpoint = fake_companion
+        _patch_companion(monkeypatch, endpoint)
+        ac = _make_client(endpoint=endpoint, proxy=_mint_proxy())
+        body = b'{"amount": "10.00", "platform_account_id": "fixture-account"}'
+        async with ac.client as client:
+            client.cookies.set("ads_bridge", _valid_bridge_cookie())
+            client.cookies.set("ads_csrf", "fixture-csrf")
+            response = await client.post(
+                "/ads/api/v1/probe?review=explicit",
+                content=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Csrf-Token": "fixture-csrf",
+                    "X-Action-Confirmation": "fixture-one-shot-proof",
+                    "X-Reauth-Token": "retired-otp-header",
+                },
+            )
+        assert response.status_code == 200
+        received = companion.probe_calls[-1]
+        assert received["headers"]["x-action-confirmation"] == "fixture-one-shot-proof"
+        assert "x-reauth-token" not in received["headers"]
+        assert received["headers"]["x-csrf-token"] == "fixture-csrf"
+        assert received["cookies"]["ads_csrf"] == "fixture-csrf"
+        assert received["method"] == "POST"
+        assert received["body"] == body
+        assert received["query"] == "review=explicit"
+        assert len(companion.probe_calls) == 1
+
     async def test_client_supplied_forwarded_prefix_is_ignored(
         self, fake_companion, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -545,6 +578,24 @@ class TestFreshAssertionPerExchange:
 
 
 class TestOneRetryOnUpstream401:
+    async def test_confirmed_mutation_never_replays_under_a_new_session(
+        self, fake_companion, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        companion, endpoint = fake_companion
+        _patch_companion(monkeypatch, endpoint)
+        ac = _make_client(endpoint=endpoint, proxy=_mint_proxy())
+        ac.app.state.ads_session_jar.set(cookie="stale-session", ttl_seconds=3600)
+        async with ac.client as client:
+            client.cookies.set("ads_bridge", _valid_bridge_cookie())
+            response = await client.post(
+                "/ads/api/v1/probe",
+                content=b'{"intent":"fixture"}',
+                headers={"X-Action-Confirmation": "fixture-one-shot-proof"},
+            )
+        assert response.status_code == 401
+        assert len(companion.probe_calls) == 1
+        assert companion.exchange_calls == []
+
     async def test_stale_session_triggers_exactly_one_retry(
         self, fake_companion, monkeypatch: pytest.MonkeyPatch
     ) -> None:
