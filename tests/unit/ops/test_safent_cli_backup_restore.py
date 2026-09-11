@@ -28,6 +28,7 @@ Covers:
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -59,6 +60,15 @@ _running_file="$FAKE_STATE_DIR/running"
 [ -f "$_running_file" ] || echo "$FAKE_CONTAINER_RUNNING" > "$_running_file"
 
 case "$1" in
+  machine)
+    # macOS CLI preflight also stays inside this engine double. Do not fake
+    # uname/tar: archive compatibility must exercise the actual host tools.
+    case "$2" in
+      list) echo safent-test-engine ;;
+      inspect) echo true ;;
+    esac
+    exit 0
+    ;;
   ps)
     [ "${FAKE_PS_FAILS:-}" != "true" ] || exit 125
     if [ "$(cat "$_exists_file")" = "true" ]; then echo safent-test; fi
@@ -593,3 +603,172 @@ class TestRestoreRefusesATamperedArchive:
         calls = _podman_calls(podman_log)
         assert not any(c.startswith("volume rm") for c in calls), calls
         assert not any(c.startswith("volume import") for c in calls), calls
+
+
+def _archive_member(name: str, kind: bytes = tarfile.REGTYPE) -> tarfile.TarInfo:
+    member = tarfile.TarInfo(name)
+    member.type = kind
+    member.linkname = "/tmp/forbidden-safent-target" if kind in (
+        tarfile.SYMTYPE, tarfile.LNKTYPE,
+    ) else ""
+    member.mode = 0o6777
+    return member
+
+
+def _custom_backup(
+    tmp_path: Path, *, state_members: list[tarfile.TarInfo] | None = None,
+    outer_members: list[tarfile.TarInfo] | None = None,
+) -> Path:
+    state = io.BytesIO()
+    with tarfile.open(fileobj=state, mode="w") as tf:
+        for member in state_members or []:
+            content = b"RESTORED" if member.isfile() else b""
+            member.size = len(content)
+            tf.addfile(member, io.BytesIO(content))
+    bodies = {"state.tar": state.getvalue(), "data-volume.tar": b"FAKE-VOLUME-DATA"}
+    bodies["manifest.json"] = json.dumps({
+        "sha256": {name: hashlib.sha256(value).hexdigest() for name, value in bodies.items()},
+    }).encode()
+    output = tmp_path / "custom.tar.gz"
+    with tarfile.open(output, "w:gz", format=tarfile.PAX_FORMAT) as tf:
+        for member in outer_members or [_archive_member(name) for name in bodies]:
+            content = bodies.get(member.name, b"EXTRA") if member.isfile() else b""
+            member.size = len(content)
+            tf.addfile(member, io.BytesIO(content))
+    return output
+
+
+class TestRestoreArchiveContainment:
+    @pytest.mark.parametrize("name,kind", [
+        ("extra", tarfile.REGTYPE), ("../escape", tarfile.REGTYPE),
+        ("/tmp/absolute", tarfile.REGTYPE), ("./manifest.json", tarfile.REGTYPE),
+        ("manifest.json", tarfile.SYMTYPE), ("manifest.json", tarfile.LNKTYPE),
+        ("manifest.json", tarfile.DIRTYPE), ("manifest.json", tarfile.FIFOTYPE),
+        ("manifest.json", tarfile.REGTYPE), ("bad\nname", tarfile.REGTYPE),
+    ])
+    def test_outer_namespace_and_types_rejected_before_mutation(
+        self, tmp_path: Path, fake_bin_dir: Path, name: str, kind: bytes,
+    ) -> None:
+        members = [_archive_member(n) for n in ("manifest.json", "data-volume.tar", "state.tar")]
+        members.append(_archive_member(name, kind))
+        archive = _custom_backup(tmp_path, outer_members=members)
+        log = tmp_path / "restore.log"
+        result = _run_safent(
+            "restore", str(archive), "--force", fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home", podman_log=log, container_running=True,
+        )
+        assert result.returncode != 0
+        assert not any(c.startswith(("stop ", "volume rm", "volume import", "volume create"))
+                       for c in _podman_calls(log))
+
+    @pytest.mark.parametrize("name,kind", [
+        ("../escape", tarfile.REGTYPE), ("/tmp/absolute", tarfile.REGTYPE),
+        ("companions/ads/../../escape", tarfile.REGTYPE),
+        ("companions/ads/./bearer", tarfile.REGTYPE),
+        ("companions//ads/bearer", tarfile.REGTYPE),
+        ("companions/ads/bad\nname", tarfile.REGTYPE),
+        ("companions/ads/bad name", tarfile.REGTYPE),
+        ("companions/ads/link", tarfile.SYMTYPE),
+        ("companions/ads/hardlink", tarfile.LNKTYPE),
+        ("companions/ads/pipe", tarfile.FIFOTYPE),
+        ("companions/ads/device", tarfile.CHRTYPE),
+        ("companions/ads", tarfile.REGTYPE),
+        ("safent-seccomp.json", tarfile.DIRTYPE),
+        ("machine.json", tarfile.REGTYPE),
+    ])
+    def test_state_rejects_paths_and_special_types_before_mutation(
+        self, tmp_path: Path, fake_bin_dir: Path, name: str, kind: bytes,
+    ) -> None:
+        archive = _custom_backup(tmp_path, state_members=[_archive_member(name, kind)])
+        log = tmp_path / "restore.log"
+        result = _run_safent(
+            "restore", str(archive), "--force", fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home", podman_log=log, container_running=True,
+        )
+        assert result.returncode != 0
+        assert not any(c.startswith(("stop ", "volume rm", "volume import", "volume create"))
+                       for c in _podman_calls(log))
+
+    @pytest.mark.parametrize("members", [
+        ["companions/ads/bearer", "companions/ads/bearer"],
+        ["companions/ads/tls", "companions/ads/tls/key"],
+    ])
+    def test_duplicate_and_file_parent_rejected(
+        self, tmp_path: Path, fake_bin_dir: Path, members: list[str],
+    ) -> None:
+        archive = _custom_backup(tmp_path, state_members=[_archive_member(n) for n in members])
+        log = tmp_path / "restore.log"
+        result = _run_safent(
+            "restore", str(archive), "--force", fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home", podman_log=log, container_running=True,
+        )
+        assert result.returncode != 0
+        assert not any(c.startswith(("stop ", "volume rm", "volume import"))
+                       for c in _podman_calls(log))
+
+    @pytest.mark.parametrize("target", ["companions", "companions/ads", "companions/ads/bearer"])
+    def test_existing_destination_symlink_never_followed(
+        self, tmp_path: Path, fake_bin_dir: Path, target: str,
+    ) -> None:
+        home = tmp_path / "home"
+        link = home / ".safent" / target
+        link.parent.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        if target.endswith("bearer"):
+            outside.write_bytes(b"UNTOUCHED")
+        else:
+            outside.mkdir()
+        link.symlink_to(outside)
+        archive = _custom_backup(tmp_path, state_members=[_archive_member("companions/ads/bearer")])
+        log = tmp_path / "restore.log"
+        result = _run_safent(
+            "restore", str(archive), "--force", fake_bin_dir=fake_bin_dir,
+            home_dir=home, podman_log=log, container_running=True,
+        )
+        assert result.returncode != 0
+        assert not any(c.startswith(("stop ", "volume rm", "volume import"))
+                       for c in _podman_calls(log))
+        if outside.is_file():
+            assert outside.read_bytes() == b"UNTOUCHED"
+        else:
+            assert list(outside.iterdir()) == []
+
+    def test_regular_state_restored_privately_without_modifying_hardlink_target(
+        self, tmp_path: Path, fake_bin_dir: Path,
+    ) -> None:
+        home = tmp_path / "home"
+        bearer = home / ".safent/companions/ads/bearer"
+        bearer.parent.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"UNTOUCHED")
+        os.link(outside, bearer)
+        archive = _custom_backup(tmp_path, state_members=[
+            _archive_member("companions/ads/", tarfile.DIRTYPE),
+            _archive_member("companions/ads/bearer"),
+            _archive_member("companions/ads/bin/provision.sh"),
+            _archive_member("safent-seccomp.json"),
+        ])
+        result = _run_safent(
+            "restore", str(archive), "--force", fake_bin_dir=fake_bin_dir,
+            home_dir=home, podman_log=tmp_path / "restore.log",
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert outside.read_bytes() == b"UNTOUCHED"
+        assert bearer.read_bytes() == b"RESTORED"
+        assert stat.S_IMODE(bearer.stat().st_mode) == 0o600
+        assert stat.S_IMODE((bearer.parent / "bin/provision.sh").stat().st_mode) == 0o700
+
+    def test_backup_refuses_state_links_instead_of_creating_unrestorable_archive(
+        self, tmp_path: Path, fake_bin_dir: Path,
+    ) -> None:
+        home = tmp_path / "home"
+        state = home / ".safent/companions/ads"
+        state.mkdir(parents=True)
+        (state / "link").symlink_to(tmp_path / "outside")
+        output = tmp_path / "backups"
+        result = _run_safent(
+            "backup", str(output), fake_bin_dir=fake_bin_dir,
+            home_dir=home, podman_log=tmp_path / "backup.log",
+        )
+        assert result.returncode != 0
+        assert list(output.glob("*.tar.gz")) == []
