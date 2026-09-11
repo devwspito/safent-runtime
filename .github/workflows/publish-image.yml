@@ -35,7 +35,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
-            FE_CACHEBUST=${{ github.sha }}
             GIT_SHA=${{ github.sha }}
           tags: |
             ${{ env.IMAGE }}:latest

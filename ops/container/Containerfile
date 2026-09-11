@@ -87,12 +87,10 @@ RUN HERMES_AGENT_COMMIT="$(tr -d ' \t\n\r' < /tmp/hermes-agent.lock)" \
 # SELF-CONTAINED — the host's python is never used (an old macOS system python 3.9/pip
 # can't mis-name it as UNKNOWN-0.0.0). Then install --no-deps + ALL real deps EXPLICITLY
 # (core + the browser/shell/tui/mcp extras). No extras-syntax, one package per need.
-# APP_CACHEBUST: pass a unique value (build.sh sends $(date +%s)) to force the wheel
-# (COPY src) AND everything after — including the ops/ launcher COPY — to rebuild.
-# Without this, podman has served STALE `COPY src` / `COPY ops` layers even when the
-# content changed, baking old backend code / launcher into a "fresh" image.
-ARG APP_CACHEBUST=0
-RUN echo "app-cachebust ${APP_CACHEBUST}" > /tmp/.app_cachebust
+# COPY inputs are content-addressed by BuildKit/Podman. Do not inject timestamps
+# here: that invalidates the wheel and every later security/tooling layer even
+# when their inputs are identical. Operators can use the engine's explicit
+# `--no-cache` switch for a diagnostic clean rebuild.
 COPY pyproject.toml README.md VERSION /tmp/whlbuild/
 COPY src /tmp/whlbuild/src
 # Sync the wheel + runtime version from the repo-root VERSION file (single source of
@@ -145,10 +143,6 @@ RUN cd /tmp/whlbuild \
 COPY frontend/package.json frontend/package-lock.json /tmp/frontbuild/
 RUN cd /tmp/frontbuild && npm ci --ignore-scripts
 
-# FE_CACHEBUST: pass --build-arg FE_CACHEBUST=<unique> to force a clean rebuild of the
-# vite layer (the COPY-frontend layer can stale-cache across iterative rebuilds).
-ARG FE_CACHEBUST=0
-RUN echo "fe-cachebust ${FE_CACHEBUST}" > /tmp/.fe_cachebust
 COPY frontend/ /tmp/frontbuild/
 RUN cd /tmp/frontbuild && rm -rf dist && npm run build \
     && rm -rf /opt/safent-webapp && mkdir -p /opt/safent-webapp \
