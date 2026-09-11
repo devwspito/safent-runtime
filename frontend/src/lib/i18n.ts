@@ -721,6 +721,8 @@ const translations = {
     'memoria.err.delete':          'Error al eliminar',
     'memoria.toast.saved':         'Entrada actualizada',
     'memoria.toast.deleted':       'Entrada eliminada',
+    'memoria.drawer.load_error':   'No se pudo cargar el contenido completo de esta entrada.',
+    'memoria.drawer.preview_only': 'Solo hay una vista previa truncada disponible; esta entrada no se puede editar.',
 
     // Providers view
     'providers.err.load':          'No se pudieron cargar los proveedores.',
@@ -819,6 +821,7 @@ const translations = {
     'archivos.meta.path':       'Ruta',
     'archivos.download':        'Descargar archivo',
     'archivos.preview.loading': 'Cargando vista previa…',
+    'archivos.preview.error':   'No se pudo cargar la vista previa de este archivo.',
     'archivos.preview.aria':    'Vista previa del contenido',
     'archivos.col.name':        'Nombre',
     'archivos.col.size':        'Tamaño',
@@ -1745,6 +1748,8 @@ const translations = {
     'memoria.err.delete':          'Error deleting',
     'memoria.toast.saved':         'Entry updated',
     'memoria.toast.deleted':       'Entry deleted',
+    'memoria.drawer.load_error':   'Could not load the full content of this entry.',
+    'memoria.drawer.preview_only': 'Only a truncated preview is available; this entry cannot be edited.',
 
     // Providers view
     'providers.err.load':          'Could not load providers.',
@@ -1843,6 +1848,7 @@ const translations = {
     'archivos.meta.path':       'Path',
     'archivos.download':        'Download file',
     'archivos.preview.loading': 'Loading preview…',
+    'archivos.preview.error':   'Could not load a preview of this file.',
     'archivos.preview.aria':    'Content preview',
     'archivos.col.name':        'Name',
     'archivos.col.size':        'Size',

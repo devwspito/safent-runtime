@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sileo } from 'sileo'
-import { Brain, CalendarClock, ChevronRight, Save, Search, Trash2 } from 'lucide-react'
+import { AlertTriangle, Brain, CalendarClock, ChevronRight, Save, Search, Trash2 } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import { listMemory, searchMemory, forgetMemoryItem, getMemoryEntry, updateMemoryEntry, ApiError } from '../api/client'
 import type { MemoryItem, MemoryEntryDetail } from '../api/types'
@@ -37,9 +37,16 @@ type MemoryState =
   | { status: 'success'; items: MemoryItem[]; query: string }
   | { status: 'error'; message: string }
 
+// `status` tracks the full-content fetch for the item currently open in the
+// drawer. 'error' is distinct from a successful fetch that legitimately has
+// no full detail (id-less items keep the truncated preview): a failed fetch
+// must never leave the truncated list text silently editable/saveable, or a
+// save would overwrite the stored full entry with a truncated copy.
 type DrawerState =
   | { open: false }
-  | { open: true; item: MemoryItem; detail: MemoryEntryDetail | null; loading: boolean }
+  | { open: true; item: MemoryItem; status: 'loading' }
+  | { open: true; item: MemoryItem; status: 'error' }
+  | { open: true; item: MemoryItem; status: 'ready'; detail: MemoryEntryDetail | null }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -158,13 +165,21 @@ export default function MemoriaView() {
   const [saving, setSaving] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
+  // List load/search generation guard: an older in-flight request (e.g. the
+  // initial "recent" load) must never overwrite a newer one (a fast search
+  // typed right after) when it resolves out of order.
+  const loadEpochRef = useRef(0)
+
   const load = useCallback(async (query = '') => {
+    const epoch = ++loadEpochRef.current
     setState({ status: 'loading' })
     try {
       const raw = query ? await searchMemory(query) : await listMemory()
+      if (loadEpochRef.current !== epoch) return
       const items = Array.isArray(raw) ? raw : []
       setState({ status: 'success', items, query })
     } catch (e) {
+      if (loadEpochRef.current !== epoch) return
       const msg = e instanceof ApiError ? e.message : t('memoria.err.load')
       setState({ status: 'error', message: msg })
       sileo.error({ title: msg })
@@ -182,44 +197,62 @@ export default function MemoriaView() {
     void load('')
   }
 
+  // Drawer selection generation guard: bumped whenever the drawer opens on a
+  // (possibly different) item or closes, so a late detail/save response for a
+  // no-longer-selected item can never write into whatever is on screen now.
+  const drawerEpochRef = useRef(0)
+
   async function openDrawer(item: MemoryItem) {
-    setDrawer({ open: true, item, detail: null, loading: true })
+    const epoch = ++drawerEpochRef.current
     setEditValue(memoryContent(item))
     const id = entryId(item)
     if (!id) {
-      setDrawer({ open: true, item, detail: null, loading: false })
+      setDrawer({ open: true, item, status: 'ready', detail: null })
       return
     }
+    setDrawer({ open: true, item, status: 'loading' })
     try {
       const detail = await getMemoryEntry(id)
-      setDrawer(prev => prev.open ? { ...prev, detail, loading: false } : prev)
+      if (drawerEpochRef.current !== epoch) return
+      setDrawer({ open: true, item, status: 'ready', detail })
       // Load the FULL content into the editor (list rows are truncated).
       setEditValue(detail.content ?? memoryContent(item))
     } catch {
-      setDrawer(prev => prev.open ? { ...prev, detail: null, loading: false } : prev)
+      if (drawerEpochRef.current !== epoch) return
+      setDrawer({ open: true, item, status: 'error' })
     }
   }
 
   function closeDrawer() {
+    drawerEpochRef.current += 1
     setDrawer({ open: false })
     setEditValue('')
   }
 
-  async function handleSave() {
+  function retryDrawer() {
     if (!drawer.open) return
+    void openDrawer(drawer.item)
+  }
+
+  async function handleSave() {
+    if (!drawer.open || drawer.status !== 'ready') return
     const item = drawer.item
     const id = entryId(item)
     if (!id) { sileo.error({ title: t('memoria.err.no_edit') }); return }
     const next = editValue.trim()
     if (!next) { sileo.warning({ title: t('memoria.err.empty_content') }); return }
+    const epoch = drawerEpochRef.current
     setSaving(true)
     try {
       await updateMemoryEntry(id, next)
       sileo.success({ title: t('memoria.toast.saved') })
-      // Reflect the saved value in the open drawer without a refetch.
-      setDrawer(prev => prev.open
-        ? { ...prev, detail: prev.detail ? { ...prev.detail, content: next } : prev.detail }
-        : prev)
+      // Only reflect the saved value in the drawer if the selection has not
+      // moved on to a different item while the request was in flight.
+      if (drawerEpochRef.current === epoch) {
+        setDrawer(prev => prev.open && prev.status === 'ready'
+          ? { ...prev, detail: prev.detail ? { ...prev.detail, content: next } : prev.detail }
+          : prev)
+      }
       void load(searchInput.trim())
     } catch (e) {
       sileo.error({ title: e instanceof ApiError ? e.message : t('memoria.err.save') })
@@ -253,6 +286,10 @@ export default function MemoriaView() {
   // The list key changes when the query changes so AnimatePresence fires a
   // cross-fade between the old and new result sets.
   const listKey = isSuccess ? `q:${state.query}` : '__loading__'
+
+  const drawerReady = drawer.open && drawer.status === 'ready' ? drawer : null
+  const savedContent = drawerReady ? (drawerReady.detail?.content ?? memoryContent(drawerReady.item)) : ''
+  const canSave = drawerReady !== null && Boolean(entryId(drawerReady.item))
 
   return (
     <>
@@ -389,10 +426,10 @@ export default function MemoriaView() {
                 onClick={handleSave}
                 loading={saving}
                 disabled={
-                  drawer.loading ||
+                  !canSave ||
                   deleting ||
                   !editValue.trim() ||
-                  editValue.trim() === (drawer.detail?.content ?? memoryContent(drawer.item)).trim()
+                  editValue.trim() === savedContent.trim()
                 }
                 aria-label={t('memoria.drawer.save.aria')}
               >
@@ -436,15 +473,29 @@ export default function MemoriaView() {
               </div>
             )}
 
-            {/* Content body — editable */}
-            {drawer.loading ? (
+            {/* Content body — loading / load error / editable */}
+            {drawer.status === 'loading' && (
               <div className={styles.drawerLoadingWrap}>
                 <Spinner size={14} label={t('memoria.drawer.loading')} />
                 <div className="skeleton skeleton--line" style={{ width: '90%' }} />
                 <div className="skeleton skeleton--line" style={{ width: '75%' }} />
                 <div className="skeleton skeleton--line-sm" style={{ width: '55%' }} />
               </div>
-            ) : (
+            )}
+
+            {drawer.status === 'error' && (
+              <FadeIn>
+                <div role="alert" className={styles.errorState}>
+                  <AlertTriangle size={16} aria-hidden="true" />
+                  <p className={styles.errorMessage}>{t('memoria.drawer.load_error')}</p>
+                  <Button variant="secondary" size="sm" onClick={retryDrawer}>
+                    {t('memoria.retry')}
+                  </Button>
+                </div>
+              </FadeIn>
+            )}
+
+            {drawer.status === 'ready' && (
               <FadeIn>
                 <label className="sr-only" htmlFor="memory-edit">{t('memoria.drawer.edit.label')}</label>
                 <textarea
@@ -453,11 +504,15 @@ export default function MemoriaView() {
                   value={editValue}
                   onChange={e => setEditValue(e.target.value)}
                   spellCheck={false}
+                  readOnly={!canSave}
+                  aria-readonly={!canSave}
                   aria-label={t('memoria.drawer.edit.aria')}
                   placeholder={t('memoria.drawer.edit.placeholder')}
                 />
                 <p className={styles.editHint}>
-                  {t('memoria.drawer.hint_pre')} <strong>{t('memoria.drawer.save')}</strong>{t('memoria.drawer.hint_post')}
+                  {canSave
+                    ? <>{t('memoria.drawer.hint_pre')} <strong>{t('memoria.drawer.save')}</strong>{t('memoria.drawer.hint_post')}</>
+                    : t('memoria.drawer.preview_only')}
                 </p>
               </FadeIn>
             )}

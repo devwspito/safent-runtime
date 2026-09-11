@@ -241,24 +241,49 @@ interface FileDrawerProps {
   onClose: () => void
 }
 
+// A failed/HTTP-error preview fetch must never be presented as "no preview"
+// (silent) nor as file content (an error page body rendered as text). It is
+// its own explicit state, distinct from 'idle' (non-previewable kind) and
+// 'ready' (real content).
+type PreviewState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'error' }
+  | { status: 'ready'; text: string }
+
 function FileDrawer({ file, onClose }: FileDrawerProps) {
   const t = useT()
-  const [preview, setPreview] = useState<string | null>(null)
-  const [previewLoading, setPreviewLoading] = useState(false)
+  const [preview, setPreview] = useState<PreviewState>({ status: 'idle' })
 
   useEffect(() => {
     if (!file || file.is_dir || !TEXT_KINDS.has(file.kind ?? '')) {
-      setPreview(null)
+      setPreview({ status: 'idle' })
       return
     }
-    setPreviewLoading(true)
+    // `cancelled` is set synchronously in the cleanup below, before any
+    // pending fetch's .then/.catch can run — this guarantees a stale
+    // request for a previous file can never overwrite the state of the
+    // file the user has since selected, regardless of resolve order.
+    let cancelled = false
+    setPreview({ status: 'loading' })
     const controller = new AbortController()
     fetch(workspaceDownloadUrl(file.path), { signal: controller.signal })
-      .then(r => r.text())
-      .then(text => setPreview(text.slice(0, 4000) + (text.length > 4000 ? '\n[…truncado]' : '')))
-      .catch(() => setPreview(null))
-      .finally(() => setPreviewLoading(false))
-    return () => controller.abort()
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.text()
+      })
+      .then(text => {
+        if (cancelled) return
+        setPreview({
+          status: 'ready',
+          text: text.slice(0, 4000) + (text.length > 4000 ? '\n[…truncado]' : ''),
+        })
+      })
+      .catch(() => {
+        if (cancelled) return
+        setPreview({ status: 'error' })
+      })
+    return () => { cancelled = true; controller.abort() }
   }, [file])
 
   return (
@@ -296,16 +321,22 @@ function FileDrawer({ file, onClose }: FileDrawerProps) {
             {t('archivos.download')}
           </a>
 
-          {previewLoading && (
+          {preview.status === 'loading' && (
             <div className={styles.previewLoading}>
               <Loader2 size={13} className="spin" aria-hidden="true" />
               <span>{t('archivos.preview.loading')}</span>
             </div>
           )}
 
-          {preview !== null && !previewLoading && (
+          {preview.status === 'error' && (
+            <div role="alert" className={styles.previewError}>
+              <span>{t('archivos.preview.error')}</span>
+            </div>
+          )}
+
+          {preview.status === 'ready' && (
             <pre className={styles.preview} aria-label={t('archivos.preview.aria')}>
-              {preview}
+              {preview.text}
             </pre>
           )}
         </div>
@@ -339,10 +370,17 @@ export default function ArchivosView() {
   const [uploading, setUploading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // Generation guard: navigating folders quickly (or hitting Refresh while a
+  // previous listing is still in flight) must not let a slow, older request
+  // overwrite the entries of the folder the user is now looking at.
+  const loadEpochRef = useRef(0)
+
   const load = useCallback(async (path: string) => {
+    const epoch = ++loadEpochRef.current
     setBrowseState({ status: 'loading' })
     try {
       const raw = await listWorkspaceFiles(path || undefined)
+      if (loadEpochRef.current !== epoch) return
       const entries = Array.isArray(raw) ? raw : []
       // Directories first, then files alphabetically
       entries.sort((a, b) => {
@@ -354,6 +392,7 @@ export default function ArchivosView() {
       })
       setBrowseState({ status: 'success', entries, path })
     } catch (err) {
+      if (loadEpochRef.current !== epoch) return
       setBrowseState({
         status: 'error',
         message: err instanceof Error ? err.message : t('archivos.err.load'),

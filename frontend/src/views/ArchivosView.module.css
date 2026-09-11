@@ -412,6 +412,20 @@
   padding: var(--space-3) 0;
 }
 
+/* ── Preview error ─────────────────────────────────────────────────────────── */
+
+.previewError {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-danger) 25%, transparent);
+  border-radius: var(--radius-md);
+}
+
 /* ── Preview code block ───────────────────────────────────────────────────── */
 
 .preview {
