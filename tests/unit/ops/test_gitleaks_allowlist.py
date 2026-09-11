@@ -73,6 +73,16 @@ def test_gitleaks_toml_does_not_weaken_the_rules_globally() -> None:
         )
 
 
+def test_ci_verifies_pinned_archive_before_extracting_or_executing() -> None:
+    workflow = (_REPO_ROOT / ".github/workflows/secret-scan.yml").read_text()
+    assert 'GITLEAKS_VERSION: "8.18.4"' in workflow
+    assert "ba6dbb656933921c775ee5a2d1c13a91046e7952e9d919f9bac4cec61d628e7d" in workflow
+    verify = workflow.index("sha256sum --check --strict")
+    assert workflow.index("curl -sSfL") < verify < workflow.index("tar -xzf")
+    assert verify < workflow.index("sudo install")
+    assert '"$GITLEAKS_SHA256" "$scan_tmp/gitleaks.tgz"' in workflow
+
+
 @pytest.mark.skipif(shutil.which("gitleaks") is None, reason="gitleaks binary not on PATH")
 def test_gitleaks_scan_passes_with_the_repo_config() -> None:
     """Real end-to-end check, same invocation as .github/workflows/secret-scan.yml."""
