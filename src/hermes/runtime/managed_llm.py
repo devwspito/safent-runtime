@@ -43,6 +43,10 @@ def local_configuration_write(db_path: Path):
 
 
 def read_policy(db_path: Path) -> dict | None:
+    return _read_policy(db_path, check_trust=True)
+
+
+def _read_policy(db_path: Path, *, check_trust: bool) -> dict | None:
     if not db_path.exists():
         return None
     try:
@@ -57,20 +61,29 @@ def read_policy(db_path: Path) -> dict | None:
                 return None
             state = json.loads(row[0])
             association = conn.execute(
-                "SELECT instance_id, tenant_id, state FROM instance_association WHERE id=1"
+                "SELECT instance_id, tenant_id, state, signing_pubkey_hex, cloud_endpoint "
+                "FROM instance_association WHERE id=1"
             ).fetchone()
-            if not association or association != (
+            if not association or association[:3] != (
                 state["instance_id"],
                 state["tenant_id"],
                 "active",
             ):
                 raise ManagedProviderUnavailableError("Enterprise association is inactive")
+            from hermes.runtime.managed_llm_lifecycle import association_fingerprint
+
+            if check_trust and state.get("association_fingerprint") != association_fingerprint(
+                association[0], association[1], association[3], association[4]
+            ):
+                raise ManagedProviderUnavailableError("Enterprise LLM trust binding changed")
             return state
     except (sqlite3.Error, ValueError, KeyError, TypeError):
         raise ManagedProviderUnavailableError("LLM policy cannot be verified") from None
 
 
 def _save_policy(db_path: Path, state: dict) -> None:
+    from hermes.runtime.managed_llm_lifecycle import record_authority_transition
+
     with configuration_lock(db_path), sqlite3.connect(db_path) as conn:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS managed_llm_policy "
@@ -79,6 +92,7 @@ def _save_policy(db_path: Path, state: dict) -> None:
         conn.execute(
             "INSERT OR REPLACE INTO managed_llm_policy VALUES (1, ?)", (json.dumps(state),)
         )
+        record_authority_transition(conn)
 
 
 def resolve_managed_config(db_path: Path, alias: str | None = None) -> ModelConfig | None:  # noqa: ARG001 - execution remains gated
@@ -88,6 +102,11 @@ def resolve_managed_config(db_path: Path, alias: str | None = None) -> ModelConf
     inference. No engine, auxiliary, skill synthesis or MCP caller can obtain
     the delegated credential through the production config source meanwhile.
     """
+    from hermes.runtime.managed_llm_bootstrap import assert_process_admission
+
+    # Check even when policy disappeared: unpair must not release an OLD
+    # corporate process into a cached personal credential environment.
+    assert_process_admission(db_path)
     state = read_policy(db_path)
     if state is None:
         return None
@@ -152,6 +171,7 @@ def _apply_signed_gateway_locked(wiring, bundle_json: str, store) -> dict:  # no
     from hermes.config_sync.applier import _is_safe_base_url
     from hermes.config_sync.policy_document import PolicyBundle, signing_bytes
     from hermes.config_sync.signature import verify_bundle
+    from hermes.runtime.managed_llm_lifecycle import association_fingerprint
     from hermes.shell_server.providers.domain import ProviderKind, new_provider
 
     association = store.get()
@@ -217,15 +237,27 @@ def _apply_signed_gateway_locked(wiring, bundle_json: str, store) -> dict:  # no
         raise PermissionError("Exactly one managed default provider is required")
     db_path = store.db_path
     digest = hashlib.sha256(encoded).hexdigest()
+    trust_binding = association_fingerprint(
+        association.instance_id,
+        association.tenant_id,
+        association.signing_pubkey_hex,
+        association.cloud_endpoint,
+    )
     with configuration_lock(db_path):
-        previous = read_policy(db_path)
+        # The incoming envelope was verified against the CURRENT key above.
+        # Preserve the previous replay floor while allowing an authorized fresh
+        # policy to replace the old key binding after rotation.
+        previous = _read_policy(db_path, check_trust=False)
         if previous:
             if bundle.version < previous["version"]:
                 raise PermissionError("LLM policy rollback rejected")
             if bundle.version == previous["version"]:
                 if digest != previous["digest"]:
                     raise PermissionError("LLM policy version collision")
-                if previous["status"] != "applying":
+                if (
+                    previous["status"] != "applying"
+                    and previous.get("association_fingerprint") == trust_binding
+                ):
                     return {"ok": True, "unchanged": True}
         elif bundle.version < association.last_applied_version:
             raise PermissionError("LLM policy rollback rejected")
@@ -237,6 +269,7 @@ def _apply_signed_gateway_locked(wiring, bundle_json: str, store) -> dict:  # no
             "status": "applying",
             "tenant_id": association.tenant_id,
             "instance_id": association.instance_id,
+            "association_fingerprint": trust_binding,
             "active_alias": active[0] if active else None,
             "bindings": {},
         }

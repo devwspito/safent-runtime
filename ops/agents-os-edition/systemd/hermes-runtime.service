@@ -245,6 +245,11 @@ Slice=agents-os.slice
 # dejarlos huérfanos (RAM + cookies/credenciales vivas). Es el default, pero lo
 # fijamos explícito porque las sesiones de navegador concurrentes lo necesitan.
 KillMode=control-group
+# Native SDK threads cannot be killed by cancelling their asyncio Future.
+# The daemon's hard deadline is 8s; this independent cgroup deadline also
+# covers a stuck interpreter and reaps descendants before Restart=always.
+TimeoutStopSec=10
+SendSIGKILL=yes
 MemoryMin=512M
 MemoryHigh=80%
 MemoryMax=6G

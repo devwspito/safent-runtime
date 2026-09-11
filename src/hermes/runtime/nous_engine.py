@@ -1170,6 +1170,9 @@ class GovernedAIAgent:
         INVARIANTE: un WRITE NUNCA ejecuta el handler nativo de Nous.
         INVARIANTE: toda tool externa pasa por el CapabilityBroker exactamente UNA vez.
         """
+        from hermes.runtime.managed_llm_bootstrap import assert_process_admission  # noqa: PLC0415
+
+        assert_process_admission()
         nous_risk = classify_nous_tool(function_name)
 
         if nous_risk is not None:
@@ -2003,6 +2006,9 @@ class NousReasoningEngine:
         self._dbus_emit_end = emit_end
 
     def _resolve_model_config(self, agent_id: str | None = None) -> ModelConfig:
+        from hermes.runtime.managed_llm_bootstrap import assert_process_admission  # noqa: PLC0415
+
+        assert_process_admission()
         # Consult dynamic authority even for engines constructed with an explicit
         # personal config; a later signed assignment must govern the next turn.
         source_cfg = self._model_config_source() if self._model_config_source is not None else None
@@ -2216,7 +2222,9 @@ class NousReasoningEngine:
 
         cycle_agent_id: str | None = context.agent_id if hasattr(context, "agent_id") else None
 
-        model_config = self._resolve_model_config(cycle_agent_id)
+        # Authority reconciliation may wait on the cross-process DB lock.
+        # Keep SIGTERM and the generation watcher responsive during admission.
+        model_config = await asyncio.to_thread(self._resolve_model_config, cycle_agent_id)
 
         # Resolve per-cycle persona: use the agent bound to this task (from
         # DecisionContext.agent_id) or the active agent. Falls back to the
@@ -2360,7 +2368,8 @@ class NousReasoningEngine:
         external_specs = await self._resolve_external_specs(active_agent_id)
         external_catalog = _ExternalToolCatalog(external_specs)
 
-        agent = self._build_governed_agent(
+        agent = await asyncio.to_thread(
+            self._build_governed_agent,
             model_config, system_prompt, loop, tenant_id, external_catalog,
             consent_context=per_cycle_consent,
             active_agent_id=str(active_agent_id) if active_agent_id else "",
@@ -2420,8 +2429,12 @@ class NousReasoningEngine:
             _snapshot_workspace() if is_chat_cycle else {}
         )
 
-        result = await loop.run_in_executor(
-            None,
+        from hermes.runtime.managed_llm_bootstrap import process_admission  # noqa: PLC0415
+        from hermes.runtime.managed_llm_lifecycle import run_admitted_native  # noqa: PLC0415
+
+        admission = process_admission()
+        result = await run_admitted_native(
+            admission,
             lambda: _run_conversation_with_cdp(
                 agent, user_message, _history, cerebro_cdp_provider,
                 stream_callback=_stream_cb,
@@ -2429,6 +2442,7 @@ class NousReasoningEngine:
                 work_item_id=_work_item_id_for_dbus,
                 active_agent_id=str(active_agent_id) if active_agent_id else "",
             ),
+            lambda: agent._inner.hard_interrupt("Runtime configuration changed"),
         )
 
         # spec streaming-dbus: flush any remaining coalesced text and emit
@@ -2948,6 +2962,9 @@ class NousReasoningEngine:
         consent_context: per-cycle override que propaga el operator_id real del
         WorkItem (spec 014 inc. 3 / CTRL-13). Si None, cae al consent de clase.
         """
+        from hermes.runtime.managed_llm_bootstrap import assert_process_admission  # noqa: PLC0415
+
+        assert_process_admission()
         if model_config.managed:
             # Hermes 0.21.1 turn_context publishes api_key to global auxiliary
             # mirrors unconditionally. No supported per-agent opt-out exists.

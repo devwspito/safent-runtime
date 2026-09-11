@@ -131,9 +131,14 @@ class SQLiteAssociationStore:
     @_serialized_write
     def save(self, *, association: InstanceAssociation, instance_secret: str) -> None:
         """Upsert the single pairing row, encrypting the secret."""
+        from hermes.runtime.managed_llm_lifecycle import (  # noqa: PLC0415
+            record_authority_transition,
+        )
+
         blob = self._vault.encrypt(secret_id=_SECRET_ID, plaintext=instance_secret)
         license_json = json.dumps(association.license)
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 INSERT INTO instance_association (
@@ -164,6 +169,7 @@ class SQLiteAssociationStore:
                     blob,
                 ),
             )
+            record_authority_transition(conn)
         logger.info("hermes.instance.association_saved", extra={"tenant_id": association.tenant_id})
 
     @_serialized_write
@@ -217,8 +223,14 @@ class SQLiteAssociationStore:
     @_serialized_write
     def mark_revoked(self) -> None:
         """Flip state to 'revoked' without deleting the row (audit trail)."""
+        from hermes.runtime.managed_llm_lifecycle import (  # noqa: PLC0415
+            record_authority_transition,
+        )
+
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("UPDATE instance_association SET state = 'revoked' WHERE id = 1")
+            record_authority_transition(conn)
         logger.info("hermes.instance.association_revoked")
 
     @_serialized_write
@@ -237,6 +249,10 @@ class SQLiteAssociationStore:
         Use clear() for operator-initiated unpair (no audit trail needed).
         Use mark_revoked() when you need to preserve the row for auditing.
         """
+        from hermes.runtime.managed_llm_lifecycle import (  # noqa: PLC0415
+            record_authority_transition,
+        )
+
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
@@ -252,6 +268,7 @@ class SQLiteAssociationStore:
                 conn.execute("DELETE FROM managed_llm_policy")
             if "providers" in tables:
                 conn.execute("DELETE FROM providers WHERE managed_by='cloud'")
+            record_authority_transition(conn)
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         # VACUUM must run outside the WAL transaction (it implicitly commits).

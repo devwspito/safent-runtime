@@ -1380,7 +1380,7 @@ def _ensure_state_db_secure() -> None:
         logger.warning("hermes.runtime.state_db_secure_failed", extra={"error": str(exc)})
 
 
-async def _run(*, systemd_notify: bool) -> None:
+async def _run(*, systemd_notify: bool, bootstrap=None) -> None:
     import time as _time  # noqa: PLC0415
     _t_start = _time.perf_counter()
 
@@ -1400,6 +1400,14 @@ async def _run(*, systemd_notify: bool) -> None:
     # para que el self-test quede registrado en el journal). El ruleset RUNTIME es
     # amplio (cubre todo lo que el daemon usa) → no rompe; deniega /boot /home /opt…
     _apply_runtime_landlock()
+
+    if bootstrap is not None:
+        from hermes.runtime.managed_llm_bootstrap import complete_process_bootstrap  # noqa: PLC0415
+        from hermes.runtime.managed_llm_profile import current_profile  # noqa: PLC0415
+
+        complete_process_bootstrap(
+            bootstrap, profile_factory=lambda generation: current_profile(_DB_PATH, generation)
+        )
 
     operator_id = _resolve_operator_id()
     consent_manager = _build_consent_manager()
@@ -2016,6 +2024,14 @@ async def _run(*, systemd_notify: bool) -> None:
                 t.cancel()
 
     def _handle_sigterm() -> None:
+        from hermes.runtime.managed_llm_bootstrap import process_admission  # noqa: PLC0415
+
+        # Arm first: a third-party native interrupt callback may itself stall.
+        shutdown_deadline.arm()
+        admission = process_admission()
+        if admission is not None:
+            admission.close()
+            admission.interrupt_inflight()
         logger.info("hermes.runtime.sigterm_received — starting graceful shutdown")
         orchestrator.request_shutdown()
         unix_socket.close()
@@ -2026,7 +2042,21 @@ async def _run(*, systemd_notify: bool) -> None:
         )
 
     event_loop = asyncio.get_event_loop()
+    from hermes.runtime.shutdown_deadline import ShutdownDeadline  # noqa: PLC0415
+
+    shutdown_deadline = ShutdownDeadline()
     event_loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
+
+    async def _watch_llm_generation() -> None:
+        from hermes.runtime.managed_llm_bootstrap import process_admission  # noqa: PLC0415
+        from hermes.runtime.managed_llm_lifecycle import watch_authority  # noqa: PLC0415
+
+        admission = process_admission()
+        if admission is None:
+            return
+        await watch_authority(admission, _handle_sigterm)
+
+    tasks.append(asyncio.create_task(_watch_llm_generation(), name="llm-generation-monitor"))
 
     await asyncio.gather(*tasks, return_exceptions=True)
     logger.info("hermes.runtime.loop_stopped")
@@ -3134,8 +3164,11 @@ def _apply_runtime_landlock() -> None:
 def main() -> int:
     args = sys.argv[1:]
     systemd_notify = "--systemd-notify" in args
+    from hermes.runtime.managed_llm_bootstrap import initialize_process  # noqa: PLC0415
+
+    bootstrap = initialize_process(_DB_PATH)
     try:
-        asyncio.run(_run(systemd_notify=systemd_notify))
+        asyncio.run(_run(systemd_notify=systemd_notify, bootstrap=bootstrap))
     except KeyboardInterrupt:
         pass
     return 0
