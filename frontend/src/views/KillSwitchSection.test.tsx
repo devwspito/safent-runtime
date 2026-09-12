@@ -64,7 +64,7 @@ describe('KillSwitchSection — release dialog shows which proof is asked', () =
   afterEach(() => {
     act(() => { root.unmount() })
     container.remove()
-    document.body.querySelectorAll('.mfa-modal-backdrop').forEach(el => el.remove())
+    document.body.querySelectorAll('.owner-confirm-backdrop').forEach(el => el.remove())
   })
 
   it('releases only after explicit owner confirmation without an MFA endpoint', async () => {
@@ -76,7 +76,7 @@ describe('KillSwitchSection — release dialog shows which proof is asked', () =
     clickButton(container, t => t.includes('Liberar'))
     await flush()
     expect(releaseKillSwitch).not.toHaveBeenCalled()
-    expect(document.body.querySelector('.mfa-modal input')).toBeNull()
+    expect(document.body.querySelector('.owner-confirm input')).toBeNull()
     clickButton(document.body, t => t === 'Confirmar')
     await flush()
     expect(releaseKillSwitch).toHaveBeenCalledExactlyOnceWith()
