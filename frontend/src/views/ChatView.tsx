@@ -314,7 +314,7 @@ const UserMessage = memo(function UserMessage({ text, failed }: UserMessageProps
 // that would 404 (the app is mounted under /app). This is how the agent "operates
 // its own body" — it can take the user to any section with a one-click button.
 const APP_VIEW_ROUTES: ReadonlySet<string> = new Set([
-  '/chat', '/programadas', '/agentes', '/skills', '/integraciones', '/mcp',
+  '/chat', '/tareas', '/programadas', '/agentes', '/skills', '/integraciones', '/mcp',
   '/archivos', '/proveedores', '/seguridad', '/memoria', '/coste', '/en-vivo', '/ensenar',
 ])
 

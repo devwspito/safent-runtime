@@ -81,7 +81,7 @@ class SafentTerminal(App):
         Binding("2", "go('skills')", "Skills", show=False),
         Binding("3", "go('integrations')", "Integraciones", show=False),
         Binding("4", "go('mcp')", "MCP", show=False),
-        Binding("5", "go('agents')", "Agentes", show=False),
+        Binding("5", "go('agents')", "Perfiles", show=False),
         Binding("6", "go('tasks')", "Tareas", show=False),
         # Advanced pane shortcuts.
         Binding("7", "go('security')", "Seguridad", show=False),
@@ -174,13 +174,7 @@ class SafentTerminal(App):
         bar.connected = self.bridge.connected
         try:
             agents = await self.bridge.list_agents()
-            active = await self.bridge.get_active_agent()
-            name = next(
-                (a.get("name", "Safent") for a in agents if str(a.get("id")) == active),
-                None,
-            )
-            if not name:
-                name = next((a.get("name") for a in agents if a.get("is_default")), "Safent")
+            name = next((a.get("name") for a in agents if a.get("is_default")), "Safent")
             bar.agent_name = name or "Safent"
         except Exception:  # noqa: BLE001
             bar.agent_name = "Safent"

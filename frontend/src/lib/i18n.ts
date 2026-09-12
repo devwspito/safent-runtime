@@ -25,7 +25,7 @@ const translations = {
     // Navigation
     'nav.chat':           'Chat',
     'nav.programadas':    'Programadas',
-    'nav.agentes':        'Agentes',
+    'nav.agentes':        'Perfiles',
     'nav.tareas':         'Tareas',
     'nav.skills':         'Habilidades',
     'nav.integraciones':  'Integraciones',
@@ -127,7 +127,7 @@ const translations = {
 
     // View titles (used in page <h1>)
     'view.chat':          'Chat',
-    'view.agentes':       'Agentes',
+    'view.agentes':       'Perfiles',
     'view.skills':        'Habilidades',
     'view.integraciones': 'Integraciones',
     'view.mcp':           'Herramientas externas',
@@ -991,7 +991,7 @@ const translations = {
     // Navigation
     'nav.chat':           'Chat',
     'nav.programadas':    'Scheduled',
-    'nav.agentes':        'Agents',
+    'nav.agentes':        'Profiles',
     'nav.tareas':         'Tasks',
     'nav.skills':         'Skills',
     'nav.integraciones':  'Integrations',
@@ -1091,7 +1091,7 @@ const translations = {
 
     // View titles
     'view.chat':          'Chat',
-    'view.agentes':       'Agents',
+    'view.agentes':       'Profiles',
     'view.skills':        'Skills',
     'view.integraciones': 'Integrations',
     'view.mcp':           'External Tools',

@@ -4,7 +4,7 @@ import QtQuick.Layouts
 import "." // Tokens singleton — OBLIGATORIO, sin él la pantalla queda en blanco
 
 // ── AgentsApp ─────────────────────────────────────────────────────────────
-// Cableado REAL al daemon: ListAgents/GetActiveAgent/CreateAgent/SetActiveAgent/
+// Cableado REAL al daemon: ListAgents/CreateAgent/UpdateAgent/
 // DeleteAgent. Un agente = un profile Hermes (personalidad + instrucciones). Las
 // skills/MCP se asignan por agente (capability binding). Sin mocks.
 Rectangle {
@@ -17,7 +17,6 @@ Rectangle {
 
     // ── Agentes ──────────────────────────────────────────────────────────
     property var agents: []
-    property string activeId: ""
     property bool loading: true
     property bool creating: false
     property bool busy: false
@@ -56,7 +55,6 @@ Rectangle {
     function load() {
         loading = true;
         hermes.call("ag-list", "list_agents", "{}");
-        hermes.call("ag-active", "get_active_agent", "{}");
     }
     function create() {
         if (busy) return;
@@ -70,7 +68,6 @@ Rectangle {
             language: "es-ES", autonomy_level: "balanced"
         }}));
     }
-    function activate(id) { hermes.call("ag-activate", "set_active_agent", JSON.stringify({ agent_id: id })); }
     function del(id) { hermes.call("ag-del", "delete_agent", JSON.stringify({ agent_id: id })); }
 
     function beginEdit(agentData) {
@@ -315,8 +312,6 @@ Rectangle {
                 app.loading = false;
                 try { app.agents = ok ? JSON.parse(jsonStr || "[]") : []; }
                 catch (e) { app.agents = []; }
-            } else if (reqId === "ag-active") {
-                app.activeId = (jsonStr || "").replace(/^"|"$/g, "");
             } else if (reqId === "ag-create") {
                 app.busy = false;
                 if (ok) {
@@ -327,7 +322,7 @@ Rectangle {
                     if (app.fMission) app.fMission.text = "";
                     if (app.fInstr) app.fInstr.text = "";
                     app.load();
-                    root.showToast("Agente creado", "success");
+                    root.showToast("Perfil creado", "success");
                 } else {
                     try { app.note = JSON.parse(jsonStr).error || jsonStr; }
                     catch (e) { app.note = jsonStr; }
@@ -342,19 +337,15 @@ Rectangle {
                     if (app.fMission) app.fMission.text = "";
                     if (app.fInstr) app.fInstr.text = "";
                     app.load();
-                    root.showToast("Agente actualizado", "success");
+                    root.showToast("Perfil actualizado", "success");
                 } else {
                     try { app.note = JSON.parse(jsonStr).error || jsonStr; }
                     catch (e) { app.note = jsonStr; }
                 }
-            } else if (reqId === "ag-activate") {
-                app.load();
-                if (ok) root.showToast("Agente activado", "success");
-                else root.showToast("No se pudo activar el agente", "error");
             } else if (reqId === "ag-del") {
                 app.load();
-                if (ok) root.showToast("Agente eliminado", "success");
-                else { var m = ""; try { m = JSON.parse(jsonStr).error; } catch (e) {} root.showToast(m || "No se pudo eliminar el agente", "error"); }
+                if (ok) root.showToast("Perfil eliminado", "success");
+                else { var m = ""; try { m = JSON.parse(jsonStr).error; } catch (e) {} root.showToast(m || "No se pudo eliminar el perfil", "error"); }
             }
         }
     }
@@ -403,14 +394,14 @@ Rectangle {
                     spacing: Math.round(Tokens.spXs * sf)
 
                     Text {
-                        text: "Agentes"
+                        text: "Perfiles"
                         color: Tokens.textPrimary
                         font.family: Tokens.fontDisplay
                         font.pixelSize: Math.round(18 * sf)
                         font.weight: Font.DemiBold
                     }
                     Text {
-                        text: "Cada agente es una personalidad de Hermes con sus instrucciones. Skills, MCP y proveedor se asignan por agente."
+                        text: "Configura perfiles de Hermes con tus instrucciones. Sus acciones siguen sujetas a permisos, políticas y aprobaciones."
                         color: Tokens.textMuted
                         font.family: Tokens.fontBody
                         font.pixelSize: Math.round(12 * sf)
@@ -423,7 +414,7 @@ Rectangle {
                     id: newAgentBtn
                     sf: app.sf
                     anchors.verticalCenter: parent.verticalCenter
-                    label: app.creating ? "Cancelar" : "+ Nuevo agente"
+                    label: app.creating ? "Cancelar" : "+ Nuevo perfil"
                     variant: app.creating ? "secondary" : "primary"
                     implicitWidth: Math.round(148 * sf)
                     onClicked: { app.creating = !app.creating; app.editingId = ""; app.note = ""; }
@@ -440,7 +431,7 @@ Rectangle {
             }
             Text {
                 visible: !app.loading && app.agents.length === 0 && !app.creating
-                text: "No hay agentes. Crea el primero."
+                text: "No hay perfiles disponibles."
                 color: Tokens.textMuted
                 font.family: Tokens.fontBody
                 font.pixelSize: Math.round(13 * sf)
@@ -488,15 +479,6 @@ Rectangle {
                         pad: 0
                         width: parent.width
                         implicitHeight: agentCardContent.implicitHeight + Math.round(Tokens.spXl * sf)
-
-                        // Active agent gets a success-tinted border
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: Math.round(Tokens.radiusLg * sf)
-                            color: "transparent"
-                            border.width: modelData.agent_id === app.activeId ? 1 : 0
-                            border.color: Tokens.successBase
-                        }
 
                         // Hover tint (gated on reduceMotion)
                         Rectangle {
@@ -564,19 +546,11 @@ Rectangle {
                                     }
 
                                     // "ACTIVO" chip
-                                    LumenChip {
-                                        visible: modelData.agent_id === app.activeId
-                                        sf: app.sf
-                                        text: "Activo"
-                                        tone: "success"
-                                        anchors.verticalCenter: parent.verticalCenter
-                                    }
-
-                                    // "Cerebro · omnipotente" chip
+                                    // Native main profile, not an authority bypass.
                                     LumenChip {
                                         visible: modelData.is_default
                                         sf: app.sf
-                                        text: "Cerebro · omnipotente"
+                                        text: "Perfil principal"
                                         tone: "warn"
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
@@ -598,16 +572,6 @@ Rectangle {
                                 anchors.right: parent.right
                                 anchors.top: parent.top
                                 spacing: Math.round(Tokens.spXs * sf)
-
-                                LumenButton {
-                                    visible: modelData.agent_id !== app.activeId
-                                    sf: app.sf
-                                    label: "Activar"
-                                    variant: "secondary"
-                                    implicitWidth: Math.round(72 * sf)
-                                    implicitHeight: Math.round(30 * sf)
-                                    onClicked: app.activate(modelData.agent_id)
-                                }
 
                                 LumenButton {
                                     sf: app.sf
@@ -717,7 +681,7 @@ Rectangle {
 
                             // ── Skills section ────────────────────────────
                             Text {
-                                text: "Skills del agente"
+                                text: "Skills del perfil"
                                 color: Tokens.textSecondary
                                 font.family: Tokens.fontBody
                                 font.pixelSize: Math.round(11 * sf)
@@ -808,7 +772,7 @@ Rectangle {
 
                             // ── MCP section ───────────────────────────────
                             Text {
-                                text: "Servidores MCP del agente"
+                                text: "Servidores MCP del perfil"
                                 color: Tokens.textSecondary
                                 font.family: Tokens.fontBody
                                 font.pixelSize: Math.round(11 * sf)
@@ -898,7 +862,7 @@ Rectangle {
 
                             // ── Composio Connections section ──────────────
                             Text {
-                                text: "Conexiones Composio del agente"
+                                text: "Conexiones Composio del perfil"
                                 color: Tokens.textSecondary
                                 font.family: Tokens.fontBody
                                 font.pixelSize: Math.round(11 * sf)
@@ -1017,7 +981,7 @@ Rectangle {
                 spacing: Math.round(Tokens.spSm * sf)
 
                 Text {
-                    text: app.editingId.length > 0 ? "Editar agente" : "Nuevo agente"
+                    text: app.editingId.length > 0 ? "Editar perfil" : "Nuevo perfil"
                     color: Tokens.textPrimary
                     font.family: Tokens.fontDisplay
                     font.pixelSize: Math.round(16 * sf)
@@ -1054,7 +1018,7 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: Math.round(Tokens.spSm * sf)
                     anchors.rightMargin: Math.round(Tokens.spSm * sf)
-                    text: "Cerebro · omnipotente. Su system prompt es fijo para que el SO siempre funcione. Aquí solo ajustas su personalidad y tono."
+                    text: "Perfil principal. Su núcleo está protegido; las políticas y aprobaciones siguen vigentes."
                     color: Tokens.warnBase
                     font.family: Tokens.fontBody
                     font.pixelSize: Math.round(11 * sf)
@@ -1066,7 +1030,7 @@ Rectangle {
             LumenInput {
                 sf: app.sf
                 width: parent.width
-                placeholder: "Nombre del agente"
+                placeholder: "Nombre del perfil"
                 Component.onCompleted: app.fName = this
                 enabled: !app.editingDefault
             }
@@ -1183,7 +1147,7 @@ Rectangle {
                     loading: app.busy
                     label: app.busy
                            ? (app.editingId.length > 0 ? "Guardando…" : "Creando…")
-                           : (app.editingId.length > 0 ? "Guardar cambios" : "Crear agente")
+                           : (app.editingId.length > 0 ? "Guardar cambios" : "Crear perfil")
                     variant: "primary"
                     implicitWidth: Math.round(152 * sf)
                     onClicked: app.save()

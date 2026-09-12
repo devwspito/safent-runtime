@@ -69,7 +69,7 @@ Item {
                 { appId: "integrations", label: "Integraciones" },
                 { appId: "providers",  label: "Providers" },
                 { appId: "mcp",        label: "MCP Apps" },
-                { appId: "agents",     label: "Agents" },
+                { appId: "agents",     label: "Perfiles" },
                 { appId: "tasks",      label: "Tareas" }
                 // Terminal eliminado del dock — centralizado en "Apps"
                 // (NativeAppsLauncher → qterminal). Un solo punto de entrada.
