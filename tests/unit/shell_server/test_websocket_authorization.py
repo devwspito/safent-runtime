@@ -85,10 +85,12 @@ async def _first_ws_message(
 
 
 def _api_v1_websocket_routes(app: Any) -> list[str]:
+    from tests.route_inventory import route_inventory
+
     return [
-        route.path
-        for route in app.routes
-        if isinstance(route, APIWebSocketRoute) and route.path.startswith("/api/v1/")
+        path
+        for route, path in route_inventory(app.routes)
+        if isinstance(route, APIWebSocketRoute) and path.startswith("/api/v1/")
     ]
 
 

@@ -32,6 +32,21 @@ _TENANT = UUID("30000000-0000-0000-0000-000000000099")
 _OPERATOR = UUID("30000000-0000-0000-0000-000000000001")
 
 
+@pytest.fixture
+def broker_loop():
+    """Supply the live loop required by the production write boundary."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        yield loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        loop.close()
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -449,7 +464,7 @@ class TestExternalNoDoubleGateConcurrent:
 class TestMemoryToolGated:
     """memory WRITE actions route through broker via monkeypatch."""
 
-    def test_memory_write_routes_through_broker(self) -> None:
+    def test_memory_write_routes_through_broker(self, broker_loop) -> None:
         """_patch_memory_tool makes memory WRITE actions dispatch through broker.
 
         FAIL BEFORE FIX: inline branch calls memory_tool directly → bypasses broker.
@@ -463,7 +478,7 @@ class TestMemoryToolGated:
             dispatch_calls.append(proposal)
             return _outcome_executed({"written": True})
 
-        agent = _build_agent_with_external_catalog(())
+        agent = _build_agent_with_external_catalog((), engine_loop=broker_loop)
 
         # Track if we patch memory_tool successfully.
         patched = {"original_called": False}
@@ -554,7 +569,7 @@ class TestMemoryToolGated:
 class TestClarifyToolGated:
     """clarify routes through broker via monkeypatch."""
 
-    def test_clarify_routes_through_broker(self) -> None:
+    def test_clarify_routes_through_broker(self, broker_loop) -> None:
         """_patch_clarify_tool intercepts clarify and routes through broker.
 
         FAIL BEFORE FIX: inline branch calls clarify_tool directly → bypasses broker.
@@ -568,7 +583,7 @@ class TestClarifyToolGated:
             dispatch_calls.append(proposal)
             return _outcome_pending()
 
-        agent = _build_agent_with_external_catalog(())
+        agent = _build_agent_with_external_catalog((), engine_loop=broker_loop)
 
         try:
             import tools.clarify_tool as _cl_mod
