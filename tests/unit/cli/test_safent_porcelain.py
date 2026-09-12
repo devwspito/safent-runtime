@@ -183,7 +183,7 @@ case "$1" in
           [ "$exists" = "true" ] || exit 1
           case "$2" in
             '{{.Rootful}}') echo "${FAKE_MACHINE_ROOTFUL:-true}" ;;
-            '{{.State}}') echo "${FAKE_MACHINE_STATE:-running}" ;;
+            '{{.State}}') echo "${FAKE_MACHINE_STATE-running}" ;;
           esac
           exit 0
         fi
@@ -202,6 +202,7 @@ case "$1" in
         ;;
       start)
         [ -n "${FAKE_MACHINE_START_DELAY_SECONDS:-}" ] && sleep "$FAKE_MACHINE_START_DELAY_SECONDS"
+        [ -n "${FAKE_MACHINE_START_ERROR:-}" ] && printf '%s\\n' "$FAKE_MACHINE_START_ERROR" >&2
         [ "${FAKE_MACHINE_START_FAILS:-false}" = "true" ] && exit 1
         exit 0
         ;;
@@ -737,6 +738,61 @@ class TestEnsureMachineNeverAdoptsAForeignMachine:
 
         machine_json = json.loads((tmp_path / "home" / ".safent" / "machine.json").read_text())
         assert machine_json == {"name": "safent-test-engine", "adopted": False}
+
+    @pytest.mark.parametrize("start_fails", ["true", "false"])
+    @pytest.mark.parametrize("machine_state", ["stopped", "starting", ""])
+    def test_success_requires_the_named_machine_running_not_another_daemon(
+        self, tmp_path: Path, fake_bin_dir: Path, start_fails: str, machine_state: str
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("podman-machine-default\nsafent-test-engine\n")
+        conflict = (
+            "podman-machine-default already starting or running on the libkrun provider: "
+            "only one VM can be active at a time"
+        )
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_STATE": machine_state,
+                "FAKE_MACHINE_START_FAILS": start_fails,
+                "FAKE_MACHINE_START_ERROR": conflict,
+            },
+        )
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 16, result.stdout
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["code"] == "machine_start_failed"
+        assert events[-1]["retryable"] is False
+        assert "safent-test-engine" in events[-1]["detail"]
+        assert conflict in result.stderr
+        calls = _podman_calls(podman_log)
+        assert calls.count("machine start safent-test-engine") == 1
+        assert "machine inspect safent-test-engine --format {{.State}}" in calls
+        assert not any(c == "info" or c.startswith("info ") for c in calls)
+        assert not any(c.startswith(("machine stop", "machine rm")) for c in calls)
+
+    def test_nonzero_start_is_idempotent_only_if_the_named_machine_is_running(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("safent-test-engine\n")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state),
+                       "FAKE_MACHINE_STATE": "running", "FAKE_MACHINE_START_FAILS": "true"},
+        )
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+        assert result.returncode == 0, result.stderr
+        assert _parse_ndjson(result.stdout)[-1]["t"] == "done"
+        assert "machine inspect safent-test-engine --format {{.State}}" in _podman_calls(podman_log)
 
     def test_our_own_already_existing_machine_is_reused_without_recreating(
         self, tmp_path: Path, fake_bin_dir: Path

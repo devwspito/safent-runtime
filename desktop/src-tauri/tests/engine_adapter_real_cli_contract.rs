@@ -419,6 +419,48 @@ fn real_local_engine_image_digest_is_null_when_podman_image_exists_says_no() {
 }
 
 #[test]
+fn real_machine_conflict_is_a_terminal_failure_not_bootstrap_progress() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fx = healthy_fixture("machine-conflict", "engine-good");
+    std::fs::write(&fx.podman_path, r#"#!/bin/sh
+echo "$@" >> "$FAKE_PODMAN_LOG"
+case "$1 $2" in
+  'machine inspect')
+    case "$5" in
+      '{{.Rootful}}') echo true ;;
+      '{{.State}}') echo stopped ;;
+    esac
+    exit 0 ;;
+  'machine start')
+    echo 'podman-machine-default already starting or running on the libkrun provider: only one VM can be active at a time' >&2
+    exit 1 ;;
+esac
+# The unrelated default daemon answers info successfully.
+exit 0
+"#).unwrap();
+    let uname_dir = unique_dir("machine-conflict-uname");
+    write_fake_uname(&uname_dir);
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    // SAFETY: ENV_LOCK held; restored before inspecting the result.
+    unsafe { set_env("PATH", &format!("{}:{original_path}", uname_dir.display())); }
+    let result = EmbeddedCliDriver::new(config(&fx, "engine-good")).apply(
+        &RepairAction::CreateMachine, &RecordingNotifier::new(), &CancelSignal::new(),
+    );
+    unsafe { set_env("PATH", &original_path); }
+    match result {
+        Err(ports::EngineError::Reported(cause)) => {
+            assert_eq!(cause.code, domain::FailureCode::MachineStartFailed);
+            assert!(!cause.retryable);
+            assert!(cause.message.contains("explicitamente"));
+        }
+        other => panic!("expected a non-retryable machine failure, got {other:?}"),
+    }
+    let calls = podman_calls(&fx);
+    assert_eq!(calls.iter().filter(|c| c.starts_with("machine start ")).count(), 1);
+    assert!(!calls.iter().any(|c| c == "info" || c.starts_with("machine stop ")));
+}
+
+#[test]
 fn real_stage_runtime_ensure_machine_ensure_images_are_contract_shaped_ndjson() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fx = healthy_fixture("verbs", "engine-good");
