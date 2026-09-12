@@ -753,7 +753,7 @@ img, svg { display: block; }
   font-family: var(--font-ui);
   padding: var(--sp-2) var(--sp-4);
   cursor: pointer;
-  transition: all var(--ease-hover);
+  transition: background-color var(--ease-hover), border-color var(--ease-hover), color var(--ease-hover), transform var(--dur-quick) var(--ease);
 }
 
 .suggestion-pill:hover {
@@ -1226,7 +1226,7 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   font-size: var(--text-label);
   font-weight: 600;
   cursor: pointer;
-  transition: all var(--ease-hover);
+  transition: background-color var(--ease-hover), border-color var(--ease-hover), color var(--ease-hover), transform var(--dur-quick) var(--ease);
 }
 .composer-stop:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
 
@@ -1435,7 +1435,7 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   border-radius: var(--r-sm);
   font-size: var(--text-button);
   font-weight: 600;
-  transition: all var(--ease-hover);
+  transition: background-color var(--ease-hover), border-color var(--ease-hover), color var(--ease-hover), transform var(--dur-quick) var(--ease);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -1453,6 +1453,7 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   border: 1px solid var(--line2);
 }
 .office-btn--ghost:hover:not(:disabled) { background: var(--card2); }
+.office-btn:active:not(:disabled) { transform: scale(.97); }
 
 /* ── Modal ─────────────────────────────────────────────────────────────────── */
 
@@ -2762,7 +2763,7 @@ details[open] .cv-teach-chevron {
   font-size: var(--text-label);
   font-weight: 500;
   cursor: pointer;
-  transition: all var(--ease-hover);
+  transition: background-color var(--ease-hover), border-color var(--ease-hover), color var(--ease-hover);
 }
 
 .day-chip:hover { border-color: var(--accent); color: var(--accent); }
@@ -4150,7 +4151,7 @@ details[open] .cv-teach-chevron {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  transition: all 200ms ease;
+  transition: background-color 180ms var(--ease), border-color 180ms var(--ease), color 180ms var(--ease);
 }
 
 .ob-step--active .ob-step__circle {
@@ -4445,7 +4446,7 @@ details[open] .cv-teach-chevron {
   cursor: pointer;
   text-align: left;
   line-height: 1.5;
-  transition: all var(--ease-hover);
+  transition: background-color var(--ease-hover), border-color var(--ease-hover), color var(--ease-hover), transform var(--dur-quick) var(--ease);
 }
 
 .ob-suggestion-btn:hover {
@@ -4453,6 +4454,8 @@ details[open] .cv-teach-chevron {
   color: var(--ink);
   background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
+
+.ob-suggestion-btn:active { transform: scale(.98); }
 
 .ob-finish__cta {
   height: 48px;
