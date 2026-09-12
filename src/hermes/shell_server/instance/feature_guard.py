@@ -44,6 +44,7 @@ _PREFIX_FEATURE_MAP: tuple[tuple[str, str], ...] = (
     ("/api/v1/skills",      "skills"),
     ("/api/v1/composio",    "skills"),
     ("/api/v1/integrations","integraciones"),
+    ("/api/v1/crm",         "integraciones"),
     ("/api/v1/tasks",       "programadas"),
     ("/api/v1/agents",      "agentes"),
     ("/api/v1/runtime/agent","agentes"),

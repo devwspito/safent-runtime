@@ -13,6 +13,7 @@ import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
 import styles from './IntegrationsView.module.css'
+import { EnterpriseCrm } from './EnterpriseCrm'
 
 // Mirrors vanilla integrations.js load order: status first → prevents calling
 // connected/apps when Composio has no key (avoids hanging for minutes).
@@ -172,6 +173,7 @@ export default function IntegrationsView() {
       />
 
       <div className={`view-body ${styles.body}`}>
+          <EnterpriseCrm />
 
           {/* ── Web search (Brave) ─────────────────────────────────────────── */}
             <section className={styles.section} aria-label={t('int.websearch.label')}>
