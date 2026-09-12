@@ -55,3 +55,15 @@ it('does not show late IPC failure in a replacement attempt or override its irre
   expect(byId('cancel-note').textContent).toContain('ya no se puede cancelar')
   expect(byId('action-error').hidden).toBe(true)
 })
+
+it('does not request a retry for a non-retryable machine failure, even from a stale click', () => {
+  snapshot(1, { kind: 'failed', code: 'machine_start_failed', retryable: false })
+  const retry = byId('btn-retry')
+  expect(retry.hidden).toBe(true)
+  expect(retry.disabled).toBe(true)
+  expect(byId('failed-hint').textContent).not.toMatch(/vuelve a intentarlo/i)
+  retry.disabled = false // A queued/synthetic event is not lifecycle authority.
+  retry.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  expect(ipc.retry).not.toHaveBeenCalled()
+  expect(byId('screen-failed').hidden).toBe(false)
+})

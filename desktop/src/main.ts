@@ -97,7 +97,7 @@ function main(): void {
   })
 
   els.retryButton.addEventListener('click', () => {
-    if (els.retryButton.disabled) return
+    if (els.retryButton.disabled || state.kind !== 'failed' || !state.retryable || state.retrying) return
     retryAttempt = attemptId
     const previous = state
     const pending = reduceLifecycle(state, { source: 'retry-requested' })

@@ -106,6 +106,10 @@ describe('reduceLifecycle — preparation stages (contract app-engine.md §8, sa
 })
 
 describe('reduceLifecycle — the ONE failure screen (FR-033)', () => {
+  it('ignores a retry request when the current failure is not retryable', () => {
+    const failed = run([engine({ kind: 'failed', code: 'machine_start_failed', detail: 'x', retryable: false })])
+    expect(reduceLifecycle(failed, { source: 'retry-requested' })).toBe(failed)
+  })
   it('turns `failed` into the failed state, deriving stageId from the last active stage (the wire carries no stage on `failed`)', () => {
     const state = run([
       engine({ kind: 'stage', stage: 'pull_engine', label: 'Descargando Safent', total_bytes: null, point_of_no_return: false }),
