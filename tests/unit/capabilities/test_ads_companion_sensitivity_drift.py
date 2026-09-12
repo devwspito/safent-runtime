@@ -32,6 +32,12 @@ from hermes.capabilities.tool_sensitivity import SensitivityCategory, sensitivit
 
 pytestmark = pytest.mark.unit
 
+
+def test_child_creation_proposal_is_spend_only_for_exact_ads_slug() -> None:
+    assert SensitivityCategory.SPEND in sensitivity("mcp__safent-ads__propose_ad_child", {})
+    assert SensitivityCategory.SPEND not in sensitivity("mcp__other__propose_ad_child", {})
+
+
 _ADS_REPO = Path(
     os.environ.get("SAFENT_ADS_REPO", str(Path.home() / "Desktop" / "safent-ads"))
 )
