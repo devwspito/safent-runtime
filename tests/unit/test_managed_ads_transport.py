@@ -15,6 +15,92 @@ ads_policy = policy_fixture
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"revision": 2},
+        {"connection_id": "99999999-9999-4999-8999-999999999999"},
+        {"external_account_id": "999"},
+        {"revision": True},
+        {"role": "owner"},
+    ],
+)
+async def test_ui_snapshot_is_precondition_not_authority(ads_policy, changes):
+    store, _, binding, envelope = ads_policy
+    apply_signed_ads(store, envelope())
+    post = AsyncMock()
+    with pytest.raises(ManagedAdsUnavailable):
+        await ManagedAdsTransport(store, post=post).call(
+            binding.grant_id,
+            "list_campaigns",
+            {},
+            expected_binding={**binding.model_dump(), **changes},
+        )
+    post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matching_ui_snapshot_is_not_forwarded_to_central(ads_policy):
+    store, key, binding, envelope = ads_policy
+    apply_signed_ads(store, envelope())
+    post = AsyncMock(side_effect=[{"grant_token": signed_token(key, binding)}, {"ok": True}])
+    assert await ManagedAdsTransport(store, post=post).call(
+        binding.grant_id,
+        "list_campaigns",
+        {},
+        expected_binding=binding.model_dump(),
+    ) == {"ok": True}
+    assert post.call_args_list[1].args[2] == {}
+
+
+@pytest.mark.asyncio
+async def test_http_ui_snapshot_guard_runs_before_any_upstream_request(ads_policy, monkeypatch):
+    import httpx
+    from fastapi import FastAPI
+
+    from hermes.shell_server import ads_bridge
+
+    store, key, binding, envelope = ads_policy
+    apply_signed_ads(store, envelope())
+    post = AsyncMock(
+        side_effect=[
+            {"grant_token": signed_token(key, binding)},
+            {"result": {"items": [], "cursor": None}},
+        ]
+    )
+    monkeypatch.setattr(
+        ads_bridge, "ManagedAdsTransport", lambda value: ManagedAdsTransport(value, post=post)
+    )
+    app = FastAPI()
+    app.include_router(ads_bridge.create_ads_bridge_router(store.db_path, store._vault))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app), base_url="https://local.test"
+    ) as client:
+        payload = {
+            "grant_id": binding.grant_id,
+            "arguments": {},
+            "expected_binding": binding.model_dump(),
+        }
+        for snapshot in [
+            None,
+            [],
+            {**binding.model_dump(), "revision": 2},
+            {**binding.model_dump(), "revision": True},
+        ]:
+            denied = await client.post(
+                "/api/v1/ads/managed/tools/list_campaigns",
+                json={**payload, "expected_binding": snapshot},
+            )
+            assert denied.status_code == 403
+            assert "grant-a" not in denied.text
+        post.assert_not_awaited()
+        allowed = await client.post("/api/v1/ads/managed/tools/list_campaigns", json=payload)
+        assert allowed.status_code == 200
+        assert allowed.headers["cache-control"] == "no-store"
+        assert post.call_args_list[1].args[2] == {}
+
+
 def signed_token(key, binding, *, nonce="nonce", **changes):
     now = int(time.time())
     claims = {

@@ -1,7 +1,7 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { X, Terminal, Search, Wrench, ExternalLink, Megaphone, Link2, Lightbulb } from 'lucide-react'
-import { useT } from '../lib/i18n'
+import { useT, useLocale } from '../lib/i18n'
 import type { TranslationKey } from '../lib/i18n'
 import {
   listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, scanInstall, recordSecurityDecision,
@@ -767,6 +767,7 @@ interface ManagedRemotePresetCardProps {
 
 function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: ManagedRemotePresetCardProps) {
   const t = useT()
+  const { locale } = useLocale()
   const [url, setUrl] = useState('')
   const [connecting, setConnecting] = useState(false)
   const [pendingScan, setPendingScan] = useState<{ scan: InstallScanResponse; url: string } | null>(null)
@@ -857,6 +858,15 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
     } catch (e) {
       show(e instanceof Error ? e.message : t('mcp.err.decision'), 'error')
     }
+  }
+
+  if (availability.status === 'managed') {
+    return <div className={styles.catalogCard}>
+      <div className={styles.catalogCardName}>Safent Ads · Enterprise</div>
+      <p className={styles.catalogCardDesc}>{locale === 'es'
+        ? 'Las asignaciones y la conexión se administran desde Enterprise. Consulta las cuentas disponibles en Anuncios.'
+        : 'Assignments and the connection are managed by Enterprise. Open Ads to inspect available accounts.'}</p>
+    </div>
   }
 
   if (connectedServer) {

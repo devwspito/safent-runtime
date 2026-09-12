@@ -17,6 +17,7 @@ vi.mock('../hooks/useAdsAvailability', () => ({ useAdsAvailability }))
 
 import AdsView from './AdsView'
 import type { AdsAvailability } from '../hooks/useAdsAvailability'
+import { adsPolicyFixture } from '../api/managedAds.fixtures'
 
 function noop() { /* refresh stub */ }
 
@@ -25,6 +26,13 @@ function setAvailability(status: AdsAvailability['status'], reason: AdsAvailabil
 }
 
 describe('AdsView', () => {
+  it('managed mode mounts assignments, never the local iframe', () => {
+    useAdsAvailability.mockReturnValue({ status: 'managed', reason: null, policy: adsPolicyFixture, refresh: noop })
+    render()
+    expect(container.querySelector('iframe')).toBeNull()
+    expect(container.textContent).toContain('Administrado por Enterprise')
+    expect(container.querySelector('select')?.value).toBe('')
+  })
   let container: HTMLDivElement
   let root: Root
 

@@ -85,6 +85,7 @@ describe('AdsNavItem', () => {
     for (const av of [
       availability('loading'),
       availability('ready'),
+      availability('managed'),
       availability('unavailable', 'not_installed'),
       availability('unavailable', 'unreachable'),
       availability('unavailable', 'unauthorized'),
@@ -118,7 +119,7 @@ describe('AdsNavItem', () => {
 
   it.each([
     ['not_installed', 'El servicio de anuncios no está instalado'],
-    ['unreachable', 'El servicio de anuncios está arrancando'],
+    ['unreachable', 'No se pudo conectar con el servicio de anuncios'],
     ['unauthorized', 'El servicio de anuncios necesita configuración'],
   ] as const)(
     'shows a status dot + a screen-reader-only reason for unavailable + %s',
@@ -147,6 +148,7 @@ describe('AdsNavItem', () => {
       request: { verb: 'install_companion', state: 'pending', expires_at: 't' },
     })
     render(availability('unavailable', 'not_installed'))
+    await act(async () => { await Promise.resolve() })
 
     const link = container.querySelector('a[href="/anuncios"]')
     expect(link).not.toBeNull() // the link never disappears, even with the action present

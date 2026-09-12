@@ -12,6 +12,8 @@ const { mintAdsBridgeSession } = vi.hoisted(() => ({
 }))
 
 vi.mock('../api/client', () => ({ mintAdsBridgeSession }))
+const { getAdsPolicy } = vi.hoisted(() => ({ getAdsPolicy: vi.fn() }))
+vi.mock('../api/managedAds', () => ({ getAdsPolicy }))
 
 import { useAdsAvailability } from './useAdsAvailability'
 
@@ -30,6 +32,7 @@ describe('useAdsAvailability', () => {
 
   beforeEach(() => {
     mintAdsBridgeSession.mockReset()
+    getAdsPolicy.mockReset().mockResolvedValue(null)
     vi.useFakeTimers()
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -126,7 +129,7 @@ describe('useAdsAvailability', () => {
       new Promise((resolve) => { resolvePromise = resolve }),
     )
 
-    act(() => {
+    await act(async () => {
       root.render(React.createElement(Harness))
     })
     act(() => { root.unmount() })
@@ -142,7 +145,7 @@ describe('useAdsAvailability', () => {
   it('does not overlap polling and manual refresh while an availability check is pending', async () => {
     let finish!: (value: { status: 'unavailable'; reason: 'unauthorized' }) => void
     mintAdsBridgeSession.mockReturnValue(new Promise(resolve => { finish = resolve }))
-    act(() => root.render(React.createElement(Harness, { pollMs: 1000 })))
+    await act(async () => root.render(React.createElement(Harness, { pollMs: 1000 })))
     await act(async () => {
       container.querySelector('button')!.click()
       vi.advanceTimersByTime(5000)
@@ -166,5 +169,19 @@ describe('useAdsAvailability', () => {
     mintAdsBridgeSession.mockRejectedValue(new Error('offline'))
     await act(async () => root.render(React.createElement(Harness)))
     expect(container.querySelector('div')?.dataset.reason).toBe('unreachable')
+  })
+
+  it('managed policy never mints a local session, even with no assignments', async () => {
+    getAdsPolicy.mockResolvedValue({ mode: 'managed', bindings: [] })
+    await act(async () => root.render(React.createElement(Harness)))
+    expect(container.querySelector('div')?.dataset.status).toBe('managed')
+    expect(mintAdsBridgeSession).not.toHaveBeenCalled()
+  })
+  it('failed policy verification clears previous managed state and never falls back', async () => {
+    getAdsPolicy.mockResolvedValueOnce({ mode: 'managed', bindings: [] }).mockRejectedValueOnce(new Error('revoked'))
+    await act(async () => root.render(React.createElement(Harness)))
+    await act(async () => container.querySelector('button')!.click())
+    expect(container.querySelector('div')?.dataset.status).toBe('unavailable')
+    expect(mintAdsBridgeSession).not.toHaveBeenCalled()
   })
 })

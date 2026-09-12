@@ -20,6 +20,8 @@ import { useAdsAvailability } from '../hooks/useAdsAvailability'
 import { Button } from '../components/ui/Button'
 import type { AdsAvailabilityReason } from '../api/types'
 import css from './AdsView.module.css'
+import { ManagedAdsView } from './ManagedAdsView'
+import { adsPolicyKey } from '../api/managedAds'
 
 const ADS_IFRAME_SRC = '/ads/'
 
@@ -37,6 +39,13 @@ export default function AdsView() {
 
   if (availability.status === 'loading') {
     return <AdsState icon={<Loader2 size={24} aria-hidden className="spin" />} title={t('ads.state.loading.title')} loading />
+  }
+
+  if (availability.status === 'managed') {
+    return availability.policy?.mode === 'managed'
+      ? <ManagedAdsView key={adsPolicyKey(availability.policy)} policy={availability.policy}
+          refresh={availability.refresh} refreshing={availability.refreshing ?? false} />
+      : <AdsState icon={<ShieldAlert size={24} aria-hidden />} title={t('ads.state.unauthorized.title')} />
   }
 
   const isBlocked = availability.status === 'unavailable' && availability.reason !== 'no_accounts'
