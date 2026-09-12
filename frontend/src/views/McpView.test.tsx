@@ -66,6 +66,13 @@ describe('McpView — Ads card (029 SC-001)', () => {
       for (let i = 0; i < 5; i++) await Promise.resolve()
     })
   }
+  it('managed Ads hides local install and self-host connection controls', async () => {
+    useAdsAvailability.mockReturnValue({ status: 'managed', reason: null, refresh: vi.fn() })
+    await render()
+    expect(container.textContent).toContain('Las asignaciones y la conexión se administran desde Enterprise')
+    expect(container.querySelector('#mcp-managed-ads-url')).toBeNull()
+    expect(postInstallRequest).not.toHaveBeenCalled()
+  })
   it.each(['offline','unknown','empty-pass'])('does not request MCP install on unverifiable scan: %s',async mode=>{
     if(mode==='offline') scanInstall.mockRejectedValue(new Error('offline'))
     else if(mode==='empty-pass') scanInstall.mockResolvedValue({verdict:'PASS',scan_id:'',requires_owner_approval:false})

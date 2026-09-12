@@ -124,7 +124,14 @@ class ManagedAdsTransport:
     def __init__(self, store: SQLiteAssociationStore, *, post: JsonPost = post_json) -> None:
         self.store, self.post = store, post
 
-    async def call(self, grant_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def call(
+        self,
+        grant_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        expected_binding: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(name, str) or name not in TOOLS or not isinstance(arguments, dict):
             raise ManagedAdsUnavailable()
         try:
@@ -132,6 +139,11 @@ class ManagedAdsTransport:
             if len(encoded.encode()) > MAX_ARGUMENT_BYTES:
                 raise ValueError
             frozen = json.loads(encoded)
+            expected = (
+                AdsBindingSpec.model_validate(expected_binding)
+                if expected_binding is not None
+                else None
+            )
         except (ValueError, TypeError):
             raise ManagedAdsUnavailable() from None
         with configuration_lock(self.store.db_path):
@@ -141,6 +153,10 @@ class ManagedAdsTransport:
             binding = next((item for item in policy.bindings if item.grant_id == grant_id), None)
             association = self.store.get()
             if binding is None or association is None:
+                raise ManagedAdsUnavailable()
+            # Caller snapshot is only a precondition, never delegated authority.
+            # A fresh signed binding remains the sole principal for bootstrap.
+            if expected is not None and expected != binding:
                 raise ManagedAdsUnavailable()
             secret = self.store.reveal_instance_secret()
             if not secret:

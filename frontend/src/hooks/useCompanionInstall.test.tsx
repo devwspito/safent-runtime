@@ -25,6 +25,9 @@ function availability(
 }
 
 describe('deriveCompanionInstallPhase (pure)', () => {
+  it('managed never offers repair/install for an old local install failure', () => {
+    expect(deriveCompanionInstallPhase(availability('managed'), { verb: 'install_companion', state: 'failed', expires_at: 't' })).toEqual({ kind: 'hidden' })
+  })
   it.each([
     ['ready', null] as const,
     ['loading', null] as const,

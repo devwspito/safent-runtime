@@ -483,11 +483,16 @@ def create_ads_bridge_router(db_path: Path | None = None, vault: Any = None) -> 
             if len(raw) > MAX_ARGUMENT_BYTES:
                 return unavailable()
             body = json.loads(raw)
-            if not isinstance(body, dict) or set(body) != {'grant_id', 'arguments'}:
+            if not isinstance(body, dict) or set(body) not in (
+                {'grant_id', 'arguments'}, {'grant_id', 'arguments', 'expected_binding'},
+            ):
+                return unavailable()
+            if 'expected_binding' in body and not isinstance(body['expected_binding'], dict):
                 return unavailable()
             store = SQLiteAssociationStore(db_path=db_path, vault=vault)
             result = await ManagedAdsTransport(store).call(
                 body['grant_id'], name, body['arguments'],
+                expected_binding=body.get('expected_binding'),
             )
             return JSONResponse(result, headers={'Cache-Control': 'no-store'})
         except (PermissionError, ValueError, TypeError):

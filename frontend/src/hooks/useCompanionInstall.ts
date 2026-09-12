@@ -45,6 +45,7 @@ export function deriveCompanionInstallPhase(
   availability: Pick<AdsAvailability, 'status' | 'reason'>,
   status: InstallRequestStatus | null,
 ): CompanionInstallPhase {
+  if (availability.status === 'managed') return { kind: 'hidden' }
   switch (status?.state) {
     case 'pending':
     case 'claimed':
@@ -124,7 +125,7 @@ export function useCompanionInstall(availability: AdsAvailability): CompanionIns
   }, [status, availability])
 
   const fire = useCallback((verb: HostVerb) => {
-    if (active || submittingRef.current || !checked || readError || polling.current) return
+    if (availability.status === 'managed' || active || submittingRef.current || !checked || readError || polling.current) return
     submittingRef.current = true
     postInstallRequest(verb, { slug: COMPANION_SLUG })
       .then((res) => {
@@ -136,13 +137,13 @@ export function useCompanionInstall(availability: AdsAvailability): CompanionIns
         setStatus({ verb, state: 'failed', expires_at: new Date().toISOString() })
       })
       .finally(() => { submittingRef.current = false })
-  }, [active, checked, readError])
+  }, [active, checked, readError, availability.status])
 
   const install = useCallback(() => fire('install_companion'), [fire])
   const repair = useCallback(() => fire('repair_companion'), [fire])
   const retry = useCallback(() => fire(status?.verb ?? 'install_companion'), [fire, status])
 
-  const phase: CompanionInstallPhase = !checked ? { kind: 'checking' }
+  const phase: CompanionInstallPhase = availability.status === 'managed' ? { kind: 'hidden' } : !checked ? { kind: 'checking' }
     : readError ? { kind: 'unavailable' } : deriveCompanionInstallPhase(availability, status)
   return { phase, install, repair, retry, refresh: poll }
 }

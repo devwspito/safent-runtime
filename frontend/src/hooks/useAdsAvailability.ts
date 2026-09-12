@@ -7,9 +7,9 @@
  * (contracts/sso.md) so the FIRST click into Ads never shows a login step
  * (SC-002: zero-second logins across 20 opens).
  *
- * Polls POST /api/v1/ads/bridge/session — same call AdsView's first paint
- * would otherwise have to make, so polling it from the sidebar means the
- * bridge cookie is already warm by the time the owner clicks through.
+ * Verifies signed routing via GET /api/v1/ads/managed first. Only a free or
+ * never-associated policy may warm the local bridge session. Managed has a
+ * separate state, and any policy error denies rather than falling back.
  *
  * Also consumed by CompanionInstallAction/useCompanionInstall (029 FR-001):
  * `reason` selects "Instalar" vs "Reparar", and `status === 'ready'` is the
@@ -18,33 +18,41 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { mintAdsBridgeSession } from '../api/client'
+import { getAdsPolicy, type AdsPolicy } from '../api/managedAds'
 import type { AdsAvailabilityReason } from '../api/types'
 
 const ADS_AVAILABILITY_POLL_MS = 15_000
 
 export interface AdsAvailability {
   /** "loading" only before the first response ever arrives. */
-  status: 'loading' | 'ready' | 'unavailable'
+  status: 'loading' | 'ready' | 'managed' | 'unavailable'
   reason: AdsAvailabilityReason | null
+  policy?: AdsPolicy | null
   /** Re-checks immediately, outside the poll interval (e.g. a "Retry" CTA). */
   refresh: () => void
   refreshing?: boolean
 }
 
 export function useAdsAvailability(pollMs = ADS_AVAILABILITY_POLL_MS): AdsAvailability {
-  const [state, setState] = useState<{ status: 'loading' | 'ready' | 'unavailable'; reason: AdsAvailabilityReason | null }>(
+  const [state, setState] = useState<Omit<AdsAvailability, 'refresh'>>(
     { status: 'loading', reason: null },
   )
   const [refreshing, setRefreshing] = useState(false)
-  const scope = useRef({ active: false, pending: false })
+  const scope = useRef({ active: false, pending: false, controller: new AbortController() })
 
   const poll = useCallback(() => {
     const current = scope.current
     if (!current.active || current.pending) return
     current.pending = true
     setRefreshing(true)
-    void mintAdsBridgeSession().then((res) => {
-      if (current.active) setState({ status: res.status, reason: res.reason })
+    void getAdsPolicy(current.controller.signal).then(async policy => {
+      if (!current.active) return
+      if (policy?.mode === 'managed') {
+        setState({ status: 'managed', reason: null, policy })
+        return
+      }
+      const res = await mintAdsBridgeSession()
+      if (current.active) setState({ status: res.status, reason: res.reason, policy })
     }).catch(() => {
       if (current.active) setState({ status: 'unavailable', reason: 'unreachable' })
     }).finally(() => {
@@ -54,11 +62,11 @@ export function useAdsAvailability(pollMs = ADS_AVAILABILITY_POLL_MS): AdsAvaila
   }, [])
 
   useEffect(() => {
-    const current = { active: true, pending: false }
+    const current = { active: true, pending: false, controller: new AbortController() }
     scope.current = current
     poll()
     const id = setInterval(poll, pollMs)
-    return () => { current.active = false; clearInterval(id) }
+    return () => { current.active = false; current.controller.abort(); clearInterval(id) }
   }, [poll, pollMs])
 
   return { ...state, refreshing, refresh: poll }
