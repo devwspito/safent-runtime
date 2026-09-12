@@ -22,6 +22,7 @@ let context: ChatOutletContext
 async function render() {
   await act(async () => { root.render(<I18nProvider><MemoryRouter><Routes>
     <Route element={<Outlet context={context} />}><Route index element={<ChatView />} /></Route>
+    <Route path="tareas" element={<p>Task destination</p>} />
   </Routes></MemoryRouter></I18nProvider>) })
 }
 beforeEach(() => {
@@ -37,6 +38,19 @@ beforeEach(() => {
   }
 })
 afterEach(() => { act(() => root.unmount()); host.remove() })
+
+it('opens the real Tasks route from an assistant link without reloading the app', async () => {
+  context.status = { phase: 'idle' }
+  context.messages = [{ type: 'assistant', id: 'reply', taskId: null,
+    thinkingText: '', thinkingDone: true, toolSteps: [], activityText: '',
+    renderedHtml: '<p><a href="/tareas">Ver Tareas</a></p>', isStreaming: false }]
+  await render()
+  const link = host.querySelector<HTMLAnchorElement>('a[href="/tareas"]')!
+  const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+  await act(async () => { link.dispatchEvent(click) })
+  expect(click.defaultPrevented).toBe(true)
+  expect(host.textContent).toContain('Task destination')
+})
 
 it('shows unconfirmed cancellation without hiding the next draft or allowing another stop/send', async () => {
   context.cancellation = 'requested'

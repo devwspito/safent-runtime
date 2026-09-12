@@ -220,7 +220,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   network:       'Red',
   browser:       'Navegador',
   tasks:         'Tareas programadas',
-  agents:        'Agentes',
+  agents:        'Perfiles',
   providers:     'Modelos y proveedores',
   security:      'Seguridad del sistema',
 }

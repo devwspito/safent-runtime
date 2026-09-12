@@ -36,7 +36,7 @@ NAV_PRIMARY: tuple[NavEntry, ...] = (
     NavEntry("skills", "✧", "Skills", "2"),
     NavEntry("integrations", "⇄", "Integraciones", "3"),
     NavEntry("mcp", "⊞", "MCP", "4"),
-    NavEntry("agents", "◇", "Agentes", "5"),
+    NavEntry("agents", "◇", "Perfiles", "5"),
     NavEntry("tasks", "≣", "Tareas", "6"),
 )
 

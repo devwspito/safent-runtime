@@ -65,7 +65,7 @@ class StatusBar(Horizontal):
         crown = "♛ " if self.agent_name.lower() in ("safent", "hermes", "cerebro") else ""
         brand.append(f"{crown}{self.agent_name}", style=PALETTE["text"])
         if crown:
-            brand.append("  Cerebro · omnipotente", style=PALETTE["text_faint"])
+            brand.append("  Perfil principal", style=PALETTE["text_faint"])
         left.update(brand)
 
         seg = Text()
