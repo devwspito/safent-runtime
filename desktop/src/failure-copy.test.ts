@@ -34,6 +34,11 @@ const ALL_CODES: readonly FailureCode[] = [
 const JARGON = /podman|contenedor|container|\bvm\b|máquina virtual|digest|daemon/i
 
 describe('copyForFailure — FR-007 named states, NFR-004 owner vocabulary', () => {
+  it('does not suggest an unavailable retry when the embedded CLI is missing', () => {
+    const copy = copyForFailure('cli_porcelain_unsupported')
+    expect(copy.hint).not.toMatch(/vuelve a intentarlo/i)
+    expect(copy.hint).toContain('diagnóstico de arranque')
+  })
   it.each(ALL_CODES)('has a non-empty headline and hint for every contract FailureCode (%s)', (code) => {
     const copy = copyForFailure(code)
     expect(copy.headline.length).toBeGreaterThan(0)
