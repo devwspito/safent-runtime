@@ -19,7 +19,7 @@ def build(monkeypatch, config, *, substitute_gate=False):
 
     monkeypatch.setattr(managed_llm_bootstrap, "assert_process_admission", lambda **_: None)
     if substitute_gate:
-        monkeypatch.setattr(nous_engine, "_assert_managed_execution_ready", lambda: None)
+        monkeypatch.setattr(nous_engine, "_assert_managed_execution_ready", lambda _config: None)
     monkeypatch.setattr(nous_engine, "_cached_enrich_prompt", lambda prompt, _: prompt)
     monkeypatch.setattr(
         nous_engine,
@@ -50,7 +50,7 @@ def build(monkeypatch, config, *, substitute_gate=False):
     return captured
 
 
-def test_real_factory_managed_gate_stays_unconditionally_closed(monkeypatch):
+def test_real_factory_requires_process_admission_not_profile_flags(monkeypatch):
     with pytest.raises(ManagedProviderUnavailableError):
         build(
             monkeypatch,

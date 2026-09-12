@@ -2968,7 +2968,7 @@ class NousReasoningEngine:
         from hermes.runtime.managed_llm_bootstrap import assert_process_admission  # noqa: PLC0415
 
         if model_config.managed:
-            _assert_managed_execution_ready()
+            _assert_managed_execution_ready(model_config)
         assert_process_admission(managed=model_config.managed)
         if model_config.managed and model_config.extra:
             raise ValueError("Managed inference does not accept custom request overrides")
@@ -3127,19 +3127,33 @@ class NousReasoningEngine:
 # ---------------------------------------------------------------------------
 
 
-def _assert_managed_execution_ready() -> None:
-    """Release gate, not a setting or hook accepted from profiles/tools.
-
-    The isolated native factory fixture substitutes this private function only
-    in its own process. Production remains unconditionally closed until the
-    complete confined service lifecycle has been certified.
-    """
+def _assert_managed_execution_ready(model_config: ModelConfig) -> None:
+    """Require current process admission and the exact authoritative binding."""
+    from hermes.runtime.managed_llm import resolve_managed_config  # noqa: PLC0415
+    from hermes.runtime.managed_llm_bootstrap import (  # noqa: PLC0415
+        assert_process_admission,
+        process_admission,
+    )
+    from hermes.runtime.managed_llm_lifecycle import LifecycleUnavailable  # noqa: PLC0415
     from hermes.runtime.model_config import (  # noqa: PLC0415
         MANAGED_EXECUTION_UNAVAILABLE,
         ManagedProviderUnavailableError,
     )
 
-    raise ManagedProviderUnavailableError(MANAGED_EXECUTION_UNAVAILABLE)
+    try:
+        assert_process_admission(managed=True)
+        admission = process_admission()
+        if admission is None:
+            raise LifecycleUnavailable("Corporate process bootstrap is required")
+        binding = resolve_managed_config(admission.db_path)
+        if binding is None or any(
+            getattr(model_config, field) != getattr(binding, field)
+            for field in ("managed", "model", "native_provider", "base_url", "api_key")
+        ):
+            raise ManagedProviderUnavailableError("Model does not match the Enterprise assignment")
+        assert_process_admission(admission.db_path, managed=True)
+    except LifecycleUnavailable:
+        raise ManagedProviderUnavailableError(MANAGED_EXECUTION_UNAVAILABLE) from None
 
 
 def _resolve_per_cycle_consent(

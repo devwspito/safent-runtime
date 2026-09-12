@@ -74,7 +74,7 @@ def check() -> dict:  # noqa: PLR0915 - chronological isolated integration proof
     result = {"diagnostic_only": True, "scope": "real-native-terminal-transient-unit"}
     subprocess.run(["systemctl", "stop", "hermes-runtime"], check=True, timeout=20)
     result["inputs"] = baseline.install_fixture_wheel()
-    result["substitutions"] = baseline.substitute_gates()
+    result["substitutions"] = baseline.verify_production_gates()
     subprocess.run(
         [
             "runuser",

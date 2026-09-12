@@ -101,12 +101,12 @@ def main() -> None:
                 from tool_guest_check import check
 
                 report["gate"] = (
-                    "TWO diagnostic-only substitutions; fixture LLM tool_call; NOT production"
+                    "Production admission unchanged; fixture LLM tool_call; no live provider"
                 )
             elif Path("/opt/safent-guest-fixture/diagnostic_check.py").exists():
                 from diagnostic_check import check
 
-                report["gate"] = "TWO diagnostic-only substitutions; NOT production"
+                report["gate"] = "Production admission unchanged; fixture gateway only"
             else:
                 from managed_checks import check
 

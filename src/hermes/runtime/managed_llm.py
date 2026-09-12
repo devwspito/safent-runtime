@@ -95,26 +95,30 @@ def _save_policy(db_path: Path, state: dict) -> None:
         record_authority_transition(conn)
 
 
-def resolve_managed_config(db_path: Path, alias: str | None = None) -> ModelConfig | None:  # noqa: ARG001 - execution remains gated
-    """Execution boundary: never release a managed token until isolation exists.
-
-    A signed assignment can be stored/revoked and inspected without enabling
-    inference. No engine, auxiliary, skill synthesis or MCP caller can obtain
-    the delegated credential through the production config source meanwhile.
-    """
+def resolve_managed_config(db_path: Path, alias: str | None = None) -> ModelConfig | None:
+    """Release a delegated credential only to the admitted corporate process."""
     from hermes.runtime.managed_llm_bootstrap import assert_process_admission
+    from hermes.runtime.managed_llm_lifecycle import LifecycleUnavailable
 
     # Check even when policy disappeared: unpair must not release an OLD
     # corporate process into a cached personal credential environment.
-    assert_process_admission(db_path)
-    state = read_policy(db_path)
-    if state is None:
-        return None
-    raise ManagedProviderUnavailableError(MANAGED_EXECUTION_UNAVAILABLE)
+    try:
+        with configuration_lock(db_path):
+            assert_process_admission(db_path)
+            if read_policy(db_path) is None:
+                return None
+            admission = assert_process_admission(db_path, managed=True)
+            if admission is None or admission.mode != "managed":
+                raise LifecycleUnavailable("Corporate process bootstrap is required")
+            binding = _resolve_managed_binding(db_path, alias)
+            assert_process_admission(db_path, managed=True)
+            return binding
+    except LifecycleUnavailable:
+        raise ManagedProviderUnavailableError(MANAGED_EXECUTION_UNAVAILABLE) from None
 
 
 def _resolve_managed_binding(db_path: Path, alias: str | None = None) -> ModelConfig | None:
-    """Private contract/transport diagnostic; not an execution config source."""
+    """Read signed binding for bootstrap; execution must use the admitted source."""
     with configuration_lock(db_path):
         state = read_policy(db_path)
         if state is None:

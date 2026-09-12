@@ -32,8 +32,9 @@ class ManagedProviderUnavailableError(HermesModelNotConfiguredError):
 
 
 MANAGED_EXECUTION_UNAVAILABLE = (
-    'Enterprise LLM execution is unavailable: Hermes 0.21.1 cannot isolate '
-    'auxiliary credentials per agent. Local fallback is disabled.'
+    'Enterprise LLM execution is unavailable: this process has not completed '
+    'the current isolated corporate bootstrap. A controlled restart is required; '
+    'local fallback is disabled.'
 )
 
 

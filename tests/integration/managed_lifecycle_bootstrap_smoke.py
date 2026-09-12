@@ -2,7 +2,7 @@
 
 Run with --network none and enterprise.fixture.test mapped to 127.0.0.1.
 No running user service, no real credentials. This is NOT the full systemd/
-Landlock daemon boot: production execution remains gated pending that proof.
+Landlock daemon boot; it proves the sealed process admission and native factory.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def construct_fixture_agent(_binding, native, model):
     )
 
 
-def worker():
+def worker():  # noqa: PLR0915 - sequential sealed bootstrap and native process proof
     from hermes.runtime.managed_llm_bootstrap import complete_process_bootstrap, initialize_process
     from hermes.runtime.managed_llm_profile import current_profile
 
@@ -70,17 +70,18 @@ def worker():
         print("RESULT:blocked", flush=True)
         return
 
-    from hermes.runtime.managed_llm import _resolve_managed_binding
+    from hermes.runtime.managed_llm import resolve_managed_config
     from hermes.runtime.managed_llm_lifecycle import run_admitted_native, watch_authority
     from hermes.runtime.nous_engine import _resolve_hermes_runtime
     from hermes.runtime.shutdown_deadline import ShutdownDeadline
+    from hermes.tasks.domain.task_cancel_registry import OperationCancelled
 
-    binding = _resolve_managed_binding(db_path)
+    binding = resolve_managed_config(db_path)
     native, model = _resolve_hermes_runtime(binding)
     assert "OPENAI_API_KEY" not in os.environ and "HERMES_MODEL" not in os.environ
     assert binding.api_key not in (Path(os.environ["HERMES_HOME"]) / "config.yaml").read_text()
     # Existing wrapper, native resolver and SDK; no parallel inference engine.
-    # Direct construction is diagnostic only while the production gate is closed.
+    # The factory variant constructs through the production engine as well.
     agent = construct_fixture_agent(binding, native, model)
 
     async def run():
@@ -94,11 +95,20 @@ def worker():
 
         monitor = asyncio.create_task(watch_authority(guard, stop, interval=0.05))
         try:
-            result = await run_admitted_native(
-                guard,
-                lambda: agent.run_conversation("Reply OK."),
-                lambda: agent._inner.hard_interrupt("Fixture authority changed"),
-            )
+            try:
+                result = await run_admitted_native(
+                    guard,
+                    lambda: agent.run_conversation("Reply OK."),
+                    lambda: agent._inner.hard_interrupt("Fixture authority changed"),
+                )
+            except OperationCancelled:
+                assert case == "revoke"
+                print("RESULT:cancelled", flush=True)
+                # Authority can invalidate a completed SDK response before the
+                # monitor's next tick. Still observe the real restart deadline.
+                stop()
+                await asyncio.sleep(2)
+                raise AssertionError("Controlled shutdown deadline did not expire") from None
             if case == "revoke":
                 # Do not print a false completed result if native cancellation
                 # returned before the hard deadline terminated the process.
@@ -106,6 +116,15 @@ def worker():
             assert result.get("final_response") == "OK", (
                 "Native fixture response was not successful"
             )
+            assert all(binding.api_key not in value for value in os.environ.values()), (
+                "Native inference exported the delegated credential to subprocess environment"
+            )
+            home = Path(os.environ["HERMES_HOME"])
+            for filename in ("config.yaml", ".env", "auth.json"):
+                file = home / filename
+                assert not file.exists() or binding.api_key not in file.read_text(), (
+                    "Native inference persisted the delegated credential in its profile"
+                )
             guard.check()
             print("RESULT:success", flush=True)
         finally:
@@ -246,7 +265,7 @@ def main():  # noqa: PLR0915 - self-contained disposable process fixture
         threading.Thread(target=server.serve_forever, daemon=True).start()
         origin = f"https://enterprise.fixture.test:{server.server_port}"
         outputs = []
-        for case in ("success", "revoke"):
+        for case in ("success", "default", "revoke"):
             path = root / f"{case}.db"
             vault = SecretsVault(master_key=b"L" * 32)
             store = SQLiteAssociationStore(db_path=path, vault=vault)
@@ -313,7 +332,7 @@ def main():  # noqa: PLR0915 - self-contained disposable process fixture
                 raise AssertionError(
                     "Fixture process exceeded bounded lifecycle deadline"
                 ) from None
-            if case == "success":
+            if case != "revoke":
                 if process.returncode != 0 or "RESULT:success" not in stdout:
                     print(stderr, flush=True)
                     raise AssertionError("Native fixture did not complete")
@@ -341,7 +360,16 @@ def main():  # noqa: PLR0915 - self-contained disposable process fixture
         )
         assert any(body.get("stream") for _, _, body in records)
         server.shutdown()
-        print(json.dumps({"PASS": outputs, "requests": len(records), "production_gate": "closed"}))
+        print(
+            json.dumps(
+                {
+                    "PASS": outputs,
+                    "requests": len(records),
+                    "production_gate": "process_admission",
+                    "gate_substitutions": 0,
+                }
+            )
+        )
 
 
 if __name__ == "__main__":
