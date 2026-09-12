@@ -1,7 +1,8 @@
 """Fictional signed assignment through the real guest's authorized D-Bus path.
 
 This fixture never patches either production inference gate. It tests managed
-clean exec, READY, closed admission and signed revocation on the existing daemon.
+clean exec, READY and signed revocation on the existing daemon. The companion
+diagnostic_check supplies a fixture gateway to verify successful native inference.
 Only run inside the dedicated native KVM image created by this harness.
 """
 
@@ -245,8 +246,8 @@ def check() -> dict:
     Path("/var/lib/safent-managed-checks-partial.json").write_text(json.dumps(result))
     assert queued["returncode"] == 0
     task_id = json.loads(queued["stdout"])["data"][0]
-    # The production audit/TSA path may spend ~30s exhausting its offline
-    # network timeout before persisting this error; keep it real and bounded.
+    # This baseline has no gateway. It can demonstrate an honest terminal
+    # error, not successful inference (covered by diagnostic_check instead).
     deadline = time.monotonic() + 60
     task = None
     while time.monotonic() < deadline:
@@ -259,9 +260,11 @@ def check() -> dict:
         time.sleep(0.5)
     result["task"] = task
     Path("/var/lib/safent-managed-checks-partial.json").write_text(json.dumps(result))
-    assert task and "Enterprise LLM execution is unavailable" in (task[1] or ""), (
-        "Real daemon did not demonstrate its closed managed gate"
+    assert task and task[1], "Offline task did not report its failure"
+    assert "Enterprise LLM execution is unavailable" not in task[1], (
+        "Fresh managed daemon unexpectedly failed its production admission"
     )
+    result["inference_proof"] = "Not provided: baseline has no gateway"
     revoked = call(
         "hermes-user", "ApplyManagedLlmGateway", "s", (FIXTURE / "bundle-2.json").read_text()
     )

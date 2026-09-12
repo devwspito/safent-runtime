@@ -178,7 +178,7 @@ def test_failed_vault_write_stays_blocked_and_same_signed_policy_can_retry(setup
     assert resolve_managed_config(wiring._provider_repo._db_path).managed
 
 
-def test_all_production_config_sources_refuse_token_release_until_execution_isolated(setup):
+def test_all_production_config_sources_refuse_token_release_without_admitted_process(setup):
     from hermes.runtime.managed_llm import resolve_managed_config as production_source
     from hermes.runtime.provider_config_source import resolve_model_config
     from hermes.runtime.active_provider import ActiveProviderService
@@ -188,6 +188,6 @@ def test_all_production_config_sources_refuse_token_release_until_execution_isol
     for source in [lambda: production_source(path), lambda: resolve_model_config(path),
                    lambda: ActiveProviderService(path).resolve()]:
         with patch.object(wiring._provider_repo, 'reveal_api_key') as reveal:
-            with pytest.raises(ManagedProviderUnavailableError, match='isolate auxiliary credentials'):
+            with pytest.raises(ManagedProviderUnavailableError, match='corporate bootstrap'):
                 source()
             reveal.assert_not_called()

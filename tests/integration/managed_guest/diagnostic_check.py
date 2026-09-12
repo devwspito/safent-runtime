@@ -1,14 +1,8 @@
-"""DISPOSABLE DIAGNOSTIC ONLY: two explicit gate substitutions, real daemon.
-
-Never installed by the production wheel. No flag, environment variable, policy
-field or tool can enable these substitutions in the product. The unchanged-gate
-guest proof must pass first; host preserves that disk before making this copy.
-"""
+"""Disposable fixture gateway and real daemon, with production gates unchanged."""
 
 from __future__ import annotations
 
 import ast
-import difflib
 import hashlib
 import importlib.util
 import json
@@ -77,58 +71,28 @@ def install_fixture_wheel() -> dict | None:
     return inputs
 
 
-def substitute_gates() -> list:
-    if MANIFEST.exists():
-        entries = json.loads(MANIFEST.read_text())
-        for entry in entries:
-            assert hashlib.sha256(Path(entry["path"]).read_bytes()).hexdigest() == entry["after"]
-        return entries
-    entries = []
-    for module, name, replacement in (
-        (
-            "managed_llm",
-            "resolve_managed_config",
-            "return _resolve_managed_binding(db_path, alias)",
-        ),
-        ("nous_engine", "_assert_managed_execution_ready", "return None"),
+def verify_production_gates() -> list:
+    """Reject old patched disks; inspect only, never rewrite installed source."""
+    assert not MANIFEST.exists(), "Use a fresh fixture: this disk has legacy gate substitutions"
+    for module, name in (
+        ("managed_llm", "resolve_managed_config"),
+        ("nous_engine", "_assert_managed_execution_ready"),
     ):
         path = Path(importlib.util.find_spec("hermes.runtime." + module).origin)
-        original = path.read_text()
         function = next(
             node
-            for node in ast.parse(original).body
+            for node in ast.parse(path.read_text()).body
             if isinstance(node, ast.FunctionDef) and node.name == name
         )
-        statement = function.body[-1]
-        assert isinstance(statement, ast.Raise)
-        assert (
-            ast.unparse(statement)
-            == "raise ManagedProviderUnavailableError(MANAGED_EXECUTION_UNAVAILABLE)"
-        )
-        lines = original.splitlines(keepends=True)
-        assert statement.lineno == statement.end_lineno
-        lines[statement.lineno - 1] = "    " + replacement + "\n"
-        changed = "".join(lines)
-        compile(changed, str(path), "exec")
-        entries.append(
-            {
-                "path": str(path),
-                "function": name,
-                "before": hashlib.sha256(original.encode()).hexdigest(),
-                "after": hashlib.sha256(changed.encode()).hexdigest(),
-                "diff": "".join(
-                    difflib.unified_diff(
-                        original.splitlines(True),
-                        changed.splitlines(True),
-                        fromfile=module + ".original",
-                        tofile=module + ".diagnostic",
-                    )
-                ),
-            }
-        )
-        path.write_text(changed)
-    MANIFEST.write_text(json.dumps(entries, indent=2))
-    return entries
+        assert any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "assert_process_admission"
+            and any(keyword.arg == "managed" and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is True for keyword in node.keywords)
+            for node in ast.walk(function)
+        ), "Production gate must require managed process admission"
+    return []
 
 
 class Gateway(ThreadingHTTPServer):
@@ -327,7 +291,7 @@ def check() -> dict:  # noqa: PLR0915 - sequential, disposable daemon lifecycle 
     assert os.getuid() == 0 and Path("/proc/1/comm").read_text().strip() == "systemd"
     subprocess.run(["systemctl", "stop", "hermes-runtime"], check=True, timeout=20)
     inputs = install_fixture_wheel()
-    substitutions = substitute_gates()
+    substitutions = verify_production_gates()
     subprocess.run(
         [
             "runuser",

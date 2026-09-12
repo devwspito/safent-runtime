@@ -106,10 +106,10 @@ def test_new_managed_policy_overrides_engine_personal_snapshot():
     assert instance._resolve_model_config() is current[0]
 
 
-def test_managed_execution_fails_before_native_agent_can_publish_global_key():
+def test_unadmitted_managed_execution_fails_before_native_construction():
     instance = object.__new__(engine.NousReasoningEngine)
     with patch.object(engine, 'GovernedAIAgent') as native:
-        with pytest.raises(RuntimeError, match='cannot isolate auxiliary credentials'):
+        with pytest.raises(RuntimeError, match='corporate bootstrap'):
             instance._build_governed_agent(ModelConfig(model='custom/corporate', managed=True), '', None, None)
     native.assert_not_called()
 

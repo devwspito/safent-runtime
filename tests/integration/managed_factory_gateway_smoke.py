@@ -1,8 +1,8 @@
 """Disposable image: real engine factory + native SDK + real Enterprise admission.
 
 Mount runtime at /review and Enterprise source at /review/enterprise-src. Uses
-the existing HTTPS clean-bootstrap fixture. Only the constant production gate
-is substituted in the worker, never the factory/resolver/SDK/admission service.
+the existing HTTPS clean-bootstrap fixture. Production gates, factory, native
+resolver, SDK and admission service run unchanged; no gate substitutions.
 No live gateway or service is started; the upstream response is a loopback stub.
 """
 
@@ -28,7 +28,6 @@ _CHECKS = set()
 def factory(binding, _native, _model):
     from hermes.prompts.persona import PersonaSpec
     from hermes.runtime import nous_engine
-    from hermes.runtime.model_config import ManagedProviderUnavailableError
 
     engine = nous_engine.NousReasoningEngine(
         persona=PersonaSpec(
@@ -37,17 +36,11 @@ def factory(binding, _native, _model):
         enabled_toolsets=[],
     )
     loop = asyncio.new_event_loop()
-    config = replace(binding, max_iterations=1, max_tokens=16)
+    config = replace(
+        binding, max_iterations=1,
+        max_tokens=None if "/default/" in binding.base_url else 16,
+    )
     try:
-        try:
-            engine._build_governed_agent(config, "Reply OK.", loop, UUID(int=1))
-        except ManagedProviderUnavailableError:
-            pass
-        else:
-            raise AssertionError("Production managed execution gate unexpectedly opened")
-        # Explicit, fixture-process-only replacement; cannot be supplied through
-        # a profile/tool/env flag. All authority/bootstrap checks stay real.
-        nous_engine._assert_managed_execution_ready = lambda: None
         return engine._build_governed_agent(config, "Reply OK.", loop, UUID(int=1))
     finally:
         loop.close()
@@ -98,7 +91,7 @@ def enterprise_state():
         )
     )
     now = datetime.now(UTC)
-    for case in ("success", "revoke"):
+    for case in ("success", "default", "revoke"):
         instance_id = "instance-" + case
         repo.save_instance(
             Instance(instance_id, "org", "template", case, state=InstanceState.ACTIVE),
@@ -138,7 +131,12 @@ def validate(path, authorization, body):
     assert _UPSTREAM not in str(body) and "chat_template_kwargs" not in body
     assert "extra_body" not in body and body["model"] == "company"
     prepared = service.prepare(grant_id, authorization, body)
-    assert prepared[2].get("max_tokens") == 16
+    if grant_id == "default":
+        assert "max_tokens" not in body and "max_completion_tokens" not in body
+        assert prepared[2].get("max_completion_tokens") == 4096
+        _CHECKS.add("native-default-token-cap")
+    else:
+        assert prepared[2].get("max_tokens") == 16
     repo.settle_inference_request(prepared[3], "org", usage_json="{}", uncertain=False)
     _CHECKS.add("real-factory-payload")
 
@@ -183,7 +181,7 @@ if __name__ == "__main__":
     else:
         try:
             fixture.main()
-            assert len(_CHECKS) == 6, _CHECKS
+            assert len(_CHECKS) == 7, _CHECKS
             print("FACTORY_GATEWAY_PASS:" + ",".join(sorted(_CHECKS)))
         finally:
             if _STATE is not None:
