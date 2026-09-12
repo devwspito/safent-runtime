@@ -1,5 +1,5 @@
-//! Unwired adapter primitives: reshape Tauri metadata and verify the signed
-//! runtime manifest. This module does not itself fetch, install, or relaunch.
+//! Adapter primitives consumed by native.rs: reshape Tauri metadata and verify
+//! the signed runtime manifest. Fetch/install/relaunch live in native.rs.
 //!
 //! Two manifests, two different verification paths, by design (contracts/
 //! update.md §1-2):
@@ -7,7 +7,7 @@
 //!   and compares versions. It does NOT verify a signature of latest.json.
 //!   The plugin verifies the downloaded artifact in `Update::download()`.
 //!   `tauri_manifest_from_check` only reshapes metadata; it cannot authorize
-//!   installation. Future UpdatePorts must complete the plugin's verified
+//!   installation. Native app-only and any future UpdatePorts complete verified
 //!   download before backup/apply, never install raw metadata URLs directly.
 //! - `runtime-manifest.json` (engine + companion digests): the plugin has no
 //!   concept of this file — it is ours, so WE verify it, with the same
@@ -17,6 +17,7 @@
 //!   (Constitution Principle IV; contracts/update.md §2 invariant 3).
 
 use super::types::{RuntimeManifest, TauriManifest, TauriManifestPlatform, UpdateFailure};
+use base64::Engine;
 use minisign_verify::{PublicKey, Signature};
 use std::collections::HashMap;
 
@@ -75,9 +76,15 @@ pub struct RuntimeManifestVerifier {
 }
 
 impl RuntimeManifestVerifier {
-    /// `pubkey_b64` is the same base64 string as `plugins.updater.pubkey` —
-    /// pass the SAME value the pipeline substitutes for
-    /// `__TAURI_UPDATER_PUBKEY__`, never a second, independently-managed key.
+    /// Tauri's updater embeds base64 of the WHOLE .pub file (comment + key),
+    /// not the 42-byte key line accepted by `new`. Never conflate the formats.
+    pub fn from_tauri_pubkey(encoded_file: &str) -> Result<Self, UpdateFailure> {
+        let text = decode_tauri_text(encoded_file)?;
+        let pubkey = PublicKey::decode(&text).map_err(|_| UpdateFailure::ManifestUnverified)?;
+        Ok(Self { pubkey })
+    }
+    /// A raw minisign public-key line. For `plugins.updater.pubkey` use
+    /// `from_tauri_pubkey`: Tauri encodes the whole .pub file, not this line.
     pub fn new(pubkey_b64: &str) -> Result<Self, UpdateFailure> {
         let pubkey =
             PublicKey::from_base64(pubkey_b64).map_err(|_| UpdateFailure::ManifestUnverified)?;
@@ -100,6 +107,22 @@ impl RuntimeManifestVerifier {
     }
 }
 
+fn decode_tauri_text(value: &str) -> Result<String, UpdateFailure> {
+    if value.len() > 4096 {
+        return Err(UpdateFailure::ManifestUnverified);
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| UpdateFailure::ManifestUnverified)?;
+    String::from_utf8(bytes).map_err(|_| UpdateFailure::ManifestUnverified)
+}
+
+pub fn tauri_signature_well_formed(value: &str) -> bool {
+    decode_tauri_text(value)
+        .ok()
+        .is_some_and(|text| Signature::decode(&text).is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +136,99 @@ mod tests {
     const TEST_PAYLOAD: &[u8] =
         b"{\"schema_version\":1,\"version\":\"0.2.0\",\"engine\":{\"linux/arm64\":\"sha256:deadbeef\"},\"companion\":{},\"min_app_version\":\"0.2.0\"}\n";
     const TEST_SIGNATURE: &str = "untrusted comment: test fixture\nRUT/DhbH+Js0LOvwmxeLZ7me+l8X12aZ+vtJ9Bz65Fjs/qpyQs+FRh0SlzT+Un7YmwyJBCoYoXrI2bgFf4EtADl61DeUhogCwAw=\ntrusted comment: test fixture\nfbZbRTRYq/L6plES8gHMfp6sCaYW0MTkUPC4e69PiJWWsT8d+3C4uM8S+WVMWBva03o8jZfrL1mxNbA5pWOBCw==\n";
+
+    #[test]
+    fn tauri_encoded_file_key_verifies_same_exact_runtime_bytes() {
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(format!("untrusted comment: test key\n{TEST_PUBKEY}\n"));
+        let verifier = RuntimeManifestVerifier::from_tauri_pubkey(&encoded).unwrap();
+        assert!(verifier
+            .verify_and_parse(TEST_PAYLOAD, TEST_SIGNATURE)
+            .is_ok());
+        assert!(RuntimeManifestVerifier::from_tauri_pubkey(TEST_PUBKEY).is_err());
+        assert!(tauri_signature_well_formed(
+            &base64::engine::general_purpose::STANDARD.encode(TEST_SIGNATURE)
+        ));
+        assert!(!tauri_signature_well_formed(TEST_SIGNATURE));
+        assert!(!tauri_signature_well_formed("garbage"));
+    }
+
+    /// Real plugin fetch+signature verification, with only a loopback fixture
+    /// server and fake AppHandle. It never calls install or changes the app.
+    #[test]
+    fn plugin_download_authenticates_fixture_bytes_and_rejects_tampering() {
+        use std::io::{Read, Write};
+        use tauri_plugin_updater::UpdaterExt;
+        let pubkey = base64::engine::general_purpose::STANDARD
+            .encode(format!("untrusted comment: test key\n{TEST_PUBKEY}\n"));
+        let signature = base64::engine::general_purpose::STANDARD.encode(TEST_SIGNATURE);
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context
+            .config_mut()
+            .plugins
+            .0
+            .insert("updater".into(), serde_json::json!({"pubkey": pubkey}));
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .build(context)
+            .unwrap();
+        for tamper in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let signature = signature.clone();
+            let server = std::thread::spawn(move || {
+                for request in 0..2 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                        .unwrap();
+                    let mut buffer = [0; 4096];
+                    let _ = stream.read(&mut buffer).unwrap();
+                    let body = if request == 0 {
+                        serde_json::to_vec(
+                            &serde_json::json!({"version":"99.0.0", "signature":signature,
+                            "url":format!("http://{address}/artifact")}),
+                        )
+                        .unwrap()
+                    } else if tamper {
+                        b"tampered signed archive".to_vec()
+                    } else {
+                        TEST_PAYLOAD.to_vec()
+                    };
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .unwrap();
+                    stream.write_all(&body).unwrap();
+                }
+            });
+            let result = tauri::async_runtime::block_on(async {
+                let update = app
+                    .updater_builder()
+                    .endpoints(vec![format!("http://{address}/latest.json")
+                        .parse()
+                        .unwrap()])
+                    .unwrap()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .no_proxy()
+                    .build()
+                    .unwrap()
+                    .check()
+                    .await
+                    .unwrap()
+                    .unwrap();
+                update.download(|_, _| {}, || {}).await
+            });
+            server.join().unwrap();
+            if tamper {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), TEST_PAYLOAD);
+            }
+        }
+    }
 
     #[test]
     fn valid_signature_over_the_exact_bytes_verifies_and_parses() {

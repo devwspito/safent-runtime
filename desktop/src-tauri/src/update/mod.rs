@@ -1,19 +1,11 @@
-//! Update orchestrator — `contracts/update.md`. Owns the answer to "is there
-//! a real update" (`plan`, pure) and how a plan is applied end to end
-//! (`orchestrator`, coordination over injected ports). `tauri_updater` is the
-//! only impure edge: the Tauri updater plugin call and the
-//! `runtime-manifest.json` minisign check.
-//!
-//! T014 delivers this module ready to wire in; the Builder/bootstrap call
-//! that actually constructs a `dyn UpdatePorts` from the embedded CLI +
-//! plugin and invokes `run_update` is T011's bootstrap_service.rs (a
-//! different lane's file). Until that wiring lands, nothing in the `bin`
-//! target calls into `update::*` (including these re-exports) outside
-//! `#[cfg(test)]`, which `-D warnings` would otherwise flag as dead/unused —
-//! every item below IS exercised, by the unit tests in its own file.
+//! `native` wires the real app-only Tauri updater with native confirmation.
+//! `tauri_updater` owns format conversion and runtime-manifest verification.
+//! The joint engine/Ads/app `plan`/`orchestrator` remains unactivated: its
+//! synchronous ports have no durable continuation after process relaunch.
 #![allow(dead_code, unused_imports)]
 
 pub mod availability;
+pub mod native;
 pub mod orchestrator;
 pub mod plan;
 pub mod tauri_updater;

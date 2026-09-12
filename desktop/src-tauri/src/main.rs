@@ -20,8 +20,8 @@ mod window_policy;
 use window_policy::WindowPolicy;
 
 // T014: update orchestrator (contracts/update.md) — plan/orchestrator are pure
-// resp. port-driven and exercised entirely by `cargo test`; wiring the plugin
-// into the running app's Builder is tracked separately (not yet consumed here).
+// resp. port-driven. The native app-only plugin is wired below; the combined
+// engine/Ads/app transaction is not activated by this shell integration.
 mod update;
 
 // Bootstrap engine (specs/028-safent-app-nativa, T007/T008/T009/T011): pure
@@ -206,14 +206,18 @@ fn main() {
         }))
         .manage(policy.clone())
         .manage(diagnostics::DiagnosticsState::default())
+        .manage(update::native::NativeUpdater::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             read_host_clipboard,
             write_host_clipboard,
             boot::cancel_bootstrap,
             boot::retry_bootstrap,
             diagnostics::export_diagnostics,
-            diagnostics::get_bootstrap_state
+            diagnostics::get_bootstrap_state,
+            update::native::check_native_update,
+            update::native::install_native_update
         ])
         .setup(move |app| {
             // NOTE: do NOT replace the default macOS menu. A custom menu that drops the

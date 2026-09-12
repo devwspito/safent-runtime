@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 struct ActiveState {
     latest_id: u64,
     signal: Option<CancelSignal>,
+    updating_app: bool,
 }
 #[derive(Clone, Default)]
 pub(crate) struct BootstrapControl(Arc<Mutex<ActiveState>>);
@@ -17,7 +18,7 @@ impl BootstrapControl {
         if expected_id.is_some_and(|id| id != active.latest_id) {
             return Err("stale_bootstrap_attempt");
         }
-        if active.signal.is_some() {
+        if active.signal.is_some() || active.updating_app {
             return Err("bootstrap_in_progress");
         }
         active.latest_id = active
@@ -42,6 +43,26 @@ impl BootstrapControl {
         signal.set();
         Ok(())
     }
+
+    /// Replacing the app also replaces its bundled CLI. Exclude bootstrap
+    /// without changing its attempt ID, signal or authorizing cancellation.
+    pub fn reserve_update(&self) -> Result<AppUpdateGuard, &'static str> {
+        let mut active = self.0.lock().map_err(|_| "bootstrap_control_unavailable")?;
+        if active.signal.is_some() || active.updating_app {
+            return Err("bootstrap_in_progress");
+        }
+        active.updating_app = true;
+        Ok(AppUpdateGuard(self.clone()))
+    }
+}
+
+pub(crate) struct AppUpdateGuard(BootstrapControl);
+impl Drop for AppUpdateGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.0 .0.lock() {
+            active.updating_app = false;
+        }
+    }
 }
 
 /// Owns the running slot through observation, repair and final notification.
@@ -63,6 +84,19 @@ impl Drop for BootstrapAttempt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn app_update_and_bootstrap_are_mutually_exclusive_without_changing_attempt_id() {
+        let control = BootstrapControl::default();
+        let boot = control.begin(None).unwrap();
+        let id = boot.id;
+        assert!(control.reserve_update().is_err());
+        drop(boot);
+        let updating = control.reserve_update().unwrap();
+        assert!(control.begin(Some(id)).is_err());
+        assert!(control.reserve_update().is_err());
+        drop(updating);
+        assert!(control.begin(Some(id)).is_ok());
+    }
     #[test]
     fn cancel_retry_cancel_targets_the_new_active_signal() {
         let control = BootstrapControl::default();

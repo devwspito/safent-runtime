@@ -1,4 +1,4 @@
-//! Build capability, NOT a release check. No updater ports are wired yet.
+//! Build capability, NOT a release check. Installation remains host-only.
 //! Publishing this before page scripts keeps the loader and product honest
 //! without granting the remote webview another native command.
 
@@ -9,10 +9,18 @@ struct NativeUpdaterStatus {
     app_version: &'static str,
 }
 
-pub fn initialization_script() -> String {
+pub fn initialization_script(configured: bool) -> String {
     let status = NativeUpdaterStatus {
-        status: "unavailable",
-        reason: "integration_missing",
+        status: if configured {
+            "available"
+        } else {
+            "unavailable"
+        },
+        reason: if configured {
+            "app_only"
+        } else {
+            "signing_configuration_missing"
+        },
         app_version: env!("CARGO_PKG_VERSION"),
     };
     let json = serde_json::to_string(&status).expect("static native updater metadata");
@@ -27,9 +35,12 @@ mod tests {
 
     #[test]
     fn reports_only_build_capability_never_a_release_check() {
-        let script = initialization_script();
-        assert!(script.contains("\"status\":\"unavailable\""));
-        assert!(script.contains("\"reason\":\"integration_missing\""));
+        let script = initialization_script(true);
+        assert!(script.contains("\"status\":\"available\""));
+        assert!(script.contains("\"reason\":\"app_only\""));
+        let missing = initialization_script(false);
+        assert!(missing.contains("\"status\":\"unavailable\""));
+        assert!(missing.contains("\"reason\":\"signing_configuration_missing\""));
         assert!(script.contains(&format!(
             "\"app_version\":\"{}\"",
             env!("CARGO_PKG_VERSION")
@@ -48,7 +59,7 @@ mod tests {
 
     #[test]
     fn native_metadata_is_readonly_and_does_not_overwrite_daemon_signal() {
-        let script = initialization_script();
+        let script = initialization_script(true);
         assert!(script.contains("Object.freeze("));
         assert!(script.contains("writable: false, configurable: false"));
         assert!(!script.contains("__safentLatestVersion"));

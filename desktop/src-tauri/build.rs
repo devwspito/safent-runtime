@@ -12,6 +12,8 @@ fn main() {
             "retry_bootstrap",
             "export_diagnostics",
             "get_bootstrap_state",
+            "check_native_update",
+            "install_native_update",
         ]),
     ))
     .expect("failed to run tauri-build");
