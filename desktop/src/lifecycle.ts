@@ -151,7 +151,8 @@ export function reduceLifecycle(state: UiState, action: LifecycleAction): UiStat
   }
 
   if (action.source === 'retry-requested') {
-    return state.kind === 'failed' ? { ...state, retrying: true } : state
+    return state.kind === 'failed' && state.retryable && !state.retrying
+      ? { ...state, retrying: true } : state
   }
 
   const event = action.event

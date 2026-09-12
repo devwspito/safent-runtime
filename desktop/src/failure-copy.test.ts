@@ -34,6 +34,13 @@ const ALL_CODES: readonly FailureCode[] = [
 const JARGON = /podman|contenedor|container|\bvm\b|máquina virtual|digest|daemon/i
 
 describe('copyForFailure — FR-007 named states, NFR-004 owner vocabulary', () => {
+  it('explains a blocked machine start without assuming a detected foreign VM or promising a retry', () => {
+    const copy = copyForFailure('machine_start_failed', false)
+    expect(copy.hint).not.toMatch(/vuelve a intentarlo/i)
+    expect(copy.hint).toContain('no detendrá ninguna otra máquina')
+    expect(copy.hint).toContain('diagnóstico')
+    expect(copyForFailure('machine_start_failed', true).hint).toBe('Vuelve a intentarlo.')
+  })
   it('does not suggest an unavailable retry when the embedded CLI is missing', () => {
     const copy = copyForFailure('cli_porcelain_unsupported')
     expect(copy.hint).not.toMatch(/vuelve a intentarlo/i)

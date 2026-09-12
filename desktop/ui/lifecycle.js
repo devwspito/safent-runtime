@@ -31,7 +31,8 @@ export function reduceLifecycle(state, action) {
         return { kind: 'reconnecting', reason: action.reason };
     }
     if (action.source === 'retry-requested') {
-        return state.kind === 'failed' ? { ...state, retrying: true } : state;
+        return state.kind === 'failed' && state.retryable && !state.retrying
+            ? { ...state, retrying: true } : state;
     }
     const event = action.event;
     switch (event.kind) {

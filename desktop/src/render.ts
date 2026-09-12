@@ -83,7 +83,7 @@ function renderPreparing(
 }
 
 function renderFailed(state: Extract<UiState, { kind: 'failed' }>, els: ScreenElements): void {
-  const copy = copyForFailure(state.code)
+  const copy = copyForFailure(state.code, state.retryable)
   els.failedHeading.textContent = copy.headline
   els.failedHint.textContent = copy.hint
   els.failedCode.textContent = state.code
@@ -91,7 +91,7 @@ function renderFailed(state: Extract<UiState, { kind: 'failed' }>, els: ScreenEl
   els.failedDetail.textContent = state.detail
 
   setHidden(els.retryButton, !state.retryable)
-  els.retryButton.disabled = state.retrying
+  els.retryButton.disabled = !state.retryable || state.retrying
   els.retryButton.textContent = state.retrying ? 'Reintentando…' : 'Reintentar'
 }
 

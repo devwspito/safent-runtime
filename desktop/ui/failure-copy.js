@@ -115,7 +115,15 @@ const FALLBACK = {
  * promises. See UI-STATES.md for the known gap (no `cancelled` code exists
  * yet for the §6 SIGINT path).
  */
-export function copyForFailure(code) {
+export function copyForFailure(code, retryable = true) {
+    // A generic machine failure carries no trustworthy identity of a blocker.
+    // Do not infer a foreign VM from stderr or offer a stop action from this code.
+    if (code === 'machine_start_failed' && !retryable) {
+        return {
+            headline: 'Safent necesita tu atención para arrancar.',
+            hint: 'Este bloqueo no se resuelve repitiendo el arranque. Exporta el diagnóstico para revisar la causa; Safent no detendrá ninguna otra máquina por su cuenta.',
+        };
+    }
     return COPY[code] ?? FALLBACK;
 }
 //# sourceMappingURL=failure-copy.js.map

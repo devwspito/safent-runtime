@@ -90,7 +90,7 @@ function main() {
             els.cancelNote.focus();
     });
     els.retryButton.addEventListener('click', () => {
-        if (els.retryButton.disabled)
+        if (els.retryButton.disabled || state.kind !== 'failed' || !state.retryable || state.retrying)
             return;
         retryAttempt = attemptId;
         const previous = state;

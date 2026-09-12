@@ -48,14 +48,14 @@ function renderPreparing(state, els) {
     setHidden(els.cancelNote, state.cancelable);
 }
 function renderFailed(state, els) {
-    const copy = copyForFailure(state.code);
+    const copy = copyForFailure(state.code, state.retryable);
     els.failedHeading.textContent = copy.headline;
     els.failedHint.textContent = copy.hint;
     els.failedCode.textContent = state.code;
     els.failedStage.textContent = state.stageId ?? '—';
     els.failedDetail.textContent = state.detail;
     setHidden(els.retryButton, !state.retryable);
-    els.retryButton.disabled = state.retrying;
+    els.retryButton.disabled = !state.retryable || state.retrying;
     els.retryButton.textContent = state.retrying ? 'Reintentando…' : 'Reintentar';
 }
 function renderReconnecting(state, els) {
