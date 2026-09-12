@@ -166,7 +166,8 @@ ARG AGENT_BROWSER_VERSION=0.31.1
 RUN npm install -g --ignore-scripts "npm@${NPM_VERSION}" \
     && npm install -g --ignore-scripts "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" "agent-browser@${AGENT_BROWSER_VERSION}" \
     && chmod +x /usr/lib/node_modules/agent-browser/bin/agent-browser-* \
-    && PLAYWRIGHT_CLI="$(node -p "require.resolve('playwright/cli', {paths: ['/usr/lib/node_modules/@playwright/mcp']})")" \
+    && PLAYWRIGHT_CLI=/usr/lib/node_modules/@playwright/mcp/node_modules/playwright/cli.js \
+    && [ -f "${PLAYWRIGHT_CLI}" ] \
     && node "${PLAYWRIGHT_CLI}" install chromium \
     && CHROME="$(node -e "const {chromium}=require(require.resolve('playwright',{paths:['/usr/lib/node_modules/@playwright/mcp']}));process.stdout.write(chromium.executablePath())")" \
     && [ -n "$CHROME" ] && ln -sf "$CHROME" /usr/bin/chromium-browser \
