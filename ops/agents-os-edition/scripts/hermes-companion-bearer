@@ -2,6 +2,12 @@
 """hermes-companion-bearer — stage companion secrets where the daemon can read them
 (024 bearer, 026 SSO private key).
 
+The same root stage validates the source registry explicitly and publishes only
+accepted endpoints at /run/hermes/companions/companions.json (0440 root:hermes).
+Source files live on the launcher's read-only Linux-volume projection, NOT a
+raw virtiofs bind whose caller-dependent owner can make secrets readable by an
+unprivileged process. The daemon never falls back to a source registry.
+
 WHY A SHIM AND NOT A MODE/GROUP CHANGE ON THE HOST FILE
 ------------------------------------------------------
 `read_companion_bearer` runs INSIDE hermes-runtime.service, i.e. as uid 880
@@ -46,13 +52,19 @@ reason; both belts, on purpose.
 from __future__ import annotations
 
 import grp
+import json
 import os
 import sys
+import tempfile
+from contextlib import suppress
+from dataclasses import asdict
 from pathlib import Path
 
 from hermes.shell_server.companions import (  # noqa: E402
     COMPANION_RUNTIME_BEARER_DIR,
+    COMPANION_RUNTIME_REGISTRY_PATH,
     COMPANION_RUNTIME_SSO_KEY_PATH,
+    COMPANION_SOURCE_REGISTRY_PATH,
     COMPANION_SSO_KEY_MOUNT_PATH,
     load_companions,
     read_companion_bearer,
@@ -63,10 +75,23 @@ _DAEMON_GROUP = "hermes"
 
 
 def main() -> int:
-    endpoints = load_companions()
     gid = grp.getgrnam(_DAEMON_GROUP).gr_gid
     _ensure_dir(gid)
+    # Remove the previous authority snapshot before reading a rotated source.
+    # Optional infrastructure may fail to stage, but stale credentials must not
+    # survive that failure. Publish the new registry LAST.
+    _purge_runtime(gid)
+    try:
+        return _stage(gid)
+    except Exception:
+        _purge_runtime(gid)
+        raise
+
+
+def _stage(gid: int) -> int:
+    endpoints = load_companions(path=COMPANION_SOURCE_REGISTRY_PATH)
     staged = 0
+    accepted = []
     for slug, endpoint in sorted(endpoints.items()):
         # prefer_runtime_copy=False: read the read-only MOUNT, never the copy
         # this script itself wrote on a previous boot (which would make a
@@ -76,14 +101,26 @@ def main() -> int:
             print(f"[companion-bearer] {slug}: no bearer at its bearer_ref", file=sys.stderr)
             continue
         _write_secret(runtime_bearer_path(slug), bearer, gid)
+        accepted.append(asdict(endpoint))
         staged += 1
-    _purge_stale(set(endpoints), gid)
-    sso_staged = _stage_sso_key(gid)
+    sso_staged = _stage_sso_key(gid) if accepted else 0
+    if accepted:
+        _write_secret(
+            str(COMPANION_RUNTIME_REGISTRY_PATH),
+            json.dumps({"version": 1, "companions": accepted}, sort_keys=True),
+            gid,
+        )
     print(
         f"[companion-bearer] {staged} bearer(s), {sso_staged} sso key(s) "
         f"staged for uid/gid {_DAEMON_GROUP}"
     )
     return 0
+
+
+def _purge_runtime(gid: int) -> None:
+    _remove_if_present(str(COMPANION_RUNTIME_REGISTRY_PATH))
+    _purge_stale(set(), gid)
+    _remove_if_present(COMPANION_RUNTIME_SSO_KEY_PATH)
 
 
 def _stage_sso_key(gid: int) -> int:
@@ -105,31 +142,36 @@ def _stage_sso_key(gid: int) -> int:
 
 
 def _remove_if_present(path: str) -> None:
-    try:
+    with suppress(OSError):
         os.remove(path)
-    except OSError:
-        pass
 
 
 def _ensure_dir(gid: int) -> None:
     os.makedirs(COMPANION_RUNTIME_BEARER_DIR, exist_ok=True)
+    if Path(COMPANION_RUNTIME_BEARER_DIR).is_symlink():
+        raise ValueError("staging directory must not be a symlink")
     os.chown(COMPANION_RUNTIME_BEARER_DIR, 0, gid)
-    os.chmod(COMPANION_RUNTIME_BEARER_DIR, 0o750)
+    os.chmod(COMPANION_RUNTIME_BEARER_DIR, 0o750)  # noqa: S103 — root:hermes, no other access
 
 
 def _write_secret(path: str, value: str, gid: int) -> None:
-    tmp = f"{path}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o400)
+    fd, tmp = tempfile.mkstemp(prefix=".companion-", dir=Path(path).parent)
     try:
-        os.write(fd, value.encode("utf-8"))
         os.fchown(fd, 0, gid)
         os.fchmod(fd, 0o440)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = -1
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
     finally:
-        os.close(fd)
-    os.replace(tmp, path)
+        if fd != -1:
+            os.close(fd)
+        _remove_if_present(tmp)
 
 
-def _purge_stale(live_slugs: set[str], gid: int) -> None:
+def _purge_stale(live_slugs: set[str], _gid: int) -> None:
     """A companion the owner removed must not leave its bearer behind."""
     try:
         names = os.listdir(COMPANION_RUNTIME_BEARER_DIR)
@@ -140,10 +182,7 @@ def _purge_stale(live_slugs: set[str], gid: int) -> None:
             continue
         if name[: -len(".bearer")] in live_slugs:
             continue
-        try:
-            os.remove(os.path.join(COMPANION_RUNTIME_BEARER_DIR, name))
-        except OSError:
-            pass
+        _remove_if_present(os.path.join(COMPANION_RUNTIME_BEARER_DIR, name))
 
 
 if __name__ == "__main__":

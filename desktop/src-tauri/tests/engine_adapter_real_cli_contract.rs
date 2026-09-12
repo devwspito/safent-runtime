@@ -127,6 +127,9 @@ case "$1" in
     exit 0
     ;;
   exec)
+    case "$*" in
+      *install_request_agent_cli\ claim-ads*) exit 1 ;;
+    esac
     shift 2
     case "$1" in
       systemctl)
@@ -273,6 +276,30 @@ fn podman_calls(fx: &Fixture) -> Vec<String> {
         .lines()
         .map(str::to_string)
         .collect()
+}
+
+#[test]
+fn real_native_companion_request_tick_never_starts_the_legacy_agent() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fx = healthy_fixture("native-request-idle", "engine-good");
+    let mut cfg = config(&fx, "engine-good");
+    cfg.companion_image =
+        Some(ImageRef::new("ghcr.io/devwspito/safent-ads", "sha256:ads-good").unwrap());
+    let notifier = RecordingNotifier::new();
+    let outcome = EmbeddedCliDriver::new(cfg)
+        .consume_companion_requests(&notifier, &ports::CancelSignal::new())
+        .unwrap();
+    assert!(matches!(outcome, ApplyOutcome::Progressed));
+    assert!(notifier.events().is_empty());
+    let calls = podman_calls(&fx);
+    assert_eq!(
+        calls.len(),
+        1,
+        "idle may only try the shared closed claim helper: {calls:?}"
+    );
+    assert!(calls[0].contains("install_request_agent_cli claim-ads --claimant safent-native-"));
+    assert!(!calls[0].contains(".update-requested"));
+    assert!(!calls[0].contains(".uninstall-requested"));
 }
 
 #[test]

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import plistlib
 import struct
+import subprocess
 import tempfile
 import unittest
 
@@ -25,6 +26,15 @@ class MacosDistributionTests(unittest.TestCase):
         self.exe.write_bytes(b"not executed: metadata fixture only")
         self.exe.chmod(0o755)
         (contents / "Resources/icon.icns").write_bytes(b"fixture icon")
+        self.runtime = contents / "Resources/runtime"
+        self.runtime.mkdir()
+        self.compose = self.runtime / "docker-compose"
+        self.compose.write_text("#!/bin/sh\nprintf '5.5.1\\n'\n")
+        self.compose.chmod(0o755)
+        self.manifest = self.runtime / "runtime-bundle.json"
+        self.manifest.write_text(json.dumps({"entries": [
+            {"path": "docker-compose", "sha256": "unchanged-by-chmod", "mode": "0755"},
+        ]}))
         self.info = contents / "Info.plist"
         self.data = {
             "CFBundleIdentifier": "com.safent.desktop", "CFBundlePackageType": "APPL",
@@ -65,6 +75,39 @@ class MacosDistributionTests(unittest.TestCase):
         self.write_info()
         with self.assertRaises(ValueError):
             MODULE.validate_metadata(self.app, "0.9.2")
+
+    def test_compose_launch_contract_after_packaging(self):
+        MODULE.validate_compose(self.runtime, execute=True)
+        for mode in (0o644, 0o744, 0o777, 0o4755):
+            with self.subTest(mode=oct(mode)):
+                self.compose.chmod(mode)
+                with self.assertRaisesRegex(ValueError, "mode 0755"):
+                    MODULE.validate_metadata(self.app, "0.9.2")
+        self.compose.chmod(0o755)
+
+    def test_compose_manifest_cannot_bless_nonexecutable_bytes(self):
+        for entries in ([], [{"path": "docker-compose", "mode": "0644"}],
+                        [{"path": "docker-compose", "mode": "0755"}] * 2):
+            with self.subTest(entries=entries):
+                self.manifest.write_text(json.dumps({"entries": entries}))
+                with self.assertRaisesRegex(ValueError, "manifest"):
+                    MODULE.validate_metadata(self.app, "0.9.2")
+
+    def test_compose_loader_failure_rejected_despite_executable_mode(self):
+        self.compose.write_text("#!/bin/sh\nexit 42\n")
+        with self.assertRaises(subprocess.CalledProcessError):
+            MODULE.validate_compose(self.runtime, execute=True)
+
+    def test_compose_version_pin_matches_lock(self):
+        lock = json.loads((DESKTOP / "runtime-manifest.lock").read_text())
+        self.assertEqual(MODULE.COMPOSE_VERSION,
+                         lock["targets"]["aarch64-apple-darwin"]["compose_provider"]["version"])
+
+    def test_compose_symlink_is_not_an_executable_contract(self):
+        self.compose.unlink()
+        self.compose.symlink_to(self.exe)
+        with self.assertRaisesRegex(ValueError, "redirect"):
+            MODULE.validate_compose(self.runtime)
 
     def test_executable_directory_cannot_redirect_outside_bundle(self):
         macos = self.app / "Contents/MacOS"

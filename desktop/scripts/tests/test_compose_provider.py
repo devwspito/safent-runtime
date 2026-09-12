@@ -41,7 +41,10 @@ def test_real_downloader_and_stager_fail_closed(tmp_path, corrupt):
         "sbom": "docker-compose-sbom.json",
     }
     for component, relative in paths.items():
-        data = f"fixture-{component}\n".encode()
+        data = (
+            b"#!/bin/sh\n[ \"$1\" = version ] && [ \"$2\" = --short ] || exit 90\nprintf '5.5.1\\n'\n"
+            if component == "download" else f"fixture-{component}\n".encode()
+        )
         source = tmp_path / component
         source.write_bytes(data)
         provider[component] = {
@@ -58,7 +61,9 @@ def test_real_downloader_and_stager_fail_closed(tmp_path, corrupt):
     script = (
         'source "$1/lib/fetch-verified.sh"; '
         'source "$1/lib/stage-compose-provider.sh"; '
-        'stage_compose_provider "$2" qa "$3" "$4"'
+        'stage_compose_provider "$2" qa "$3" "$4" || exit $?; '
+        'source "$1/lib/normalize-staged-tree.sh"; '
+        'normalize_staged_tree "$4"'
     )
     result = subprocess.run(  # noqa: S603 - fixed shell program, own fixtures
         [
@@ -85,4 +90,9 @@ def test_real_downloader_and_stager_fail_closed(tmp_path, corrupt):
         for component, relative in paths.items():
             assert (destination / relative).read_bytes() == (tmp_path / component).read_bytes()
         assert (destination / "bin/docker-compose").stat().st_mode & 0o111
+        executed = subprocess.run(
+            [str(destination / "bin/docker-compose"), "version", "--short"],
+            check=True, capture_output=True, text=True, timeout=5,
+        )
+        assert executed.stdout.strip() == "5.5.1"
         assert not (destination / "docker-compose-LICENSE").stat().st_mode & 0o111

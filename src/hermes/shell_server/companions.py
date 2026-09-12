@@ -1,4 +1,4 @@
-"""companions — `/etc/hermes/companions.json` loader + strict validation (024).
+"""companions — root-staged registry loader + strict validation (024).
 
 A "companion" is a sibling container Safent's launcher provisions and joins
 to a FIXED network (`safent-companions`, 10.201.0.0/24) at install time —
@@ -8,8 +8,10 @@ direction: DNS-name-only, no IP literal), a companion's destination is
 PINNED by the local installer, never by the owner typing a URL and never by
 the daemon:
 
-  - `/etc/hermes/companions.json` is a HOST bind-mount, read-only inside the
-    container (run-safent.sh). `/etc` is read-only to hermes-runtime.service
+  - `/etc/hermes/companions/companions.json` is the read-only source registry.
+    Root validates it explicitly and stages the accepted entries at
+    `/run/hermes/companions/companions.json`, 0440 root:hermes. The daemon
+    reads only that staged registry. `/etc` is read-only to hermes-runtime.service
     (ProtectSystem=strict) — no D-Bus verb, no REST path, no config-sync
     verb writes this file (INV-2). This loader is the ONLY reader.
   - The path is a CONSTANT — no env override — an override would be a knob
@@ -44,17 +46,21 @@ import ipaddress
 import json
 import os
 import ssl
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-_COMPANIONS_PATH = Path("/etc/hermes/companions.json")
+COMPANION_SOURCE_REGISTRY_PATH = Path("/etc/hermes/companions/companions.json")
+COMPANION_RUNTIME_REGISTRY_PATH = Path("/run/hermes/companions/companions.json")
+_COMPANIONS_PATH = COMPANION_RUNTIME_REGISTRY_PATH
 _COMPANION_MOUNT_DIR = Path("/etc/hermes/companions")
 _COMPANION_SUBNET = ipaddress.ip_network("10.201.0.0/24")
 _ALLOWED_PORT = 8443
 _ALLOWED_SCHEME = "https"
 _HOST_SUFFIX = ".safent.internal"
 _BEARER_REF_SCHEME = "file:"
+_STAGED_REGISTRY_MODE = 0o440
 
 # Where the root `ExecStartPre=-+` of hermes-runtime.service stages a copy of
 # each companion's bearer (see ops/agents-os-edition/scripts/hermes-companion-
@@ -126,11 +132,14 @@ class CompanionEndpoint:
         ]
 
 
-def load_companions(*, path: Path = _COMPANIONS_PATH) -> dict[str, CompanionEndpoint]:
+def load_companions(*, path: Path | None = None) -> dict[str, CompanionEndpoint]:
     """Return {slug: CompanionEndpoint} for every entry in *path* that
     validates. Fail-soft to {} on ANY anomaly (missing file, bad owner/
     permissions, malformed JSON, wrong version, any entry failing
     validation) — a companion is optional infrastructure (FR-3)."""
+    path = _COMPANIONS_PATH if path is None else path
+    if path == _COMPANIONS_PATH and not _is_root_staged_registry(path):
+        return {}
     if not _is_trustworthy_file(path):
         return {}
     try:
@@ -153,7 +162,7 @@ def load_companions(*, path: Path = _COMPANIONS_PATH) -> dict[str, CompanionEndp
     return result
 
 
-def get_companion(slug: str, *, path: Path = _COMPANIONS_PATH) -> CompanionEndpoint | None:
+def get_companion(slug: str, *, path: Path | None = None) -> CompanionEndpoint | None:
     """Return the validated companion for *slug*, or None if absent/invalid."""
     return load_companions(path=path).get(slug)
 
@@ -213,6 +222,23 @@ def _read_secret_file(path: Path) -> str | None:
 # ---------------------------------------------------------------------------
 # Validation internals
 # ---------------------------------------------------------------------------
+
+
+def _is_root_staged_registry(path: Path) -> bool:
+    """A daemon-owned/injected tmpfs file is never a root staging result."""
+    try:
+        file_stat = path.lstat()
+        parent_stat = path.parent.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(file_stat.st_mode)
+        and file_stat.st_uid == 0
+        and stat.S_IMODE(file_stat.st_mode) == _STAGED_REGISTRY_MODE
+        and stat.S_ISDIR(parent_stat.st_mode)
+        and parent_stat.st_uid == 0
+        and not parent_stat.st_mode & 0o022
+    )
 
 
 def _is_trustworthy_file(path: Path) -> bool:

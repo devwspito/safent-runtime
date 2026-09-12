@@ -574,7 +574,7 @@ _provision_companion() {
   # final URL on stdout, never provisioning chatter. Its exit status (the
   # only thing this `if` actually needs) is untouched by the redirect.
   if SAFENT_PODMAN="$RT" "$COMPANION_BIN_DIR/provision.sh" --scaffold >&2; then
-    COMPANION_RUN_ARGS="--network safent-companions -v ${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro -v ${COMPANION_STATE}/tls/ca.crt:/etc/hermes/companions/ads-ca.crt:ro -v ${COMPANION_STATE}/bearer:/etc/hermes/companions/ads.bearer:ro -v ${COMPANION_STATE}/sso/ads-sso.key:/etc/hermes/companions/ads-sso.key:ro"
+    COMPANION_RUN_ARGS="--network safent-companions -v safent-companion-runtime:/etc/hermes/companions:ro"
   else
     echo "[!] Companion scaffolding failed — starting Safent without it (FR-3)." >&2
   fi
@@ -1301,9 +1301,32 @@ _handle_install_request() {  # $1=verb $2=action-function-name
   if ( "$2" ); then
     _resolve_install_request "$1" success
   else
-    echo "[!] $1 failed; it stays pending and will be retried." >&2
+    echo "[!] $1 failed; an explicit new request is required." >&2
     _resolve_install_request "$1" failure
   fi
+}
+
+# Closed native tick. The guest supplies only a verb and opaque request identity;
+# the image is the native launcher's pinned VersionSet, never marker contents.
+cmd_companion_requests() {
+  _REQUEST_CLAIMANT="safent-native-$$"
+  if _request="$("$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
+    claim-ads --claimant "$_REQUEST_CLAIMANT" 2>/dev/null)"; then :; else
+    _claim_rc=$?
+    [ "$_claim_rc" -eq 1 ] && return 0
+    return 1
+  fi
+  _REQUEST_VERB="${_request%% *}"
+  _REQUEST_ID="${_request#* }"
+  case "$_REQUEST_VERB" in install_companion|repair_companion) ;; *) return 1 ;; esac
+  case "$_REQUEST_ID" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#_REQUEST_ID}" -eq 32 ] || return 1
+  if ( _companion_install_or_repair ); then _request_outcome=success; else _request_outcome=failure; fi
+  "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
+    resolve-ads "$_REQUEST_VERB" --claimant "$_REQUEST_CLAIMANT" --request-id "$_REQUEST_ID" \
+    "--$_request_outcome" >/dev/null 2>&1 || return 1
+  unset _REQUEST_ID _REQUEST_VERB _REQUEST_CLAIMANT
+  [ "$_request_outcome" = success ]
 }
 
 # One pass over every marker this agent watches — extracted from cmd_agent's
@@ -1320,8 +1343,7 @@ _agent_tick() {
     echo "[*] Update requested from the UI — applying..."
     cmd_update || echo "[!] Update failed; re-request it from the UI to retry."
   fi
-  _handle_install_request install_companion cmd_companion_install
-  _handle_install_request repair_companion cmd_companion_repair
+  cmd_companion_requests || echo "[!] Companion request failed; request a new attempt explicitly." >&2
 }
 
 cmd_agent() {
@@ -1489,6 +1511,12 @@ _uninstall_companion() {  # $1: 1 to also purge state + volumes, 0 to keep them
     _remove_partial_companion_volume safent-ads-companion-db-data ads-db-data
     _remove_partial_companion_volume safent-ads-companion-broker-sock broker-sock
     _remove_partial_companion_volume safent-ads-companion-credential-store credential-store
+    _projection_label="$("$RT" volume inspect --format '{{index .Labels "com.safent.component"}}' safent-companion-runtime 2>/dev/null || true)"
+    if [ "$_projection_label" = ads-runtime-projection ]; then
+      # Derived secret projection only. Never force-remove an attached volume.
+      "$RT" volume rm safent-companion-runtime >/dev/null 2>&1 || \
+        printf '[!] Companion projection retained: volume is still in use or unavailable.\n' >&2
+    fi
     rm -rf "$COMPANION_STATE" 2>/dev/null || true
   fi
 }
@@ -1512,15 +1540,31 @@ _uninstall_companion() {  # $1: 1 to also purge state + volumes, 0 to keep them
 # just at the call site) means every current AND future caller gets it
 # right by construction.
 _companion_container_counts() {
-  total=0
+  # Four long-lived roles are required even if compose returns fewer IDs.
+  # ads-migrate is a one-shot job, not a fifth missing service after exit 0.
+  total=4
   running=0
   _companion_env
   ids="$("$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" ps -q -a 2>/dev/null || true)"
+  _cc_seen=" "
+  _cc_invalid=0
   for id in $ids; do
-    total=$((total + 1))
-    state="$("$RT" inspect -f '{{.State.Running}}' "$id" 2>/dev/null || echo false)"
-    if [ "$state" = true ]; then running=$((running + 1)); fi
+    _cc_info="$("$RT" inspect -f '{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Running}}|{{.State.Status}}|{{.State.ExitCode}}' "$id" 2>/dev/null || true)"
+    _cc_role=${_cc_info%%|*}
+    case "$_cc_role" in
+      ads-api|ads-worker|ads-broker|ads-db|ads-migrate) ;;
+      *) _cc_invalid=1; continue ;;
+    esac
+    case "$_cc_seen" in *" $_cc_role "*) _cc_invalid=1; continue ;; esac
+    _cc_seen="$_cc_seen$_cc_role "
+    case "$_cc_role:$_cc_info" in
+      ads-migrate:ads-migrate\|false\|exited\|0) ;;
+      ads-migrate:*) _cc_invalid=1 ;;
+      "$_cc_role:$_cc_role|true|running|0") running=$((running + 1)) ;;
+    esac
   done
+  # A running/failed migration or ambiguous inventory must never look ready.
+  [ "$_cc_invalid" -eq 0 ] || running=0
 }
 
 # Bearer-protected `/mcp/health` — a bare 401 IS liveness (see provision.sh's
@@ -1558,6 +1602,14 @@ _run_with_heartbeat() {
   while kill -0 "$_hb_pid" 2>/dev/null; do
     sleep 1
     _hb_elapsed=$((_hb_elapsed + 1))
+    if [ -n "${_REQUEST_ID:-}" ] && [ $((_hb_elapsed % 20)) -eq 0 ]; then
+      if ! "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
+          renew-ads "$_REQUEST_VERB" --claimant "$_REQUEST_CLAIMANT" --request-id "$_REQUEST_ID" \
+          >/dev/null 2>&1; then
+        kill "$_hb_pid" 2>/dev/null || true
+        _die_porcelain companion_migration_failed "Se perdio la concesion de instalacion. Revisa el estado antes de volver a solicitarla." false
+      fi
+    fi
     # MAC5-01 (verificacion-mac-5.md): "seconds" is not in the closed
     # progress-unit vocabulary (app-engine.md §3: bytes|layers|steps) —
     # engine_adapter.rs's map_progress_unit rejected it as
@@ -1580,7 +1632,7 @@ _companion_install_or_repair() {
   done
 
   _stage companion_scaffold "Preparando el andamiaje del companion"
-  SAFENT_PODMAN="$RT" "$COMPANION_BIN_DIR/provision.sh" --scaffold >&2 \
+  _run_with_heartbeat env SAFENT_PODMAN="$RT" "$COMPANION_BIN_DIR/provision.sh" --scaffold \
     || _die_porcelain companion_network_conflict "No se pudo preparar la red/estado del companion" true
   _stage_done
 
@@ -1590,11 +1642,12 @@ _companion_install_or_repair() {
   _stage_done
 
   _stage companion_reload "Registrando el companion en Safent"
-  if _running; then
-    "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.companion_reload_cli \
-      reload safent-ads >&2 \
-      || echo "[!] No se pudo recargar el companion en caliente en Safent — 'safent restart' lo recoge igualmente (029 CL-002)." >&2
-  fi
+  _running || _die_porcelain companion_unreachable "Safent no esta disponible para registrar el companion" false
+  "$RT" exec -u root "$NAME" /usr/libexec/hermes/hermes-companion-bearer >&2 \
+    || _die_porcelain companion_unreachable "No se pudo preparar el registro seguro del companion" false
+  _run_with_heartbeat "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
+    verify-ads \
+    || _die_porcelain companion_unreachable "El companion no ha superado el registro y la comprobacion autenticada de salud" false
   _stage_done
 
   [ "$PORCELAIN" -eq 1 ] || return 0
@@ -1809,6 +1862,7 @@ cmd_companion_remove() {
 
 cmd_companion() {
   case "${1:-}" in
+    requests) cmd_companion_requests ;;
     install) cmd_companion_install ;;
     repair) cmd_companion_repair ;;
     status) cmd_companion_status ;;
@@ -2135,11 +2189,13 @@ cmd_facts() {
     [ -n "$RT" ] && { _companion_container_counts; companion_running="$running"; companion_total="$total"; }
   fi
   companion_health=unknown
-  if [ -f "$COMPANION_STATE/tls/ca.crt" ]; then
-    case "$(_companion_health_code)" in
-      200|401) companion_health=healthy ;;
-      *) companion_health=unreachable ;;
-    esac
+  if [ "$engine_running" = true ] && [ -n "$RT" ]; then
+    if "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
+        health-ads >/dev/null 2>&1; then
+      companion_health=reachable
+    else
+      companion_health=unreachable
+    fi
   fi
 
   daemon_health=unknown; app_version=null
@@ -2151,9 +2207,7 @@ cmd_facts() {
   fi
 
   runtime_ok=false
-  for f in "$SAFENT_STATE_HOME"/runtime/*/.verified; do
-    [ -f "$f" ] && runtime_ok=true
-  done
+  _runtime_cache_current && runtime_ok=true
 
   userns_allowed=true
   if [ "$OS" = Linux ]; then
@@ -2179,6 +2233,34 @@ cmd_facts() {
 # Manifest lives beside this script inside the app bundle (app-engine.md §1:
 # `<bundle>/engine/safent`), never fetched over the network. Fixed, known
 # shape — same "no general JSON parser" rule as _manifest_field.
+_runtime_cache_current() (
+  bundle_dir="$(CDPATH='' cd -- "$(dirname "$0")" 2>/dev/null && pwd)" || return 1
+  manifest="$bundle_dir/runtime-bundle.json"
+  [ -f "$manifest" ] || return 1
+  version="$(_manifest_field "$manifest" podman_version)"
+  case "$version" in ""|.|..|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  target="$SAFENT_STATE_HOME/runtime/$version"
+  [ ! -L "$SAFENT_STATE_HOME/runtime" ] && [ ! -L "$target" ] && [ ! -L "$target/.verified" ] || return 1
+  [ -f "$target/.verified" ] || return 1
+  [ "$(cat "$target/.verified")" = "$(_sha256 "$manifest")" ] || return 1
+  paths="$(grep -o '"path": *"[^"]*"' "$manifest" | sed -E 's/.*"([^"]*)"$/\1/')"
+  [ -n "$paths" ] || return 1
+  for path in $paths; do
+    # Packaged resources are flat basenames. Never traverse a request/path.
+    case "$path" in .|..|*/*|*[!A-Za-z0-9._+-]*) return 1 ;; esac
+    [ ! -L "$target/$path" ] && [ -f "$target/$path" ] || return 1
+    entry_block="$(awk -v p="\"path\": \"$path\"" 'index($0,p){f=1} f{print; if(/}/){exit}}' "$manifest")"
+    mode="$(printf '%s\n' "$entry_block" | sed -n 's/.*"mode": *"\([^"]*\)".*/\1/p' | head -1)"
+    mode="${mode:-0755}"
+    case "$mode" in 0[0-7][0-7][0-7]) ;; *) return 1 ;; esac
+    actual_mode="$(stat -c %a "$target/$path" 2>/dev/null)" || actual_mode="$(stat -f %Lp "$target/$path")" || return 1
+    [ "$actual_mode" = "${mode#0}" ] || return 1
+    # Compare against the current signed app bytes, not pre-codesign Mach-O
+    # hashes. This validates the cache copy without a second signing scheme.
+    cmp -s "$bundle_dir/$path" "$target/$path" || return 1
+  done
+)
+
 cmd_stage_runtime() {
   _stage runtime_staging "Preparando la base de ejecucion"
   bundle_dir="$(CDPATH='' cd -- "$(dirname "$0")" 2>/dev/null && pwd)"
@@ -2190,8 +2272,9 @@ cmd_stage_runtime() {
     return 0
   fi
   version="$(_manifest_field "$manifest" podman_version)"
-  [ -n "$version" ] || _die_porcelain runtime_hash_mismatch "Manifiesto sin podman_version" false
+  case "$version" in ""|.|..|*[!A-Za-z0-9._-]*) _die_porcelain runtime_hash_mismatch "Versión del runtime no válida" false ;; esac
   target="$SAFENT_STATE_HOME/runtime/$version"
+  [ ! -L "$SAFENT_STATE_HOME/runtime" ] && [ ! -L "$target" ] || _die_porcelain runtime_hash_mismatch "Ruta del runtime no válida" false
   mkdir -p "$target" 2>/dev/null || _die_porcelain runtime_hash_mismatch "No se pudo crear $target" false
 
   # Owner's decision (11-sep-2026, "el codigo mas simple es el que
@@ -2218,25 +2301,36 @@ cmd_stage_runtime() {
   fi
 
   paths="$(grep -o '"path": *"[^"]*"' "$manifest" | sed -E 's/.*"([^"]*)"$/\1/')"
+  [ -n "$paths" ] || _die_porcelain runtime_hash_mismatch "Manifiesto del runtime vacío" false
   total="$(printf '%s\n' "$paths" | grep -c .)"
   done_n=0
   for path in $paths; do
+    case "$path" in .|..|*/*|*[!A-Za-z0-9._+-]*) _die_porcelain runtime_hash_mismatch "Ruta de recurso no válida" false ;; esac
     entry_block="$(awk -v p="\"path\": \"$path\"" 'index($0,p){f=1} f{print; if(/}/){exit}}' "$manifest")"
     sha="$(printf '%s\n' "$entry_block" | sed -n 's/.*"sha256": *"\([^"]*\)".*/\1/p' | head -1)"
     mode="$(printf '%s\n' "$entry_block" | sed -n 's/.*"mode": *"\([^"]*\)".*/\1/p' | head -1)"
     mode="${mode:-0755}"
+    case "$mode" in 0[0-7][0-7][0-7]) ;; *) _die_porcelain runtime_hash_mismatch "Modo de recurso no válido" false ;; esac
     src="$bundle_dir/$path"
     [ -f "$src" ] || _die_porcelain runtime_hash_mismatch "Falta $path en el paquete" false
     if [ "$OS" != Darwin ]; then
       [ "$(_sha256 "$src")" = "$sha" ] || _die_porcelain runtime_hash_mismatch "$path no coincide con el manifiesto" false
     fi
     dst="$target/$path"
-    mkdir -p "$(dirname "$dst")" 2>/dev/null || true
-    cp "$src" "$dst" && chmod "$mode" "$dst"
+    [ ! -L "$dst" ] && [ ! -d "$dst" ] || _die_porcelain runtime_hash_mismatch "Destino de recurso no válido" false
+    staged_tmp="$(mktemp "$target/.stage.XXXXXX")" || _die_porcelain runtime_hash_mismatch "No se pudo preparar el recurso" false
+    if ! { cp "$src" "$staged_tmp" && chmod "$mode" "$staged_tmp" && mv -f "$staged_tmp" "$dst"; }; then
+      rm -f "$staged_tmp"
+      _die_porcelain runtime_hash_mismatch "No se pudo guardar el recurso" false
+    fi
     done_n=$((done_n + 1))
     _stage_progress "$done_n" "$total" steps
   done
-  : > "$target/.verified"
+  verified_tmp="$(mktemp "$target/.verified.XXXXXX")" || _die_porcelain runtime_hash_mismatch "No se pudo verificar el runtime" false
+  if ! { _sha256 "$manifest" > "$verified_tmp" && chmod 0600 "$verified_tmp" && mv -f "$verified_tmp" "$target/.verified"; }; then
+    rm -f "$verified_tmp"
+    _die_porcelain runtime_hash_mismatch "No se pudo guardar la verificación" false
+  fi
   [ -n "${SAFENT_PODMAN:-}" ] || SAFENT_PODMAN="$target/podman"
   _stage_done
 }
@@ -2430,6 +2524,10 @@ cmd_ensure_images() {
 # convergence this way — it always re-runs, unchanged from before.
 _container_matches_desired() {
   _exists && _running || return 1
+  if [ "$NO_COMPANION" -eq 0 ]; then
+    _projection_mount="$("$RT" inspect --format '{{range .Mounts}}{{if eq .Destination "/etc/hermes/companions"}}{{.Type}}|{{.Name}}|{{.RW}}{{end}}{{end}}' "$NAME" 2>/dev/null || true)"
+    [ "$_projection_mount" = 'volume|safent-companion-runtime|false' ] || return 1
+  fi
   case "$IMAGE" in
     *@sha256:*) ;;
     *) return 1 ;;

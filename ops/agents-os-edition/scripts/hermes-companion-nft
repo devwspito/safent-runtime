@@ -35,7 +35,10 @@ from hermes.shell_server.companion_nft import (  # noqa: E402
     render_companion_nat_rules,
     render_companion_output_rules,
 )
-from hermes.shell_server.companions import load_companions  # noqa: E402
+from hermes.shell_server.companions import (  # noqa: E402
+    COMPANION_SOURCE_REGISTRY_PATH,
+    load_companions,
+)
 
 _NFT_DIR = "/run/hermes/nft"
 _ETC_HOSTS = "/etc/hosts"
@@ -43,7 +46,7 @@ _ETC_HOSTS_MARKER = "# hermes-companion-nft"
 
 
 def main() -> int:
-    endpoints = list(load_companions().values())
+    endpoints = list(load_companions(path=COMPANION_SOURCE_REGISTRY_PATH).values())
     os.makedirs(_NFT_DIR, exist_ok=True)
     _write_or_remove(FORWARD_FRAGMENT_FILENAME, render_companion_forward_rules(endpoints))
     _write_or_remove(OUTPUT_FRAGMENT_FILENAME, render_companion_output_rules(endpoints))

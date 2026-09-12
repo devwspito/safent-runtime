@@ -24,13 +24,18 @@ regresses.
 from __future__ import annotations
 
 import contextlib
+import fcntl
+import functools
 import json
 import logging
 import os
 import time
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import ParamSpec, TypeVar
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -83,6 +88,23 @@ _LEGACY_FLAG_NAME: dict[str, str] = {
 
 # install-request.md §4: a claim younger than this is respected as live.
 _CLAIM_TTL_S = 60
+_ADS_WORK_VERBS = frozenset({"install_companion", "repair_companion"})
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _locked(fn: Callable[_P, _R]) -> Callable[_P, _R]:  # noqa: UP047
+    @functools.wraps(fn)
+    def run(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        _INSTANCE_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(_INSTANCE_DIR / ".install-requests.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            return fn(*args, **kwargs)
+        finally:
+            os.close(fd)
+
+    return run
 
 
 @dataclass(frozen=True)
@@ -90,6 +112,7 @@ class InstallRequestStatus:
     verb: str
     state: str  # 'pending' | 'claimed'
     expires_at: str
+    last_failure: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +123,7 @@ class ClaimedRequest:
 
     verb: str
     slug: str | None
+    request_id: str = ""
 
 
 def _marker_path(verb: str) -> Path:
@@ -121,8 +145,11 @@ def _iso(dt: datetime) -> str:
 def _read_marker(verb: str) -> dict[str, object] | None:
     try:
         with open(_marker_path(verb), encoding="utf-8") as fh:
-            parsed = json.load(fh)
-    except (OSError, json.JSONDecodeError):
+            raw = fh.read(8193)
+            if len(raw) > 8192:  # noqa: PLR2004
+                return None
+            parsed = json.loads(raw)
+    except (OSError, ValueError, UnicodeError, RecursionError):
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -168,6 +195,16 @@ def _write_claim(verb: str, claimant: str) -> None:
 
 
 def _status_from_marker(verb: str, marker: dict[str, object]) -> InstallRequestStatus:
+    if verb in _ADS_WORK_VERBS and marker.get("state") == "claimed" and not _has_live_claim(verb):
+        _fail_ads_marker(verb, marker, "host_interrupted")
+    if marker.get("state") == "failed":
+        failure = marker.get("last_failure")
+        return InstallRequestStatus(
+            verb=verb,
+            state="failed",
+            expires_at=str(marker.get("expires_at")),
+            last_failure=failure if isinstance(failure, dict) else None,
+        )
     state = "claimed" if _has_live_claim(verb) else "pending"
     return InstallRequestStatus(verb=verb, state=state, expires_at=str(marker.get("expires_at")))
 
@@ -193,6 +230,7 @@ def _write_legacy_flag(verb: str) -> None:
         logger.warning("hermes.install_requests.legacy_flag_write_failed verb=%s: %s", verb, exc)
 
 
+@_locked
 def is_verb_live(verb: str) -> bool:
     """True if `verb` has a pending/claimed request right now. Lazily
     expires a stale marker as a side effect (install-request.md §1 #4)."""
@@ -203,9 +241,10 @@ def is_verb_live(verb: str) -> bool:
         _delete_marker(verb)
         logger.info("hermes.install_requests.expired verb=%s", verb)
         return False
-    return True
+    return _status_from_marker(verb, marker).state != "failed"
 
 
+@_locked
 def create_request(
     verb: str, *, slug: str | None = None, retention: str | None = None
 ) -> tuple[bool, InstallRequestStatus]:
@@ -215,7 +254,11 @@ def create_request(
     (install-request.md §1 #5: the second press never starts a second
     install)."""
     existing = _read_marker(verb)
-    if existing is not None and not _is_expired(existing):
+    if (
+        existing is not None
+        and not _is_expired(existing)
+        and _status_from_marker(verb, existing).state != "failed"
+    ):
         logger.info("hermes.install_requests.already_live verb=%s", verb)
         return False, _status_from_marker(verb, existing)
 
@@ -227,6 +270,7 @@ def create_request(
         "created_at": _iso(created_at),
         "expires_at": _iso(expires_at),
         "attempt": 1,
+        "request_id": uuid.uuid4().hex,
     }
     if slug is not None:
         document["slug"] = slug
@@ -234,12 +278,17 @@ def create_request(
         document["retention"] = retention
 
     _write_marker_atomic(verb, document)
+    with contextlib.suppress(OSError):
+        os.remove(_claim_path(verb))
     _write_legacy_flag(verb)
     logger.info("hermes.install_requests.created verb=%s slug=%s", verb, slug)
     return True, InstallRequestStatus(verb=verb, state="pending", expires_at=_iso(expires_at))
 
 
-def claim_request(verb: str, *, claimant: str) -> ClaimedRequest | None:
+@_locked
+def claim_request(  # noqa: PLR0911
+    verb: str, *, claimant: str, allow_reclaim: bool = True
+) -> ClaimedRequest | None:
     """Claim a live, unclaimed request for *verb* (install-request.md §4:
     mutually-exclusive claim between `safent agent` and the open app).
 
@@ -262,12 +311,107 @@ def claim_request(verb: str, *, claimant: str) -> ClaimedRequest | None:
         return None
     if _has_live_claim(verb) and not _claim_owned_by(verb, claimant):
         return None
+    if verb in _ADS_WORK_VERBS:
+        if _status_from_marker(verb, marker).state == "failed":
+            return None
+        if marker.get("state") == "claimed" and not allow_reclaim:
+            return None
+        request_id = marker.get("request_id")
+        if (
+            type(marker.get("schema_version")) is not int
+            or marker.get("schema_version") != 1
+            or (
+                request_id is not None
+                and (
+                    not isinstance(request_id, str)
+                    or len(request_id) != 32  # noqa: PLR2004
+                    or any(c not in "0123456789abcdef" for c in request_id)
+                )
+            )  # noqa: PLR2004
+            or marker.get("slug") != _DEFAULT_SLUG
+            or marker.get("verb") != verb
+            or set(marker)
+            - {
+                "schema_version",
+                "verb",
+                "slug",
+                "created_at",
+                "expires_at",
+                "attempt",
+                "request_id",
+                "state",
+                "last_failure",
+            }
+        ):
+            _fail_ads_marker(verb, marker, "invalid_request")
+            return None
+        for other in _ADS_WORK_VERBS - {verb}:
+            if _has_live_claim(other):
+                return None
+        marker["state"] = "claimed"
+        marker.setdefault("request_id", uuid.uuid4().hex)
+        _write_marker_atomic(verb, marker)
     _write_claim(verb, claimant)
     logger.info("hermes.install_requests.claimed verb=%s claimant=%s", verb, claimant)
     slug = marker.get("slug")
-    return ClaimedRequest(verb=verb, slug=slug if isinstance(slug, str) else None)
+    return ClaimedRequest(
+        verb=verb,
+        slug=slug if isinstance(slug, str) else None,
+        request_id=str(marker.get("request_id", "")),
+    )
 
 
+def _fail_ads_marker(verb: str, marker: dict[str, object], code: str) -> None:
+    marker["state"] = "failed"
+    marker["expires_at"] = _iso(_now() + timedelta(hours=24))
+    marker["last_failure"] = {
+        "code": code,
+        "label": "La operacion no termino. Revisa el estado y vuelve a solicitarla.",
+        "retryable": True,
+    }
+    _write_marker_atomic(verb, marker)
+
+
+@_locked
+def renew_ads_request(verb: str, *, claimant: str, request_id: str) -> bool:
+    marker = _read_marker(verb) if verb in _ADS_WORK_VERBS else None
+    if not marker or marker.get("state") != "claimed" or _is_expired(marker):
+        return False
+    if (
+        marker.get("request_id") != request_id
+        or not _claim_owned_by(verb, claimant)
+        or not _has_live_claim(verb)
+    ):
+        return False
+    os.utime(_claim_path(verb), None)
+    return True
+
+
+@_locked
+def resolve_ads_request(verb: str, *, claimant: str, request_id: str, success: bool) -> bool:
+    marker = _read_marker(verb) if verb in _ADS_WORK_VERBS else None
+    if not marker or marker.get("state") != "claimed" or marker.get("request_id") != request_id:
+        return False
+    if not _claim_owned_by(verb, claimant) or not _has_live_claim(verb) or _is_expired(marker):
+        return False
+    with contextlib.suppress(OSError):
+        os.remove(_claim_path(verb))
+    if success:
+        _delete_marker(verb)
+    else:
+        _fail_ads_marker(verb, marker, "companion_install_failed")
+    return True
+
+
+@_locked
+def reject_unsupported_companion_request() -> None:
+    """The native consumer never executes removal or legacy system flags."""
+    marker = _read_marker("remove_companion")
+    if marker and marker.get("state") != "failed" and not _is_expired(marker):
+        _fail_ads_marker("remove_companion", marker, "native_operation_unsupported")
+
+
+@_locked
 def resolve_request(verb: str, *, success: bool) -> None:
     """Release *verb*'s claim. On success ALSO consumes the marker (deleted
     before the caller acts is the contract's own invariant — this call
@@ -277,15 +421,21 @@ def resolve_request(verb: str, *, success: bool) -> None:
     pending), never re-executed in a tight loop because releasing the
     claim does not create a new expiry — the SAME `expires_at` still bounds
     how long it stays retryable."""
+    if verb in _ADS_WORK_VERBS:
+        raise ValueError("Ads resolution requires the exact claim and request identity")
     with contextlib.suppress(OSError):
         os.remove(_claim_path(verb))
     if success:
         _delete_marker(verb)
         logger.info("hermes.install_requests.applied verb=%s", verb)
     else:
+        marker = _read_marker(verb)
+        if verb in _ADS_WORK_VERBS and marker:
+            _fail_ads_marker(verb, marker, "companion_install_failed")
         logger.info("hermes.install_requests.failed verb=%s", verb)
 
 
+@_locked
 def list_live_requests() -> list[InstallRequestStatus]:
     statuses: list[InstallRequestStatus] = []
     for verb in sorted(VERBS):
@@ -301,7 +451,14 @@ def list_live_requests() -> list[InstallRequestStatus]:
 
 
 def _status_payload(status: InstallRequestStatus) -> dict[str, object]:
-    return {"verb": status.verb, "state": status.state, "expires_at": status.expires_at}
+    payload: dict[str, object] = {
+        "verb": status.verb,
+        "state": status.state,
+        "expires_at": status.expires_at,
+    }
+    if status.last_failure is not None:
+        payload["last_failure"] = status.last_failure
+    return payload
 
 
 def _validate_and_normalize(
@@ -311,7 +468,7 @@ def _validate_and_normalize(
     on failure. The ONLY logic this module contains beyond marker I/O
     (Constitution Principle 0 condition): enum membership, nothing else."""
     verb = body.get("verb")
-    if verb not in VERBS:
+    if not isinstance(verb, str) or verb not in VERBS:
         return "unknown_verb"
     assert isinstance(verb, str)  # narrowed by the membership check above
 
@@ -357,7 +514,7 @@ def create_install_requests_router() -> APIRouter:
 
         result = _validate_and_normalize(body)
         if isinstance(result, str):
-            logger.warning("hermes.install_requests.rejected code=%s body=%r", result, body)
+            logger.warning("hermes.install_requests.rejected code=%s", result)
             return JSONResponse(status_code=400, content={"accepted": False, "code": result})
 
         verb, slug, retention = result

@@ -68,6 +68,9 @@ case "$1" in
     ;;
   pull) exit 0 ;;
   run)
+    case "$*" in
+      *"safent-companion-runtime:/runtime"*) cat >/dev/null; exit 0 ;;
+    esac
     # `run --rm --entrypoint cat <image> ...` (T015 scaffold's image-baked-
     # file probe, _fetch_companion_file) always misses -> forces the cache
     # tier (pre-seeded below). `run --rm --network none -- <image> python -m
@@ -100,6 +103,13 @@ case "$1" in
       "test -f") exit 1 ;;  # legacy .update-requested/.uninstall-requested: never present here
     esac
     case "$*" in
+      *install_request_agent_cli\ claim-ads*)
+        if [ -n "${FAKE_CLAIM_install_companion:-}" ]; then verb=install_companion;
+        elif [ -n "${FAKE_CLAIM_repair_companion:-}" ]; then verb=repair_companion;
+        else exit 1; fi
+        echo "$verb 0123456789abcdef0123456789abcdef"
+        exit 0
+        ;;
       *install_request_agent_cli\ claim*)
         verb="$5"
         case "$verb" in
@@ -115,7 +125,7 @@ case "$1" in
       *install_request_agent_cli\ resolve*)
         exit 0
         ;;
-      *companion_reload_cli\ reload*)
+      *install_request_agent_cli\ verify-ads*)
         [ "${FAKE_RELOAD_FAIL:-0}" = "1" ] && exit 1
         exit 0
         ;;
@@ -159,7 +169,9 @@ def _seed_state_home(state_home: Path) -> None:
     shutil.copy(_CAPS_TEMPLATE, bin_dir / "caps.template.yaml")
 
 
-def _base_env(tmp_path: Path, fake_bin_dir: Path, state_home: Path, podman_log: Path) -> dict[str, str]:
+def _base_env(
+    tmp_path: Path, fake_bin_dir: Path, state_home: Path, podman_log: Path
+) -> dict[str, str]:
     return {
         **os.environ,
         "PATH": f"{fake_bin_dir}:{os.environ.get('PATH', '')}",
@@ -173,11 +185,16 @@ def _base_env(tmp_path: Path, fake_bin_dir: Path, state_home: Path, podman_log: 
 
 class TestCompanionInstall:
     @pytest.mark.parametrize("verb", ["install", "repair"])
-    @pytest.mark.parametrize("image", [
-        "", "ghcr.io/devwspito/safent-ads:latest", "ghcr.io/devwspito/safent-ads:v0.2.2",
-        "ghcr.io/devwspito/safent-ads@sha256:short",
-        "ghcr.io/other/ads@sha256:" + "a" * 64,
-    ])
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "",
+            "ghcr.io/devwspito/safent-ads:latest",
+            "ghcr.io/devwspito/safent-ads:v0.2.2",
+            "ghcr.io/devwspito/safent-ads@sha256:short",
+            "ghcr.io/other/ads@sha256:" + "a" * 64,
+        ],
+    )
     def test_missing_or_mutable_bootstrap_pin_has_no_effect(
         self, tmp_path: Path, fake_bin_dir: Path, verb: str, image: str
     ) -> None:
@@ -188,7 +205,11 @@ class TestCompanionInstall:
         env["SAFENT_ADS_IMAGE"] = image
         result = subprocess.run(
             ["sh", str(_SAFENT_CLI), "companion", verb],
-            env=env, capture_output=True, text=True, timeout=10, check=False,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
         assert result.returncode != 0
         assert not log_path.exists() or log_path.read_text() == ""
@@ -201,13 +222,20 @@ class TestCompanionInstall:
 
         result = subprocess.run(
             ["sh", str(_SAFENT_CLI), "companion", "install"],
-            env=env, capture_output=True, text=True, timeout=60,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         log_lines = podman_log.read_text().splitlines()
         assert any(ln.startswith("network create") for ln in log_lines)
         assert any(ln.startswith("compose ") and "up" in ln for ln in log_lines)
-        assert any("companion_reload_cli reload safent-ads" in ln for ln in log_lines)
+        assert any("install_request_agent_cli verify-ads" in ln for ln in log_lines)
+        assert any(
+            "exec -u root agent-test /usr/libexec/hermes/hermes-companion-bearer" in ln
+            for ln in log_lines
+        )
         assert "[ok] Companion instalado." in result.stdout
 
     def test_porcelain_emits_scaffold_up_and_reload_stages(
@@ -220,12 +248,13 @@ class TestCompanionInstall:
 
         result = subprocess.run(
             ["sh", str(_SAFENT_CLI), "companion", "install", "--porcelain"],
-            env=env, capture_output=True, text=True, timeout=60,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
-        stage_ids = [
-            ln for ln in result.stdout.splitlines() if '"t":"stage"' in ln
-        ]
+        stage_ids = [ln for ln in result.stdout.splitlines() if '"t":"stage"' in ln]
         assert any('"id":"companion_scaffold"' in ln for ln in stage_ids)
         assert any('"id":"companion_up"' in ln for ln in stage_ids)
         assert any('"id":"companion_reload"' in ln for ln in stage_ids)
@@ -236,9 +265,7 @@ class TestCompanionInstall:
         for line in result.stdout.splitlines():
             _json.loads(line)
 
-    def test_hot_reload_failure_does_not_fail_the_install(
-        self, tmp_path: Path, fake_bin_dir: Path
-    ) -> None:
+    def test_hot_reload_failure_fails_the_install(self, tmp_path: Path, fake_bin_dir: Path) -> None:
         """CL-002: 'Instalar' prefers hot-reload but may fall back to a
         restart — a reload failure must never fail the install itself."""
         state_home = tmp_path / "state-home"
@@ -249,10 +276,13 @@ class TestCompanionInstall:
 
         result = subprocess.run(
             ["sh", str(_SAFENT_CLI), "companion", "install"],
-            env=env, capture_output=True, text=True, timeout=60,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
-        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
-        assert "restart" in result.stderr.lower()
+        assert result.returncode != 0
+        assert "[ok] Companion instalado." not in result.stdout
 
     def test_installing_twice_converges_without_duplicating_the_network(
         self, tmp_path: Path, fake_bin_dir: Path
@@ -265,7 +295,10 @@ class TestCompanionInstall:
 
         first = subprocess.run(
             ["sh", str(_SAFENT_CLI), "companion", "install"],
-            env=env, capture_output=True, text=True, timeout=60,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         assert first.returncode == 0, first.stderr
 
@@ -273,7 +306,10 @@ class TestCompanionInstall:
         env2["FAKE_NETWORK_PRESENT"] = "1"  # second run: already there
         second = subprocess.run(
             ["sh", str(_SAFENT_CLI), "companion", "install"],
-            env=env2, capture_output=True, text=True, timeout=60,
+            env=env2,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         assert second.returncode == 0, second.stderr
         assert "safent-ads" in second.stdout or second.returncode == 0
@@ -290,7 +326,10 @@ class TestCompanionRepair:
 
         result = subprocess.run(
             ["sh", str(_SAFENT_CLI), "companion", "repair"],
-            env=env, capture_output=True, text=True, timeout=60,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         assert "[ok] Companion reparado." in result.stdout
@@ -310,7 +349,10 @@ class TestAgentTick:
         env.update(extra_env or {})
         result = subprocess.run(
             ["sh", str(_SAFENT_CLI), "agent"],
-            env=env, capture_output=True, text=True, timeout=60,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         return result, podman_log
 
@@ -330,9 +372,9 @@ class TestAgentTick:
         )
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         log_lines = podman_log.read_text().splitlines()
-        assert any("install_request_agent_cli claim install_companion" in ln for ln in log_lines)
+        assert any("install_request_agent_cli claim-ads" in ln for ln in log_lines)
         assert any(
-            "install_request_agent_cli resolve install_companion --success" in ln
+            "install_request_agent_cli resolve-ads install_companion" in ln and "--success" in ln
             for ln in log_lines
         )
         # The claimed request actually ran the install (network created).
@@ -346,8 +388,10 @@ class TestAgentTick:
         )
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         log = podman_log.read_text()
-        assert "install_request_agent_cli claim repair_companion" in log
-        assert "install_request_agent_cli resolve repair_companion --success" in log
+        assert "install_request_agent_cli claim-ads" in log
+        assert (
+            "install_request_agent_cli resolve-ads repair_companion" in log and "--success" in log
+        )
 
     def test_a_failed_install_resolves_failure_not_success(
         self, tmp_path: Path, fake_bin_dir: Path
@@ -363,8 +407,10 @@ class TestAgentTick:
         # The tick itself never aborts the agent loop over one failed install.
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         log = podman_log.read_text()
-        assert "install_request_agent_cli resolve install_companion --failure" in log
-        assert "install_request_agent_cli resolve install_companion --success" not in log
+        assert (
+            "install_request_agent_cli resolve-ads install_companion" in log and "--failure" in log
+        )
+        assert "--success" not in log
 
     def test_a_request_already_claimed_by_someone_else_is_left_alone(
         self, tmp_path: Path, fake_bin_dir: Path
@@ -397,7 +443,7 @@ _FAKE_PODMAN_SLOW_PULL = _FAKE_PODMAN.replace(
     "    exit 0\n"
     "    ;;\n"
     "  pull)\n"
-    '    _slept=0\n'
+    "    _slept=0\n"
     '    while [ "$_slept" -lt "${FAKE_PULL_SLEEP_S:-0}" ]; do sleep 1; _slept=$((_slept + 1)); done\n'
     "    exit 0\n"
     "    ;;\n",
@@ -429,11 +475,15 @@ class TestHeartbeatDuringASlowPull:
         podman_log = tmp_path / "podman.log"
         env = _base_env(tmp_path, fake_bin_dir_slow_pull, state_home, podman_log)
         env["FAKE_PULL_SLEEP_S"] = "20"
+        env["FAKE_CLAIM_install_companion"] = "safent-ads"
 
         started = _time.monotonic()
         proc = subprocess.Popen(
-            ["sh", str(_SAFENT_CLI), "companion", "install", "--porcelain"],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            ["sh", str(_SAFENT_CLI), "companion", "requests", "--porcelain"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
         events: list[tuple[float, dict]] = []
         assert proc.stdout is not None
@@ -448,9 +498,16 @@ class TestHeartbeatDuringASlowPull:
 
         assert proc.returncode == 0, proc.stderr.read() if proc.stderr else ""
         assert len(events) >= 2, "expected at least one heartbeat during the slow pull"
+        request_log = podman_log.read_text()
+        assert "install_request_agent_cli renew-ads install_companion" in request_log
+        assert "--request-id 0123456789abcdef0123456789abcdef" in request_log
+        assert "install_request_agent_cli resolve-ads install_companion" in request_log
+        assert "--success" in request_log
 
         gaps = [events[i][0] - events[i - 1][0] for i in range(1, len(events))]
-        assert max(gaps) < 15.0, f"a gap of {max(gaps):.1f}s exceeds the desktop's 15s stall threshold: {gaps}"
+        assert max(gaps) < 15.0, (
+            f"a gap of {max(gaps):.1f}s exceeds the desktop's 15s stall threshold: {gaps}"
+        )
 
     def test_every_stdout_line_is_valid_json_even_during_the_slow_pull(
         self, tmp_path: Path, fake_bin_dir_slow_pull: Path
@@ -465,7 +522,10 @@ class TestHeartbeatDuringASlowPull:
 
         result = subprocess.run(
             ["sh", str(_SAFENT_CLI), "companion", "install", "--porcelain"],
-            env=env, capture_output=True, text=True, timeout=60,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         for line in result.stdout.splitlines():

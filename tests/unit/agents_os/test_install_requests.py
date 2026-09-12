@@ -98,9 +98,7 @@ class TestClosedVocabulary:
         assert marker["slug"] == "safent-ads"
 
     def test_verb_not_a_string_is_400(self) -> None:
-        r = _client().post(
-            "/api/v1/system/requests", json={"verb": 12345}, headers=_auth_headers()
-        )
+        r = _client().post("/api/v1/system/requests", json={"verb": 12345}, headers=_auth_headers())
         assert r.status_code == 400
 
 
@@ -367,7 +365,7 @@ class TestClaimRequest:
         assert first is not None
         assert second is not None
 
-    def test_a_stale_claim_can_be_taken_by_a_new_claimant(self) -> None:
+    def test_a_stale_claim_fails_without_automatic_reclaim(self) -> None:
         _post("install_companion")
         ir.claim_request("install_companion", claimant="agent-1")
         claim_path = ir._claim_path("install_companion")
@@ -375,7 +373,8 @@ class TestClaimRequest:
         os.utime(claim_path, (old, old))
 
         claimed = ir.claim_request("install_companion", claimant="agent-2")
-        assert claimed is not None
+        assert claimed is None
+        assert ir.list_live_requests()[0].state == "failed"
 
     def test_an_expired_marker_is_not_claimable_and_is_deleted(self) -> None:
         _post("install_companion")
@@ -391,31 +390,45 @@ class TestClaimRequest:
 class TestResolveRequest:
     def test_success_consumes_the_marker_and_the_claim(self) -> None:
         _post("install_companion")
-        ir.claim_request("install_companion", claimant="agent-1")
-
-        ir.resolve_request("install_companion", success=True)
+        claim = ir.claim_request("install_companion", claimant="agent-1")
+        assert claim is not None
+        assert ir.resolve_ads_request(
+            "install_companion", claimant="agent-1", request_id=claim.request_id, success=True
+        )
 
         assert not ir._marker_path("install_companion").exists()
         assert not ir._claim_path("install_companion").exists()
 
     def test_failure_releases_the_claim_but_keeps_the_marker_for_a_retry(self) -> None:
         _post("install_companion")
-        ir.claim_request("install_companion", claimant="agent-1")
-
-        ir.resolve_request("install_companion", success=False)
+        claim = ir.claim_request("install_companion", claimant="agent-1")
+        assert claim is not None
+        assert ir.resolve_ads_request(
+            "install_companion", claimant="agent-1", request_id=claim.request_id, success=False
+        )
 
         assert ir._marker_path("install_companion").exists()
         assert not ir._claim_path("install_companion").exists()
 
-    def test_after_a_failure_another_claimant_can_claim_it(self) -> None:
+    def test_after_a_failure_explicit_new_request_is_required(self) -> None:
         _post("install_companion")
-        ir.claim_request("install_companion", claimant="agent-1")
-        ir.resolve_request("install_companion", success=False)
+        claim = ir.claim_request("install_companion", claimant="agent-1")
+        assert claim is not None
+        ir.resolve_ads_request(
+            "install_companion", claimant="agent-1", request_id=claim.request_id, success=False
+        )
 
         claimed = ir.claim_request("install_companion", claimant="agent-2")
-        assert claimed is not None
+        assert claimed is None
+        assert _post("install_companion").status_code == 200
+        fresh = ir.claim_request("install_companion", claimant="agent-2")
+        assert fresh is not None and fresh.request_id != claim.request_id
+        assert not ir.resolve_ads_request(
+            "install_companion", claimant="agent-1", request_id=claim.request_id, success=True
+        )
 
     def test_resolve_without_a_prior_claim_is_a_safe_no_op(self) -> None:
         _post("install_companion")
-        ir.resolve_request("install_companion", success=True)  # never raises
-        assert not ir._marker_path("install_companion").exists()
+        with pytest.raises(ValueError):
+            ir.resolve_request("install_companion", success=True)
+        assert ir._marker_path("install_companion").exists()

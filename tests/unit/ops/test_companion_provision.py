@@ -49,6 +49,16 @@ case "$1 $2" in
     ;;
 esac
 if [ "$1" = "run" ]; then
+  case " $* " in
+    *" safent-companion-runtime:/runtime "*)
+      if [ -n "${FAKE_PROJECTION_ARCHIVE:-}" ]; then
+        cat > "$FAKE_PROJECTION_ARCHIVE"
+      else
+        cat >/dev/null
+      fi
+      exit 0
+      ;;
+  esac
   for a in "$@"; do
     if [ "$a" = "safent_ads.tools.gen_keys" ]; then
       echo "ADS_APPROVAL_SIGNING_KEY=ZmFrZS1zaWduaW5nLWtleS1iNjQ="
@@ -115,6 +125,65 @@ def _run_provision(
 
 def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
+
+
+@pytest.mark.parametrize("purge,label,removed", [
+    ("1", "ads-runtime-projection", True),
+    ("1", "foreign-volume", False),
+    ("1", "", False),
+    ("0", "ads-runtime-projection", False),
+])
+def test_projection_purge_requires_exact_label_and_never_force(tmp_path, purge, label, removed):
+    # Execute the real bounded teardown function; other teardown helpers are
+    # neutral fixtures so this test cannot touch any engine or user data.
+    source = (_REPO_ROOT / "safent").read_text()
+    function = (
+        "_uninstall_companion() {"
+        + source.split("_uninstall_companion() {", 1)[1].split("\n}", 1)[0]
+        + "\n}"
+    )
+    runtime = tmp_path / "runtime"
+    runtime.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALL_LOG"\n'
+        '[ "$2" != inspect ] || printf "%s\\n" "$VOLUME_LABEL"\n'
+    )
+    runtime.chmod(0o755)
+    log = tmp_path / "calls"
+    result = subprocess.run(
+        ["sh", "-c", "_remove_partial_companion_containers() { :; }; "
+         "_remove_companion_network_if_unused() { :; }; "
+         "_remove_partial_companion_volume() { :; }; "
+         + function + '\n_uninstall_companion "$PURGE"'],
+        env={**os.environ, "RT": str(runtime), "CALL_LOG": str(log),
+             "VOLUME_LABEL": label, "PURGE": purge, "COMPANION_STATE": str(tmp_path / "state")},
+        capture_output=True, text=True, timeout=5, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text() if log.exists() else ""
+    assert ("volume rm safent-companion-runtime" in calls) is removed
+    assert "--force" not in calls and " -f " not in calls
+
+
+def test_runtime_projection_contains_only_allowlisted_files(tmp_path, fake_bin_dir):
+    import tarfile
+
+    archive = tmp_path / "projection.tar"
+    result = _run_provision(
+        tmp_path / "state", fake_bin_dir, tmp_path / "podman.log",
+        extra_env={"FAKE_PROJECTION_ARCHIVE": str(archive)},
+    )
+    assert result.returncode == 0, result.stderr
+    with tarfile.open(archive) as bundle:
+        files = {member.name: member for member in bundle.getmembers()}
+        assert set(files) == {"companions.json", "ads-ca.crt", "ads.bearer", "ads-sso.key"}
+        assert all(member.isfile() for member in files.values())
+        assert files["ads.bearer"].mode == 0o400
+        assert files["ads-sso.key"].mode == 0o400
+        assert files["ads-sso.key"].size > 0
+    assert not list((tmp_path / "state").glob(".runtime.*"))
+    commands = (tmp_path / "podman.log").read_text()
+    assert "--network none --user 0:0 --read-only --cap-drop ALL" in commands
+    assert "--security-opt no-new-privileges" in commands
 
 
 def _hash_tree(root: Path) -> dict[str, str]:
@@ -766,6 +835,25 @@ case "$1" in
     ;;
   inspect)
     id="$4"
+    case "$3" in
+      *com.docker.compose.service*)
+        case "$id" in
+          c1) role=ads-api ;; c2) role=ads-db ;; c3) role=ads-worker ;;
+          c4) role=ads-broker ;; c5) role=ads-migrate ;; c6) role=ads-api ;;
+          *) role=unknown ;;
+        esac
+        if [ "$role" = ads-migrate ]; then
+          state="${FAKE_MIGRATION_RUNNING:-false}|${FAKE_MIGRATION_STATUS:-exited}"
+          printf '%s|%s|%s\n' "$role" "$state" "${FAKE_MIGRATION_EXIT:-0}"
+        else
+          case " ${FAKE_RUNNING_IDS:-c1 c2} " in
+            *" $id "*) printf '%s|true|running|0\n' "$role" ;;
+            *) printf '%s|false|exited|1\n' "$role" ;;
+          esac
+        fi
+        exit 0
+        ;;
+    esac
     case " ${FAKE_RUNNING_IDS:-c1 c2} " in
       *" $id "*) echo true ;;
       *) echo false ;;
@@ -897,7 +985,7 @@ class TestCompanionStatus:
         )
         assert result.returncode == 0, result.stderr
         assert "network:      up" in result.stdout
-        assert "containers:   2/3 running" in result.stdout
+        assert "containers:   2/4 running" in result.stdout
         assert "/mcp/health:  reachable (HTTP 401)" in result.stdout
 
     def test_container_counts_are_not_zero_even_without_a_preexported_password(
@@ -928,7 +1016,30 @@ class TestCompanionStatus:
         )
         assert result.returncode == 0, result.stderr
         assert "containers:   0/0 running" not in result.stdout, result.stdout
-        assert "containers:   5/5 running" in result.stdout
+        assert "containers:   4/4 running" in result.stdout
+
+    @pytest.mark.parametrize("extra,expected", [
+        ({}, "4/4"),
+        ({"FAKE_COMPOSE_IDS": "c1 c2 c4 c5"}, "3/4"),
+        ({"FAKE_MIGRATION_EXIT": "1"}, "0/4"),
+        ({"FAKE_MIGRATION_RUNNING": "true", "FAKE_MIGRATION_STATUS": "running"}, "0/4"),
+        ({"FAKE_COMPOSE_IDS": "c1 c2 c3 c4 c5 c6"}, "0/4"),
+        ({"FAKE_COMPOSE_IDS": "unknown"}, "0/4"),
+    ])
+    def test_role_inventory_distinguishes_migration_from_required_services(
+        self, tmp_path, fake_cli_bin_dir, extra, expected
+    ):
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        result = _run_companion(
+            "status", fake_bin_dir=fake_cli_bin_dir, state_dir=state_dir,
+            home_dir=home_dir, podman_log=tmp_path / "podman.log",
+            extra_env={"FAKE_NETWORK_PRESENT": "1", "FAKE_COMPOSE_IDS": "c1 c2 c3 c4 c5",
+                       "FAKE_RUNNING_IDS": "c1 c2 c3 c4", **extra},
+        )
+        assert result.returncode == 0, result.stderr
+        assert f"containers:   {expected} running" in result.stdout
 
     def test_reports_network_absent(self, tmp_path: Path, fake_cli_bin_dir: Path) -> None:
         state_dir = _companion_state(tmp_path, provisioned=True)

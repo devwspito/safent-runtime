@@ -66,6 +66,7 @@ case "$1" in
     # below), never to the network (this test has none faked).
     case " $* " in
       *" -d "*) exit 0 ;;
+      *" safent-companion-runtime:/runtime "*) cat >/dev/null; exit 0 ;;
       *) exit 1 ;;
     esac
     ;;
@@ -136,7 +137,7 @@ def _run_safent_start(
 
 
 class TestScaffoldAlwaysRunsOnStart:
-    def test_run_command_includes_the_companion_network_and_all_four_binds(
+    def test_run_command_includes_only_the_private_linux_projection(
         self, tmp_path: Path, fake_bin_dir: Path
     ) -> None:
         result, podman_log, _ = _run_safent_start(tmp_path, fake_bin_dir)
@@ -146,10 +147,9 @@ class TestScaffoldAlwaysRunsOnStart:
         assert len(run_lines) == 1, log_lines
         run_line = run_lines[0]
         assert "--network safent-companions" in run_line
-        assert "/etc/hermes/companions.json:ro" in run_line
-        assert "/etc/hermes/companions/ads-ca.crt:ro" in run_line
-        assert "/etc/hermes/companions/ads.bearer:ro" in run_line
-        assert "/etc/hermes/companions/ads-sso.key:ro" in run_line
+        assert "safent-companion-runtime:/etc/hermes/companions:ro" in run_line
+        assert "/companions/ads/bearer:" not in run_line
+        assert "/companions/ads/sso/ads-sso.key:" not in run_line
 
     def test_scaffold_never_pulls_or_runs_the_ads_image(
         self, tmp_path: Path, fake_bin_dir: Path

@@ -68,6 +68,7 @@ readonly COMPANION_IP="10.201.0.10"
 readonly COMPANION_PORT="8443"
 readonly COMPANION_HOST="ads.safent.internal"
 readonly COMPANION_NETWORK="safent-companions"
+readonly COMPANION_RUNTIME_VOLUME="safent-companion-runtime"
 # The image is the OWNER'S release artifact (ghcr.io/devwspito/safent-ads),
 # published by the ads team's own pipeline — never built here (no publishing
 # from a developer machine). Override for local dev with
@@ -373,6 +374,54 @@ ensure_sso_keypair() {
   log "par Ed25519 de SSO generado (0400) en $STATE/sso/ads-sso.key"
 }
 
+# Never bind macOS files containing credentials into the core: virtiofs can
+# report the calling container uid as their owner. Materialize ONLY this
+# allowlisted projection in a Linux volume, with real root ownership. A
+# directory mount also observes atomic replacements (individual file binds
+# otherwise keep the empty scaffold SSO inode forever).
+publish_runtime_projection() {
+  local projection image
+  image="${SAFENT_IMAGE:-$SAFENT_ADS_IMAGE}"
+  "$RUNTIME" image inspect "$image" >/dev/null 2>&1 \
+    || "$RUNTIME" pull "$image" >&2 \
+    || fail "no se pudo preparar la imagen de la proyección privada"
+  "$RUNTIME" volume create --label com.safent.component=ads-runtime-projection \
+    "$COMPANION_RUNTIME_VOLUME" >/dev/null
+  projection="$(mktemp -d "$STATE/.runtime.XXXXXX")"
+  cp "$STATE/companions.json" "$projection/companions.json"
+  cp "$STATE/tls/ca.crt" "$projection/ads-ca.crt"
+  cp "$STATE/bearer" "$projection/ads.bearer"
+  cp "$STATE/sso/ads-sso.key" "$projection/ads-sso.key"
+  chmod 0400 "$projection/ads.bearer" "$projection/ads-sso.key"
+  chmod 0444 "$projection/companions.json" "$projection/ads-ca.crt"
+  if COPYFILE_DISABLE=1 tar --format ustar -C "$projection" -cf - \
+      companions.json ads-ca.crt ads.bearer ads-sso.key \
+    | "$RUNTIME" run --rm -i --network none --user 0:0 --read-only \
+        --cap-drop ALL --security-opt no-new-privileges \
+        -v "$COMPANION_RUNTIME_VOLUME:/runtime" --entrypoint /bin/sh \
+        "$image" -ec '
+          umask 077
+          mkdir -p /runtime/.next
+          tar --no-same-owner -xf - -C /runtime/.next
+          chmod 0400 /runtime/.next/ads.bearer /runtime/.next/ads-sso.key
+          chmod 0444 /runtime/.next/companions.json /runtime/.next/ads-ca.crt
+          for file in ads.bearer ads-sso.key ads-ca.crt companions.json; do
+            mv -f "/runtime/.next/$file" "/runtime/$file"
+          done
+          rmdir /runtime/.next
+          chmod 0755 /runtime
+        '; then
+    rm -f "$projection/companions.json" "$projection/ads-ca.crt" \
+      "$projection/ads.bearer" "$projection/ads-sso.key"
+    rmdir "$projection"
+  else
+    rm -f "$projection/companions.json" "$projection/ads-ca.crt" \
+      "$projection/ads.bearer" "$projection/ads-sso.key"
+    rmdir "$projection"
+    fail "no se pudo preparar el volumen privado de Anuncios"
+  fi
+}
+
 # Idempotent single-line writer: appends ADS_SSO_PUBLIC_KEY=<value> to
 # secrets/api.env unless a line for that key already exists — mirrors
 # merge_vendor_credentials' own "skip if present" discipline so re-running
@@ -476,6 +525,7 @@ ensure_caps
 ensure_sso_placeholder
 
 if [ "$SCAFFOLD_ONLY" -eq 1 ]; then
+  publish_runtime_projection
   log "andamiaje listo (red + companions.json + TLS + bearer) — companion NO arrancado (usa 'safent companion install')"
   exit 0
 fi
@@ -483,6 +533,7 @@ fi
 ensure_image
 ensure_secrets
 ensure_sso_keypair
+publish_runtime_projection
 start_companion
 wait_for_health
 log "aprovisionamiento OK — $STATE/companions.json listo para el bind read-only"

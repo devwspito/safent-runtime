@@ -8,6 +8,7 @@ struct ActiveState {
     latest_id: u64,
     signal: Option<CancelSignal>,
     updating_app: bool,
+    companion_signal: Option<CancelSignal>,
 }
 #[derive(Clone, Default)]
 pub(crate) struct BootstrapControl(Arc<Mutex<ActiveState>>);
@@ -18,7 +19,7 @@ impl BootstrapControl {
         if expected_id.is_some_and(|id| id != active.latest_id) {
             return Err("stale_bootstrap_attempt");
         }
-        if active.signal.is_some() || active.updating_app {
+        if active.signal.is_some() || active.updating_app || active.companion_signal.is_some() {
             return Err("bootstrap_in_progress");
         }
         active.latest_id = active
@@ -48,11 +49,31 @@ impl BootstrapControl {
     /// without changing its attempt ID, signal or authorizing cancellation.
     pub fn reserve_update(&self) -> Result<AppUpdateGuard, &'static str> {
         let mut active = self.0.lock().map_err(|_| "bootstrap_control_unavailable")?;
-        if active.signal.is_some() || active.updating_app {
+        if active.signal.is_some() || active.updating_app || active.companion_signal.is_some() {
             return Err("bootstrap_in_progress");
         }
         active.updating_app = true;
         Ok(AppUpdateGuard(self.clone()))
+    }
+
+    /// A closed companion request is neither a new bootstrap attempt nor an
+    /// app update. Hold the same exclusion without changing loader identity.
+    pub fn reserve_companion(&self, signal: CancelSignal) -> Result<CompanionGuard, &'static str> {
+        let mut active = self.0.lock().map_err(|_| "bootstrap_control_unavailable")?;
+        if active.signal.is_some() || active.updating_app || active.companion_signal.is_some() {
+            return Err("bootstrap_in_progress");
+        }
+        active.companion_signal = Some(signal);
+        Ok(CompanionGuard(self.clone()))
+    }
+}
+
+pub(crate) struct CompanionGuard(BootstrapControl);
+impl Drop for CompanionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.0 .0.lock() {
+            active.companion_signal = None;
+        }
     }
 }
 
@@ -84,6 +105,23 @@ impl Drop for BootstrapAttempt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn companion_excludes_boot_and_update_without_changing_loader_identity() {
+        let control = BootstrapControl::default();
+        let work = control.reserve_companion(CancelSignal::new()).unwrap();
+        assert!(control.begin(Some(0)).is_err());
+        assert!(control.reserve_update().is_err());
+        assert!(control.reserve_companion(CancelSignal::new()).is_err());
+        drop(work);
+        let boot = control.begin(Some(0)).unwrap();
+        assert_eq!(boot.id, 1);
+        assert!(control.reserve_companion(CancelSignal::new()).is_err());
+        drop(boot);
+        let update = control.reserve_update().unwrap();
+        assert!(control.reserve_companion(CancelSignal::new()).is_err());
+        drop(update);
+        assert!(control.reserve_companion(CancelSignal::new()).is_ok());
+    }
     #[test]
     fn app_update_and_bootstrap_are_mutually_exclusive_without_changing_attempt_id() {
         let control = BootstrapControl::default();

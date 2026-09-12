@@ -26,17 +26,13 @@ def _isolated_instance_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> P
 
 
 class TestCmdClaim:
-    def test_unknown_verb_exits_2_with_no_stdout(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_unknown_verb_exits_2_with_no_stdout(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.cmd_claim("bogus_verb", "agent-1")
         assert rc == 2
         assert capsys.readouterr().out == ""
 
-    def test_nothing_live_exits_1_with_no_stdout(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        rc = cli.cmd_claim("install_companion", "agent-1")
+    def test_nothing_live_exits_1_with_no_stdout(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(["claim-ads", "--claimant", "agent-1"])
         assert rc == 1
         assert capsys.readouterr().out == ""
 
@@ -45,10 +41,11 @@ class TestCmdClaim:
     ) -> None:
         ir.create_request("install_companion", slug="safent-ads")
 
-        rc = cli.cmd_claim("install_companion", "agent-1")
+        rc = cli.main(["claim-ads", "--claimant", "agent-1"])
 
         assert rc == 0
-        assert capsys.readouterr().out == "safent-ads\n"
+        output = capsys.readouterr().out.split()
+        assert output[0] == "install_companion" and len(output[1]) == 32
 
     def test_verb_with_no_slug_prints_an_empty_line(
         self, capsys: pytest.CaptureFixture[str]
@@ -67,18 +64,38 @@ class TestCmdResolve:
 
     def test_success_consumes_the_marker(self) -> None:
         ir.create_request("install_companion", slug="safent-ads")
-        ir.claim_request("install_companion", claimant="agent-1")
-
-        rc = cli.cmd_resolve("install_companion", success=True)
+        claim = ir.claim_request("install_companion", claimant="agent-1")
+        assert claim is not None
+        rc = cli.main(
+            [
+                "resolve-ads",
+                "install_companion",
+                "--claimant",
+                "agent-1",
+                "--request-id",
+                claim.request_id,
+                "--success",
+            ]
+        )
 
         assert rc == 0
         assert not ir._marker_path("install_companion").exists()
 
     def test_failure_keeps_the_marker_for_a_retry(self) -> None:
         ir.create_request("install_companion", slug="safent-ads")
-        ir.claim_request("install_companion", claimant="agent-1")
-
-        rc = cli.cmd_resolve("install_companion", success=False)
+        claim = ir.claim_request("install_companion", claimant="agent-1")
+        assert claim is not None
+        rc = cli.main(
+            [
+                "resolve-ads",
+                "install_companion",
+                "--claimant",
+                "agent-1",
+                "--request-id",
+                claim.request_id,
+                "--failure",
+            ]
+        )
 
         assert rc == 0
         assert ir._marker_path("install_companion").exists()
@@ -97,9 +114,7 @@ class TestMainDispatch:
         with pytest.raises(SystemExit):
             cli.main(["resolve", "install_companion", "--success", "--failure"])
 
-    def test_claim_dispatches_to_cmd_claim(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_claim_dispatches_to_cmd_claim(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[tuple[str, str]] = []
         monkeypatch.setattr(
             cli, "cmd_claim", lambda verb, claimant: calls.append((verb, claimant)) or 0

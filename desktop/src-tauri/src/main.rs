@@ -15,6 +15,7 @@
 // the container — the shell adds none.
 
 use std::process::{Command, Stdio};
+use tauri::Manager;
 
 mod window_policy;
 use window_policy::WindowPolicy;
@@ -29,6 +30,7 @@ mod update;
 // default and only boot path (main() below).
 mod boot;
 mod bootstrap_control;
+mod companion_requests;
 mod diagnostics;
 mod domain;
 mod engine_adapter;
@@ -253,6 +255,29 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Safent desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building Safent desktop")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                let Some(consumer) = app.try_state::<companion_requests::CompanionRequests>()
+                else {
+                    return;
+                };
+                if consumer.exit_finished() {
+                    return;
+                }
+                api.prevent_exit();
+                if consumer.begin_exit() {
+                    let handle = app.clone();
+                    std::thread::spawn(move || {
+                        // Do not wait on a worker/event emitter from the UI
+                        // thread. Drain before exiting or replacing this app.
+                        let consumer = handle.state::<companion_requests::CompanionRequests>();
+                        consumer.stop();
+                        consumer.finish_exit();
+                        handle.exit(code.unwrap_or(0));
+                    });
+                }
+            }
+        });
 }

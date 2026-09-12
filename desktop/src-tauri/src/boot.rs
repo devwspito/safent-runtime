@@ -231,6 +231,16 @@ impl BootService {
                 }
                 Ok(ApplyOutcome::Ready(ticket)) => {
                     self.advance_to(&mut lifecycle, &action);
+                    if self.desired.companion_image.is_some() {
+                        let _ = lifecycle.enter(EnginePhase::EngineReady);
+                        // `up` proves the engine, not the complete product. Do
+                        // not navigate before Ads has converged too. Discard
+                        // this private ticket; confirm_ready issues a fresh one
+                        // after the potentially long companion installation.
+                        drop(ticket);
+                        last_effective_repair = Some((action, facts));
+                        continue;
+                    }
                     let _ = lifecycle.enter(EnginePhase::EngineReady);
                     notifier.notify(&DomainEvent::EngineReady {
                         version_set: self.version_set(),
@@ -295,7 +305,36 @@ impl BootService {
         self.advance_to(lifecycle, &RepairAction::StartContainer);
         match self.apply_gated(lifecycle, &RepairAction::StartContainer, notifier, cancel) {
             Ok(ApplyOutcome::Ready(ticket)) => {
-                let _ = lifecycle.enter(EnginePhase::EngineReady);
+                if self.desired.companion_image.is_some() {
+                    // `up` can recreate a legacy core to migrate its mounts.
+                    // Its ticket alone does not prove the previously observed
+                    // Ads bridge survived that change. Recheck before exposing
+                    // the ticket or emitting product Ready.
+                    let confirmed = self.probe.observe().is_ok_and(|facts| {
+                        !facts.another_instance_running
+                            && reconcile::reconcile(&facts, &self.desired).is_empty()
+                    });
+                    if !confirmed {
+                        notifier.notify(&DomainEvent::EngineDegraded {
+                            cause: FailureCause {
+                                code: FailureCode::CompanionUnreachable,
+                                message: "No se pudo confirmar Anuncios después de preparar Safent"
+                                    .into(),
+                                retryable: true,
+                            },
+                        });
+                        return LoopOutcome::Degraded {
+                            lifecycle: lifecycle.clone(),
+                        };
+                    }
+                    if lifecycle.phase() != EnginePhase::CompanionProvisioning {
+                        let _ = lifecycle.enter(EnginePhase::EngineReady);
+                        let _ = lifecycle.enter(EnginePhase::CompanionProvisioning);
+                    }
+                    let _ = lifecycle.enter(EnginePhase::CompanionReady);
+                } else {
+                    let _ = lifecycle.enter(EnginePhase::EngineReady);
+                }
                 notifier.notify(&DomainEvent::EngineReady {
                     version_set: self.version_set(),
                 });
@@ -364,6 +403,30 @@ impl BootService {
     }
 
     fn advance_to(&self, lifecycle: &mut EngineLifecycle, action: &RepairAction) {
+        if matches!(
+            action,
+            RepairAction::EnsureCompanionScaffold
+                | RepairAction::PullCompanion(_)
+                | RepairAction::ComposeCompanionUp(_)
+                | RepairAction::ReloadCompanionPresence
+        ) {
+            // A resumed boot may first observe an already-running engine.
+            // Companion provisioning has its own phase, including downloads;
+            // never move the lifecycle backwards into engine provisioning.
+            if !matches!(
+                lifecycle.phase(),
+                EnginePhase::EngineReady
+                    | EnginePhase::CompanionProvisioning
+                    | EnginePhase::CompanionReady
+            ) {
+                let _ = lifecycle.enter(EnginePhase::EngineStarting);
+                let _ = lifecycle.enter(EnginePhase::EngineReady);
+            }
+            if lifecycle.phase() != EnginePhase::CompanionProvisioning {
+                let _ = lifecycle.enter(EnginePhase::CompanionProvisioning);
+            }
+            return;
+        }
         if let Some(phase) = phase_for(action) {
             if lifecycle.phase() != phase {
                 let _ = lifecycle.enter(phase);
@@ -680,6 +743,7 @@ fn spawn_attempt(
 /// research.md FR-030: closing the WINDOW alone never stops the engine).
 pub fn start(app: AppHandle) {
     app.manage(crate::bootstrap_control::BootstrapControl::default());
+    app.manage(crate::companion_requests::CompanionRequests::default());
 
     let restart_handle = app.clone();
     app.listen(RESTART_REQUESTED_EVENT, move |_event| {
@@ -691,6 +755,9 @@ pub fn start(app: AppHandle) {
     app.listen(QUIT_REQUESTED_EVENT, move |_event| {
         let handle = quit_handle.clone();
         std::thread::spawn(move || {
+            handle
+                .state::<crate::companion_requests::CompanionRequests>()
+                .stop();
             stop_engine_best_effort(&handle);
             handle.exit(0);
         });
@@ -730,7 +797,7 @@ fn stop_engine_best_effort(app: &AppHandle) {
 fn run_once(app: AppHandle, cancel: CancelSignal) {
     let notifier = TauriNotifier { app: app.clone() };
     let runtime_dir = resolve_runtime_dir(&app);
-    let desired = match desired_state_from_runtime(&runtime_dir) {
+    let desired = match native_desired_state_from_runtime(&runtime_dir) {
         Ok(desired) => desired,
         Err(cause) => {
             notifier.notify(&DomainEvent::EngineDegraded { cause });
@@ -742,7 +809,7 @@ fn run_once(app: AppHandle, cancel: CancelSignal) {
         desired.engine_image.clone(),
         desired.companion_image.clone(),
     );
-    let driver = Arc::new(EmbeddedCliDriver::new(config));
+    let driver = Arc::new(EmbeddedCliDriver::new(config.clone()));
     let probe: Arc<dyn EngineProbe> = driver.clone();
     let engine_driver: Arc<dyn EngineDriver> = driver;
     let service = BootService::new(
@@ -754,10 +821,57 @@ fn run_once(app: AppHandle, cancel: CancelSignal) {
     );
 
     match service.run(&notifier, &cancel) {
-        LoopOutcome::Ready { ticket, .. } => navigate_to_ticket(&app, &ticket),
+        LoopOutcome::Ready { ticket, .. } => {
+            let request_app = app.clone();
+            let control = app
+                .state::<crate::bootstrap_control::BootstrapControl>()
+                .inner()
+                .clone();
+            let consumer = app.state::<crate::companion_requests::CompanionRequests>();
+            if consumer
+                .start(control, move |signal| {
+                    let notifier = CompanionRequestNotifier {
+                        app: request_app.clone(),
+                    };
+                    let driver = EmbeddedCliDriver::new(config.clone());
+                    if let Err(error) = driver.consume_companion_requests(&notifier, signal) {
+                        if !signal.is_set() {
+                            notifier.notify(&DomainEvent::EngineDegraded {
+                                cause: error.to_failure_cause(),
+                            });
+                        }
+                    }
+                })
+                .is_err()
+            {
+                notifier.notify(&DomainEvent::EngineDegraded {
+                    cause: FailureCause {
+                        code: FailureCode::ContainerStartFailed,
+                        message: "No se pudo iniciar la recuperación de Anuncios".into(),
+                        retryable: true,
+                    },
+                });
+                return;
+            }
+            navigate_to_ticket(&app, &ticket);
+        }
         LoopOutcome::FocusExisting
         | LoopOutcome::Cancelled { .. }
         | LoopOutcome::Degraded { .. } => {}
+    }
+}
+
+/// Request progress has its own durable state in the shared consumer. Reuse
+/// the existing CLI event stream without resetting loader attempt/snapshot.
+struct CompanionRequestNotifier {
+    app: AppHandle,
+}
+impl Notifier for CompanionRequestNotifier {
+    fn notify(&self, event: &DomainEvent) {
+        TauriNotifier {
+            app: self.app.clone(),
+        }
+        .emit_legacy(event);
     }
 }
 
@@ -937,6 +1051,19 @@ pub fn desired_state_from_runtime(runtime_dir: &Path) -> Result<DesiredState, Fa
         min_free_disk_bytes: Bytes(4 * GIB),
         min_total_memory_bytes: Bytes(4 * GIB),
     })
+}
+
+/// Factory Community includes Ads. Only explicit headless/dev callers may
+/// request an engine-only DesiredState; the windowed product fails closed if
+/// its bundle did not pin a usable companion for this platform.
+fn native_desired_state_from_runtime(runtime_dir: &Path) -> Result<DesiredState, FailureCause> {
+    let desired = desired_state_from_runtime(runtime_dir)?;
+    if desired.companion_image.is_none() {
+        return Err(engine_digest_missing(
+            "el paquete no incluye un digest válido de Anuncios para esta plataforma",
+        ));
+    }
+    Ok(desired)
 }
 
 fn desired_machine_spec() -> Option<MachineSpec> {
@@ -1160,6 +1287,80 @@ mod tests {
     }
 
     #[test]
+    fn factory_boot_does_not_deliver_engine_ticket_before_ads_is_healthy() {
+        let ads = ImageRef::new("ghcr.io/devwspito/safent-ads", "sha256:ads-good").unwrap();
+        let mut wanted = desired();
+        wanted.companion_image = Some(ads.clone());
+        let mut fresh = converged_facts();
+        fresh.engine_container = None;
+        fresh.published_port = None;
+        let engine_only = converged_facts();
+        let mut scaffold = engine_only.clone();
+        scaffold.companion_scaffold = true;
+        let mut pulled = scaffold.clone();
+        pulled.local_companion_image_digest = Some(ads.digest.clone());
+        let mut healthy = pulled.clone();
+        healthy.companion_containers = CompanionContainers {
+            running: 4,
+            total: 4,
+        };
+        healthy.companion_health = CompanionHealth::Reachable;
+        let driver = Arc::new(ScriptedDriver::new(vec![
+            (
+                RepairAction::CreateContainer,
+                Ok(ApplyOutcome::Ready(ticket())),
+            ),
+            (
+                RepairAction::EnsureCompanionScaffold,
+                Ok(ApplyOutcome::Progressed),
+            ),
+            (
+                RepairAction::PullCompanion(ads.clone()),
+                Ok(ApplyOutcome::Progressed),
+            ),
+            (
+                RepairAction::ComposeCompanionUp(ads),
+                Ok(ApplyOutcome::Progressed),
+            ),
+            (
+                RepairAction::StartContainer,
+                Ok(ApplyOutcome::Ready(BootstrapTicket::new(
+                    "http://127.0.0.1:37013/?k=fresh-after-ads".into(),
+                ))),
+            ),
+        ]));
+        let svc = BootService::new(
+            Arc::new(ScriptedProbe::new(vec![
+                Ok(fresh),
+                Ok(engine_only),
+                Ok(scaffold),
+                Ok(pulled),
+                Ok(healthy),
+            ])),
+            driver.clone(),
+            Arc::new(FakeClock::new()),
+            wanted,
+            SemVer::parse("0.9.5").unwrap(),
+        );
+        let notifier = RecordingNotifier::new();
+        let result = svc.run(&notifier, &CancelSignal::new());
+        let LoopOutcome::Ready { ticket, lifecycle } = result else {
+            panic!("expected complete factory boot");
+        };
+        assert!(ticket.expose().ends_with("fresh-after-ads"));
+        assert_eq!(lifecycle.phase(), EnginePhase::CompanionReady);
+        assert_eq!(driver.applied().len(), 5);
+        assert_eq!(
+            notifier
+                .events()
+                .iter()
+                .filter(|event| matches!(event, DomainEvent::EngineReady { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn already_converged_reissues_up_once_for_a_fresh_ticket() {
         // No cache to trust, so the loop re-observes for real — an ALREADY
         // fully running engine (adopted from a previous session) means
@@ -1185,6 +1386,84 @@ mod tests {
             .events()
             .iter()
             .any(|e| matches!(e, DomainEvent::EngineReady { .. })));
+    }
+
+    #[test]
+    fn factory_boot_never_navigates_when_running_ads_fails_health() {
+        let ads = ImageRef::new("ghcr.io/devwspito/safent-ads", "sha256:ads-good").unwrap();
+        let mut wanted = desired();
+        wanted.companion_image = Some(ads.clone());
+        let mut facts = converged_facts();
+        facts.companion_scaffold = true;
+        facts.local_companion_image_digest = Some(ads.digest.clone());
+        facts.companion_containers = CompanionContainers {
+            running: 4,
+            total: 4,
+        };
+        facts.companion_health = CompanionHealth::Unreachable;
+        let driver = Arc::new(ScriptedDriver::new(vec![
+            (
+                RepairAction::ComposeCompanionUp(ads.clone()),
+                Err(EngineErrorKind::Io("health unavailable".into())),
+            ),
+            (
+                RepairAction::ComposeCompanionUp(ads),
+                Err(EngineErrorKind::Io("health unavailable".into())),
+            ),
+        ]));
+        let svc = BootService::new(
+            Arc::new(ScriptedProbe::new(vec![Ok(facts.clone()), Ok(facts)])),
+            driver.clone(),
+            Arc::new(FakeClock::new()),
+            wanted,
+            SemVer::parse("0.9.5").unwrap(),
+        );
+        let notifier = RecordingNotifier::new();
+        assert!(matches!(
+            svc.run(&notifier, &CancelSignal::new()),
+            LoopOutcome::Degraded { .. }
+        ));
+        assert_eq!(driver.applied().len(), 2);
+        assert!(!notifier
+            .events()
+            .iter()
+            .any(|event| matches!(event, DomainEvent::EngineReady { .. })));
+    }
+
+    #[test]
+    fn factory_final_ticket_does_not_hide_health_lost_during_core_up() {
+        let ads = ImageRef::new("ghcr.io/devwspito/safent-ads", "sha256:ads-good").unwrap();
+        let mut wanted = desired();
+        wanted.companion_image = Some(ads.clone());
+        let mut before = converged_facts();
+        before.companion_scaffold = true;
+        before.local_companion_image_digest = Some(ads.digest);
+        before.companion_containers = CompanionContainers {
+            running: 4,
+            total: 4,
+        };
+        before.companion_health = CompanionHealth::Reachable;
+        let mut after = before.clone();
+        after.companion_health = CompanionHealth::Unreachable;
+        let svc = BootService::new(
+            Arc::new(ScriptedProbe::new(vec![Ok(before), Ok(after)])),
+            Arc::new(ScriptedDriver::new(vec![(
+                RepairAction::StartContainer,
+                Ok(ApplyOutcome::Ready(ticket())),
+            )])),
+            Arc::new(FakeClock::new()),
+            wanted,
+            SemVer::parse("0.9.5").unwrap(),
+        );
+        let notifier = RecordingNotifier::new();
+        assert!(matches!(
+            svc.run(&notifier, &CancelSignal::new()),
+            LoopOutcome::Degraded { .. }
+        ));
+        assert!(!notifier
+            .events()
+            .iter()
+            .any(|event| matches!(event, DomainEvent::EngineReady { .. })));
     }
 
     #[test]
@@ -1510,6 +1789,10 @@ mod desired_state_from_runtime_tests {
             "ghcr.io/devwspito/safent@sha256:engine-good"
         );
         assert!(desired.companion_image.is_none());
+        assert!(
+            native_desired_state_from_runtime(&dir).is_err(),
+            "the windowed product cannot silently omit bundled Ads"
+        );
     }
 
     #[test]
@@ -1525,7 +1808,8 @@ mod desired_state_from_runtime_tests {
                 "companion_image":{"repo":"ghcr.io/devwspito/safent-ads","digest":"sha256:ads-good"}}"#,
         );
 
-        let desired = desired_state_from_runtime(&dir).expect("both digests pinned must resolve");
+        let desired = native_desired_state_from_runtime(&dir)
+            .expect("factory native product requires both digests");
 
         assert_eq!(
             desired

@@ -182,11 +182,10 @@ fn container_gap(facts: &HostFacts) -> Option<RepairAction> {
     }
 }
 
-/// `desired.companion_image` is `None` until an `InstallRequest` accepts one
-/// (029) — the boot loop never installs a companion on its own initiative.
-/// Once desired, the scaffold (029 CL-002: network + state + the four
-/// read-only files) is unconditional; only then does the image/compose gap
-/// apply, so "Instalar" never has to recreate Safent.
+/// Native Community always requires its bundled companion. Engine-only
+/// desired states remain available for explicit headless/dev callers.
+/// Scaffold precedes image/compose; a running container count alone never
+/// establishes availability of the service.
 fn companion_gap(facts: &HostFacts, desired: &DesiredState) -> Option<RepairAction> {
     let want = desired.companion_image.as_ref()?;
 
@@ -197,7 +196,9 @@ fn companion_gap(facts: &HostFacts, desired: &DesiredState) -> Option<RepairActi
     if !have_locally {
         return Some(RepairAction::PullCompanion(want.clone()));
     }
-    if under_provisioned(&facts.companion_containers) {
+    if under_provisioned(&facts.companion_containers)
+        || facts.companion_health != crate::domain::CompanionHealth::Reachable
+    {
         return Some(RepairAction::ComposeCompanionUp(want.clone()));
     }
     None
@@ -256,6 +257,28 @@ mod tests {
             machine: None,
             ..desired_macos()
         }
+    }
+
+    #[test]
+    fn factory_ads_running_count_without_health_never_converges() {
+        let mut wanted = desired_macos();
+        wanted.companion_image = Some(companion_image());
+        let mut facts = converged_macos_facts();
+        facts.companion_scaffold = true;
+        facts.local_companion_image_digest = Some(companion_image().digest);
+        facts.companion_containers = CompanionContainers {
+            running: 4,
+            total: 4,
+        };
+        for health in [CompanionHealth::Unknown, CompanionHealth::Unreachable] {
+            facts.companion_health = health;
+            assert_eq!(
+                reconcile(&facts, &wanted),
+                vec![RepairAction::ComposeCompanionUp(companion_image())]
+            );
+        }
+        facts.companion_health = CompanionHealth::Reachable;
+        assert!(reconcile(&facts, &wanted).is_empty());
     }
 
     /// Every field at the value it would hold once the product is fully
@@ -597,6 +620,7 @@ mod tests {
     #[test]
     fn companion_ready_needs_no_action() {
         let facts = HostFacts {
+            companion_health: CompanionHealth::Reachable,
             companion_scaffold: true,
             local_companion_image_digest: Some("sha256:companion-good".into()),
             companion_containers: CompanionContainers {

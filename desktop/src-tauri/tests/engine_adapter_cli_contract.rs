@@ -71,6 +71,96 @@ fn config(cli_path: PathBuf) -> EmbeddedCliConfig {
 }
 
 #[test]
+fn native_companion_consumer_is_closed_pinned_and_reports_real_progress() {
+    let script = fake_cli(
+        r#"
+[ "$#" = 3 ] && [ "$1" = companion ] && [ "$2" = requests ] && [ "$3" = --porcelain ] || exit 80
+[ "$SAFENT_IMAGE" = ghcr.io/devwspito/safent@sha256:engine-good ] || exit 81
+[ "$SAFENT_ADS_IMAGE" = ghcr.io/devwspito/safent-ads@sha256:ads-good ] || exit 82
+[ "$SAFENT_PODMAN" = /usr/bin/true ] || exit 83
+[ "$SAFENT_NO_SELF_UPDATE" = 1 ] && [ "$SAFENT_NO_BROWSER" = 1 ] || exit 84
+echo '{"t":"stage","id":"pull_companion","label":"Descargando Anuncios","total_bytes":100}'
+echo '{"t":"progress","id":"pull_companion","done":50,"total":100,"unit":"bytes"}'
+echo '{"t":"done","id":"pull_companion","ms":1}'
+"#,
+    );
+    let mut cfg = config(script);
+    cfg.companion_image =
+        Some(ImageRef::new("ghcr.io/devwspito/safent-ads", "sha256:ads-good").unwrap());
+    let notifier = RecordingNotifier::new();
+    let result = EmbeddedCliDriver::new(cfg)
+        .consume_companion_requests(&notifier, &ports::CancelSignal::new())
+        .unwrap();
+    assert!(matches!(result, ApplyOutcome::Progressed));
+    assert_eq!(notifier.events().len(), 3);
+    assert!(matches!(
+        notifier.events()[1],
+        DomainEvent::StageProgressed { done: 50, .. }
+    ));
+}
+
+#[test]
+fn native_companion_consumer_no_pending_is_not_readiness_or_a_failure() {
+    let mut cfg = config(fake_cli("exit 0\n"));
+    cfg.companion_image =
+        Some(ImageRef::new("ghcr.io/devwspito/safent-ads", "sha256:ads-good").unwrap());
+    let notifier = RecordingNotifier::new();
+    assert!(matches!(
+        EmbeddedCliDriver::new(cfg)
+            .consume_companion_requests(&notifier, &ports::CancelSignal::new()),
+        Ok(ApplyOutcome::Progressed)
+    ));
+    assert!(notifier.events().is_empty());
+}
+
+#[test]
+fn native_companion_consumer_refuses_an_unpinned_bundle_without_spawning() {
+    let cfg = config(PathBuf::from("/not-a-real-cli"));
+    assert!(matches!(
+        EmbeddedCliDriver::new(cfg)
+            .consume_companion_requests(&RecordingNotifier::new(), &ports::CancelSignal::new()),
+        Err(EngineError::Protocol(_))
+    ));
+}
+
+#[test]
+fn native_companion_shutdown_drains_a_started_mutation_instead_of_killing_it() {
+    struct StopOnProgress(ports::CancelSignal);
+    impl ports::Notifier for StopOnProgress {
+        fn notify(&self, _: &DomainEvent) {
+            self.0.set();
+        }
+    }
+    let mut cfg = config(fake_cli("echo '{\"t\":\"stage\",\"id\":\"companion_up\",\"label\":\"Preparando Anuncios\"}'\necho '{\"t\":\"done\",\"id\":\"companion_up\",\"ms\":1}'\n"));
+    cfg.companion_image =
+        Some(ImageRef::new("ghcr.io/devwspito/safent-ads", "sha256:ads-good").unwrap());
+    let signal = ports::CancelSignal::new();
+    let result = EmbeddedCliDriver::new(cfg)
+        .consume_companion_requests(&StopOnProgress(signal.clone()), &signal);
+    assert!(signal.is_set());
+    assert!(matches!(result, Ok(ApplyOutcome::Progressed)));
+}
+
+#[test]
+fn native_companion_consumer_propagates_failure_and_honors_shutdown() {
+    let mut cfg = config(fake_cli("echo '{\"t\":\"failed\",\"code\":\"companion_unreachable\",\"detail\":\"unavailable\",\"retryable\":true}'\nexit 1\n"));
+    cfg.companion_image =
+        Some(ImageRef::new("ghcr.io/devwspito/safent-ads", "sha256:ads-good").unwrap());
+    assert!(matches!(
+        EmbeddedCliDriver::new(cfg.clone())
+            .consume_companion_requests(&RecordingNotifier::new(), &ports::CancelSignal::new()),
+        Err(EngineError::Reported(_))
+    ));
+    cfg.cli_path = fake_cli("sleep 30\n");
+    let signal = ports::CancelSignal::new();
+    signal.set();
+    assert!(matches!(
+        EmbeddedCliDriver::new(cfg).consume_companion_requests(&RecordingNotifier::new(), &signal),
+        Err(EngineError::Cancelled)
+    ));
+}
+
+#[test]
 fn observe_maps_a_valid_facts_event() {
     // Field names/casing here are the REAL `cmd_facts` shape (camelCase,
     // verified against the actual `safent` script — see

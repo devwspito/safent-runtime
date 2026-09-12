@@ -156,10 +156,7 @@ if [ "$NO_COMPANION" -eq 0 ]; then
   if "$HERE/companions/ads/provision.sh" --scaffold; then
     COMPANION_RUN_ARGS=(
       --network safent-companions
-      -v "${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro"
-      -v "${COMPANION_STATE}/tls/ca.crt:/etc/hermes/companions/ads-ca.crt:ro"
-      -v "${COMPANION_STATE}/bearer:/etc/hermes/companions/ads.bearer:ro"
-      -v "${COMPANION_STATE}/sso/ads-sso.key:/etc/hermes/companions/ads-sso.key:ro"
+      -v "safent-companion-runtime:/etc/hermes/companions:ro"
     )
   else
     echo "run-safent.sh: companion provisioning failed — starting Safent WITHOUT it (FR-3)" >&2

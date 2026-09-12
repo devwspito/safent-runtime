@@ -1,6 +1,6 @@
 {
   "name": "safent-desktop",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "private": true,
   "type": "module",
   "description": "Safent desktop — thin native-webview shell over the local Safent web UI",

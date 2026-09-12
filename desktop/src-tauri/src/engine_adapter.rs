@@ -193,14 +193,41 @@ impl EngineProbe for EmbeddedCliDriver {
     }
 }
 
-impl EngineDriver for EmbeddedCliDriver {
-    fn apply(
+impl EmbeddedCliDriver {
+    /// One closed marker-consumer tick. Claim/lease/status handling stays in
+    /// the shared CLI consumer; no arbitrary verb, image, URL or args enter.
+    pub(crate) fn consume_companion_requests(
         &self,
-        action: &RepairAction,
         notifier: &dyn Notifier,
         cancel: &CancelSignal,
     ) -> Result<ApplyOutcome, EngineError> {
-        let (verb, mut args) = cli_invocation_for(action)?;
+        if cancel.is_set() {
+            return Err(EngineError::Cancelled);
+        }
+        if self.config.companion_image.is_none() {
+            return Err(EngineError::Protocol(
+                "bundled companion digest required".into(),
+            ));
+        }
+        // Like boot's companion apply_gated, a claimed operation may already
+        // be migrating before its stage reaches this reader. Shutdown drains
+        // it under the existing stall/hard caps; it does not kill a migration
+        // on a window gesture or claim to have rolled it back.
+        self.apply_command(
+            "companion",
+            vec!["requests".into()],
+            notifier,
+            &CancelSignal::new(),
+        )
+    }
+
+    fn apply_command(
+        &self,
+        verb: &str,
+        mut args: Vec<String>,
+        notifier: &dyn Notifier,
+        cancel: &CancelSignal,
+    ) -> Result<ApplyOutcome, EngineError> {
         // `up` always provisions the companion SCAFFOLD unconditionally
         // (T015: "el andamiaje existe siempre") unless told not to — but
         // when THIS boot's own DesiredState wants no companion at all
@@ -306,6 +333,18 @@ impl EngineDriver for EmbeddedCliDriver {
             )));
         }
         Ok(ApplyOutcome::Progressed)
+    }
+}
+
+impl EngineDriver for EmbeddedCliDriver {
+    fn apply(
+        &self,
+        action: &RepairAction,
+        notifier: &dyn Notifier,
+        cancel: &CancelSignal,
+    ) -> Result<ApplyOutcome, EngineError> {
+        let (verb, args) = cli_invocation_for(action)?;
+        self.apply_command(verb, args, notifier, cancel)
     }
 
     fn stop(&self) -> Result<(), EngineError> {
