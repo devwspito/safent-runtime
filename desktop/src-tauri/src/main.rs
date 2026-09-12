@@ -36,9 +36,14 @@ mod ports;
 mod reconcile;
 mod selftest;
 
-/// GUI apps launched from Finder / the dock inherit a MINIMAL PATH (/usr/bin:/bin:…),
-/// so the `safent` script cannot find `podman`/`docker` (installed in /opt/homebrew/bin
-/// or /usr/local/bin). Hand every child an augmented PATH covering the common locations.
+/// Clipboard helpers on macOS are OS binaries; do not inherit user tools.
+#[cfg(target_os = "macos")]
+fn augmented_path() -> String {
+    engine_adapter::native_command_path(true, None)
+}
+
+/// Preserve existing Linux clipboard-helper discovery (Wayland / X11).
+#[cfg(not(target_os = "macos"))]
 fn augmented_path() -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Ok(p) = std::env::var("PATH") {
@@ -78,7 +83,7 @@ fn augmented_path() -> String {
 #[cfg(not(target_os = "windows"))]
 fn clipboard_read_cmd() -> (&'static str, &'static [&'static str]) {
     #[cfg(target_os = "macos")]
-    return ("pbpaste", &[]);
+    return ("/usr/bin/pbpaste", &[]);
     #[cfg(not(target_os = "macos"))]
     return (
         "sh",
@@ -93,7 +98,7 @@ fn clipboard_read_cmd() -> (&'static str, &'static [&'static str]) {
 #[cfg(not(target_os = "windows"))]
 fn clipboard_write_cmd() -> (&'static str, &'static [&'static str]) {
     #[cfg(target_os = "macos")]
-    return ("pbcopy", &[]);
+    return ("/usr/bin/pbcopy", &[]);
     #[cfg(not(target_os = "macos"))]
     return (
         "sh",
@@ -102,6 +107,18 @@ fn clipboard_write_cmd() -> (&'static str, &'static [&'static str]) {
             "wl-copy 2>/dev/null || xclip -selection clipboard -i 2>/dev/null",
         ],
     );
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod stock_clipboard_tests {
+    use super::*;
+
+    #[test]
+    fn macos_clipboard_uses_only_absolute_system_binaries() {
+        assert_eq!(clipboard_read_cmd(), ("/usr/bin/pbpaste", &[][..]));
+        assert_eq!(clipboard_write_cmd(), ("/usr/bin/pbcopy", &[][..]));
+        assert_eq!(augmented_path(), "/usr/bin:/bin:/usr/sbin:/sbin");
+    }
 }
 
 /// Apply the platform env the clipboard tools need: augmented PATH, and on macOS a UTF-8

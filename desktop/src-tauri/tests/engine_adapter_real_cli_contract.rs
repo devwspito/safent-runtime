@@ -27,8 +27,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 
 use domain::{HostOs, ImageRef, Port, RepairAction};
 use engine_adapter::{EmbeddedCliConfig, EmbeddedCliDriver};
@@ -490,11 +490,9 @@ exit 0
             .count(),
         1
     );
-    assert!(
-        !calls
-            .iter()
-            .any(|c| c == "info" || c.starts_with("machine stop "))
-    );
+    assert!(!calls
+        .iter()
+        .any(|c| c == "info" || c.starts_with("machine stop ")));
 }
 
 #[test]

@@ -31,6 +31,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _PROVISION_SH = _REPO_ROOT / "ops/container/companions/ads/provision.sh"
 _COMPOSE_YAML = _REPO_ROOT / "ops/container/companions/ads/compose.yaml"
 _CAPS_TEMPLATE = _REPO_ROOT / "ops/container/companions/ads/caps.template.yaml"
+_PINNED_ADS_IMAGE = "ghcr.io/devwspito/safent-ads@sha256:" + "a" * 64
 
 _FAKE_PODMAN = """#!/usr/bin/env bash
 set -e
@@ -820,7 +821,7 @@ def _companion_state(tmp_path: Path, *, provisioned: bool, with_image_marker: bo
         (state_dir / "sso" / "ads-sso.key").write_text("old-sso-seed\n")
         (state_dir / "sso" / "ads-sso.key").chmod(0o400)
         if with_image_marker:
-            (state_dir / "image").write_text("safent-ads:test-fake")
+            (state_dir / "image").write_text(_PINNED_ADS_IMAGE)
     return state_dir
 
 
@@ -846,7 +847,7 @@ def _run_companion(
     env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
     env["HOME"] = str(home_dir)
     env["SAFENT_COMPANION_STATE"] = str(state_dir)
-    env["SAFENT_ADS_IMAGE"] = "safent-ads:test-fake"
+    env["SAFENT_ADS_IMAGE"] = _PINNED_ADS_IMAGE
     env["FAKE_PODMAN_LOG"] = str(podman_log)
     env.update(extra_env or {})
     return subprocess.run(
@@ -946,6 +947,65 @@ class TestCompanionStatus:
 
 
 class TestCompanionUpdate:
+    @pytest.mark.parametrize("override", ["", _PINNED_ADS_IMAGE])
+    def test_refresh_uses_only_the_registered_digest(
+        self, tmp_path: Path, fake_cli_bin_dir: Path, override: str
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        log_path = tmp_path / "podman.log"
+        result = _run_companion(
+            "update", fake_bin_dir=fake_cli_bin_dir, state_dir=state_dir,
+            home_dir=home_dir, podman_log=log_path,
+            extra_env={"SAFENT_ADS_IMAGE": override},
+        )
+        assert result.returncode == 0, result.stderr
+        assert f"pull {_PINNED_ADS_IMAGE}" in log_path.read_text()
+        assert (state_dir / "image").read_text() == _PINNED_ADS_IMAGE
+
+    @pytest.mark.parametrize("recorded", [
+        "", "ghcr.io/devwspito/safent-ads:latest", "ghcr.io/devwspito/safent-ads:v0.2.2",
+        "ghcr.io/devwspito/safent-ads@sha256:short",
+        "ghcr.io/devwspito/safent-ads@sha256:" + "G" * 64,
+        "ghcr.io/other/ads@sha256:" + "a" * 64,
+    ])
+    def test_mutable_or_malformed_recorded_image_fails_before_any_effect(
+        self, tmp_path: Path, fake_cli_bin_dir: Path, recorded: str
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        (state_dir / "image").write_text(recorded)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        log_path = tmp_path / "podman.log"
+        result = _run_companion(
+            "update", fake_bin_dir=fake_cli_bin_dir, state_dir=state_dir,
+            home_dir=home_dir, podman_log=log_path, extra_env={"SAFENT_ADS_IMAGE": ""},
+        )
+        assert result.returncode != 0
+        assert not log_path.exists() or log_path.read_text() == ""
+        assert (state_dir / "image").read_text() == recorded
+
+    @pytest.mark.parametrize("override", [
+        "ghcr.io/devwspito/safent-ads:latest", "ghcr.io/devwspito/safent-ads:v0.2.3",
+        "ghcr.io/devwspito/safent-ads@sha256:" + "b" * 64,
+    ])
+    def test_even_another_digest_cannot_override_the_registered_release(
+        self, tmp_path: Path, fake_cli_bin_dir: Path, override: str
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        log_path = tmp_path / "podman.log"
+        result = _run_companion(
+            "update", fake_bin_dir=fake_cli_bin_dir, state_dir=state_dir,
+            home_dir=home_dir, podman_log=log_path,
+            extra_env={"SAFENT_ADS_IMAGE": override},
+        )
+        assert result.returncode != 0
+        assert not log_path.exists() or log_path.read_text() == ""
+        assert (state_dir / "image").read_text() == _PINNED_ADS_IMAGE
+
     def test_pulls_the_image_and_recreates_the_containers(
         self, tmp_path: Path, fake_cli_bin_dir: Path
     ) -> None:
@@ -962,7 +1022,7 @@ class TestCompanionUpdate:
         )
         assert result.returncode == 0, result.stderr
         log = podman_log.read_text()
-        assert "pull safent-ads:test-fake" in log
+        assert f"pull {_PINNED_ADS_IMAGE}" in log
         assert "up -d" in log
 
     def test_persists_the_image_marker_after_a_successful_update(
@@ -981,7 +1041,7 @@ class TestCompanionUpdate:
             podman_log=tmp_path / "podman.log",
         )
         assert result.returncode == 0, result.stderr
-        assert (state_dir / "image").read_text() == "safent-ads:test-fake"
+        assert (state_dir / "image").read_text() == _PINNED_ADS_IMAGE
 
     def test_fails_loud_when_not_provisioned(
         self, tmp_path: Path, fake_cli_bin_dir: Path
@@ -1070,7 +1130,7 @@ class TestCompanionUpdateMigrationGuard:
             },
         )
         assert result.returncode == 0, result.stderr
-        assert (state_dir / "image").read_text() == "safent-ads:test-fake"
+        assert (state_dir / "image").read_text() == _PINNED_ADS_IMAGE
 
     def test_a_brand_new_database_skips_the_guard(
         self, tmp_path: Path, fake_cli_bin_dir: Path
@@ -1170,11 +1230,31 @@ class TestMissingImageMarkerFailsClosed:
     ads_image` used to fall back to the hard-coded ghcr.io/…/safent-ads:
     latest default when $STATE/image was absent — deleting that ONE file
     (0700 dir, no integrity protection) silently restored the exact CLI-10
-    divergence this whole fix set out to close. status/rotate/remove must
-    now refuse with a clear recovery step instead of guessing; `update`
+    divergence this whole fix set out to close. status/rotate must
+    refuse with a clear recovery step instead of guessing; teardown does
+    not require an image and selects owned resources directly. `update`
     alone keeps the historical fallback (it is the one verb allowed to
     CHOOSE an image, so falling back to the published default there is a
     deliberate bootstrap, not a guess)."""
+
+    @pytest.mark.parametrize("verb", ["status", "rotate"])
+    @pytest.mark.parametrize("recorded", ["", "ghcr.io/devwspito/safent-ads:latest"])
+    def test_legacy_marker_cannot_drive_status_or_rotation(
+        self, tmp_path: Path, fake_cli_bin_dir: Path, verb: str, recorded: str
+    ) -> None:
+        state_dir = _companion_state(tmp_path, provisioned=True)
+        (state_dir / "image").write_text(recorded)
+        home_dir = tmp_path / "home"
+        _companion_bin_dir(home_dir, provisioned=True)
+        log_path = tmp_path / "podman.log"
+        result = _run_companion(
+            verb, fake_bin_dir=fake_cli_bin_dir, state_dir=state_dir,
+            home_dir=home_dir, podman_log=log_path,
+        )
+        assert result.returncode != 0
+        log = log_path.read_text() if log_path.exists() else ""
+        assert not any(line.startswith(("compose ", "run ", "pull ")) for line in log.splitlines())
+        assert (state_dir / "bearer").read_text().strip() == "old-bearer-value"
 
     def test_status_refuses_without_the_marker(
         self, tmp_path: Path, fake_cli_bin_dir: Path
@@ -1191,7 +1271,7 @@ class TestMissingImageMarkerFailsClosed:
         )
         assert result.returncode != 0
         assert "refusing to guess the companion's image" in result.stderr
-        assert "safent companion update" in result.stderr
+        assert "bootstrap" in result.stderr
 
     def test_rotate_refuses_without_the_marker(
         self, tmp_path: Path, fake_cli_bin_dir: Path
@@ -1212,7 +1292,7 @@ class TestMissingImageMarkerFailsClosed:
         # Refuses BEFORE rotating anything — no bearer/SSO files touched.
         assert "old-bearer-value" == (state_dir / "bearer").read_text().strip()
 
-    def test_remove_refuses_without_the_marker(
+    def test_remove_does_not_need_an_image_marker(
         self, tmp_path: Path, fake_cli_bin_dir: Path
     ) -> None:
         state_dir = _companion_state(tmp_path, provisioned=True, with_image_marker=False)
@@ -1225,16 +1305,17 @@ class TestMissingImageMarkerFailsClosed:
             home_dir=home_dir,
             podman_log=tmp_path / "podman.log",
         )
-        assert result.returncode != 0
-        assert "refusing to guess the companion's image" in result.stderr
+        assert result.returncode == 0, result.stderr
+        log = (tmp_path / "podman.log").read_text()
+        assert "compose " not in log
+        assert "pull " not in log
+        assert "label=com.docker.compose.project=safent-ads" in log
+        assert state_dir.exists()  # no --purge: keep data
 
-    def test_update_still_bootstraps_with_the_published_default(
+    def test_update_refuses_to_bootstrap_without_recorded_digest(
         self, tmp_path: Path, fake_cli_bin_dir: Path
     ) -> None:
-        """The one deliberate exception — update is ALLOWED to guess,
-        because guessing is the whole point of this verb: it always PICKS
-        an image (explicit override or the published default) and then
-        PERSISTS its choice, closing the gap for every future verb."""
+        """Only the release bootstrap can install a new compatible digest."""
         state_dir = _companion_state(tmp_path, provisioned=True, with_image_marker=False)
         home_dir = tmp_path / "home"
         _companion_bin_dir(home_dir, provisioned=True)
@@ -1247,10 +1328,10 @@ class TestMissingImageMarkerFailsClosed:
             podman_log=podman_log,
             extra_env={"SAFENT_ADS_IMAGE": ""},  # no explicit override either
         )
-        assert result.returncode == 0, result.stderr
-        assert (state_dir / "image").read_text() == "ghcr.io/devwspito/safent-ads:latest"
-        log = podman_log.read_text()
-        assert "pull ghcr.io/devwspito/safent-ads:latest" in log
+        assert result.returncode != 0
+        assert not (state_dir / "image").exists()
+        log = podman_log.read_text() if podman_log.exists() else ""
+        assert "pull " not in log
 
 
 class TestCompanionRotate:
@@ -1312,7 +1393,8 @@ class TestCompanionRotate:
         images is what made `ads-migrate` die `Can't locate revision …`
         against the real companion."""
         state_dir = _companion_state(tmp_path, provisioned=True)
-        (state_dir / "image").write_text("localhost/safent-ads:persisted-v2")
+        persisted = "ghcr.io/devwspito/safent-ads@sha256:" + "b" * 64
+        (state_dir / "image").write_text(persisted)
         home_dir = tmp_path / "home"
         _companion_bin_dir(home_dir, provisioned=True)
         podman_log = tmp_path / "podman.log"
@@ -1328,7 +1410,7 @@ class TestCompanionRotate:
 
         assert result.returncode == 0, result.stderr
         log = podman_log.read_text()
-        assert "localhost/safent-ads:persisted-v2" in log
+        assert persisted in log
         assert "ghcr.io/devwspito/safent-ads:latest" not in log
 
     def test_fails_loud_when_sso_keygen_fails(
@@ -1373,7 +1455,7 @@ class TestCompanionRotate:
 
 
 class TestCompanionRemove:
-    def test_composes_down_and_removes_the_network_keeping_state(
+    def test_selects_owned_resources_and_removes_the_network_keeping_state(
         self, tmp_path: Path, fake_cli_bin_dir: Path
     ) -> None:
         state_dir = _companion_state(tmp_path, provisioned=True)
@@ -1391,7 +1473,8 @@ class TestCompanionRemove:
 
         assert result.returncode == 0, result.stderr
         log = podman_log.read_text()
-        assert "compose -p safent-ads" in log and "down" in log
+        assert "label=com.docker.compose.project=safent-ads" in log
+        assert "compose " not in log
         assert "network rm safent-companions" in log
         assert state_dir.exists()  # state survives without --purge
         assert (state_dir / "secrets" / "api.env").exists()

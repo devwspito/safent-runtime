@@ -338,8 +338,8 @@
       {
         "repo_path": "safent",
         "flat_name": "safent",
-        "sha256": "980e7ef8228e9fb9cf60070222afb8d4c8ad7d8ae68bd8cefd64ce4a34a5662b",
-        "size_bytes": 126990,
+        "sha256": "f43ccde5a5fea16add2f98c113204f97289df3485c33c3085eabbda26f50fdae",
+        "size_bytes": 128610,
         "mode": "0755"
       },
       {

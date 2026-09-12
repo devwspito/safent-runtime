@@ -12,6 +12,7 @@ never a fabricated "ready".
 
 from __future__ import annotations
 
+import json
 import socket
 
 import pytest
@@ -37,6 +38,13 @@ class _FakeJsonResponse:
     def __init__(self, *, status: int, body: object) -> None:
         self.status = status
         self._body = body
+        self.headers = {}
+        self.content = self
+
+    async def iter_chunked(self, size: int):
+        data = json.dumps(self._body).encode()
+        for offset in range(0, len(data), size):
+            yield data[offset : offset + size]
 
     async def json(self, *, content_type: str | None = None) -> object:  # noqa: ARG002
         return self._body
@@ -59,9 +67,7 @@ class TestNotInstalled:
         assert report.state == "not_installed"
         assert report.reachable is False
 
-    async def test_no_bearer_reports_not_installed(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_no_bearer_reports_not_installed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(companions_mod, "get_companion", lambda _slug: _FakeEndpoint())
         monkeypatch.setattr(companions_mod, "read_companion_bearer", lambda _ep: None)
         checker = CompanionHealthChecker()
@@ -177,5 +183,5 @@ class TestInterpretResponse:
 
         report = await checker._interpret(_SLUG, response)  # noqa: SLF001
 
-        assert report.state == "no_accounts"  # no accounts_linked dict -> none linked
+        assert report.state == "unreachable"  # malformed does not mean valid-but-unconfigured
         assert report.reachable is True

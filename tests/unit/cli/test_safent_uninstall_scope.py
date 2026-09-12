@@ -32,6 +32,14 @@ echo "$@" >> "$FAKE_PODMAN_LOG"
 case "$1" in
   inspect)
     case "$*" in
+      *com.docker.compose.project.config_files*)
+        id="${@: -1}"
+        [ "${FAKE_OWNERSHIP_INSPECT_FAIL:-0}" = 1 ] && exit 1
+        project="${FAKE_COMPOSE_PROJECT:-safent-ads}"
+        service="${FAKE_COMPOSE_SERVICE:-ads-api}"
+        config="${FAKE_COMPOSE_CONFIG:-$SAFENT_STATE_HOME/companions/ads/bin/compose.yaml}"
+        echo "$id|$project|$service|$config"
+        exit 0 ;;
       *"-f "*) echo "${FAKE_RUNNING:-true}"; exit 0 ;;
       *) [ "${FAKE_CONTAINER_EXISTS:-1}" = "1" ] && exit 0 || exit 1 ;;
     esac
@@ -45,11 +53,25 @@ case "$1" in
     exit 0
     ;;
   ps)
+    case "$*" in
+      *label=com.docker.compose.project=*)
+        for id in ${FAKE_COMPANION_IDS:-}; do echo "$id"; done
+        exit 0 ;;
+    esac
+    [ "${FAKE_NETWORK_LIST_FAIL:-0}" = 1 ] && exit 1
     for id in ${FAKE_NETWORK_ATTACHED_IDS:-}; do echo "$id"; done
     exit 0
     ;;
   volume)
     case "$2" in
+      inspect)
+        case "${@: -1}" in
+          *-db-data) key=ads-db-data ;;
+          *-broker-sock) key=broker-sock ;;
+          *-credential-store) key=credential-store ;;
+        esac
+        echo "${FAKE_VOLUME_PROJECT:-safent-ads}|$key"
+        exit 0 ;;
       rm) exit 0 ;;
     esac
     exit 0
@@ -99,12 +121,20 @@ def _run_uninstall(
     home: Path | None = None,
     state_home: Path | None = None,
     provisioned_companion: bool = True,
+    recorded_image: bool = True,
+    cached_compose: bool = True,
+    seed_state: bool = True,
     extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     home_dir = home if home is not None else tmp_path / "home"
     home_dir.mkdir(parents=True, exist_ok=True)
     resolved_state_home = state_home if state_home is not None else tmp_path / "state-home"
-    _seed_companion_state(resolved_state_home, provisioned=provisioned_companion)
+    if seed_state:
+        _seed_companion_state(resolved_state_home, provisioned=provisioned_companion)
+    if not recorded_image:
+        (resolved_state_home / "companions/ads/image").unlink(missing_ok=True)
+    if not cached_compose:
+        (resolved_state_home / "companions/ads/bin/compose.yaml").unlink(missing_ok=True)
     podman_log = tmp_path / f"podman-{name}.log"
     env = {
         **os.environ,
@@ -118,9 +148,89 @@ def _run_uninstall(
     env.update(extra_env or {})
     result = subprocess.run(
         ["sh", str(_SAFENT_CLI), "uninstall", *args],
-        env=env, capture_output=True, text=True, timeout=60,
+        env=env, capture_output=True, text=True, timeout=60, check=False,
     )
     return result, podman_log
+
+
+class TestPartialCompanionUninstall:
+    @pytest.mark.parametrize("purge", [False, True])
+    @pytest.mark.parametrize("cached_compose", [False, True])
+    def test_missing_image_never_blocks_cleanup_or_guesses_image(
+        self, tmp_path: Path, fake_bin_dir: Path, purge: bool, cached_compose: bool
+    ) -> None:
+        own_id = "a" * 64
+        for attempt in range(2):
+            result, log_path = _run_uninstall(
+                tmp_path, fake_bin_dir, *(["--purge"] if purge else []),
+                recorded_image=False, cached_compose=cached_compose,
+                seed_state=attempt == 0,
+                extra_env={"FAKE_COMPANION_IDS": own_id},
+            )
+            assert result.returncode == 0, result.stderr
+            lines = log_path.read_text().splitlines()
+            assert f"rm -f {own_id}" in lines
+            assert not any(line.startswith(("compose ", "pull ", "run ")) for line in lines)
+            assert (tmp_path / "state-home").exists() is not purge
+            if purge:
+                assert "volume rm safent-ads-companion-db-data" in lines
+            else:
+                assert not any(line.startswith("volume rm ") for line in lines)
+
+    @pytest.mark.parametrize("recorded_image", [False, True])
+    @pytest.mark.parametrize("overrides", [
+        {"FAKE_COMPOSE_PROJECT": "other-project"},
+        {"FAKE_COMPOSE_SERVICE": "unrelated"},
+        {"FAKE_COMPOSE_CONFIG": "/other/installation/compose.yaml"},
+        {"FAKE_COMPOSE_CONFIG": "<no value>"},
+        {"FAKE_OWNERSHIP_INSPECT_FAIL": "1"},
+    ])
+    def test_shared_project_is_not_enough_to_remove_another_container(
+        self, tmp_path: Path, fake_bin_dir: Path, overrides: dict[str, str],
+        recorded_image: bool,
+    ) -> None:
+        other_id = "b" * 64
+        result, log_path = _run_uninstall(
+            tmp_path, fake_bin_dir, "--purge", recorded_image=recorded_image,
+            extra_env={"FAKE_COMPANION_IDS": other_id, **overrides},
+        )
+        assert result.returncode == 0, result.stderr
+        assert f"rm -f {other_id}" not in log_path.read_text().splitlines()
+
+    @pytest.mark.parametrize("service", ["ads-db", "ads-migrate", "ads-api", "ads-worker", "ads-broker"])
+    def test_all_owned_services_are_selected_by_exact_id(
+        self, tmp_path: Path, fake_bin_dir: Path, service: str
+    ) -> None:
+        own_id = "c" * 64
+        result, log_path = _run_uninstall(
+            tmp_path, fake_bin_dir, recorded_image=False,
+            extra_env={"FAKE_COMPANION_IDS": own_id, "FAKE_COMPOSE_SERVICE": service},
+        )
+        assert result.returncode == 0, result.stderr
+        assert f"rm -f {own_id}" in log_path.read_text().splitlines()
+
+    def test_invalid_id_and_foreign_volume_are_never_removed(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        result, log_path = _run_uninstall(
+            tmp_path, fake_bin_dir, "--purge", recorded_image=False,
+            extra_env={"FAKE_COMPANION_IDS": "--all reused-name", "FAKE_VOLUME_PROJECT": "other"},
+        )
+        assert result.returncode == 0, result.stderr
+        lines = log_path.read_text().splitlines()
+        assert "rm -f --all" not in lines
+        assert "rm -f reused-name" not in lines
+        assert not any(line.startswith("volume rm safent-ads-") for line in lines)
+
+    def test_failed_network_listing_does_not_authorize_network_removal(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        result, log_path = _run_uninstall(
+            tmp_path, fake_bin_dir, recorded_image=False,
+            extra_env={"FAKE_NETWORK_LIST_FAIL": "1"},
+        )
+        assert result.returncode == 0, result.stderr
+        assert "network rm safent-companions" not in log_path.read_text().splitlines()
 
 
 class TestScopeValidation:
@@ -148,7 +258,8 @@ class TestDefaultKeepsData:
         assert result.returncode == 0, result.stderr
         log_lines = podman_log.read_text().splitlines()
         assert any(ln.startswith("rm -f safent") for ln in log_lines)
-        assert any(ln.startswith("compose ") for ln in log_lines)
+        assert any("label=com.docker.compose.project=safent-ads" in ln for ln in log_lines)
+        assert not any(ln.startswith("compose ") for ln in log_lines)
 
     def test_data_volume_is_not_removed(self, tmp_path: Path, fake_bin_dir: Path) -> None:
         result, podman_log = _run_uninstall(tmp_path, fake_bin_dir)

@@ -166,11 +166,33 @@ def _base_env(tmp_path: Path, fake_bin_dir: Path, state_home: Path, podman_log: 
         "HOME": str(tmp_path / "home"),
         "SAFENT_STATE_HOME": str(state_home),
         "SAFENT_NAME": "agent-test",
+        "SAFENT_ADS_IMAGE": "ghcr.io/devwspito/safent-ads@sha256:" + "a" * 64,
         "FAKE_PODMAN_LOG": str(podman_log),
     }
 
 
 class TestCompanionInstall:
+    @pytest.mark.parametrize("verb", ["install", "repair"])
+    @pytest.mark.parametrize("image", [
+        "", "ghcr.io/devwspito/safent-ads:latest", "ghcr.io/devwspito/safent-ads:v0.2.2",
+        "ghcr.io/devwspito/safent-ads@sha256:short",
+        "ghcr.io/other/ads@sha256:" + "a" * 64,
+    ])
+    def test_missing_or_mutable_bootstrap_pin_has_no_effect(
+        self, tmp_path: Path, fake_bin_dir: Path, verb: str, image: str
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log_path = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log_path)
+        env["SAFENT_ADS_IMAGE"] = image
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", verb],
+            env=env, capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert result.returncode != 0
+        assert not log_path.exists() or log_path.read_text() == ""
+
     def test_scaffolds_then_installs_then_reloads(self, tmp_path: Path, fake_bin_dir: Path) -> None:
         state_home = tmp_path / "state-home"
         _seed_state_home(state_home)

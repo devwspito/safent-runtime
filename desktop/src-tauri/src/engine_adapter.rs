@@ -368,29 +368,17 @@ fn wait_bounded(
     }
 }
 
-/// A GUI-launched app inherits a minimal PATH (main.rs's `augmented_path`
-/// carries the same note for the legacy install flow) — hand the child the
-/// common install locations too.
-///
-/// MAC3-07 (verificacion-mac-3.md, MAC-07/MAC2-13 repeated unfixed):
-/// `/opt/podman/bin` used to be in this list — it is the OFFICIAL podman.io
-/// macOS installer's own default location, so a Mac that already had podman
-/// installed there silently ran ITS gvproxy/vfkit instead of the bundled,
-/// hash-verified ones once `podman machine start` fell through to PATH-based
-/// helper resolution (confirmed live: different sha256). This spawn path
-/// ALWAYS pins `SAFENT_PODMAN` (`EmbeddedCliDriver::spawn` sets it
-/// unconditionally) — the CLI never needs PATH to find podman itself here —
-/// so the only real effect of leaving `/opt/podman/bin` in this list was
-/// letting a foreign gvproxy/vfkit win. The actual fix is
-/// stage-runtime.sh's bundled `containers.conf` (`helper_binaries_dir`,
-/// checked BEFORE any PATH fallback); removing this entry too is
-/// defense-in-depth, matching app-engine.md §1's "nunca el del PATH del
-/// usuario" rule that already applies to podman itself.
-fn augmented_path() -> String {
+/// The macOS app carries its engine and helpers, addressed by verified paths.
+/// Its shell utilities must come from macOS too, never from a user's PATH or
+/// package manager. Keep the existing non-macOS resolution contract unchanged.
+pub(crate) fn native_command_path(macos: bool, inherited: Option<&str>) -> String {
+    if macos {
+        return "/usr/bin:/bin:/usr/sbin:/sbin".into();
+    }
     let mut parts = Vec::new();
-    if let Ok(p) = std::env::var("PATH") {
+    if let Some(p) = inherited {
         if !p.is_empty() {
-            parts.push(p);
+            parts.push(p.to_string());
         }
     }
     for extra in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
@@ -399,27 +387,45 @@ fn augmented_path() -> String {
     parts.join(":")
 }
 
-/// MAC3-07 (verificacion-mac-3.md): `/opt/podman/bin` must never reappear in
-/// this list — see the doc comment on `augmented_path` for why.
+fn augmented_path() -> String {
+    native_command_path(
+        cfg!(target_os = "macos"),
+        std::env::var("PATH").ok().as_deref(),
+    )
+}
+
 #[cfg(test)]
 mod augmented_path_tests {
     use super::*;
 
     #[test]
-    fn never_includes_the_official_installers_own_podman_directory() {
-        let path = augmented_path();
-        assert!(
-            !path.contains("/opt/podman/bin"),
-            "augmented_path must never let a foreign gvproxy/vfkit under /opt/podman/bin win over the bundled ones: {path}"
+    fn macos_ignores_user_path_even_when_it_contains_foreign_engines_and_tools() {
+        let path = native_command_path(true, Some("/tmp/decoy:/opt/homebrew/bin:/usr/local/bin:/opt/podman/bin:.:/Users/test/.local/bin"));
+        assert_eq!(path, "/usr/bin:/bin:/usr/sbin:/sbin");
+    }
+
+    #[test]
+    fn macos_needs_no_inherited_path() {
+        assert_eq!(
+            native_command_path(true, None),
+            "/usr/bin:/bin:/usr/sbin:/sbin"
+        );
+        assert_eq!(
+            native_command_path(true, Some("")),
+            native_command_path(true, None)
         );
     }
 
     #[test]
-    fn still_includes_the_other_common_install_locations() {
-        let path = augmented_path();
-        for expected in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
-            assert!(path.contains(expected), "expected {expected} in {path}");
-        }
+    fn non_macos_retains_its_existing_resolution_contract() {
+        assert_eq!(
+            native_command_path(false, Some("/test/bin:/usr/bin")),
+            "/test/bin:/usr/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        );
+        assert_eq!(
+            native_command_path(false, None),
+            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        );
     }
 }
 

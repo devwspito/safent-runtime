@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=13
+_CLI_REV=14
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -1359,8 +1359,8 @@ _companion_env_common() {
 # divergence this whole fix set out to close (status/rotate/remove
 # recreating against a DIFFERENT image than what is actually running).
 # Fail closed instead: refuse with a clear recovery step rather than guess.
-# `safent companion update` is the ONE place a missing marker is still a
-# legitimate bootstrap case (see _companion_update_env) — never here.
+# Missing or legacy markers require the installed release's pinned bootstrap;
+# update/status/rotate must never pick a substitute image. Removal needs no image.
 # MAC4-04 (verificacion-mac-4.md): returns 1 with NO output at all when the
 # marker is missing — deliberately NEVER calls _die_porcelain (or prints
 # anything) from HERE. This function is only ever invoked as
@@ -1389,14 +1389,13 @@ _persisted_ads_image() {
 # copy-pasted per verb.
 #
 # SAFENT_ADS_IMAGE is ALWAYS the persisted ref (never an ambient env var) —
-# status/rotate/remove must reuse the EXACT image already running, or a
+# status/rotate must reuse the EXACT image already running, or a
 # rotate recreates ads-api against a DIFFERENT image than ads-worker still
 # runs, and an image whose alembic history doesn't know the database's
 # current revision dies `Can't locate revision …` (CLI-10, verified live:
 # ghcr.io/devwspito/safent-ads:latest got pulled and mixed in even though
-# run-safent.sh had actually provisioned with safent-ads:local). `safent
-# companion update` is the ONE verb allowed to pick a NEW image — see
-# _companion_update_env — and the only one that overwrites the marker.
+# run-safent.sh had actually provisioned with safent-ads:local). Update now
+# refreshes only this immutable digest; release bootstrap owns version changes.
 _companion_env() {
   _companion_env_common
   # MAC4-04: `|| _die_porcelain` runs IN THIS SHELL (never inside the `$(...)`
@@ -1404,30 +1403,27 @@ _companion_env() {
   # actually terminates the process, and nothing ever gets a chance to
   # treat a `failed` JSON line as if it were the image name.
   SAFENT_ADS_IMAGE="$(_persisted_ads_image)" || _die_porcelain companion_network_conflict \
-    "$COMPANION_STATE/image not found — refusing to guess the companion's image. Run 'safent companion update' once to record it, then retry." false
+    "$COMPANION_STATE/image not found — refusing to guess the companion's image. Repara Anuncios mediante el bootstrap de la version de Safent instalada." false
+  _is_pinned_ads_image "$SAFENT_ADS_IMAGE" \
+    || _die_porcelain companion_network_conflict "El companion no tiene un digest inmutable compatible registrado. Repara desde la version de Safent instalada; no se elegira latest ni una etiqueta." false
   export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
 }
 
-# `safent companion update`'s own resolution: an explicit SAFENT_ADS_IMAGE
-# from the caller's env WINS (that is how an owner asks for a specific new
-# image); with none given, keep whatever is already persisted — a plain
-# re-pull/refresh of the same tag. `update` is the ONE place a missing
-# marker is still a legitimate bootstrap (recovering a companion whose
-# $STATE/image was lost, or a companion provisioned before CLI-10 ever
-# wrote one) — deliberately does NOT call the now-fail-closed
-# _persisted_ads_image (that helper is for status/rotate/remove, which
-# must NEVER guess); falls back to the published default INLINE instead,
-# same historical shape, only reachable from this one explicit verb.
+# Only immutable product image references are valid for companion mutations.
+_is_pinned_ads_image() {
+  case "$1" in ghcr.io/devwspito/safent-ads@sha256:*) ;; *) return 1 ;; esac
+  _ads_digest="${1#*@sha256:}"
+  [ "${#_ads_digest}" -eq 64 ] || return 1
+  case "$_ads_digest" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+# Update is a refresh, not an independent release selector. A different image
+# must arrive through the compatible desktop/runtime release's pinned bootstrap.
 _companion_update_env() {
-  _companion_env_common
-  if [ -n "${SAFENT_ADS_IMAGE:-}" ]; then
-    : # explicit override from the caller — use it as-is
-  elif [ -f "$COMPANION_STATE/image" ]; then
-    SAFENT_ADS_IMAGE="$(cat "$COMPANION_STATE/image")"
-  else
-    SAFENT_ADS_IMAGE="ghcr.io/devwspito/safent-ads:latest"
-  fi
-  export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
+  _requested_ads_image="${SAFENT_ADS_IMAGE:-}"
+  _companion_env
+  [ -z "$_requested_ads_image" ] || [ "$_requested_ads_image" = "$SAFENT_ADS_IMAGE" ] \
+    || _die_porcelain companion_network_conflict "El companion update solo refresca el digest registrado. Cambia de version mediante una release compatible de Safent." false
 }
 
 # T003/UPD-06: `safent-companions` is a HOST-GLOBAL network — every Safent
@@ -1441,7 +1437,7 @@ _companion_update_env() {
 # `network inspect`'s own (less stable) Containers map shape.
 _remove_companion_network_if_unused() {
   "$RT" network inspect "$COMPANION_NETWORK" >/dev/null 2>&1 || return 0
-  _attached="$("$RT" ps -a --filter "network=$COMPANION_NETWORK" --format '{{.ID}}' 2>/dev/null || true)"
+  _attached="$("$RT" ps -a --filter "network=$COMPANION_NETWORK" --format '{{.ID}}' 2>/dev/null)" || return 0
   if [ -z "$_attached" ]; then
     "$RT" network rm "$COMPANION_NETWORK" >/dev/null 2>&1 || true
   else
@@ -1449,11 +1445,9 @@ _remove_companion_network_if_unused() {
   fi
 }
 
-# Tear down the safent-ads companion (024): compose down its four services,
-# using the SAME cached compose.yaml provisioning used to start it (nothing
-# rebuilt here), then remove the fixed network ONLY if nothing else is
-# still attached to it. Best-effort — a companion that was never
-# provisioned (no cached compose.yaml) is a no-op.
+# Tear down only the companion resources carrying this installation's compose
+# ownership. No compose interpolation, image resolution, download or recreation
+# is necessary, including when provisioning never wrote its image marker.
 #
 # $STATE (TLS, secrets, caps.yaml, companions.json) and the three podman
 # volumes (db-data, broker-sock, credential-store — CLI-12's own matrix
@@ -1461,18 +1455,40 @@ _remove_companion_network_if_unused() {
 # `safent uninstall` (no --purge) wants the software gone, not necessarily
 # the campaign history/credentials re-generated from scratch on the next
 # install.
+# Teardown never needs an image. Select immutable
+# container IDs and require both compose ownership and this exact config path.
+# A matching name/project alone could belong to another installation. Unknown
+# labels are not evidence of ownership; leave those resources for manual review.
+_remove_partial_companion_containers() {
+  _partial_ids="$("$RT" ps -a --no-trunc --filter label=com.docker.compose.project=safent-ads --format '{{.ID}}' 2>/dev/null)" || return 0
+  for _partial_id in $_partial_ids; do
+    case "$_partial_id" in ''|*[!0-9a-f]*) continue ;; esac
+    [ "${#_partial_id}" -eq 64 ] || continue
+    _partial_owner="$("$RT" inspect --type container --format '{{.Id}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$_partial_id" 2>/dev/null)" || continue
+    for _partial_service in ads-db ads-migrate ads-api ads-worker ads-broker; do
+      if [ "$_partial_owner" = "$_partial_id|safent-ads|$_partial_service|$COMPANION_COMPOSE" ]; then
+        "$RT" rm -f "$_partial_id" >/dev/null 2>&1 || true
+        break
+      fi
+    done
+  done
+}
+
+_remove_partial_companion_volume() {  # known volume name, compose volume key
+  _partial_volume_owner="$("$RT" volume inspect --format '{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}' "$1" 2>/dev/null)" || return 0
+  [ "$_partial_volume_owner" = "safent-ads|$2" ] || return 0
+  # Never force: an attached volume must survive, even if it has our labels.
+  "$RT" volume rm "$1" >/dev/null 2>&1 || true
+}
+
 _uninstall_companion() {  # $1: 1 to also purge state + volumes, 0 to keep them
   _purge="${1:-0}"
-  if [ -f "$COMPANION_COMPOSE" ]; then
-    echo "[*] Removing the safent-ads companion…"
-    _companion_env
-    "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" down >/dev/null 2>&1 || true
-  fi
+  _remove_partial_companion_containers
   _remove_companion_network_if_unused
   if [ "$_purge" -eq 1 ]; then
-    for _v in safent-ads-companion-db-data safent-ads-companion-broker-sock safent-ads-companion-credential-store; do
-      "$RT" volume rm "$_v" >/dev/null 2>&1 || true
-    done
+    _remove_partial_companion_volume safent-ads-companion-db-data ads-db-data
+    _remove_partial_companion_volume safent-ads-companion-broker-sock broker-sock
+    _remove_partial_companion_volume safent-ads-companion-credential-store credential-store
     rm -rf "$COMPANION_STATE" 2>/dev/null || true
   fi
 }
@@ -1555,6 +1571,9 @@ _run_with_heartbeat() {
 }
 
 _companion_install_or_repair() {
+  _is_pinned_ads_image "${SAFENT_ADS_IMAGE:-}" \
+    || _die_porcelain companion_network_conflict "Instalar o reparar Anuncios requiere el digest exacto del bootstrap de Safent. No se aceptan etiquetas ni latest." false
+  export SAFENT_ADS_IMAGE
   mkdir -p "$COMPANION_BIN_DIR" 2>/dev/null || true
   for _cf in provision.sh compose.yaml caps.template.yaml; do
     _fetch_companion_file "$_cf" || _die_porcelain companion_network_conflict "No se pudo obtener $_cf" true

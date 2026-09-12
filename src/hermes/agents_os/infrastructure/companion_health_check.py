@@ -17,6 +17,7 @@ actual SAN (`DNS:ads.safent.internal`).
 
 from __future__ import annotations
 
+import json
 import logging
 import ssl
 from dataclasses import dataclass
@@ -33,14 +34,19 @@ _CONNECT_TIMEOUT_S: Final = 5.0
 _TOTAL_TIMEOUT_S: Final = 8.0
 _HTTP_OK: Final = 200
 _HTTP_UNAUTHORIZED: Final = 401
+_MAX_HEALTH_BYTES: Final = 8192
+# Reviewed wire contracts, NOT companion package versions. A different contract
+# requires an explicit runtime change; a release tag never implies compatibility.
+_SUPPORTED_CONTRACTS: Final = {"safent-ads": "1.0.0"}
 
 
 @dataclass(frozen=True)
 class CompanionHealthReport:
     """Honest, derived-only state (FR-003/FR-009 — never a fabricated
     "ready"). `state` is the coarse signal `useAdsAvailability` (T009)
-    switches on; `detail` carries the raw upstream fields for diagnostics,
-    never a secret."""
+    switches on. Only validated contract fields are exposed; malformed payloads
+    and incompatible versions never become a successful readiness signal.
+    This probe is not an update transaction or a tool-authorization gate."""
 
     state: str  # "not_installed" | "unreachable" | "unauthorized" | "no_accounts" | "ready"
     reachable: bool
@@ -69,9 +75,7 @@ class CompanionHealthChecker:
         try:
             ssl_ctx = ssl.create_default_context(cafile=endpoint.ca_path)
         except (OSError, ssl.SSLError):
-            logger.warning(
-                "hermes.dbus.companion_health_ca_unreadable", extra={"slug": slug}
-            )
+            logger.warning("hermes.dbus.companion_health_ca_unreadable", extra={"slug": slug})
             return CompanionHealthReport(state="unreachable", reachable=False)
 
         return await self._fetch(slug, endpoint=endpoint, bearer=bearer, ssl_ctx=ssl_ctx)
@@ -80,16 +84,21 @@ class CompanionHealthChecker:
         self, slug: str, *, endpoint, bearer: str, ssl_ctx: ssl.SSLContext
     ) -> CompanionHealthReport:
         resolver = FixedIpResolver(hostname=endpoint.host, ip=endpoint.ip)
-        timeout = aiohttp.ClientTimeout(
-            total=_TOTAL_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S
-        )
+        timeout = aiohttp.ClientTimeout(total=_TOTAL_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
         connector = aiohttp.TCPConnector(resolver=resolver, ssl=ssl_ctx)
         url = f"https://{endpoint.host}:{endpoint.port}{_HEALTH_PATH}"
         try:
             async with (
-                aiohttp.ClientSession(connector=connector, timeout=timeout) as session,
+                aiohttp.ClientSession(
+                    connector=connector,
+                    timeout=timeout,
+                    auto_decompress=False,
+                    trust_env=False,
+                ) as session,
                 session.get(
-                    url, headers={"Authorization": f"Bearer {bearer}"}
+                    url,
+                    headers={"Authorization": f"Bearer {bearer}"},
+                    allow_redirects=False,
                 ) as response,
             ):
                 return await self._interpret(slug, response)
@@ -104,30 +113,51 @@ class CompanionHealthChecker:
         self, slug: str, response: aiohttp.ClientResponse
     ) -> CompanionHealthReport:
         if response.status == _HTTP_UNAUTHORIZED:
-            logger.warning(
-                "hermes.dbus.companion_health_unauthorized", extra={"slug": slug}
-            )
+            logger.warning("hermes.dbus.companion_health_unauthorized", extra={"slug": slug})
             return CompanionHealthReport(
                 state="unauthorized", reachable=True, http_status=_HTTP_UNAUTHORIZED
             )
-        if response.status != _HTTP_OK:
+        encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
+        if response.status != _HTTP_OK or encoding not in ("", "identity"):
             return CompanionHealthReport(
                 state="unreachable", reachable=True, http_status=response.status
             )
+        data = bytearray()
+        async for chunk in response.content.iter_chunked(2048):
+            data.extend(chunk)
+            if len(data) > _MAX_HEALTH_BYTES:
+                return CompanionHealthReport(
+                    state="unreachable", reachable=True, http_status=response.status
+                )
         try:
-            body = await response.json(content_type=None)
-        except (aiohttp.ContentTypeError, ValueError):
+            body = json.loads(data.decode("utf-8"))
+        except (ValueError, UnicodeError, RecursionError):
             return CompanionHealthReport(
                 state="unreachable", reachable=True, http_status=response.status
             )
         accounts = body.get("accounts_linked") if isinstance(body, dict) else None
-        accounts_linked = accounts if isinstance(accounts, dict) else {}
-        has_account = any(bool(v) for v in accounts_linked.values())
+        contract = _SUPPORTED_CONTRACTS.get(slug)
+        if (
+            contract is None
+            or not isinstance(body, dict)
+            or set(body) != {"status", "contract_version", "accounts_linked", "db"}
+            or body.get("contract_version") != contract
+            or body.get("status") != "ok"
+            or body.get("db") != "ok"
+            or not isinstance(accounts, dict)
+            or set(accounts) != {"google", "meta"}
+            or any(type(value) is not bool for value in accounts.values())
+        ):
+            return CompanionHealthReport(
+                state="unreachable", reachable=True, http_status=response.status
+            )
+        accounts_linked = {"google": accounts["google"], "meta": accounts["meta"]}
+        has_account = any(accounts_linked.values())
         state = "ready" if has_account else "no_accounts"
         return CompanionHealthReport(
             state=state,
             reachable=True,
             http_status=response.status,
-            contract_version=(body.get("contract_version") if isinstance(body, dict) else None),
+            contract_version=contract,
             accounts_linked=accounts_linked,
         )
