@@ -3,7 +3,7 @@ provisioning (024). Runs the REAL script + the REAL compose.yaml/
 caps.template.yaml (`HERE` resolves to the actual repo directory), with only
 the two commands that would touch a real container engine or the network
 faked: `podman` (network/image/gen_keys/compose) and `curl` (/mcp/health).
-Everything else (openssl, sha256sum, mv, chmod...) is the real host tool,
+Everything else (openssl, mv, chmod...) is the real host tool,
 exactly like a real run.
 
 Covers: secrets are generated once and never re-generated, ADS_MCP_TOKEN
@@ -149,6 +149,33 @@ def test_host_health_probe_uses_exact_route_and_private_tls(tmp_path, fake_bin_d
     assert "--cacert" in arguments
     assert "--noproxy" in arguments
     assert "--insecure" not in arguments
+
+
+def test_scaffold_does_not_depend_on_gnu_sha256sum(tmp_path: Path, fake_bin_dir: Path) -> None:
+    """The desktop app starts with a macOS-style minimal PATH.  A poisoned
+    sha256sum proves the scaffold derives the CA fingerprint through the
+    already-required OpenSSL implementation instead."""
+    sha256sum = fake_bin_dir / "sha256sum"
+    sha256sum.write_text("#!/bin/sh\necho sha256sum-must-not-run >&2\nexit 93\n")
+    sha256sum.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(_PROVISION_SH), "--scaffold"],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin_dir}:/usr/bin:/bin",
+            "SAFENT_COMPANION_STATE": str(tmp_path / "state"),
+            "SAFENT_ADS_IMAGE": "safent-ads:test-fake",
+            "FAKE_PODMAN_LOG": str(tmp_path / "podman.log"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "sha256sum-must-not-run" not in result.stderr
+    assert (tmp_path / "state" / "companions.json").is_file()
 
 
 class TestFirstRunWritesExpectedFiles:

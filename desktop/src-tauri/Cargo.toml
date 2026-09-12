@@ -1,6 +1,6 @@
 [package]
 name = "safent-desktop"
-version = "0.9.3"
+version = "0.9.4"
 description = "Safent desktop — thin native-webview shell over the local Safent web UI"
 authors = ["Safent"]
 edition = "2021"

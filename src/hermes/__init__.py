@@ -65,4 +65,4 @@ __all__ = [
     "ToolSpec",
 ]
 
-__version__ = "0.9.3"  # source metadata; build.sh validates against repo-root VERSION
+__version__ = "0.9.4"  # source metadata; build.sh validates against repo-root VERSION

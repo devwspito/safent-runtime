@@ -451,8 +451,21 @@ _ensure_seccomp() {
   #    terminal install has no bundle to look in and keeps tiers 1-3
   #    unchanged.
   if [ -n "${_podman_bundle_dir:-}" ] && [ -s "$_podman_bundle_dir/safent.json" ]; then
-    SECCOMP="$_podman_bundle_dir/safent.json"
-    return 0
+    # The podman client runs on macOS, but the OCI runtime that opens this
+    # path runs inside podman-machine.  That VM shares the owner's state
+    # directories (/Users, /private, /var/folders), not /Applications.  A
+    # profile referenced directly from Safent.app therefore exists on the
+    # host yet is ENOENT in the VM.  Preserve the signed bundle as the source
+    # of truth, but copy it atomically into the canonical private state path
+    # before passing it to podman.
+    _seccomp_tmp="$SECCOMP.tmp.$$"
+    if cp "$_podman_bundle_dir/safent.json" "$_seccomp_tmp" 2>/dev/null \
+       && chmod 0644 "$_seccomp_tmp" 2>/dev/null \
+       && mv -f "$_seccomp_tmp" "$SECCOMP" 2>/dev/null \
+       && [ -s "$SECCOMP" ]; then
+      return 0
+    fi
+    rm -f "$_seccomp_tmp" 2>/dev/null || true
   fi
   # 1. Pull the profile straight out of the image — v0.8.29+ ship it baked
   #    at /usr/share/hermes/seccomp/safent.json, version-matched and with NO network.
@@ -495,6 +508,20 @@ _ensure_seccomp() {
 _fetch_companion_file() {
   _cf_name="$1"
   _cf_dst="$COMPANION_BIN_DIR/$_cf_name"
+  # Packaged desktop builds already ship these files in the same signed,
+  # hash-verified runtime directory as podman and the seccomp profile. Use
+  # that bundle first so first boot needs neither a helper container nor
+  # GitHub, and so the script version cannot drift from the installed app.
+  if [ -n "${_podman_bundle_dir:-}" ] && [ -s "$_podman_bundle_dir/$_cf_name" ]; then
+    _cf_tmp="$_cf_dst.tmp.$$"
+    if cp "$_podman_bundle_dir/$_cf_name" "$_cf_tmp" 2>/dev/null \
+       && chmod 0755 "$_cf_tmp" 2>/dev/null \
+       && mv -f "$_cf_tmp" "$_cf_dst" 2>/dev/null \
+       && [ -s "$_cf_dst" ]; then
+      return 0
+    fi
+    rm -f "$_cf_tmp" 2>/dev/null || true
+  fi
   # $RT, never $RTN — same "pinned, not PATH" rule as _ensure_seccomp above
   # (this was the one actual bug this fix corrects: a bare-PATH podman here
   # meant a fresh, unpackaged host's fetch attempt silently reached whatever
@@ -556,7 +583,9 @@ _provision_companion() {
 # Recreate the container with the hardened cage (loopback + min caps + seccomp).
 # Uses _image() (single runtime image, paired or not).
 _run() {
-  _ensure_machine
+  # Every caller establishes the machine before entering this lower-level
+  # container operation. Keeping that boundary explicit also prevents a
+  # nested `machine` stage from overwriting the outer porcelain stage.
   _ensure_seccomp
   _provision_companion
   _active_image="$(_image)"
@@ -2395,8 +2424,8 @@ cmd_up() {
   secret_fd=3
   [ "${1:-}" = "--secret-fd" ] && secret_fd="${2:-3}"
 
-  _stage container "Creando el contenedor"
   _ensure_machine
+  _stage container "Creando el contenedor"
   if _container_matches_desired; then
     : # already converged on the desired digest — never destroy a healthy engine
   else

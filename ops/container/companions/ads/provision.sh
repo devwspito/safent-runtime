@@ -163,8 +163,17 @@ ensure_bearer() {
 
 # ── 4. companions.json (exact shape hermes.shell_server.companions validates) ─
 write_companions_json() {
-  local fingerprint
-  fingerprint="sha256:$(openssl x509 -in "$STATE/tls/ca.crt" -outform der | sha256sum | cut -d' ' -f1)"
+  local fingerprint fingerprint_hex
+  # OpenSSL is already a hard dependency for the CA and bearer.  Use it for
+  # the digest too instead of GNU sha256sum: stock macOS exposes no
+  # sha256sum on the GUI app's minimal PATH, which used to disable the Ads
+  # scaffold during an otherwise healthy first boot.
+  fingerprint_hex="$(openssl x509 -in "$STATE/tls/ca.crt" -outform der \
+    | openssl dgst -sha256 -r | awk '{print $1}')"
+  [ "${#fingerprint_hex}" -eq 64 ] \
+    && [[ "$fingerprint_hex" != *[!0-9a-fA-F]* ]] \
+    || fail "no se pudo calcular la huella SHA-256 de la CA"
+  fingerprint="sha256:$fingerprint_hex"
   # Written to a temp name first: the live file is 0444 and (when we could
   # chown it) root-owned, so `cat >` onto it would fail — rename in the
   # owner-writable $STATE dir is the only re-provision path that works.

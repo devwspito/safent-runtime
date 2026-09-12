@@ -234,6 +234,37 @@ exit 1
     }
 }
 
+#[test]
+fn apply_reclassifies_raw_seccomp_process_exit_without_a_failed_event() {
+    let script = fake_cli(
+        r#"
+if [ "$1" = "up" ]; then
+  echo '{"t":"stage","id":"container","label":"Creando el contenedor"}'
+  echo 'Error: opening seccomp profile failed: open /Applications/Safent.app/Contents/Resources/runtime/safent.json: no such file or directory' >&2
+  exit 125
+fi
+exit 1
+"#,
+    );
+    let driver = EmbeddedCliDriver::new(config(script));
+    let notifier = RecordingNotifier::new();
+    let err = driver
+        .apply(
+            &RepairAction::CreateContainer,
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
+        .unwrap_err();
+
+    match err {
+        EngineError::Reported(cause) => {
+            assert_eq!(cause.code, FailureCode::SeccompProfileMissing, "{cause:?}");
+            assert!(cause.message.contains("opening seccomp profile"));
+        }
+        other => panic!("expected Reported(SeccompProfileMissing), got {other:?}"),
+    }
+}
+
 /// Regression test (packaging review item 3, verificacion-paquete-linux.md
 /// §"Pasada 1"): a bundled/host podman storage-lock collision made
 /// `cmd_ensure_images` report a generic `registry_unreachable` — the CLI's

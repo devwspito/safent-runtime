@@ -338,8 +338,8 @@
       {
         "repo_path": "safent",
         "flat_name": "safent",
-        "sha256": "a685441f052a88a2fd83b59cfb12820f95ab974c1f0b8b413ad8cfa50f2ae2d0",
-        "size_bytes": 113939,
+        "sha256": "980e7ef8228e9fb9cf60070222afb8d4c8ad7d8ae68bd8cefd64ce4a34a5662b",
+        "size_bytes": 126990,
         "mode": "0755"
       },
       {
@@ -359,8 +359,8 @@
       {
         "repo_path": "ops/container/companions/ads/provision.sh",
         "flat_name": "provision.sh",
-        "sha256": "eeef14235363daa6dca2f1ff5fa77745f15d162d6451fdc99de8636d0b39974d",
-        "size_bytes": 24031,
+        "sha256": "f88eaa8b390b88e93a5ceeb0813193871c8cb0ff50d9f4a80e725856a475ad27",
+        "size_bytes": 24798,
         "mode": "0755"
       },
       {

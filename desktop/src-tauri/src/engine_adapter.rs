@@ -291,10 +291,19 @@ impl EngineDriver for EmbeddedCliDriver {
             return Ok(ApplyOutcome::Ready(BootstrapTicket::new(line)));
         }
         if !outcome.exit_ok {
-            return Err(EngineError::ProcessExited {
-                code: outcome.exit_code,
-                stderr_tail: outcome.stderr_tail,
-            });
+            // A shell running with `set -e` can exit before it has emitted a
+            // structured `failed` event (podman's own seccomp/open errors are
+            // a real example).  Do not discard the classifier merely because
+            // the failure arrived through the raw process-exit path.
+            let generic = FailureCause {
+                code: FailureCode::DaemonUnhealthy,
+                message: outcome.stderr_tail.clone(),
+                retryable: true,
+            };
+            return Err(EngineError::Reported(reclassify_from_stderr(
+                generic,
+                &outcome.stderr_tail,
+            )));
         }
         Ok(ApplyOutcome::Progressed)
     }

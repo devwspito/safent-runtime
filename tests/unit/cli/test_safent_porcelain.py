@@ -1288,7 +1288,10 @@ class TestEnsureImages:
 
 
 def _run_up_with_secret_pipe(
-    *args: str, env: dict[str, str], capsys: pytest.CaptureFixture[str]
+    *args: str,
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    with_companion: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run `up` with a real pipe open for the ticket descriptor, passed to
     the child at whatever fd number the OS actually gave it — forcing a
@@ -1306,8 +1309,12 @@ def _run_up_with_secret_pipe(
     os.set_inheritable(w_fd, True)
     try:
         with capsys.disabled():
+            command = ["sh", str(_SAFENT_CLI)]
+            if not with_companion:
+                command.append("--no-companion")
+            command.extend(["up", *args, "--secret-fd", str(w_fd)])
             result = subprocess.run(
-                ["sh", str(_SAFENT_CLI), "--no-companion", "up", *args, "--secret-fd", str(w_fd)],
+                command,
                 env=env,
                 capture_output=True,
                 text=True,
@@ -1694,7 +1701,7 @@ class TestBundledPodmanGetsItsOwnStorage:
         assert not (state_home / "podman" / "storage.conf").exists()
 
 
-class TestSeccompProfileResolvesFromTheBundleNotTheStateDir:
+class TestSeccompProfileIsCopiedFromTheBundleIntoPrivateState:
     """MAC3-03 (verificacion-mac-3.md, MAC2-07 repeated unfixed): a real Mac
     run failed with a raw podman error — "opening seccomp profile failed:
     open <path>: no such file or directory" — because the profile was
@@ -1703,7 +1710,9 @@ class TestSeccompProfileResolvesFromTheBundleNotTheStateDir:
     podman-machine VM, which only ever virtiofs-mounts /Users, /private and
     /var/folders. Shipping the profile as a bundled, hash-verified runtime
     asset (like podman/gvproxy/vfkit) removes the network/image dependency
-    entirely for the PINNED-podman (desktop app) case."""
+    entirely for the PINNED-podman (desktop app) case.  The source may live
+    under /Applications, but the path passed to podman must live in the
+    canonical private state directory that podman-machine actually shares."""
 
     def test_bundled_profile_is_used_instead_of_fetching_at_runtime(
         self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
@@ -1725,14 +1734,59 @@ class TestSeccompProfileResolvesFromTheBundleNotTheStateDir:
             fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, port=healthz_server
         )
         env["SAFENT_PODMAN"] = str(pinned)
+        env["SAFENT_STATE_HOME"] = str(tmp_path / "home" / ".safent")
 
         result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
 
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         assert ticket.strip() == f"http://127.0.0.1:{healthz_server}/?k={_SECRET_TOKEN}"
+        events = [json.loads(line) for line in result.stdout.splitlines()]
+        stages = [event["id"] for event in events if event["t"] == "stage"]
+        assert stages[-2:] == ["container", "health"], stages
+        assert {event["id"] for event in events if event["t"] == "done"} >= {
+            "container", "health"
+        }
         run_calls = [c for c in _podman_calls(podman_log) if c.startswith("run -d ")]
         assert len(run_calls) == 1, run_calls
-        assert f"--security-opt seccomp={bundled_profile}" in run_calls[0], run_calls[0]
+        private_profile = Path(env["SAFENT_STATE_HOME"]) / "safent-seccomp.json"
+        assert private_profile.read_bytes() == bundled_profile.read_bytes()
+        assert f"--security-opt seccomp={private_profile}" in run_calls[0], run_calls[0]
+        assert str(bundled_profile) not in run_calls[0]
+
+    def test_bundled_companion_scaffold_is_used_without_helper_containers(
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str,
+        capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        pinned_dir = tmp_path / "Applications" / "Safent.app" / "Contents" / "Resources" / "runtime"
+        pinned_dir.mkdir(parents=True)
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        (pinned_dir / "safent.json").write_text('{"defaultAction":"SCMP_ACT_ERRNO"}')
+        (pinned_dir / "provision.sh").write_text("#!/bin/sh\nexit 0\n")
+        (pinned_dir / "compose.yaml").write_text("services: {}\n")
+        (pinned_dir / "caps.template.yaml").write_text("accounts: {}\n")
+
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            port=healthz_server,
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+        env["SAFENT_STATE_HOME"] = str(tmp_path / "home" / ".safent")
+
+        result, _ticket = _run_up_with_secret_pipe(
+            "--porcelain", env=env, capsys=capsys, with_companion=True
+        )
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        assert not any("run --rm --entrypoint cat" in call for call in calls), calls
+        scaffold_dir = Path(env["SAFENT_STATE_HOME"]) / "companions" / "ads" / "bin"
+        for name in ("provision.sh", "compose.yaml", "caps.template.yaml"):
+            assert (scaffold_dir / name).read_bytes() == (pinned_dir / name).read_bytes()
 
     def test_state_home_given_as_a_symlink_is_canonicalized_before_use(
         self, tmp_path: Path, fake_bin_dir: Path
