@@ -65,6 +65,7 @@ exit 0
 
 _FAKE_CURL = """#!/usr/bin/env bash
 # /mcp/health is bearer-protected: a bare 401 IS liveness (see provision.sh).
+[ -z "${FAKE_CURL_LOG:-}" ] || printf '%s\\n' "$@" >> "$FAKE_CURL_LOG"
 printf '401'
 exit 0
 """
@@ -94,13 +95,14 @@ def fake_bin_dir(tmp_path: Path) -> Path:
 
 
 def _run_provision(
-    state_dir: Path, fake_bin_dir: Path, podman_log: Path
+    state_dir: Path, fake_bin_dir: Path, podman_log: Path, *, extra_env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
     env["SAFENT_COMPANION_STATE"] = str(state_dir)
     env["SAFENT_ADS_IMAGE"] = "safent-ads:test-fake"
     env["FAKE_PODMAN_LOG"] = str(podman_log)
+    env.update(extra_env or {})
     return subprocess.run(
         ["bash", str(_PROVISION_SH)],
         env=env,
@@ -131,6 +133,22 @@ def provisioned_state(
     result = _run_provision(state_dir, fake_bin_dir, podman_log)
     assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
     return state_dir, result
+
+
+@pytest.mark.parametrize("platform,ip", [("Darwin", "127.0.0.1"), ("Linux", "10.201.0.10")])
+def test_host_health_probe_uses_exact_route_and_private_tls(tmp_path, fake_bin_dir, platform, ip):
+    uname = fake_bin_dir / "uname"
+    uname.write_text(f"#!/bin/sh\nprintf '%s\\n' '{platform}'\n")
+    uname.chmod(0o755)
+    log = tmp_path / "curl.log"
+    result = _run_provision(tmp_path / "state", fake_bin_dir, tmp_path / "podman.log",
+                            extra_env={"FAKE_CURL_LOG": str(log)})
+    assert result.returncode == 0, result.stderr
+    arguments = log.read_text().splitlines()
+    assert f"ads.safent.internal:8443:{ip}" in arguments
+    assert "--cacert" in arguments
+    assert "--noproxy" in arguments
+    assert "--insecure" not in arguments
 
 
 class TestFirstRunWritesExpectedFiles:

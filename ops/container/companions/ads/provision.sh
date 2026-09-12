@@ -137,7 +137,7 @@ ensure_tls() {
     _open_leaf_key_to_container
     return 0
   fi
-  log "generando CA privada + hoja TLS para $COMPANION_HOST…"
+  log "generando CA privada + hoja TLS para ${COMPANION_HOST}..."
   local ca_key="$STATE/tls/ca.key" ca_crt="$STATE/tls/ca.crt"
   local leaf_key="$STATE/tls/leaf.key" leaf_crt="$STATE/tls/leaf.crt"
   openssl ecparam -genkey -name prime256v1 -noout -out "$ca_key"
@@ -439,11 +439,15 @@ start_companion() {
 # pins the SAN-matching hostname to the fixed companion IP without needing an
 # /etc/hosts entry on THIS host (that entry belongs to the container, not us).
 wait_for_health() {
-  local i=0 code
+  local i=0 code health_ip="$COMPANION_IP"
+  # The bridge lives INSIDE the macOS VM. Its fixed loopback publication is
+  # the host route; keep the private CA and hostname verification unchanged.
+  [ "$(uname -s)" != Darwin ] || health_ip=127.0.0.1
   while [ $i -lt 60 ]; do
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
         --cacert "$STATE/tls/ca.crt" \
-        --resolve "$COMPANION_HOST:$COMPANION_PORT:$COMPANION_IP" \
+        --noproxy "$COMPANION_HOST" \
+        --resolve "$COMPANION_HOST:$COMPANION_PORT:$health_ip" \
         "https://$COMPANION_HOST:$COMPANION_PORT/mcp/health" 2>/dev/null || true)"
     case "$code" in
       200|401) log "companion listo (/mcp/health -> $code)"; return 0 ;;

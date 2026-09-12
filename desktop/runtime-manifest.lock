@@ -6,6 +6,35 @@
   "note": "Fuente única de verdad para desktop/scripts/stage-runtime.sh. Todo hash es sha256 del archivo EXACTO publicado en la URL indicada (recalculado a mano el 10-sep-2026, no copiado de research.md). Los digests de imagen OCI (machine_image) son los del propio registro (content-addressable: el digest ES el sha256 del blob, por eso no se descarga el blob de 932 MB para 'verificarlo' — el propio stage-runtime.sh lo verifica en el momento real de la descarga).",
   "targets": {
     "aarch64-apple-darwin": {
+      "compose_provider": {
+        "version": "5.5.1",
+        "source": "https://github.com/docker/compose/releases/tag/v5.5.1",
+        "license_spdx": "Apache-2.0",
+        "download": {
+          "url": "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-darwin-aarch64",
+          "sha256": "998735c9b6fe68a4f05895e6ea73d71ad06f9fc7046383ad89e47346781b6af5",
+          "size_bytes": 30532210,
+          "path": "bin/docker-compose"
+        },
+        "license": {
+          "url": "https://raw.githubusercontent.com/docker/compose/v5.5.1/LICENSE",
+          "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+          "size_bytes": 11357,
+          "path": "docker-compose-LICENSE"
+        },
+        "provenance": {
+          "url": "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-darwin-aarch64.provenance.json",
+          "sha256": "f0f902382cd708c5fa1530e6427be5b78a822b9d117ee0c676bf322f2f0ea792",
+          "size_bytes": 59908,
+          "path": "docker-compose-provenance.json"
+        },
+        "sbom": {
+          "url": "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-darwin-aarch64.sbom.json",
+          "sha256": "aa7f8651da1cc60e89636026def175ac5a7eea44a75b7510642169c7e0df571d",
+          "size_bytes": 245107,
+          "path": "docker-compose-sbom.json"
+        }
+      },
       "private_build": {
         "source_commit": "8303f2e25b675ea7f82099d615c60969aec15870",
         "source_sha256": "8a2584618a4ea0cfc3b0e95f7e07c8567b926df71fb7e8311102194b25a343b9",

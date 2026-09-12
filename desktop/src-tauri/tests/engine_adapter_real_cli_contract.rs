@@ -27,8 +27,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use domain::{HostOs, ImageRef, Port, RepairAction};
 use engine_adapter::{EmbeddedCliConfig, EmbeddedCliDriver};
@@ -163,7 +163,27 @@ fn write_fake_podman(dir: &Path) -> PathBuf {
     let path = dir.join("podman");
     std::fs::write(&path, FAKE_PODMAN).expect("write fake podman");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_private_build_marker(&path);
     path
+}
+
+fn write_private_build_marker(path: &Path) {
+    let output = std::process::Command::new("sh")
+        .args(["-c", "if command -v sha256sum >/dev/null; then sha256sum \"$1\"; else shasum -a 256 \"$1\"; fi", "sha"])
+        .arg(path).output().unwrap();
+    assert!(output.status.success());
+    let digest = String::from_utf8(output.stdout).unwrap();
+    let marker = serde_json::json!({
+        "schema_version": 1, "capability": "safent-private-machine-v1",
+        "source_commit": "8303f2e25b675ea7f82099d615c60969aec15870",
+        "patch_sha256": "a".repeat(64),
+        "binary_sha256": digest.split_whitespace().next().unwrap()
+    });
+    std::fs::write(
+        path.parent().unwrap().join("podman-private-build.json"),
+        serde_json::to_string_pretty(&marker).unwrap(),
+    )
+    .unwrap();
 }
 
 /// MAC-01: the real CLI's `cmd_facts` derives `os_id` from its OWN `uname -s`
@@ -438,15 +458,22 @@ esac
 # The unrelated default daemon answers info successfully.
 exit 0
 "#).unwrap();
+    write_private_build_marker(&fx.podman_path);
     let uname_dir = unique_dir("machine-conflict-uname");
     write_fake_uname(&uname_dir);
     let original_path = std::env::var("PATH").unwrap_or_default();
     // SAFETY: ENV_LOCK held; restored before inspecting the result.
-    unsafe { set_env("PATH", &format!("{}:{original_path}", uname_dir.display())); }
+    unsafe {
+        set_env("PATH", &format!("{}:{original_path}", uname_dir.display()));
+    }
     let result = EmbeddedCliDriver::new(config(&fx, "engine-good")).apply(
-        &RepairAction::CreateMachine, &RecordingNotifier::new(), &CancelSignal::new(),
+        &RepairAction::CreateMachine,
+        &RecordingNotifier::new(),
+        &CancelSignal::new(),
     );
-    unsafe { set_env("PATH", &original_path); }
+    unsafe {
+        set_env("PATH", &original_path);
+    }
     match result {
         Err(ports::EngineError::Reported(cause)) => {
             assert_eq!(cause.code, domain::FailureCode::MachineStartFailed);
@@ -456,8 +483,18 @@ exit 0
         other => panic!("expected a non-retryable machine failure, got {other:?}"),
     }
     let calls = podman_calls(&fx);
-    assert_eq!(calls.iter().filter(|c| c.starts_with("machine start ")).count(), 1);
-    assert!(!calls.iter().any(|c| c == "info" || c.starts_with("machine stop ")));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.starts_with("machine start "))
+            .count(),
+        1
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c == "info" || c.starts_with("machine stop "))
+    );
 }
 
 #[test]

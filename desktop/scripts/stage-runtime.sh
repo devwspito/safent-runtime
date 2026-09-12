@@ -133,6 +133,8 @@ source "$SCRIPT_DIR/lib/normalize-staged-tree.sh"
 source "$SCRIPT_DIR/lib/patch-containers-conf.sh"
 # shellcheck source=lib/resolve-image-digest.sh
 source "$SCRIPT_DIR/lib/resolve-image-digest.sh"
+# shellcheck source=lib/stage-compose-provider.sh
+source "$SCRIPT_DIR/lib/stage-compose-provider.sh"
 
 TARGET="${1:-}"
 case "$TARGET" in
@@ -388,6 +390,8 @@ _stage_macos() {
   write_macos_containers_conf "$DEST/containers.conf"
   chmod 0644 "$DEST/containers.conf"
   echo "    wrote containers.conf (helper_binaries_dir -> \$BINDIR, $(SHA256 "$DEST/containers.conf"))"
+
+  stage_compose_provider "$LOCKFILE" "$TARGET" "$CACHE_DIR" "$DEST" || exit $?
 
   # krunkit: alternative (libkrun/GPU) machine provider, bundled so the app can
   # start a pre-existing libkrun machine it adopts (see T024 quickstart) without

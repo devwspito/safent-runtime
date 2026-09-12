@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=12
+_CLI_REV=13
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -152,6 +152,132 @@ if [ -n "${SAFENT_PODMAN:-}" ]; then
 else
   RT="$(command -v podman 2>/dev/null || command -v docker 2>/dev/null || true)"
 fi
+[ -n "$RT" ] || { echo "[x] You need podman or docker." >&2; exit 1; }
+RTN="$(basename "$RT")"
+OS="$(uname -s 2>/dev/null || echo unknown)"
+
+# macOS is a remote client. Isolate the CHILD, not Safent's HOME: Podman
+# reads HOME as well as XDG paths (SSH, socket-shortening links and auth).
+# A separate executable transport also covers the companion provisioner.
+# Never import/migrate the user's old machines or connections into this tree.
+if [ "$OS" = Darwin ] && [ "$RTN" = podman ]; then
+  _podman_real="$RT"
+  _podman_bundle_dir="$(CDPATH='' cd -- "$(dirname "$RT")" && pwd -P)"
+  _podman_real="$_podman_bundle_dir/$(basename "$RT")"
+  PODMAN_STATE="$SAFENT_STATE_HOME/podman/native-v1"
+  # These paths become literal shell/TOML strings below; unsupported control
+  # characters fail closed rather than turning a configured path into code.
+  case "$PODMAN_STATE$_podman_real$MACHINE_NAME" in
+    *"'"*|*'"'*|*'\'*|*'
+'*) echo '[x] Unsupported character in private Podman path/name.' >&2; exit 1 ;;
+  esac
+  case "$MACHINE_NAME" in ''|*[!a-zA-Z0-9_.-]*) echo '[x] Invalid Safent machine name.' >&2; exit 1 ;; esac
+  _private_podman_dir() {
+    [ ! -L "$1" ] || { echo '[x] Private Podman directory is a symlink.' >&2; exit 1; }
+    (umask 077; mkdir -p "$1")
+    _owner="$(stat -c %u "$1" 2>/dev/null)" || _owner="$(stat -f %u "$1")"
+    [ "$_owner" = "$(id -u)" ] || { echo '[x] Private Podman directory has another owner.' >&2; exit 1; }
+    chmod 700 "$1"
+  }
+  _private_podman_dir "$SAFENT_STATE_HOME/podman"
+  for _dir in "$PODMAN_STATE" "$PODMAN_STATE/config" \
+    "$PODMAN_STATE/config/containers" "$PODMAN_STATE/data" "$PODMAN_STATE/cache" \
+    "$PODMAN_STATE/bin" "$PODMAN_STATE/bin/$MACHINE_NAME" "$PODMAN_STATE/docker" "$PODMAN_STATE/storage" "$PODMAN_STATE/runroot"; do
+    _private_podman_dir "$_dir"
+  done
+  # Darwin uses TMPDIR, NOT XDG_RUNTIME_DIR. Unix sockets must also fit in
+  # sockaddr_un. Stable short private path, with a profile ownership marker:
+  # hash collision or pre-existing foreign directory is an error, not adoption.
+  _runtime_key="$(printf '%s' "$PODMAN_STATE" | cksum | awk '{print $1}')"
+  _podman_runtime="/tmp/safent-pm-$(id -u)-$_runtime_key"
+  if [ ! -e "$_podman_runtime" ] && [ ! -L "$_podman_runtime" ]; then
+    if (umask 077; mkdir "$_podman_runtime") 2>/dev/null; then
+      printf '%s\n' "$PODMAN_STATE" > "$_podman_runtime/profile"
+    fi
+  fi
+  [ ! -L "$_podman_runtime" ] && [ ! -L "$_podman_runtime/profile" ] \
+    && [ "$(cat "$_podman_runtime/profile" 2>/dev/null)" = "$PODMAN_STATE" ] \
+    || { echo '[x] Private Podman runtime directory unavailable; retry after inspecting its ownership.' >&2; exit 1; }
+  _private_podman_dir "$_podman_runtime"
+  _podman_runtime="$(CDPATH='' cd -- "$_podman_runtime" && pwd -P)"
+  _private_podman_dir "$_podman_runtime/home"
+  # The ignition socket is shortened to HOME/.podman when its data path is
+  # long. HOME must ALSO be short; persistent keys still use XDG_DATA_HOME.
+  _ignition_socket="$_podman_runtime/home/.podman/$MACHINE_NAME-ignition.sock"
+  [ "${#_ignition_socket}" -le 103 ] \
+    || { echo '[x] Private Podman socket path is too long.' >&2; exit 1; }
+  for _file in containers.conf storage.conf registries.conf auth.json connections.json; do
+    [ ! -L "$PODMAN_STATE/$_file" ] || { echo '[x] Private Podman configuration is a symlink.' >&2; exit 1; }
+  done
+  _private_config() {
+    _config_file="$1"; shift
+    _config_tmp="$(mktemp "$PODMAN_STATE/.config.XXXXXX")"
+    printf "$@" > "$_config_tmp"
+    mv -f "$_config_tmp" "$PODMAN_STATE/$_config_file"
+  }
+  (umask 077
+    _private_config containers.conf '[engine]\nhelper_binaries_dir = ["$BINDIR"]\n[machine]\nprovider = "applehv"\n'
+    _private_config storage.conf '[storage]\ndriver = "overlay"\ngraphroot = "%s/storage"\nrunroot = "%s/runroot"\n' "$PODMAN_STATE" "$PODMAN_STATE"
+    _private_config registries.conf 'unqualified-search-registries = []\n'
+    [ -f "$PODMAN_STATE/auth.json" ] || printf '{"auths":{}}\n' > "$PODMAN_STATE/auth.json"
+  )
+  # Write a fresh transport atomically. Paths have been validated above, and
+  # the directory is private. Never reuse a shim supplied by the caller.
+  _shim_tmp="$(mktemp "$PODMAN_STATE/bin/$MACHINE_NAME/.podman.XXXXXX")"
+  cat > "$_shim_tmp" <<EOF
+#!/bin/sh
+set -e
+unset CONTAINER_HOST CONTAINER_CONNECTION CONTAINER_SSHKEY CONTAINER_PROXY
+unset DOCKER_HOST DOCKER_CONTEXT DOCKER_CERT_PATH DOCKER_TLS_VERIFY
+unset CONTAINERS_CONF_OVERRIDE CONTAINERS_HELPER_BINARY_DIR CONTAINERS_SSH_CONF
+unset CONTAINERS_REGISTRIES_CONF_OVERRIDE CONTAINERS_STORAGE_CONF_OVERRIDE
+unset PODMAN_COMPOSE_PROVIDER
+unset STORAGE_DRIVER STORAGE_OPTS SSH_AUTH_SOCK SSH_AGENT_PID
+unset _CONTAINERS_ROOTLESS_UID _CONTAINERS_USERNS_CONFIGURED
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+unset SSL_CERT_FILE SSL_CERT_DIR
+export HOME='$_podman_runtime/home'
+export PATH='$PODMAN_STATE/bin/$MACHINE_NAME:$_podman_bundle_dir:/usr/bin:/bin:/usr/sbin:/sbin'
+export XDG_CONFIG_HOME='$PODMAN_STATE/config'
+export XDG_DATA_HOME='$PODMAN_STATE/data'
+export XDG_CACHE_HOME='$PODMAN_STATE/cache'
+export XDG_RUNTIME_DIR='$_podman_runtime'
+export TMPDIR='$_podman_runtime'
+export CONTAINERS_CONF='$PODMAN_STATE/containers.conf'
+export CONTAINERS_STORAGE_CONF='$PODMAN_STATE/storage.conf'
+export CONTAINERS_REGISTRIES_CONF='$PODMAN_STATE/registries.conf'
+export PODMAN_CONNECTIONS_CONF='$PODMAN_STATE/connections.json'
+export REGISTRY_AUTH_FILE='$PODMAN_STATE/auth.json'
+export DOCKER_CONFIG='$PODMAN_STATE/docker'
+export CONTAINERS_MACHINE_PROVIDER=applehv
+export PODMAN_COMPOSE_PROVIDER='$_podman_bundle_dir/docker-compose'
+# The patched binary must not consult/claim the owner's global helper socket.
+# Capability is a signed-bundle sidecar, also tied to the actual binary.
+# Stock Podman cannot opt out of the global macOS helper in its environment.
+_marker='$_podman_bundle_dir/podman-private-build.json'
+_expected="\$(sed -n 's/^[[:space:]]*"binary_sha256"[[:space:]]*:[[:space:]]*"\([a-f0-9]*\)"[,]\{0,1\}[[:space:]]*$/\1/p' "\$_marker" 2>/dev/null || true)"
+if command -v sha256sum >/dev/null 2>&1; then
+  _actual="\$(sha256sum '$_podman_real' | awk '{print \$1}')"
+else
+  _actual="\$(shasum -a 256 '$_podman_real' | awk '{print \$1}')"
+fi
+[ "\${#_expected}" = 64 ] && [ "\$_actual" = "\$_expected" ] \
+  && grep -Eq '"schema_version"[[:space:]]*:[[:space:]]*1([[:space:]]*[,}])' "\$_marker" \
+  && grep -Eq '"capability"[[:space:]]*:[[:space:]]*"safent-private-machine-v1"' "\$_marker" || {
+  echo '[x] Safent requires its isolated Podman build; refusing the shared runtime.' >&2
+  exit 125
+}
+[ "\${1:-}" != --safent-verify-isolation ] || exit 0
+case "\${1:-} \${2:-}" in
+  'machine '*|'version '*|'--version '*|'system connection') ;;
+  *) export CONTAINER_CONNECTION='$MACHINE_NAME-root' ;;
+esac
+exec '$_podman_real' "\$@"
+EOF
+  chmod 700 "$_shim_tmp"
+  mv -f "$_shim_tmp" "$PODMAN_STATE/bin/$MACHINE_NAME/podman"
+  RT="$PODMAN_STATE/bin/$MACHINE_NAME/podman"
+fi
 [ -n "$RT" ] || { echo "[x] You need podman or docker.  ->  https://podman.io/get-started" >&2; exit 1; }
 RTN="$(basename "$RT")"
 OS="$(uname -s 2>/dev/null || echo unknown)"
@@ -171,7 +297,7 @@ OS="$(uname -s 2>/dev/null || echo unknown)"
 # under $SAFENT_STATE_HOME — generated HERE, not baked into the bundle,
 # because that path is only known at runtime. An existing
 # CONTAINERS_CONF/CONTAINERS_STORAGE_CONF from the caller always wins.
-if [ -n "${SAFENT_PODMAN:-}" ]; then
+if [ -n "${SAFENT_PODMAN:-}" ] && [ "$OS" != Darwin ]; then
   # `pwd -P` (physical, symlink-resolved), not plain `pwd` (logical — keeps
   # whatever symlink components the caller's own $SAFENT_PODMAN happened to
   # spell) — MAC3-03's same VM-visibility rule applies to this directory
@@ -251,21 +377,7 @@ _agent_unit() {
 # macOS: the cage runs inside a podman machine, which MUST be rootful.
 _ensure_machine() {
   [ "$RTN" = podman ] && [ "$OS" = Darwin ] || return 0
-  name="$(podman machine list -q 2>/dev/null | head -1)"
-  if [ -z "$name" ]; then
-    echo "[*] No podman machine - creating a rootful one (first time only, takes a bit)..."
-    podman machine init --rootful --cpus 4 --memory 8192 --disk-size 60 \
-      && podman machine start \
-      || { echo "[x] Could not create/start the podman machine."; exit 1; }
-    name="$(podman machine list -q 2>/dev/null | head -1)"
-  fi
-  rootful="$(podman machine inspect "$name" --format '{{.Rootful}}' 2>/dev/null | head -1)"
-  if [ "$rootful" != "true" ]; then
-    echo "[x] The podman machine '$name' is rootless; the cage needs rootful. Convert it:"
-    echo "    podman machine stop '$name' && podman machine set --rootful '$name' && podman machine start '$name'"
-    exit 1
-  fi
-  podman info >/dev/null 2>&1 || podman machine start "$name" >/dev/null 2>&1 || true
+  cmd_ensure_machine
 }
 
 # MAC3-07 (verificacion-mac-3.md, MAC-07/MAC2-13 repeated unfixed): reports
@@ -434,7 +546,7 @@ _provision_companion() {
   # §2) in EITHER mode — non-porcelain `up`/`url` also only ever print the
   # final URL on stdout, never provisioning chatter. Its exit status (the
   # only thing this `if` actually needs) is untouched by the redirect.
-  if "$COMPANION_BIN_DIR/provision.sh" --scaffold >&2; then
+  if SAFENT_PODMAN="$RT" "$COMPANION_BIN_DIR/provision.sh" --scaffold >&2; then
     COMPANION_RUN_ARGS="--network safent-companions -v ${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro -v ${COMPANION_STATE}/tls/ca.crt:/etc/hermes/companions/ads-ca.crt:ro -v ${COMPANION_STATE}/bearer:/etc/hermes/companions/ads.bearer:ro -v ${COMPANION_STATE}/sso/ads-sso.key:/etc/hermes/companions/ads-sso.key:ro"
   else
     echo "[!] Companion scaffolding failed — starting Safent without it (FR-3)." >&2
@@ -1420,12 +1532,12 @@ _companion_install_or_repair() {
   done
 
   _stage companion_scaffold "Preparando el andamiaje del companion"
-  "$COMPANION_BIN_DIR/provision.sh" --scaffold >&2 \
+  SAFENT_PODMAN="$RT" "$COMPANION_BIN_DIR/provision.sh" --scaffold >&2 \
     || _die_porcelain companion_network_conflict "No se pudo preparar la red/estado del companion" true
   _stage_done
 
   _stage companion_up "Instalando el companion"
-  _run_with_heartbeat "$COMPANION_BIN_DIR/provision.sh" \
+  _run_with_heartbeat env SAFENT_PODMAN="$RT" "$COMPANION_BIN_DIR/provision.sh" \
     || _die_porcelain companion_migration_failed "El companion no arranco" true
   _stage_done
 
@@ -1675,7 +1787,7 @@ _uninstall_machine_if_ours() {
   _mj="$SAFENT_STATE_HOME/machine.json"
   [ -f "$_mj" ] || return 0
   _m_name="$(_manifest_field "$_mj" name)"
-  [ -n "$_m_name" ] || return 0
+  [ "$_m_name" = "$MACHINE_NAME" ] || return 0
   [ "$(_json_bool_field "$_mj" adopted)" = "true" ] && return 0
   "$RT" machine rm -f "$_m_name" >/dev/null 2>&1 || true
 }
@@ -2092,6 +2204,8 @@ cmd_ensure_machine() {
     _stage_done
     return 0
   fi
+  "$RT" --safent-verify-isolation \
+    || _die_porcelain runtime_hash_mismatch "El Podman empaquetado no acredita aislamiento privado; instala un paquete Safent compatible." false
 
   # MAC-05 (verificacion-mac-1.md): NEVER take "whichever machine podman
   # happens to list first" — that adopted the OWNER's own live machine
@@ -2103,7 +2217,7 @@ cmd_ensure_machine() {
   name=""
   if [ -f "$_mj" ]; then
     _recorded_name="$(_manifest_field "$_mj" name)"
-    if [ -n "$_recorded_name" ] && "$RT" machine inspect "$_recorded_name" >/dev/null 2>&1; then
+    if [ "$_recorded_name" = "$MACHINE_NAME" ] && "$RT" machine inspect "$_recorded_name" >/dev/null 2>&1; then
       name="$_recorded_name"
     fi
   fi
@@ -2169,6 +2283,11 @@ cmd_ensure_machine() {
   [ "$_started_state" = running ] \
     || _die_porcelain machine_start_failed \
       "No se ha confirmado el arranque de $name. Revisa el error de Podman; si otra VM esta activa, debes detenerla explicitamente antes de volver a intentarlo. Safent no detendra maquinas ajenas ni reintentara automaticamente." false
+  # Running alone does not prove guest readiness (e.g. failed ignition).
+  # This transport pins the private root connection; info is an additional
+  # readiness requirement, NEVER a fallback for a failed named inspection.
+  "$RT" info >/dev/null 2>&1 \
+    || _die_porcelain machine_start_failed "La maquina privada figura arrancada, pero su conexion exacta no responde. Revisa el diagnostico antes de reintentar." false
 
   # MAC3-07: fail loudly instead of shipping a machine silently run by a
   # foreign (non-bundled) gvproxy/vfkit — see _foreign_engine_helper above.

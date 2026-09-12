@@ -50,8 +50,16 @@ _KNOWN_PROGRESS_UNITS = {"bytes", "layers", "steps"}
 _FAKE_PODMAN = """#!/usr/bin/env bash
 set -e
 echo "$@" >> "$FAKE_PODMAN_LOG"
+if [ -n "${FAKE_PRIVATE_ENV_LOG:-}" ]; then
+  for key in HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR TMPDIR CONTAINERS_CONF CONTAINERS_CONF_OVERRIDE CONTAINERS_STORAGE_CONF CONTAINERS_REGISTRIES_CONF PODMAN_CONNECTIONS_CONF CONTAINER_CONNECTION CONTAINER_HOST DOCKER_HOST REGISTRY_AUTH_FILE DOCKER_CONFIG CONTAINERS_MACHINE_PROVIDER SSH_AUTH_SOCK; do
+    printf '%s=%s\\n' "$key" "${!key-}" >> "$FAKE_PRIVATE_ENV_LOG"
+  done
+fi
 
 case "$1" in
+  info)
+    [ "${FAKE_INFO_FAILS:-false}" != true ] || exit 1
+    exit 0 ;;
   inspect)
     shift
     # BKP-01: the CLI now pins `inspect --type container` so a same-named
@@ -299,6 +307,18 @@ def _base_env(
     env["FAKE_PULL_FAILS"] = "true" if pull_fails else "false"
     if extra_env:
         env.update(extra_env)
+    # All copies of this fake are fixtures for the patched bundled runtime,
+    # including tests which select their copy AFTER calling _base_env.
+    for pinned in fake_bin_dir.parent.rglob("podman"):
+        if not pinned.is_file() or pinned.read_text() != _FAKE_PODMAN:
+            continue
+        (pinned.parent / "podman-private-build.json").write_text(json.dumps({
+            "schema_version": 1,
+            "capability": "safent-private-machine-v1",
+            "source_commit": "8303f2e25b675ea7f82099d615c60969aec15870",
+            "patch_sha256": "a" * 64,
+            "binary_sha256": hashlib.sha256(pinned.read_bytes()).hexdigest(),
+        }, indent=2))
     return env
 
 
@@ -664,6 +684,133 @@ def _fake_darwin(fake_bin_dir: Path) -> None:
     uname = fake_bin_dir / "uname"
     uname.write_text(_FAKE_UNAME)
     uname.chmod(0o755)
+
+
+class TestMacPrivatePodman:
+    def test_running_machine_without_its_own_connection_is_not_ready(self, tmp_path, fake_bin_dir):
+        _fake_darwin(fake_bin_dir)
+        machines = tmp_path / "machines"
+        machines.write_text("safent-test-engine\n")
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "owner",
+                        podman_log=tmp_path / "calls", extra_env={"FAKE_INFO_FAILS": "true", "FAKE_MACHINES_STATE": str(machines)})
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+        assert result.returncode != 0
+        failure = _parse_ndjson(result.stdout)[-1]
+        assert failure["code"] == "machine_start_failed"
+        assert failure["retryable"] is False
+
+    def test_legacy_start_uses_named_private_machine_not_first_machine_on_path(self, tmp_path, fake_bin_dir):
+        _fake_darwin(fake_bin_dir)
+        calls = tmp_path / "calls"
+        machines = tmp_path / "machines"
+        machines.write_text("podman-machine-default\nsafent-test-engine\n")
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "owner", podman_log=calls,
+                        container_exists=False, extra_env={"FAKE_MACHINES_STATE": str(machines),
+                                                          "FAKE_MACHINE_STATE": "stopped"})
+        result = _run_safent("start", env=env)
+        assert result.returncode != 0
+        observed = _podman_calls(calls)
+        assert "machine start safent-test-engine" in observed
+        assert not any("podman-machine-default" in call for call in observed)
+        assert not any(call == "info" for call in observed)
+
+    def test_recorded_foreign_name_cannot_retarget_this_install(self, tmp_path, fake_bin_dir):
+        _fake_darwin(fake_bin_dir)
+        calls = tmp_path / "calls"
+        home = tmp_path / "owner"
+        machines = tmp_path / "machines"
+        machines.write_text("podman-machine-default\nsafent-test-engine\n")
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home, podman_log=calls,
+                        extra_env={"FAKE_MACHINES_STATE": str(machines)})
+        (home / ".safent").mkdir()
+        (home / ".safent/machine.json").write_text(json.dumps({"name": "podman-machine-default", "adopted": False}))
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+        assert result.returncode == 0, result.stderr
+        assert not any("podman-machine-default" in call for call in _podman_calls(calls))
+
+    def test_two_install_names_keep_distinct_connection_transports(self, tmp_path, fake_bin_dir):
+        _fake_darwin(fake_bin_dir)
+        env_log = tmp_path / "env-log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "owner",
+                        podman_log=tmp_path / "calls", extra_env={"FAKE_PRIVATE_ENV_LOG": str(env_log)})
+        for name in ("alpha", "beta"):
+            result = _run_safent("facts", "--porcelain", env={**env, "SAFENT_NAME": name})
+            assert result.returncode == 0, result.stderr
+        for name in ("alpha", "beta"):
+            transport = tmp_path / f"owner/.safent/podman/native-v1/bin/{name}-engine/podman"
+            assert subprocess.run([str(transport), "info"], env=env, capture_output=True).returncode == 0
+            values = dict(line.split("=", 1) for line in env_log.read_text().splitlines())
+            assert values["CONTAINER_CONNECTION"] == f"{name}-engine-root"
+
+    def test_every_client_identity_is_private_and_parent_home_is_unchanged(self, tmp_path, fake_bin_dir):
+        _fake_darwin(fake_bin_dir)
+        env_log = tmp_path / "private-env"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "owner",
+                        podman_log=tmp_path / "calls", extra_env={
+                            "FAKE_PRIVATE_ENV_LOG": str(env_log),
+                            "CONTAINER_HOST": "unix:///foreign/socket",
+                            "DOCKER_HOST": "unix:///foreign/docker",
+                            "CONTAINER_CONNECTION": "podman-machine-default",
+                            "CONTAINERS_CONF_OVERRIDE": "/foreign/override",
+                            "CONTAINERS_CONF": "/foreign/config",
+                            "CONTAINERS_STORAGE_CONF": "/foreign/storage",
+                            "REGISTRY_AUTH_FILE": "/foreign/auth",
+                            "PODMAN_CONNECTIONS_CONF": "/foreign/connections",
+                            "TMPDIR": "/foreign/tmp",
+                            "SSH_AUTH_SOCK": "/foreign/ssh",
+                            "CONTAINERS_MACHINE_PROVIDER": "libkrun",
+                        })
+        result = _run_safent("facts", "--porcelain", env=env)
+        assert result.returncode == 0, result.stderr
+        observations = dict(line.split("=", 1) for line in env_log.read_text().splitlines())
+        profile = (tmp_path / "owner/.safent/podman/native-v1").resolve()
+        assert observations["HOME"] == observations["TMPDIR"] + "/home"
+        assert len(observations["HOME"] + "/.podman/safent-test-engine-ignition.sock") < 104
+        for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "CONTAINERS_CONF",
+                     "CONTAINERS_STORAGE_CONF", "CONTAINERS_REGISTRIES_CONF", "REGISTRY_AUTH_FILE",
+                     "PODMAN_CONNECTIONS_CONF", "DOCKER_CONFIG"):
+            assert observations[name].startswith(str(profile) + "/"), (name, observations[name])
+        assert observations["CONTAINER_HOST"] == observations["DOCKER_HOST"] == ""
+        assert observations["CONTAINERS_CONF_OVERRIDE"] == observations["SSH_AUTH_SOCK"] == ""
+        assert observations["CONTAINERS_MACHINE_PROVIDER"] == "applehv"
+        assert observations["TMPDIR"] == observations["XDG_RUNTIME_DIR"]
+        assert len(observations["TMPDIR"] + "/podman/safent-test-engine-gvproxy.sock") < 104
+        assert (tmp_path / "owner/.safent").is_dir()
+        assert not (tmp_path / "owner/.config/containers").exists()
+        # Invoke the SAME transport inherited by the separate provisioner.
+        child = subprocess.run([str(profile / "bin/safent-test-engine/podman"), "info"], env=env, capture_output=True)
+        assert child.returncode == 0
+        observations = dict(line.split("=", 1) for line in env_log.read_text().splitlines())
+        assert observations["CONTAINER_CONNECTION"] == "safent-test-engine-root"
+
+    @pytest.mark.parametrize("invalid", ["missing", "wrong-hash", "wrong-capability"])
+    def test_stock_or_mismatched_binary_never_reaches_machine_commands(self, tmp_path, fake_bin_dir, invalid):
+        _fake_darwin(fake_bin_dir)
+        calls = tmp_path / "calls"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "owner", podman_log=calls)
+        marker = fake_bin_dir / "podman-private-build.json"
+        if invalid == "missing":
+            marker.unlink()
+        else:
+            data = json.loads(marker.read_text())
+            data["binary_sha256" if invalid == "wrong-hash" else "capability"] = "invalid"
+            marker.write_text(json.dumps(data, indent=2))
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+        assert result.returncode != 0
+        assert not _podman_calls(calls)
+        assert "isolated Podman build" in result.stderr
+
+    def test_private_profile_symlink_is_rejected_without_touching_target(self, tmp_path, fake_bin_dir):
+        _fake_darwin(fake_bin_dir)
+        home = tmp_path / "owner"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home, podman_log=tmp_path / "calls")
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        (home / ".safent").mkdir()
+        (home / ".safent/podman").symlink_to(foreign, target_is_directory=True)
+        result = _run_safent("facts", "--porcelain", env=env)
+        assert result.returncode != 0
+        assert list(foreign.iterdir()) == []
 
 
 def _fake_codesign(fake_bin_dir: Path, *, verify_ok: bool) -> None:
