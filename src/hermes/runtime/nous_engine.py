@@ -4066,7 +4066,7 @@ def register_mcp_tools_in_nous_registry(server, broker, consent_context, engine_
         qualified = tool.qualified_name
         bare = tool.name
         schema = {"name": qualified, "description": tool.description,
-                  "parameters": {"type": "object", "properties": {}}}
+                  "parameters": tool.input_schema}
         read_handler = make_mcp_broker_read_handler(
             qualified_name=qualified, bare_tool_name=bare,
             broker=broker, consent_context=consent_context,

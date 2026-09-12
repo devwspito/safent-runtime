@@ -40,6 +40,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_serializer
 
+from hermes.config_sync.ads_policy_contract import AdsPolicySpec
 
 # ---------------------------------------------------------------------------
 # Access scope spec (Enterprise Fase 2 Phase 3)
@@ -433,6 +434,7 @@ class PolicyPayload(BaseModel):
     # "department" or "none" — see DirectorySpec's docstring.
     directory: DirectorySpec | None = None
     llm_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+    ads: AdsPolicySpec | None = None
 
     @model_serializer(mode="wrap")
     def _serialize_payload(self, handler: Any) -> dict[str, Any]:
@@ -444,6 +446,8 @@ class PolicyPayload(BaseModel):
             data.pop("directory", None)
         if self.llm_instance_id is None:
             data.pop('llm_instance_id', None)
+        if self.ads is None:
+            data.pop('ads', None)
         return data
 
 

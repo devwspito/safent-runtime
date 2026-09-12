@@ -24,17 +24,23 @@ are never replayed under a replacement session; they return the original 401.
 from __future__ import annotations
 
 import hmac
+import json
 import logging
+import os
 import ssl
 import time
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
+from pathlib import Path
 from typing import Any
 
 import aiohttp
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
+from hermes.instance.association_store import SQLiteAssociationStore
+from hermes.runtime.managed_ads_policy import read_ads_policy
+from hermes.runtime.managed_ads_transport import MAX_ARGUMENT_BYTES, ManagedAdsTransport
 from hermes.shell_server.companion_net import FixedIpResolver
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
@@ -444,14 +450,59 @@ def _error_response(status_code: int, code: str) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
-def create_ads_bridge_router() -> APIRouter:
+def create_ads_bridge_router(db_path: Path | None = None, vault: Any = None) -> APIRouter:
     router = APIRouter()
+    db_path = db_path or Path(os.environ.get('HERMES_SHELL_DB', '/var/lib/hermes/shell-state.db'))
+
+    def local_allowed():
+        policy = read_ads_policy(db_path)
+        return policy is None or policy.mode == 'free'
+
+    def unavailable():
+        return _error_response(403, 'ADS_MANAGED_LOCAL_FORBIDDEN')
+
+    @router.get('/api/v1/ads/managed')
+    async def managed_configuration():
+        if db_path is None:
+            return unavailable()
+        try:
+            policy = read_ads_policy(db_path)
+        except PermissionError:
+            return unavailable()
+        return JSONResponse(
+            {'policy': policy.model_dump() if policy else None},
+            headers={'Cache-Control': 'no-store'},
+        )
+
+    @router.post('/api/v1/ads/managed/tools/{name}')
+    async def managed_tool(name: str, request: Request):
+        if db_path is None or vault is None:
+            return unavailable()
+        try:
+            raw = await _read_bounded_body(request)
+            if len(raw) > MAX_ARGUMENT_BYTES:
+                return unavailable()
+            body = json.loads(raw)
+            if not isinstance(body, dict) or set(body) != {'grant_id', 'arguments'}:
+                return unavailable()
+            store = SQLiteAssociationStore(db_path=db_path, vault=vault)
+            result = await ManagedAdsTransport(store).call(
+                body['grant_id'], name, body['arguments'],
+            )
+            return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+        except (PermissionError, ValueError, TypeError):
+            return unavailable()
 
     @router.post("/api/v1/ads/bridge/session")
     async def mint_bridge_session(request: Request) -> Response:
         """Gated by the EXISTING webui bearer middleware (path is under
         /api/v1/*) — no additional auth here. Issues the stable ads_bridge
         cookie and reports companion readiness (T004 get_companion_health)."""
+        try:
+            if not local_allowed():
+                return unavailable()
+        except PermissionError:
+            return unavailable()
         status, reason = await _companion_readiness(request.app.state.dbus_proxy)
         response = JSONResponse({"status": status, "reason": reason})
         response.set_cookie(
@@ -472,12 +523,22 @@ def create_ads_bridge_router() -> APIRouter:
 
     @router.api_route("/ads", methods=sorted(_ALLOWED_METHODS))
     async def proxy_ads_root(request: Request) -> Response:
+        try:
+            if not local_allowed():
+                return unavailable()
+        except PermissionError:
+            return unavailable()
         if not _bridge_cookie_is_valid(request):
             return _error_response(401, "BRIDGE_COOKIE_REQUIRED")
         return await _proxy_request(app_state=request.app.state, request=request, path="")
 
     @router.api_route("/ads/{path:path}", methods=sorted(_ALLOWED_METHODS))
     async def proxy_ads_path(request: Request, path: str) -> Response:
+        try:
+            if not local_allowed():
+                return unavailable()
+        except PermissionError:
+            return unavailable()
         if not _bridge_cookie_is_valid(request):
             return _error_response(401, "BRIDGE_COOKIE_REQUIRED")
         return await _proxy_request(app_state=request.app.state, request=request, path=path)

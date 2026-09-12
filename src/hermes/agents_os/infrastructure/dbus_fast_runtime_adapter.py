@@ -699,6 +699,14 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(self._wiring.apply_managed_llm_gateway(bundle_json=bundle_json, sender_uid=sender_uid))
 
     @method()
+    async def ApplyManagedAdsPolicy(self, bundle_json: "s") -> "s":  # noqa: N802,F821,UP037
+        sender_uid = await self._resolve_current_sender_uid()
+        result = self._wiring.apply_managed_ads_policy(bundle_json=bundle_json, sender_uid=sender_uid)
+        from hermes.agents_os.infrastructure.dbus_runtime_service import reconcile_managed_ads_client
+        await reconcile_managed_ads_client(self._wiring._mcp_manager)
+        return json.dumps(result)
+
+    @method()
     async def AddProvider(self, draft_json: "s") -> "s":  # noqa: N802,F821,UP037
         """Crea provider. draft: {kind, alias, default_model, base_url, api_key, set_active}."""
         sender_uid = await self._resolve_current_sender_uid()

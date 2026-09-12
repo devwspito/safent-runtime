@@ -1,0 +1,434 @@
+{
+  "list_platform_accounts": {
+    "additionalProperties": false,
+    "properties": {},
+    "title": "EmptyArgs",
+    "type": "object"
+  },
+  "list_campaigns": {
+    "additionalProperties": false,
+    "properties": {
+      "limit": {
+        "default": 50,
+        "maximum": 50,
+        "minimum": 1,
+        "title": "Limit",
+        "type": "integer"
+      },
+      "cursor": {
+        "anyOf": [
+          {
+            "maxLength": 1200,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Cursor"
+      }
+    },
+    "title": "CampaignsArgs",
+    "type": "object"
+  },
+  "get_entity_metrics": {
+    "$defs": {
+      "WindowArgs": {
+        "additionalProperties": false,
+        "description": "`contracts/mcp-tools.md`: `{preset, lag_days}` o `{from, to}`, nunca\nambos ni ninguno.",
+        "properties": {
+          "preset": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WindowPreset"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "lag_days": {
+            "default": 0,
+            "maximum": 90,
+            "minimum": 0,
+            "title": "Lag Days",
+            "type": "integer"
+          },
+          "from": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "From"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "To"
+          }
+        },
+        "title": "WindowArgs",
+        "type": "object"
+      },
+      "WindowPreset": {
+        "enum": [
+          "T",
+          "3D",
+          "7D",
+          "14D",
+          "30D",
+          "MTD"
+        ],
+        "title": "WindowPreset",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "entity_ref": {
+        "maxLength": 1200,
+        "minLength": 1,
+        "title": "Entity Ref",
+        "type": "string"
+      },
+      "window": {
+        "$ref": "#/$defs/WindowArgs"
+      },
+      "granularity": {
+        "default": "daily",
+        "enum": [
+          "daily",
+          "hourly"
+        ],
+        "title": "Granularity",
+        "type": "string"
+      }
+    },
+    "required": [
+      "entity_ref",
+      "window"
+    ],
+    "title": "MetricsArgs",
+    "type": "object"
+  },
+  "propose_budget_change": {
+    "$defs": {
+      "CauseArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "maxLength": 140,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          },
+          "signal_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Signal Id"
+          },
+          "rule_id": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z]{1,2}\\d{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rule Id"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "CauseArgs",
+        "type": "object"
+      },
+      "EvidenceArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "metric": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Metric",
+            "type": "string"
+          },
+          "actual": {
+            "title": "Actual",
+            "type": "number"
+          },
+          "target": {
+            "title": "Target",
+            "type": "number"
+          },
+          "window_preset": {
+            "$ref": "#/$defs/WindowPreset"
+          }
+        },
+        "required": [
+          "metric",
+          "actual",
+          "target",
+          "window_preset"
+        ],
+        "title": "EvidenceArgs",
+        "type": "object"
+      },
+      "ProposalUrgencyArgs": {
+        "enum": [
+          "critical",
+          "recommended",
+          "minor"
+        ],
+        "title": "ProposalUrgencyArgs",
+        "type": "string"
+      },
+      "WindowPreset": {
+        "enum": [
+          "T",
+          "3D",
+          "7D",
+          "14D",
+          "30D",
+          "MTD"
+        ],
+        "title": "WindowPreset",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "business_id": {
+        "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+        "title": "Business Id",
+        "type": "string"
+      },
+      "entity_ref": {
+        "title": "Entity Ref",
+        "type": "string"
+      },
+      "new_daily_budget_amount": {
+        "pattern": "^\\d+(\\.\\d{1,2})?$",
+        "title": "New Daily Budget Amount",
+        "type": "string"
+      },
+      "new_daily_budget_currency": {
+        "default": "EUR",
+        "pattern": "^[A-Z]{3}$",
+        "title": "New Daily Budget Currency",
+        "type": "string"
+      },
+      "cause": {
+        "$ref": "#/$defs/CauseArgs"
+      },
+      "evidence": {
+        "items": {
+          "$ref": "#/$defs/EvidenceArgs"
+        },
+        "title": "Evidence",
+        "type": "array"
+      },
+      "urgency": {
+        "$ref": "#/$defs/ProposalUrgencyArgs",
+        "default": "recommended"
+      }
+    },
+    "required": [
+      "business_id",
+      "entity_ref",
+      "new_daily_budget_amount",
+      "cause"
+    ],
+    "title": "ProposeBudgetChangeArgs",
+    "type": "object"
+  },
+  "propose_pause": {
+    "$defs": {
+      "CauseArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "maxLength": 140,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          },
+          "signal_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Signal Id"
+          },
+          "rule_id": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z]{1,2}\\d{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rule Id"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "CauseArgs",
+        "type": "object"
+      },
+      "EvidenceArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "metric": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Metric",
+            "type": "string"
+          },
+          "actual": {
+            "title": "Actual",
+            "type": "number"
+          },
+          "target": {
+            "title": "Target",
+            "type": "number"
+          },
+          "window_preset": {
+            "$ref": "#/$defs/WindowPreset"
+          }
+        },
+        "required": [
+          "metric",
+          "actual",
+          "target",
+          "window_preset"
+        ],
+        "title": "EvidenceArgs",
+        "type": "object"
+      },
+      "ProposalUrgencyArgs": {
+        "enum": [
+          "critical",
+          "recommended",
+          "minor"
+        ],
+        "title": "ProposalUrgencyArgs",
+        "type": "string"
+      },
+      "WindowPreset": {
+        "enum": [
+          "T",
+          "3D",
+          "7D",
+          "14D",
+          "30D",
+          "MTD"
+        ],
+        "title": "WindowPreset",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "business_id": {
+        "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+        "title": "Business Id",
+        "type": "string"
+      },
+      "entity_ref": {
+        "title": "Entity Ref",
+        "type": "string"
+      },
+      "cause": {
+        "$ref": "#/$defs/CauseArgs"
+      },
+      "evidence": {
+        "items": {
+          "$ref": "#/$defs/EvidenceArgs"
+        },
+        "title": "Evidence",
+        "type": "array"
+      },
+      "urgency": {
+        "$ref": "#/$defs/ProposalUrgencyArgs",
+        "default": "recommended"
+      }
+    },
+    "required": [
+      "business_id",
+      "entity_ref",
+      "cause"
+    ],
+    "title": "ProposePauseArgs",
+    "type": "object"
+  },
+  "get_proposal": {
+    "additionalProperties": false,
+    "properties": {
+      "proposal_id": {
+        "format": "uuid",
+        "title": "Proposal Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "proposal_id"
+    ],
+    "title": "ProposalArgs",
+    "type": "object"
+  },
+  "get_approval_review": {
+    "additionalProperties": false,
+    "properties": {
+      "proposal_id": {
+        "format": "uuid",
+        "title": "Proposal Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "proposal_id"
+    ],
+    "title": "ProposalArgs",
+    "type": "object"
+  }
+}

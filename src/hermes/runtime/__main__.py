@@ -434,7 +434,14 @@ def _build_mcp_server_manager():
                 timeout = 30.0
             return StdioMcpClient(transport=transport, timeout_sec=timeout)
 
-        manager = McpServerManager(client_factory=_client_factory)
+        from hermes.runtime.managed_ads_mcp import scoped_ads_factory  # noqa: PLC0415
+        manager = McpServerManager(
+            client_factory=_client_factory,
+            scoped_client_factory=scoped_ads_factory(
+                Path(os.environ.get('HERMES_SHELL_DB', '/var/lib/hermes/shell-state.db')),
+                _client_factory,
+            ),
+        )
         logger.info("hermes.runtime.mcp_server_manager_ready (0 servers connected at startup)")
         return manager
     except Exception as exc:  # noqa: BLE001
