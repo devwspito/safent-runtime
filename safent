@@ -2159,8 +2159,16 @@ cmd_ensure_machine() {
   [ "$rootful" = "true" ] || _die_porcelain machine_create_failed "La maquina existente es rootless" false
   # MAC4-05: same heartbeat treatment as `machine init` above — starting
   # an already-created machine (VM boot) can be just as silent.
-  _run_with_heartbeat "$RT" machine start "$name" || "$RT" info >/dev/null 2>&1 \
-    || _die_porcelain machine_start_failed "No se pudo arrancar la maquina" true
+  # `info` follows Podman's default connection, which may belong to another
+  # live VM. It is NEVER evidence that this named machine has started. Even
+  # a successful start command must be checked; nonzero is only idempotent
+  # when inspect confirms that this exact machine is already running.
+  _run_with_heartbeat "$RT" machine start "$name" || true
+  _started_state="$("$RT" machine inspect "$name" --format '{{.State}}' 2>/dev/null)" \
+    || _started_state="unknown"
+  [ "$_started_state" = running ] \
+    || _die_porcelain machine_start_failed \
+      "No se ha confirmado el arranque de $name. Revisa el error de Podman; si otra VM esta activa, debes detenerla explicitamente antes de volver a intentarlo. Safent no detendra maquinas ajenas ni reintentara automaticamente." false
 
   # MAC3-07: fail loudly instead of shipping a machine silently run by a
   # foreign (non-bundled) gvproxy/vfkit — see _foreign_engine_helper above.
