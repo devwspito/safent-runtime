@@ -55,7 +55,7 @@ it('submits once under double clicks and never calls approval execution complete
 })
 
 it('approves Community security actions without any MFA prompt', async () => {
-  render({ ...approval, target: 'set_policy', required_level: 'mfa', mfa_enrolled: false })
+  render({ ...approval, target: 'set_policy', required_level: 'owner' })
   await act(async () => button('Permitir una vez').click())
   expect(document.querySelector('[role="dialog"]')).toBeNull()
   expect(document.querySelector('input')).toBeNull()

@@ -2,8 +2,8 @@
  * SeguridadView — Security, governance, and HITL approvals.
  *
  * Three sub-areas:
- *   (a) Pending HITL approvals — polled every 3 s, Approve/Deny via MfaModal.
- *   (b) Governance — MFA enrollment + security policy presets + accordion catalog.
+ *   (a) Pending HITL approvals — polled every 3 s, Approve/Deny via owner confirmation.
+ *   (b) Governance — owner confirmation + security policy presets + accordion catalog.
  *   (c) Security center — egress permissions, recent scans.
  */
 
@@ -422,12 +422,12 @@ function ToolRow({ entry, busy, onToggle }: ToolRowProps) {
   )
 }
 
-// ── Pending MFA action ────────────────────────────────────────────────────────
+// ── Pending owner-confirmed action ────────────────────────────────────────────
 
 type PendingAction =
   | { kind: 'preset'; preset: string }
   | { kind: 'batch'; changes: Record<string, boolean> }
-  | { kind: 'mfa_dangers'; enabled: boolean }
+  | { kind: 'approval_dangers'; enabled: boolean }
 
 // ── Pending changes banner (shared by catalog + legacy tool lists) ──────────
 
@@ -585,7 +585,7 @@ export function GovernanceSection() {
           return
         }
 
-      } else if (pendingAction.kind === 'mfa_dangers') {
+      } else if (pendingAction.kind === 'approval_dangers') {
         await setApprovalOnDangers(pendingAction.enabled)
         sileo.success({
           title: pendingAction.enabled
@@ -647,8 +647,8 @@ export function GovernanceSection() {
     }
   }
 
-  function requestMfaDangersToggle(checked: boolean) {
-    setPendingAction({ kind: 'mfa_dangers', enabled: checked })
+  function requestApprovalDangersToggle(checked: boolean) {
+    setPendingAction({ kind: 'approval_dangers', enabled: checked })
   }
 
   function requestLegacyToolToggle(toolName: string, enabled: boolean) {
@@ -679,12 +679,12 @@ export function GovernanceSection() {
         <OwnerConfirmation
           title={
             pendingAction.kind === 'preset'
-              ? t('seg.mfa_modal.preset').replace('{preset}', pendingAction.preset)
-              : pendingAction.kind === 'mfa_dangers'
+              ? t('seg.confirm.preset').replace('{preset}', pendingAction.preset)
+              : pendingAction.kind === 'approval_dangers'
               ? pendingAction.enabled
                 ? t('seg.policies.dangers.label')
-                : t('seg.mfa_modal.dangers_off')
-              : t('seg.mfa_modal.tools')
+                : t('seg.confirm.dangers_off')
+              : t('seg.confirm.tools')
           }
           onConfirm={handleSign}
           onCancel={() => {
@@ -717,11 +717,11 @@ export function GovernanceSection() {
               </span>
             </div>
             <ToggleSwitch
-              id="toggle-mfa-dangers"
+              id="toggle-approval-dangers"
               aria-label={t('seg.policies.dangers.label')}
               checked={pol.approval_on_dangers ?? true}
               disabled={busy}
-              onChange={requestMfaDangersToggle}
+              onChange={requestApprovalDangersToggle}
             />
           </div>
 
@@ -881,7 +881,7 @@ export function GovernanceSection() {
 function GovernanceSkeletonBlock() {
   return (
     <div aria-busy="true" aria-label="Cargando gobernanza…" className="cv-section" style={{ gap: 'var(--space-6)' }}>
-      {/* MFA section skeleton */}
+      {/* Owner confirmation section skeleton */}
       <div className="cv-section">
         <div className="skeleton skeleton--line-sm" style={{ width: '80px', marginBottom: 'var(--space-3)' }} />
         <div className="skeleton skeleton--card" />

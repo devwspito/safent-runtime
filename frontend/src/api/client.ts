@@ -705,7 +705,7 @@ export async function getEgressMode(): Promise<EgressModeResponse> {
 }
 
 /**
- * Change the egress mode.  Always requires a valid TOTP code (MFA gate).
+ * Change the egress mode after an explicit Community owner confirmation.
  */
 export function setEgressMode(mode: EgressMode): Promise<unknown> {
   return request<unknown>('/egress/mode', {
@@ -774,7 +774,7 @@ export function getSshHosts(): Promise<SshHostsResponse> {
   return request<SshHostsResponse>('/tailnet/ssh-hosts').catch(() => ({ hosts: [] }))
 }
 
-/** Revoke a host's governed-SSH approval — requires the owner's TOTP. */
+/** Revoke a host's governed-SSH approval after owner confirmation. */
 export function revokeSshHost(host: string): Promise<SshHostsResponse> {
   return request<SshHostsResponse>(`/tailnet/ssh-hosts/${encodeURIComponent(host)}`, {
     method: 'DELETE',

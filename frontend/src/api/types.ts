@@ -404,7 +404,7 @@ export interface SshHostsResponse {
   hosts: SshHostEntry[]
 }
 
-/** Emergency brake — freno de emergencia. Engaging needs no MFA; releasing does. */
+/** Emergency brake — engaging is immediate; releasing requires owner confirmation. */
 export interface KillSwitchStatus {
   engaged: boolean
   reason: string | null
@@ -426,8 +426,6 @@ export interface PendingApproval {
   required_level?: string
   /** Enterprise-routed requests cannot be approved locally. Denial is allowed. */
   route?: 'local' | 'enterprise'
-  /** Whether the owner has enrolled a TOTP secret */
-  mfa_enrolled?: boolean
   /** ISO-8601 creation timestamp. Used client-side to discard stale ghost cards. */
   created_at?: string | null
 }

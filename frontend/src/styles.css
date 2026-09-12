@@ -3610,10 +3610,10 @@ details[open] .cv-teach-chevron {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   MFA Modal
+   Owner confirmation
    ═══════════════════════════════════════════════════════════════════════════ */
 
-.mfa-modal-backdrop {
+.owner-confirm-backdrop {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, .6);
@@ -3624,7 +3624,7 @@ details[open] .cv-teach-chevron {
   padding: var(--sp-4);
 }
 
-.mfa-modal {
+.owner-confirm {
   position: fixed;
   top: 50%;
   left: 50%;
@@ -3640,7 +3640,7 @@ details[open] .cv-teach-chevron {
   overflow: auto;
 }
 
-.mfa-modal__header {
+.owner-confirm__header {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
@@ -3648,7 +3648,7 @@ details[open] .cv-teach-chevron {
   border-bottom: 1px solid var(--line);
 }
 
-.mfa-modal__title {
+.owner-confirm__title {
   flex: 1;
   font-size: var(--text-subtitle);
   font-weight: 650;
@@ -3656,7 +3656,7 @@ details[open] .cv-teach-chevron {
   letter-spacing: -.02em;
 }
 
-.mfa-modal__close {
+.owner-confirm__close {
   width: 28px;
   height: 28px;
   display: flex;
@@ -3672,29 +3672,29 @@ details[open] .cv-teach-chevron {
   flex-shrink: 0;
 }
 
-.mfa-modal__close:hover { background: var(--card2); color: var(--ink); }
+.owner-confirm__close:hover { background: var(--card2); color: var(--ink); }
 
-.mfa-modal__body {
+.owner-confirm__body {
   padding: var(--sp-6);
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
 }
 
-.mfa-modal__field {
+.owner-confirm__field {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
 }
 
-.mfa-modal__actions {
+.owner-confirm__actions {
   display: flex;
   justify-content: flex-end;
   gap: var(--sp-3);
   padding-top: var(--sp-2);
 }
 
-.mfa-modal__inline-error {
+.owner-confirm__inline-error {
   font-size: var(--text-label);
   color: var(--danger);
   margin: 0;

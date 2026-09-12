@@ -23,13 +23,13 @@ export default function OwnerConfirmation({ title, description, onConfirm, onCan
   }
   return <Dialog.Root open onOpenChange={open => { if (!open && !submitted.current) onCancel() }}>
     <Dialog.Portal>
-      <Dialog.Backdrop className="mfa-modal-backdrop" />
-      <Dialog.Popup className="mfa-modal" aria-busy={busy}>
-        <div className="mfa-modal__header"><Dialog.Title className="mfa-modal__title">{title}</Dialog.Title></div>
-        <div className="mfa-modal__body">
+      <Dialog.Backdrop className="owner-confirm-backdrop" />
+      <Dialog.Popup className="owner-confirm" aria-busy={busy}>
+        <div className="owner-confirm__header"><Dialog.Title className="owner-confirm__title">{title}</Dialog.Title></div>
+        <div className="owner-confirm__body">
           <Dialog.Description>{description ?? 'Se aplicará el cambio que acabas de revisar. Las demás protecciones permanecen activas.'}</Dialog.Description>
-          {error && <p role="alert" className="mfa-modal__inline-error">{error}</p>}
-          <div className="mfa-modal__actions">
+          {error && <p role="alert" className="owner-confirm__inline-error">{error}</p>}
+          <div className="owner-confirm__actions">
             <Button disabled={busy} variant="ghost" onClick={onCancel}>Cancelar</Button>
             <Button loading={busy} onClick={() => { void confirm() }}>Confirmar</Button>
           </div>

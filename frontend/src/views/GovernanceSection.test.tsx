@@ -68,7 +68,7 @@ describe('GovernanceSection — the approval_on_dangers toggle is sovereign', ()
   afterEach(() => {
     act(() => { root.unmount() })
     container.remove()
-    document.body.querySelectorAll('.mfa-modal-backdrop').forEach(el => el.remove())
+    document.body.querySelectorAll('.owner-confirm-backdrop').forEach(el => el.remove())
   })
 
   it('MFA enrolled + approval_on_dangers ON: turning it OFF requires only explicit confirmation', async () => {
@@ -78,7 +78,7 @@ describe('GovernanceSection — the approval_on_dangers toggle is sovereign', ()
     act(() => { root.render(React.createElement(GovernanceSection)) })
     await flush()
 
-    const toggle = container.querySelector<HTMLButtonElement>('#toggle-mfa-dangers')!
+    const toggle = container.querySelector<HTMLButtonElement>('#toggle-approval-dangers')!
     act(() => { toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await flush()
 
@@ -97,14 +97,14 @@ describe('GovernanceSection — the approval_on_dangers toggle is sovereign', ()
     act(() => { root.render(React.createElement(GovernanceSection)) })
     await flush()
 
-    const toggle = container.querySelector<HTMLButtonElement>('#toggle-mfa-dangers')!
+    const toggle = container.querySelector<HTMLButtonElement>('#toggle-approval-dangers')!
     act(() => { toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await flush()
 
     // Before the fix this branched on mfaDisabled (true here) and called
     // setApprovalOnDangers(true) directly — no modal, backend 401, dead end.
     expect(setApprovalOnDangers).not.toHaveBeenCalled()
-    expect(document.body.querySelector('.mfa-modal')).not.toBeNull()
+    expect(document.body.querySelector('.owner-confirm')).not.toBeNull()
 
     confirmChange()
     await flush()
@@ -120,7 +120,7 @@ describe('GovernanceSection — the approval_on_dangers toggle is sovereign', ()
     act(() => { root.render(React.createElement(GovernanceSection)) })
     await flush()
 
-    const toggle = container.querySelector<HTMLButtonElement>('#toggle-mfa-dangers')!
+    const toggle = container.querySelector<HTMLButtonElement>('#toggle-approval-dangers')!
     act(() => { toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await flush()
 

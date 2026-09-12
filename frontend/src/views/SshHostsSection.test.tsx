@@ -16,8 +16,8 @@ const { getSshHosts, revokeSshHost, sileoSuccess, sileoError } = vi.hoisted(() =
 vi.mock('../api/client', () => ({ getSshHosts, revokeSshHost }))
 vi.mock('sileo', () => ({ sileo: { success: sileoSuccess, error: sileoError } }))
 
-// MfaModal opens a portal + full TOTP form; the section under test only
-// needs to know it was asked to sign or cancel — stub it down to two buttons
+// OwnerConfirmation opens a portal; the section under test only
+// needs to know it was asked to confirm or cancel — stub it down to two buttons
 // so this file stays focused on SshHostsSection's own logic.
 vi.mock('../components/OwnerConfirmation', () => ({
   default: ({ title, onConfirm, onCancel }: {
@@ -27,12 +27,12 @@ vi.mock('../components/OwnerConfirmation', () => ({
   }) =>
     React.createElement(
       'div',
-      { 'data-testid': 'mfa-modal' },
+      { 'data-testid': 'owner-confirmation' },
       React.createElement('span', null, title),
       React.createElement(
         'button',
         { type: 'button', onClick: () => onConfirm() },
-        'Firmar',
+        'Confirmar',
       ),
       React.createElement('button', { type: 'button', onClick: onCancel }, 'Cancelar modal'),
     ),
@@ -113,21 +113,21 @@ describe('SshHostsSection', () => {
     expect(container.textContent).toContain('No se pudo cargar la lista de equipos')
   })
 
-  it('opens the MFA modal when Revocar is clicked, and cancel closes it without calling the API', async () => {
+  it('opens owner confirmation when Revocar is clicked, and cancel closes it without calling the API', async () => {
     getSshHosts.mockResolvedValue({ hosts: HOSTS })
 
     act(() => { root.render(React.createElement(SshHostsSection)) })
     await flush()
 
     clickButton(container, 'Revocar')
-    expect(container.querySelector('[data-testid="mfa-modal"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="owner-confirmation"]')).not.toBeNull()
 
     clickButton(container, 'Cancelar modal')
-    expect(container.querySelector('[data-testid="mfa-modal"]')).toBeNull()
+    expect(container.querySelector('[data-testid="owner-confirmation"]')).toBeNull()
     expect(revokeSshHost).not.toHaveBeenCalled()
   })
 
-  it('signing the MFA modal calls revokeSshHost with the host and totp, then refreshes the list', async () => {
+  it('confirming calls revokeSshHost with the exact host, then refreshes the list', async () => {
     getSshHosts.mockResolvedValue({ hosts: HOSTS })
     revokeSshHost.mockResolvedValue({
       hosts: [{ host: 'build-box.tailxxxx.ts.net', approved_at: null }],
@@ -138,7 +138,7 @@ describe('SshHostsSection', () => {
 
     clickButton(container, 'Revocar')
     await flush()
-    clickButton(container, 'Firmar')
+    clickButton(container, 'Confirmar')
     await flush()
 
     expect(revokeSshHost).toHaveBeenCalledWith('db1.tailxxxx.ts.net')
@@ -156,7 +156,7 @@ describe('SshHostsSection', () => {
 
     clickButton(container, 'Revocar')
     await flush()
-    clickButton(container, 'Firmar')
+    clickButton(container, 'Confirmar')
     await flush()
 
     expect(sileoError).toHaveBeenCalledTimes(1)
