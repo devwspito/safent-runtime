@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import multiprocessing
+import sqlite3
+from pathlib import Path
+
+import pytest
+
 from hermes.tasks.infrastructure.sqlite_pending_delegations import (
     SqlitePendingDelegationRepository,
 )
@@ -36,12 +42,8 @@ def test_resolve_only_transitions_from_pending():
     repo = SqlitePendingDelegationRepository.in_memory()
     repo.submit(envelope=_envelope())
 
-    first = repo.resolve(
-        message_id="msg-1", status="approved", resolved_by="admin-1"
-    )
-    second = repo.resolve(
-        message_id="msg-1", status="rejected", resolved_by="admin-2"
-    )
+    first = repo.resolve(message_id="msg-1", status="approved", resolved_by="admin-1")
+    second = repo.resolve(message_id="msg-1", status="rejected", resolved_by="admin-2")
 
     assert first is True
     assert second is False  # already resolved — no-op, never re-resolved
@@ -66,7 +68,75 @@ def test_fetch_unknown_message_id_returns_none():
 
 def test_resolve_unknown_message_id_returns_false():
     repo = SqlitePendingDelegationRepository.in_memory()
-    resolved = repo.resolve(
-        message_id="does-not-exist", status="approved", resolved_by="admin-1"
-    )
+    resolved = repo.resolve(message_id="does-not-exist", status="approved", resolved_by="admin-1")
     assert resolved is False
+
+
+def _race_decision(path: str, decision: str, barrier, results) -> None:
+    repo = SqlitePendingDelegationRepository(Path(path))
+    barrier.wait(timeout=10)
+    if decision == "approve":
+        result = repo.claim_approval(
+            message_id="msg-1", approved_by="owner", conversation_id="conv"
+        )
+    else:
+        result = repo.resolve(message_id="msg-1", status="rejected", resolved_by="owner")
+    results.put((decision, bool(result)))
+    repo._conn.close()
+
+
+@pytest.mark.parametrize("opponent", ["approve", "reject"])
+def test_admission_claim_is_single_winner_across_processes(tmp_path, opponent):
+    path = tmp_path / "claims.db"
+    repo = SqlitePendingDelegationRepository(path)
+    repo.submit(envelope=_envelope())
+    ctx = multiprocessing.get_context("spawn")
+    barrier, results = ctx.Barrier(2), ctx.Queue()
+    workers = [
+        ctx.Process(target=_race_decision, args=(str(path), decision, barrier, results))
+        for decision in ("approve", opponent)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=15)
+        assert worker.exitcode == 0
+    assert sum(results.get(timeout=2)[1] for _ in workers) == 1
+
+
+def test_uncertain_claim_survives_restart_and_cannot_be_rejected_or_reapproved(tmp_path):
+    path = tmp_path / "claims.db"
+    repo = SqlitePendingDelegationRepository(path)
+    repo.submit(envelope=_envelope())
+    claim = repo.claim_approval(message_id="msg-1", approved_by="owner", conversation_id="conv")
+    repo._conn.close()
+    restarted = SqlitePendingDelegationRepository(path)
+    assert restarted.list_pending()[0].admission_state == "unconfirmed"
+    assert (
+        restarted.claim_approval(message_id="msg-1", approved_by="other", conversation_id="other")
+        is None
+    )
+    assert not restarted.resolve(message_id="msg-1", status="rejected", resolved_by="owner")
+    assert not restarted.resolve(
+        message_id="msg-1",
+        status="approved",
+        resolved_by="owner",
+        claim_id="wrong",
+        conversation_id="conv",
+        task_id="task",
+    )
+    assert restarted.resolve(
+        message_id="msg-1",
+        status="approved",
+        resolved_by="owner",
+        claim_id=claim,
+        conversation_id="conv",
+        task_id="task",
+    )
+
+
+def test_pending_read_failure_is_not_an_empty_inbox():
+    repo = SqlitePendingDelegationRepository.in_memory()
+    repo._conn.close()
+    with pytest.raises(sqlite3.Error):
+        repo.list_pending()

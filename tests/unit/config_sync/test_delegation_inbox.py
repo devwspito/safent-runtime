@@ -898,6 +898,47 @@ class TestPollAndApplyInboxOnce:
 
 
 class TestPushPendingDelegationResults:
+    @pytest.mark.parametrize('current_instance,current', [('other-instance', True), ('instance-result', False)])
+    def test_result_never_leaves_under_foreign_or_replaced_pairing(self, tmp_path, current_instance, current):
+        db_path = tmp_path / 'state.db'
+        _seed_completed_delegation_task(db_path, task_id='private', correlation_id='private', result_body='PRIVATE')
+        with patch('httpx.post') as post:
+            di.push_pending_delegation_results_once(
+                db_path=db_path, cloud_endpoint='https://cloud.example.com',
+                instance_secret='fixture', instance_id=current_instance, is_current=lambda: current,
+            )
+        post.assert_not_called()
+
+    @pytest.mark.parametrize('receipt', [{}, {'message_id': 'm', 'correlation_id': 'other', 'state': 'pending'},
+                                        {'message_id': 'm', 'correlation_id': 'corr', 'state': 'expired'}])
+    def test_unconfirmed_result_receipt_is_not_marked_delivered(self, tmp_path, receipt):
+        db_path = tmp_path / 'state.db'
+        _seed_completed_delegation_task(db_path, task_id='t', correlation_id='corr', result_body='answer')
+        with patch('httpx.post', return_value=MagicMock(status_code=201, json=lambda: receipt)) as post:
+            for _ in range(2):
+                di.push_pending_delegation_results_once(
+                    db_path=db_path, cloud_endpoint='https://cloud.example.com',
+                    instance_secret='fixture', instance_id='instance-result', is_current=lambda: True,
+                )
+        assert post.call_count == 2
+
+    def test_pairing_is_rechecked_between_results(self, tmp_path):
+        db_path = tmp_path / 'state.db'
+        for index in range(2):
+            _seed_completed_delegation_task(db_path, task_id=f't{index}', correlation_id=f'c{index}', result_body='answer')
+        current = [True]
+        def post(_url, **kwargs):
+            current[0] = False
+            return MagicMock(status_code=201, json=lambda: {
+                'message_id': 'm', 'correlation_id': kwargs['json']['correlation_id'], 'state': 'pending',
+            })
+        with patch('httpx.post', side_effect=post) as send:
+            di.push_pending_delegation_results_once(
+                db_path=db_path, cloud_endpoint='https://cloud.example.com',
+                instance_secret='fixture', instance_id='instance-result', is_current=lambda: current[0],
+            )
+        assert send.call_count == 1
+
     def test_completed_task_result_is_pushed_once(self, tmp_path) -> None:
         db_path = tmp_path / "state.db"
         _seed_completed_delegation_task(
@@ -908,16 +949,18 @@ class TestPushPendingDelegationResults:
 
         def _fake_post(url, *, headers, json, timeout, follow_redirects):  # noqa: A002
             captured.append({"url": url, "body": json})
-            return MagicMock(status_code=200)
+            return MagicMock(status_code=201, json=lambda: {
+                'message_id': 'receipt', 'correlation_id': json['correlation_id'], 'state': 'pending',
+            })
 
         with patch("httpx.post", side_effect=_fake_post):
             di.push_pending_delegation_results_once(
                 db_path=db_path, cloud_endpoint="https://cloud.example.com",
-                instance_secret="s",
+                instance_secret="s", instance_id='instance-result', is_current=lambda: True,
             )
             di.push_pending_delegation_results_once(
                 db_path=db_path, cloud_endpoint="https://cloud.example.com",
-                instance_secret="s",
+                instance_secret="s", instance_id='instance-result', is_current=lambda: True,
             )
 
         assert len(captured) == 1  # second tick: already pushed, no-op
@@ -939,11 +982,11 @@ class TestPushPendingDelegationResults:
         with patch("httpx.post", side_effect=_fake_post):
             di.push_pending_delegation_results_once(
                 db_path=db_path, cloud_endpoint="https://cloud.example.com",
-                instance_secret="s",
+                instance_secret="s", instance_id='instance-result', is_current=lambda: True,
             )
             di.push_pending_delegation_results_once(
                 db_path=db_path, cloud_endpoint="https://cloud.example.com",
-                instance_secret="s",
+                instance_secret="s", instance_id='instance-result', is_current=lambda: True,
             )
 
         assert call_count["n"] == 2  # never marked pushed on non-2xx
@@ -958,7 +1001,7 @@ class TestPushPendingDelegationResults:
         with patch("httpx.post") as mock_post:
             di.push_pending_delegation_results_once(
                 db_path=db_path, cloud_endpoint="https://cloud.example.com",
-                instance_secret="s",
+                instance_secret="s", instance_id='instance-result', is_current=lambda: True,
             )
 
         mock_post.assert_not_called()
@@ -972,6 +1015,16 @@ def _seed_completed_delegation_task(
         db_path, task_id=task_id, trigger_kind="external_delegation",
         payload_json=payload_json, result_body=result_body,
     )
+    from hermes.tasks.infrastructure.sqlite_pending_delegations import SqlitePendingDelegationRepository
+    pending = SqlitePendingDelegationRepository(db_path)
+    pending.submit(envelope={
+        'message_id': 'request-' + task_id, 'correlation_id': correlation_id,
+        'from_employee_id': 'owner', 'from_instance_id': 'console:org:owner',
+        'to_instance_id': 'instance-result', 'body': 'fixture',
+        'issued_at': datetime.now(tz=UTC).isoformat(),
+    })
+    pending.resolve(message_id='request-' + task_id, status='approved', resolved_by='owner', task_id=task_id)
+    pending._conn.close()
 
 
 def _seed_completed_task(
@@ -1079,7 +1132,7 @@ class TestFetchUnpushedDelegationResultsPicksFinalMessage:
         conn.row_factory = sqlite3.Row
         try:
             di._ensure_schema(conn)
-            rows = di._fetch_unpushed_delegation_results(conn)
+            rows = di._fetch_unpushed_delegation_results(conn, instance_id='instance-result')
         finally:
             conn.close()
 

@@ -122,9 +122,14 @@ class SqliteAuthorizedTriggerRepository:
         *,
         trigger_type: AuthorizedTriggerType,
         scope_value: str,
+        trigger_instance_id: UUID | None = None,
     ) -> AuthorizedTrigger | None:
         """Devuelve el AuthorizedTrigger HABILITADO (enabled=1) que cubre
         (tipo, scope), o None (fail-closed, CTRL-P2-15).
+
+        Si trigger_instance_id está presente, exige esa autorización concreta,
+        habilitada y con scope/tipo coincidentes: otra aprobación concurrente
+        del mismo remitente nunca sustituye la identidad del humano.
 
         La consulta NO está cacheada — cada llamada lee de SQLite para que
         la revocación sea inmediata (CTRL-P2-15). Scope: coincidencia exacta
@@ -146,10 +151,12 @@ class SqliteAuthorizedTriggerRepository:
                 # all user values are passed as parameterized args — no SQL injection.
                 f"SELECT {_SELECT_INSTANCE} FROM authorized_trigger_instances "  # noqa: S608
                 "WHERE trigger_type = ? AND (scope_value = ? OR scope_value = '*') "
-                "AND enabled = 1 "
+                "AND enabled = 1 AND (? IS NULL OR instance_id = ?) "
                 "ORDER BY authorized_at DESC "
                 "LIMIT 1",
-                (str(trigger_type), scope_value),
+                (str(trigger_type), scope_value,
+                 str(trigger_instance_id) if trigger_instance_id is not None else None,
+                 str(trigger_instance_id) if trigger_instance_id is not None else None),
             ).fetchone()
         except sqlite3.Error:
             return None  # fail-closed

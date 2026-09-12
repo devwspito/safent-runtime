@@ -65,6 +65,29 @@ describe('InboundDelegationCard', () => {
     expect(container.textContent).toContain(delegation.body)
   })
 
+  it('never repeats an uncertain admission or offers reject as if it had not started', () => {
+    act(() => root.render(React.createElement(InboundDelegationCard, {
+      delegation: { ...delegation, admission_state: 'unconfirmed' }, onResolved: vi.fn(),
+    })))
+    expect(container.textContent).toContain('No vuelvas a enviar el encargo')
+    const buttons = [...container.querySelectorAll('button')]
+    expect(buttons.every(button => button.disabled)).toBe(true)
+    act(() => buttons.forEach(button => button.dispatchEvent(new MouseEvent('click', { bubbles: true }))))
+    expect(resolveInboundDelegation).not.toHaveBeenCalled()
+  })
+
+  it('blocks approval of unverifiable requests while allowing explicit rejection', async () => {
+    resolveInboundDelegation.mockResolvedValue({ ok: true })
+    act(() => root.render(React.createElement(InboundDelegationCard, {
+      delegation: { ...delegation, admission_state: 'unverified' }, onResolved: vi.fn(),
+    })))
+    const approve = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Aprobar')!
+    expect(approve.disabled).toBe(true)
+    expect(container.textContent).toContain('autorización vigente verificable')
+    await act(async () => clickButton(container, 'Rechazar'))
+    expect(resolveInboundDelegation).toHaveBeenCalledWith('msg-1', 'reject')
+  })
+
   it('approves: calls resolveInboundDelegation(approve) and onResolved', async () => {
     resolveInboundDelegation.mockResolvedValue({ ok: true, task_id: 'task-1' })
     const onResolved = vi.fn()

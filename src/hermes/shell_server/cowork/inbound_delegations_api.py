@@ -6,9 +6,8 @@ pending-delegation HITL card.
   POST /api/v1/inbound-delegations/{message_id}     body: {decision: "approve"|"reject"}
                                                      -> {ok, task_id?} | {ok: false, error}
 
-Mirrors approvals_api.py's posture: GET is read-only fail-soft ([] on daemon
-unavailable, same as GET /api/v1/approvals/pending); POST is a mutator,
-fail-hard 503 on daemon unavailable (CTRL-P1-11).
+Both reads and mutations return 503 when the daemon is unavailable. Failure
+does not demonstrate an empty inbox or grant permission to admit work.
 
 Both verbs are reached via the shared DbusRuntimeProxy (same pattern as
 providers_api.py/roster_api.py) — NOT via AgentControlPlane, since these are
@@ -58,7 +57,9 @@ def create_inbound_delegations_router() -> APIRouter:
                 "hermes.inbound_delegations.list_unavailable",
                 extra={"reason": str(exc)},
             )
-            return []
+            raise HTTPException(
+                status_code=503, detail={"code": "delegation_inbox_unavailable"}
+            ) from exc
 
     @router.post("/{message_id}")
     async def resolve_inbound_delegation(

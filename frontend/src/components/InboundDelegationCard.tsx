@@ -38,10 +38,11 @@ export default function InboundDelegationCard({
 
   const isResolving = cardState.phase === 'resolving'
   const isError = cardState.phase === 'error'
-  const actionsDisabled = isResolving
+  const actionsDisabled = isResolving || delegation.admission_state === 'unconfirmed'
 
   async function resolve(decision: 'approve' | 'reject') {
-    if (resolving.current) return
+    if (resolving.current || delegation.admission_state === 'unconfirmed'
+      || decision === 'approve' && delegation.admission_state === 'unverified') return
     resolving.current = true
     setCardState({ phase: 'resolving', action: decision })
     try {
@@ -85,7 +86,16 @@ export default function InboundDelegationCard({
         {delegation.body}
       </blockquote>
 
-      {isError && (
+      {delegation.admission_state === 'unconfirmed' && <p role="status">
+        La admisión está en curso o quedó sin confirmar. Actualiza Tareas para comprobarla.
+        No vuelvas a enviar el encargo: podría haber empezado. Si persiste, requiere revisión local.
+      </p>}
+      {delegation.admission_state === 'unverified' && <p role="status">
+        Este encargo no tiene una autorización vigente verificable. Puede haber caducado
+        o cambiado la conexión empresarial. No se puede aprobar; puedes rechazarlo.
+      </p>}
+
+      {isError && delegation.admission_state !== 'unconfirmed' && (
         <div className="seg-approval-card__error-band" role="alert">
           <span>{cardState.message}</span>
           <button
@@ -117,7 +127,7 @@ export default function InboundDelegationCard({
           type="button"
           className="cv-btn cv-btn--primary cv-btn--sm"
           onClick={() => void resolve('approve')}
-          disabled={actionsDisabled}
+          disabled={actionsDisabled || delegation.admission_state === 'unverified'}
         >
           {isResolving && cardState.action === 'approve'
             ? t('delegation.btn.approving')

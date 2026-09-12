@@ -14,17 +14,20 @@ Idempotencia: PK = message_id (el id que el CLOUD asigna a la DelegationEnvelope
 — NO uno nuestro). Un `submit` repetido (p.ej. config_sync reintenta tras un
 ack fallido) es un INSERT OR IGNORE — nunca duplica la tarjeta.
 
-Fail-closed: cualquier error de SQLite en una lectura devuelve None/[]  (nunca
-propaga una excepción que podría interpretarse como "aprobado").
+Una admisión se reclama de forma durable antes de encolar. Una excepción deja
+la reclamación sin confirmar y bloquea replay, incluso después de reiniciar.
+La lista propaga fallos: un almacén inaccesible no demuestra un buzón vacío.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 _DDL_PENDING_DELEGATIONS = """
 CREATE TABLE IF NOT EXISTS pending_delegations (
@@ -48,6 +51,17 @@ CREATE TABLE IF NOT EXISTS pending_delegations (
 );
 CREATE INDEX IF NOT EXISTS idx_pending_delegations_status
     ON pending_delegations (status, created_at);
+CREATE TABLE IF NOT EXISTS delegation_admission_claims (
+    message_id TEXT PRIMARY KEY REFERENCES pending_delegations(message_id),
+    claim_id TEXT NOT NULL UNIQUE,
+    approved_by TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    claimed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS delegation_admission_proofs (
+    message_id TEXT PRIMARY KEY REFERENCES pending_delegations(message_id),
+    proof_json TEXT NOT NULL
+);
 """
 
 
@@ -68,6 +82,8 @@ class PendingDelegation:
     task_id: str | None
     conversation_id: str | None
     created_at: str
+    to_instance_id: str | None = None
+    admission_state: str | None = None
 
 
 def _row_to_delegation(row: sqlite3.Row) -> PendingDelegation:
@@ -87,6 +103,9 @@ def _row_to_delegation(row: sqlite3.Row) -> PendingDelegation:
         task_id=row["task_id"],
         conversation_id=row["conversation_id"],
         created_at=row["created_at"],
+        to_instance_id=row["to_instance_id"],
+        admission_state="unconfirmed"
+        if dict(row).get("decision_claimed") and row["status"] == "pending" else None,
     )
 
 
@@ -127,7 +146,7 @@ class SqlitePendingDelegationRepository:
         """Instancia sobre ':memory:' — para tests, sin fichero de DB."""
         return cls(db_path=Path(":memory:"))
 
-    def submit(self, *, envelope: dict[str, Any]) -> str:
+    def submit(self, *, envelope: dict[str, Any], proof: dict | None = None) -> str:
         """Registra una DelegationEnvelope kind=request YA VERIFICADA.
 
         Idempotente (INSERT OR IGNORE por message_id): una re-entrega (p.ej.
@@ -138,7 +157,7 @@ class SqlitePendingDelegationRepository:
         """
         now = datetime.now(tz=UTC).isoformat()
         conn = self._conn
-        conn.execute(
+        inserted = conn.execute(
             """
             INSERT OR IGNORE INTO pending_delegations (
                 message_id, correlation_id, from_employee_id, from_agent_id,
@@ -160,12 +179,33 @@ class SqlitePendingDelegationRepository:
                 envelope.get("to_instance_id"),
             ),
         )
-        conn.commit()
+        try:
+            if inserted.rowcount == 1 and proof is not None:
+                conn.execute(
+                    "INSERT INTO delegation_admission_proofs (message_id, proof_json) VALUES (?, ?)",
+                    (envelope["message_id"], json.dumps(proof, sort_keys=True)),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         row = conn.execute(
             "SELECT status FROM pending_delegations WHERE message_id = ?",
             (envelope["message_id"],),
         ).fetchone()
         return row["status"] if row is not None else "pending"
+
+    def admission_proof(self, *, message_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT proof_json FROM delegation_admission_proofs WHERE message_id=?", (message_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            proof = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        return proof if isinstance(proof, dict) else None
 
     def fetch(self, *, message_id: str) -> PendingDelegation | None:
         try:
@@ -177,14 +217,42 @@ class SqlitePendingDelegationRepository:
             return None
         return _row_to_delegation(row) if row is not None else None
 
+    def claim_approval(
+        self, *, message_id: str, approved_by: str, conversation_id: str
+    ) -> str | None:
+        """Commit admission intent before any queue/conversation side effect.
+
+        A crash leaves an explicit uncertain claim, never permission to enqueue
+        again. SQLite's single INSERT serializes competing processes as well as
+        decisions in the daemon. No transaction is held across an await.
+        """
+        claim_id = str(uuid4())
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT OR IGNORE INTO delegation_admission_claims "
+                "(message_id,claim_id,approved_by,conversation_id,claimed_at) "
+                "SELECT message_id,?,?,?,? FROM pending_delegations "
+                "WHERE message_id=? AND status='pending'",
+                (claim_id, approved_by, conversation_id,
+                 datetime.now(tz=UTC).isoformat(), message_id),
+            )
+        return claim_id if cursor.rowcount == 1 else None
+
+    def release_unenqueued_claim(self, *, message_id: str, claim_id: str) -> None:
+        """Only after an explicit gate denial before enqueue, never on exception."""
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM delegation_admission_claims WHERE message_id=? AND claim_id=?",
+                (message_id, claim_id),
+            )
+
     def list_pending(self) -> list[PendingDelegation]:
-        try:
-            rows = self._conn.execute(
-                "SELECT * FROM pending_delegations "
-                "WHERE status = 'pending' ORDER BY created_at ASC"
-            ).fetchall()
-        except sqlite3.Error:
-            return []
+        rows = self._conn.execute(
+            "SELECT d.*, EXISTS(SELECT 1 FROM delegation_admission_claims c "
+            "WHERE c.message_id=d.message_id) AS decision_claimed "
+            "FROM pending_delegations d "
+            "WHERE status = 'pending' ORDER BY created_at ASC"
+        ).fetchall()
         return [_row_to_delegation(r) for r in rows]
 
     def resolve(
@@ -195,6 +263,7 @@ class SqlitePendingDelegationRepository:
         resolved_by: str,
         task_id: str | None = None,
         conversation_id: str | None = None,
+        claim_id: str | None = None,
     ) -> bool:
         """Transición atómica 'pending' -> status (approved|rejected).
 
@@ -209,8 +278,15 @@ class SqlitePendingDelegationRepository:
                SET status = ?, resolved_by = ?, resolved_at = ?,
                    task_id = ?, conversation_id = ?
              WHERE message_id = ? AND status = 'pending'
+               AND (NOT EXISTS (SELECT 1 FROM delegation_admission_claims c
+                                WHERE c.message_id=pending_delegations.message_id)
+                    OR (?='approved' AND EXISTS (
+                        SELECT 1 FROM delegation_admission_claims c
+                        WHERE c.message_id=pending_delegations.message_id
+                          AND c.claim_id=? AND c.approved_by=? AND c.conversation_id=?)))
             """,
-            (status, resolved_by, now, task_id, conversation_id, message_id),
+            (status, resolved_by, now, task_id, conversation_id, message_id,
+             status, claim_id, resolved_by, conversation_id),
         )
         self._conn.commit()
         return cursor.rowcount == 1

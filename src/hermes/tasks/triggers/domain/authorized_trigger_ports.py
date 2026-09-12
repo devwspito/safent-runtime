@@ -89,7 +89,8 @@ class AuthorizedTriggerRepositoryPort(Protocol):
     """
 
     async def is_authorized(
-        self, *, trigger_type: AuthorizedTriggerType, scope_value: str
+        self, *, trigger_type: AuthorizedTriggerType, scope_value: str,
+        trigger_instance_id: UUID | None = None,
     ) -> AuthorizedTrigger | None:
         """Devuelve el AuthorizedTrigger HABILITADO que cubre (tipo, scope).
 

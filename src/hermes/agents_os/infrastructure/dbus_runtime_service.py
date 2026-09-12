@@ -3639,7 +3639,10 @@ class DbusRuntimeServiceWiring:
         service = self._require_delegation_approval_service()
         if service is None:
             return {"ok": False, "error": "delegation_service_not_configured"}
-        status = await service.submit(envelope=envelope)
+        try:
+            status = await service.submit(envelope=envelope)
+        except PermissionError:
+            return {"ok": False, "error": "delegation_authority_changed"}
         logger.info(
             "hermes.dbus.delegation_submitted",
             extra={"message_id": envelope.get("message_id"), "status": status},
@@ -3656,10 +3659,9 @@ class DbusRuntimeServiceWiring:
         ANY failure — fail-closed: no association/pubkey/signature_hex means
         the card is NOT registered.
         """
-        from hermes.config_sync.delegation_inbox import (  # noqa: PLC0415
-            delegation_signing_bytes,
+        from hermes.tasks.triggers.application.delegation_authority import (  # noqa: PLC0415
+            DelegationAdmissionAuthority,
         )
-        from hermes.config_sync.signature import verify_bundle  # noqa: PLC0415
 
         signature_hex = envelope.get("signature_hex")
         if not isinstance(signature_hex, str) or not signature_hex:
@@ -3671,19 +3673,12 @@ class DbusRuntimeServiceWiring:
         if assoc is None or not assoc.signing_pubkey_hex:
             return "no_tenant_pubkey"
 
-        plain_envelope = {
-            k: v for k, v in envelope.items() if k != "signature_hex"
-        }
-        if not all(isinstance(v, str) for v in plain_envelope.values()):
-            return "invalid_envelope_shape"
-
-        payload = delegation_signing_bytes(plain_envelope)
-        if not verify_bundle(
-            payload_canonical=payload,
-            signature_hex=signature_hex,
-            pubkey_hex=assoc.signing_pubkey_hex,
-        ):
-            return "bad_signature"
+        try:
+            DelegationAdmissionAuthority(
+                association_store=self._association_store, pending_repo=None,
+            ).capture(envelope)
+        except (PermissionError, ValueError, KeyError, AttributeError) as exc:
+            return str(exc) if isinstance(exc, PermissionError) else "invalid_envelope_shape"
         return None
 
     async def resolve_inbound_delegation(
@@ -3733,7 +3728,7 @@ class DbusRuntimeServiceWiring:
         solo metadatos, sin secretos ni firma)."""
         service = self._require_delegation_approval_service()
         if service is None:
-            return []
+            raise RuntimeError("Delegation admission service is unavailable")
         return service.list_pending()
 
     def _require_delegation_approval_service(self):
@@ -3757,6 +3752,9 @@ class DbusRuntimeServiceWiring:
             DelegationApprovalService,
         )
         from hermes.tasks.triggers.application.trigger_gate import TriggerGate  # noqa: PLC0415
+        from hermes.tasks.triggers.application.delegation_authority import (  # noqa: PLC0415
+            DelegationAdmissionAuthority,
+        )
 
         trigger_repo = self._require_trigger_repo()
         db_path = self._composio_db_path()
@@ -3773,6 +3771,9 @@ class DbusRuntimeServiceWiring:
             trigger_repo=trigger_repo,
             gate=gate,
             conversation_repo=self._conversation_repo,
+            authority=DelegationAdmissionAuthority(
+                association_store=self._association_store, pending_repo=pending_repo,
+            ),
         )
         return self._delegation_approval_service
 

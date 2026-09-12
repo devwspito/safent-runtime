@@ -78,12 +78,20 @@ def collect_status_events(path: Path, *, instance_id: str) -> int:
         if "to_instance_id" not in columns:
             return 0  # Not initialized/legacy, not permission to guess provenance.
         conn.execute("BEGIN IMMEDIATE")
+        has_claims = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='delegation_admission_claims'"
+        ).fetchone()
+        pending_status = (
+            "CASE WHEN EXISTS (SELECT 1 FROM delegation_admission_claims c "
+            "WHERE c.message_id=d.message_id) THEN 'blocked' ELSE 'awaiting_approval' END"
+            if has_claims else "'awaiting_approval'"
+        )
         rows = conn.execute(
-            """WITH observed AS (
+            f"""WITH observed AS (
                 SELECT d.message_id AS request_id,
                   d.to_instance_id AS recipient_instance_id,d.task_id,
                   CASE d.status
-                    WHEN 'pending' THEN 'awaiting_approval'
+                    WHEN 'pending' THEN {pending_status}
                     WHEN 'rejected' THEN 'rejected'
                     WHEN 'approved' THEN CASE t.status
                         WHEN 'pending' THEN 'queued'
@@ -106,7 +114,7 @@ def collect_status_events(path: Path, *, instance_id: str) -> int:
             ) AND o.observed_status IS NOT NULL AND (
                 s.request_id IS NULL OR s.status<>o.observed_status
                 OR COALESCE(s.task_id,'')<>COALESCE(o.task_id,'')
-            ) ORDER BY o.request_id LIMIT ?""",
+            ) ORDER BY o.request_id LIMIT ?""",  # noqa: S608 — static fragments only
             (instance_id, _COLLECT_LIMIT),
         ).fetchall()
         collected = 0

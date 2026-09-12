@@ -112,6 +112,12 @@ def read_task_dashboard(db_path: Path, *, limit: int = 100) -> dict:
             item = dict(row)
             request_id = item.pop("delegation_request_id")
             item.update(_sync_issue(conn, tables, request_id))
+            if (request_id and item["task_id"].startswith("delegation:")
+                and item["status"] == "pending_approval"
+                and "delegation_admission_claims" in tables
+                and conn.execute("SELECT 1 FROM delegation_admission_claims WHERE message_id=?",
+                                 (request_id,)).fetchone()):
+                item["admission_state"] = "unconfirmed"
             if item["status"] not in _STATUSES:
                 raise ValueError("unsupported persisted task status")
             if "messages" in tables and item["status"] == "completed":

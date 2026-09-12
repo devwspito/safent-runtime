@@ -30,6 +30,7 @@ function validTask(task: TaskDashboardItem) {
   return task && typeof task.task_id === 'string' && task.task_id.length > 0
     && typeof task.label === 'string' && Object.prototype.hasOwnProperty.call(statuses, task.status)
     && ['local', 'enterprise'].includes(task.source)
+    && (task.admission_state === undefined || task.source === 'enterprise' && task.admission_state === 'unconfirmed')
     && [task.requested_by, task.created_at, task.updated_at, task.conversation_id, task.result].every(optionalText)
     && (task.approval_ids === undefined || Array.isArray(task.approval_ids) && task.approval_ids.every(id => typeof id === 'string'))
     && (task.enterprise_sync === undefined || task.source === 'enterprise' && task.enterprise_sync
@@ -118,12 +119,13 @@ function TaskActivity() {
           {filtered.map(task => <button key={task.task_id} className={styles.row} aria-pressed={selectedId === task.task_id} disabled={opening} onClick={() => { setSelectedId(task.task_id); setChatError(false) }}>
             <Circle size={13} className={styles.state} data-status={task.status} aria-hidden />
             <span className={styles.taskText}><strong>{task.label}</strong><span>{task.source === 'enterprise' ? 'Enterprise' : 'Local'}{task.requested_by ? ` · ${task.requested_by}` : ''}{task.enterprise_sync?.state === 'blocked' ? ' · Sin sincronizar' : ''}</span></span>
-            <span className={styles.status}>{statuses[task.status]}</span><ChevronRight size={14} aria-hidden />
+            <span className={styles.status}>{task.admission_state ? 'Admisión sin confirmar' : statuses[task.status]}</span><ChevronRight size={14} aria-hidden />
           </button>)}
         </section>
         {selected && <aside className={styles.detail} aria-label="Detalle de tarea"><div className={styles.detailHead}><span>{statuses[selected.status]}</span><button onClick={() => setSelectedId(null)} disabled={opening} aria-label="Cerrar detalle">Cerrar</button></div><h2>{selected.label}</h2><dl><div><dt>Origen</dt><dd>{selected.source === 'enterprise' ? 'Enterprise' : 'Esta instancia'}</dd></div>{selected.requested_by && <div><dt>Encargada por</dt><dd>{selected.requested_by}</dd></div>}<div><dt>Creada</dt><dd>{date(selected.created_at)}</dd></div><div><dt>Última actualización</dt><dd>{date(selected.updated_at)}</dd></div></dl>
           {selected.enterprise_sync?.state === 'blocked' && <div className={styles.warning} role="status"><strong>El estado no se está sincronizando con Enterprise.</strong><p>{syncReasons[selected.enterprise_sync.reason]} Los eventos se conservan para revisión. Esto no modifica la ejecución ni sus aprobaciones; no repitas la tarea para corregirlo.</p></div>}
           {selected.enterprise_sync?.state === 'pending' && <p className={styles.hint} role="status">Hay estados pendientes de enviar a Enterprise. Se reintentará automáticamente.</p>}
+          {selected.admission_state && <p className={styles.warning} role="status">La admisión ya fue solicitada, pero aún no hay un acuse local confirmado. No vuelvas a enviar el encargo. Actualiza el estado; si persiste, requiere revisión local.</p>}
           <h3>Resultado</h3><div className={styles.result}>{selected.result || (selected.status === 'completed' ? 'La ejecución figura completada, pero todavía no hay un resultado disponible aquí.' : 'El resultado aparecerá cuando el agente lo entregue.')}</div>
           {selected.conversation_id && <Button size="sm" onClick={() => void openConversation()} disabled={error || loading || opening}><Clock3 size={14} aria-hidden />{opening ? 'Abriendo…' : 'Abrir conversación'}</Button>}
           {chatError && <p role="alert">No se pudo abrir la conversación. El encargo se conserva.</p>}

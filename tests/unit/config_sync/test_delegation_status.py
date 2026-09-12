@@ -73,6 +73,14 @@ def collect(db, instance="instance-1"):
     return ds.collect_status_events(db[0], instance_id=instance)
 
 
+def test_admission_claim_is_blocked_not_queued_without_execution(db):
+    submit(db)
+    db[2].claim_approval(message_id='request-1', approved_by='owner', conversation_id='conv')
+    assert collect(db) == 1
+    assert events(db)[0]['status'] == 'blocked'
+    assert events(db)[0]['task_id'] is None
+
+
 def flush(db, current=lambda: True):
     return ds.push_status_events(
         db[0],

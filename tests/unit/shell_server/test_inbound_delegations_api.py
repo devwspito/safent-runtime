@@ -56,15 +56,15 @@ class TestListPendingInboundDelegations:
         assert r.status_code == 200
         assert r.json() == pending
 
-    def test_fail_soft_returns_empty_list_on_unavailable(self) -> None:
+    def test_unavailable_is_not_an_empty_inbox(self) -> None:
         p = MagicMock()
         p.call_list = AsyncMock(side_effect=AgentUnavailable("daemon down"))
         client = TestClient(_make_app(p))
 
         r = client.get("/api/v1/inbound-delegations")
 
-        assert r.status_code == 200
-        assert r.json() == []
+        assert r.status_code == 503
+        assert r.json() == {"detail": {"code": "delegation_inbox_unavailable"}}
 
     def test_uses_list_pending_delegations_verb(self) -> None:
         p = _proxy(list_return=[])

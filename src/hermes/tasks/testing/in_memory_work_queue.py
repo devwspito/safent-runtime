@@ -54,6 +54,11 @@ class InMemoryWorkQueue:
         self._items[item.id] = item
         return item
 
+    async def enqueue_guarded(self, item: WorkItem, admission_guard) -> WorkItem:
+        """Test-only adapter; production SQLite commits without an await."""
+        with admission_guard():
+            return await self.enqueue(item)
+
     async def claim_next(self) -> WorkItem | None:
         """Toma atómicamente el siguiente PENDING disponible (prioridad DESC, enqueued_at ASC).
 

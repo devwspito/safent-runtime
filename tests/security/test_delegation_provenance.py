@@ -10,6 +10,7 @@ reject() -> NEVER enqueues anything, and the pending row cannot be re-approved.
 
 from __future__ import annotations
 
+import asyncio
 from uuid import UUID, uuid4
 
 import pytest
@@ -94,11 +95,26 @@ def _build_service(
     )
     pending_repo = SqlitePendingDelegationRepository.in_memory()
     conversations = _FakeConversationRepo()
+    # These tests isolate attribution/claim races, not signature validation.
+    # Cryptographic/pairing checks have a real-store integration suite.
+    from contextlib import nullcontext
+
+    class FixtureAuthority:
+        def capture(self, envelope):
+            return {"fixture": True}
+
+        def validate(self, message_id):
+            return None
+
+        def guard(self, message_id):
+            return nullcontext()
+
     service = DelegationApprovalService(
         pending_repo=pending_repo,
         trigger_repo=trigger_repo,
         gate=gate,
         conversation_repo=conversations,
+        authority=FixtureAuthority(),
     )
     return service, conversations
 
@@ -225,6 +241,105 @@ async def test_approve_is_idempotent_double_click_does_not_double_enqueue():
     assert first is not None
     assert second is None  # already resolved — fail-closed, no double effect
     assert len(queue.all_items()) == 1
+
+
+@pytest.mark.asyncio
+async def test_reject_cannot_win_after_admission_started_and_still_enqueue(monkeypatch):
+    """Competing decisions must never persist rejected while executing its work."""
+    queue = InMemoryWorkQueue()
+    service, _ = _build_service(queue)
+    await service.submit(envelope=_envelope())
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = service._gate.enqueue_from_trigger
+
+    async def paused_enqueue(**kwargs):
+        entered.set()
+        await release.wait()
+        return await original(**kwargs)
+
+    monkeypatch.setattr(service._gate, 'enqueue_from_trigger', paused_enqueue)
+    approving = asyncio.create_task(service.approve(message_id='msg-1', approved_by=APPROVER))
+    await entered.wait()
+    rejected = await service.reject(message_id='msg-1', rejected_by=ANOTHER_APPROVER)
+    release.set()
+    task_id = await approving
+    row = service._pending.fetch(message_id='msg-1')
+    assert not (rejected and task_id is not None)
+    assert row.status == 'approved'
+    assert row.task_id == str(task_id)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_from_same_peer_keep_their_own_approver(monkeypatch):
+    queue = InMemoryWorkQueue()
+    service, _ = _build_service(queue)
+    for request_id in ('msg-a', 'msg-b'):
+        await service.submit(envelope=_envelope(message_id=request_id))
+    ready = [asyncio.Event(), asyncio.Event()]
+    release = [asyncio.Event(), asyncio.Event()]
+    original = service._gate.enqueue_from_trigger
+    calls = 0
+
+    async def paused_enqueue(**kwargs):
+        nonlocal calls
+        index = calls
+        calls += 1
+        ready[index].set()
+        await release[index].wait()
+        return await original(**kwargs)
+
+    monkeypatch.setattr(service._gate, 'enqueue_from_trigger', paused_enqueue)
+    first = asyncio.create_task(service.approve(message_id='msg-a', approved_by=APPROVER))
+    await ready[0].wait()
+    second = asyncio.create_task(service.approve(message_id='msg-b', approved_by=ANOTHER_APPROVER))
+    await ready[1].wait()
+    release[0].set()
+    first_id = await first
+    release[1].set()
+    second_id = await second
+    items = {item.id: item for item in queue.all_items()}
+    assert items[first_id].payload['enqueued_by'] == str(APPROVER)
+    assert items[second_id].payload['enqueued_by'] == str(ANOTHER_APPROVER)
+
+
+@pytest.mark.asyncio
+async def test_lost_enqueue_receipt_preserves_claim_and_never_replays_work(monkeypatch):
+    queue = InMemoryWorkQueue()
+    service, _ = _build_service(queue)
+    await service.submit(envelope=_envelope())
+    original = service._gate.enqueue_from_trigger
+
+    async def lose_receipt(**kwargs):
+        await original(**kwargs)
+        raise RuntimeError('simulated loss after commit')
+
+    monkeypatch.setattr(service._gate, 'enqueue_from_trigger', lose_receipt)
+    with pytest.raises(RuntimeError, match='simulated loss'):
+        await service.approve(message_id='msg-1', approved_by=APPROVER)
+    assert service.list_pending()[0]['admission_state'] == 'unconfirmed'
+    assert await service.approve(message_id='msg-1', approved_by=APPROVER) is None
+    assert await service.reject(message_id='msg-1', rejected_by=APPROVER) is False
+    assert len(queue.all_items()) == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_dedup_execution_is_not_rebound_to_a_new_admission(monkeypatch):
+    queue = InMemoryWorkQueue()
+    service, _ = _build_service(queue)
+    await service.submit(envelope=_envelope())
+    original = queue.enqueue
+    from dataclasses import replace
+
+    async def legacy(item):
+        existing = replace(item, id=UUID('dddddddd-0000-0000-0000-000000000004'))
+        return await original(existing)
+
+    monkeypatch.setattr(queue, 'enqueue', legacy)
+    with pytest.raises(RuntimeError, match='previous execution'):
+        await service.approve(message_id='msg-1', approved_by=APPROVER)
+    assert service._pending.fetch(message_id='msg-1').task_id is None
+    assert service.list_pending()[0]['admission_state'] == 'unconfirmed'
 
 
 @pytest.mark.asyncio

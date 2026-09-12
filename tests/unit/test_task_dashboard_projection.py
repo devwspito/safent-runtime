@@ -74,6 +74,19 @@ def test_prompt_cannot_forge_enterprise_provenance(database):
     assert "result" not in task
 
 
+def test_uncertain_admission_is_visible_without_inventing_execution(database):
+    path, _ = database
+    repo = SqlitePendingDelegationRepository(path)
+    submit(repo)
+    repo.claim_approval(message_id='request-1', approved_by='owner', conversation_id='conv')
+    task = read_task_dashboard(path)['tasks'][0]
+    assert task['task_id'] == 'delegation:request-1'
+    assert task['admission_state'] == 'unconfirmed'
+    assert task['status'] == 'pending_approval'
+    assert task['conversation_id'] is None
+    assert 'result' not in task
+
+
 @pytest.mark.parametrize("stage", ["pending", "blocked", "unknown"])
 def test_sync_health_is_readonly_exact_and_never_changes_execution(database, stage):
     from hermes.config_sync.delegation_status import collect_status_events

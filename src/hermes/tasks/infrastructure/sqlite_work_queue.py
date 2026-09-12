@@ -68,10 +68,22 @@ class SqliteWorkQueue:
 
     async def enqueue(self, item: WorkItem) -> WorkItem:
         """Inserta PENDING. Idempotente por dedup_key. Rechaza sin enqueued_by (CTRL-10)."""
+        return self._enqueue(item)
+
+    async def enqueue_guarded(self, item: WorkItem, admission_guard) -> WorkItem:
+        """Pairing validation and queue commit share a bounded synchronous lock.
+
+        No await inside this guard: a concurrent coroutine cannot reenter the
+        process/thread lock while this admission is being committed.
+        """
+        with admission_guard():
+            return self._enqueue(item)
+
+    def _enqueue(self, item: WorkItem) -> WorkItem:
         _assert_enqueued_by(item)
 
         if item.dedup_key is not None:
-            existing = await self.find_by_dedup_key(item.dedup_key)
+            existing = self._find_by_dedup_key(item.dedup_key)
             if existing is not None:
                 return existing
 
@@ -127,7 +139,7 @@ class SqliteWorkQueue:
         # invariante del esquema (p.ej. I6) que ANTES se perdía en silencio.
         if inserted == 0:
             existing = (
-                await self.find_by_dedup_key(item.dedup_key)
+                self._find_by_dedup_key(item.dedup_key)
                 if item.dedup_key is not None
                 else None
             )
@@ -428,6 +440,9 @@ class SqliteWorkQueue:
         return cursor.rowcount
 
     async def find_by_dedup_key(self, dedup_key: str) -> WorkItem | None:
+        return self._find_by_dedup_key(dedup_key)
+
+    def _find_by_dedup_key(self, dedup_key: str) -> WorkItem | None:
         """Busca item VIVO (no terminal) por dedup_key (SC-007)."""
         with self._connect() as conn:
             row = conn.execute(
@@ -441,7 +456,7 @@ class SqliteWorkQueue:
             ).fetchone()
         if row is None:
             return None
-        return await self._load_item(row["task_id"])
+        return self._load_item_sync(row["task_id"])
 
     async def renew_lease(self, item_id: UUID, *, claim_token: UUID) -> bool:
         """Renueva lease si el claim_token coincide y el item sigue in_progress.
@@ -554,6 +569,9 @@ class SqliteWorkQueue:
             ensure_tasks_schema(conn)
 
     async def _load_item(self, task_id: str) -> WorkItem | None:
+        return self._load_item_sync(task_id)
+
+    def _load_item_sync(self, task_id: str) -> WorkItem | None:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM agent_tasks WHERE task_id = ?", (task_id,)

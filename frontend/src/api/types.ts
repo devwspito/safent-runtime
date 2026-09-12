@@ -259,6 +259,7 @@ export interface ManagedRemoteEndpointsResponse {
 
 /** Read-model contract; until the daemon supports it the UI reports unavailable. */
 export interface TaskDashboardItem {
+  admission_state?: 'unconfirmed'
   task_id: string
   label: string
   status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'pending_approval' | 'rejected' | 'cancelled'
@@ -440,6 +441,7 @@ export interface PendingApproval {
  * secrets/signature reach the web surface).
  */
 export interface InboundDelegation {
+  admission_state?: 'unconfirmed' | 'unverified'
   message_id: string
   from_employee_id: string
   body: string

@@ -82,6 +82,7 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -688,7 +689,9 @@ def record_delegation_correlation(
 # ---------------------------------------------------------------------------
 
 
-def _fetch_unpushed_delegation_results(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _fetch_unpushed_delegation_results(
+    conn: sqlite3.Connection, *, instance_id: str
+) -> list[sqlite3.Row]:
     """Completed external_delegation tasks whose final assistant answer has
     not yet been pushed to the cloud. Joins agent_tasks (trigger_kind /
     status) with the conversation's `messages` table — both live in the SAME
@@ -703,10 +706,15 @@ def _fetch_unpushed_delegation_results(conn: sqlite3.Connection) -> list[sqlite3
     (ISO-8601, so lexicographic order == chronological order), tie-broken by
     message_id for full determinism.
     """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(pending_delegations)")}
+    if "to_instance_id" not in columns:
+        return []  # Legacy/unbound work must never leave under a new pairing.
     return conn.execute(
         """
         SELECT t.task_id, t.payload_json, m.content AS result_body
         FROM agent_tasks t
+        JOIN pending_delegations d ON d.task_id=t.task_id
+          AND d.status='approved' AND d.to_instance_id=?
         JOIN messages m ON m.message_id = (
             SELECT m2.message_id FROM messages m2
             WHERE m2.task_id = t.task_id AND m2.role = 'assistant'
@@ -718,7 +726,7 @@ def _fetch_unpushed_delegation_results(conn: sqlite3.Connection) -> list[sqlite3
           AND t.status = 'completed'
           AND p.task_id IS NULL
         ORDER BY t.created_at ASC
-        """
+        """, (instance_id,),
     ).fetchall()
 
 
@@ -754,17 +762,27 @@ def _post_delegation_result(
             extra={"correlation_id": correlation_id, "reason": str(exc)},
         )
         return False
-    if resp.status_code not in (200, 201, 204):
+    if resp.status_code not in (200, 201):
         logger.warning(
             "hermes.config_sync.delegation_inbox.push_result_http_error",
             extra={"correlation_id": correlation_id, "status": resp.status_code},
         )
         return False
-    return True
+    try:
+        receipt = resp.json()
+    except ValueError:
+        return False
+    return (
+        isinstance(receipt, dict)
+        and isinstance(receipt.get("message_id"), str) and bool(receipt["message_id"])
+        and receipt.get("correlation_id") == correlation_id
+        and receipt.get("state") in {"pending", "delivered", "acked"}
+    )
 
 
 def push_pending_delegation_results_once(
     *, db_path: Path, cloud_endpoint: str, instance_secret: str,
+    instance_id: str, is_current: Callable[[], bool],
 ) -> None:
     """PUSH every completed external_delegation task's result not yet pushed.
     Fail-soft per-row: one failed push never blocks the others and is
@@ -772,7 +790,9 @@ def push_pending_delegation_results_once(
     conn = _connect(db_path)
     try:
         _ensure_schema(conn)
-        for row in _fetch_unpushed_delegation_results(conn):
+        for row in _fetch_unpushed_delegation_results(conn, instance_id=instance_id):
+            if not is_current():
+                break
             correlation_id = _extract_correlation_id(row["payload_json"])
             if not correlation_id:
                 continue  # not a delegated task after all (defensive) — skip
@@ -891,10 +911,13 @@ async def run_delegation_inbox_once(
         logger.warning("hermes.config_sync.delegation_status.unavailable")
 
     try:
-        push_pending_delegation_results_once(
+        await asyncio.to_thread(
+            push_pending_delegation_results_once,
             db_path=resolved_db_path,
             cloud_endpoint=assoc.cloud_endpoint,
             instance_secret=instance_secret,
+            instance_id=assoc.instance_id,
+            is_current=pairing_is_current,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error(
@@ -904,6 +927,8 @@ async def run_delegation_inbox_once(
         )
 
     try:
+        if not pairing_is_current():
+            return
         await poll_and_apply_inbox_once(
             db_path=resolved_db_path,
             cloud_endpoint=assoc.cloud_endpoint,
