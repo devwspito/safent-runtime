@@ -469,7 +469,6 @@
 
 .scanRow:hover {
   border-color: var(--color-border);
-  transform: translateY(-1px);
 }
 
 .scanRowLeft {
