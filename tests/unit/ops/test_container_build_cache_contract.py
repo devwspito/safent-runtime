@@ -33,6 +33,20 @@ def test_local_build_does_not_rebuild_wheel_twice_or_mutate_checkout():
     assert "date +%s" not in script
 
 
+def test_local_podman_build_preserves_healthcheck_metadata():
+    script = _read("ops/container/build.sh")
+    assert 'basename "$RUNTIME"' in script
+    assert "BUILD_FORMAT_ARGS+=(--format docker)" in script
+    assert '"$RUNTIME" build "${BUILD_FORMAT_ARGS[@]}"' in script
+
+
+def test_container_uses_current_mcp_import_and_blocklist_path():
+    containerfile = _read("ops/container/Containerfile")
+    assert "from tools.mcp_tool_discovery import get_mcp_status" in containerfile
+    assert "dns-blocklists/main/wildcard/light.txt" in containerfile
+    assert "dns-blocklists/main/domains/light.txt" not in containerfile
+
+
 def test_source_installer_preserves_cache_and_data_by_default():
     script = _read("ops/container/install.sh")
     assert "builder prune" not in script
