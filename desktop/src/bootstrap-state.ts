@@ -16,7 +16,7 @@ export interface BootstrapSnapshot {
 
 const LABELS: Record<StageId,string> = {
   preflight:'Comprobando este equipo', runtime_staging:'Preparando la aplicación',
-  machine:'Preparando el espacio seguro', pull_engine:'Descargando el motor',
+  machine:'Preparando el espacio seguro', pull_engine:'Descargando Safent',
   pull_companion:'Descargando Anuncios', container:'Iniciando el espacio seguro',
   health:'Comprobando la conexión', companion_scaffold:'Preparando Anuncios',
   companion_up:'Iniciando Anuncios', companion_reload:'Conectando Anuncios',

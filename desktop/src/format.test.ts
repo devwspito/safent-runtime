@@ -16,7 +16,7 @@ describe('formatProgress — owner-language byte counts', () => {
   })
 
   it('renders layers/steps units without MB conversion', () => {
-    expect(formatProgress(stage({ done: 3, total: 5, unit: 'layers' }))).toBe('3 de 5 capas')
+    expect(formatProgress(stage({ done: 3, total: 5, unit: 'layers' }))).toBe('3 de 5 partes')
   })
 
   it('is undefined before any progress arrives', () => {

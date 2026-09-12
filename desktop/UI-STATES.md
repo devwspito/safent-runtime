@@ -2,8 +2,9 @@
 
 **Preparando** (`kind: 'preparing'`) — pantalla por defecto: «Preparando
 tu espacio», texto en vivo (`aria-live="polite"`) con la etapa activa
-(`stage.label`, ya en español del CLI). Lista de etapas «Hecho»/«En curso»
-con progreso real («43 de 86 MB»), nunca un porcentaje inventado. «Cancelar»
+(`StageId` traducido por la allowlist del renderer, no texto libre del CLI).
+Lista de etapas «Hecho»/«En curso» con progreso real («43 de 86 MB» o
+«3 de 5 partes»), nunca un porcentaje inventado. «Cancelar»
 activo hasta el punto de no retorno (hoy, `container`); después se
 deshabilita con nota: «Esta fase ya no se puede cancelar; espera a que
 termine.»
@@ -17,6 +18,14 @@ deshabilitado con explicación.
 `<details>` con Código, última Etapa y explicación de la información omitida
 (no se transportan mensajes privados en el snapshot). Cancel también resuelve
 aquí: el contrato lo trata como un `failed` más.
+
+Todos los mensajes de recuperación respetan `retryable`, no sólo el botón.
+Si es falso, el texto no pide reintentar ni conceder un permiso a una acción
+inexistente. Un fallo interno no se atribuye a aplicaciones ajenas: el usuario
+no tiene que configurar herramientas de infraestructura ni ejecutar comandos.
+La UI no reinicia o repara por su cuenta, ni promete descargas reanudadas o
+datos intactos sin una confirmación del runtime. El namespace privado y la
+recuperación automática efectiva pertenecen al CLI/Rust, no a este renderer.
 
 **Reconectando** (`kind: 'reconnecting'`) — red de seguridad de
 FR-012/SC-012, no el recorrido normal. Dos motivos: `token_missing` («Safent

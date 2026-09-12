@@ -43,7 +43,7 @@ const COPY: Record<FailureCode, FailureCopy> = {
   },
   userns_blocked: {
     headline: 'El sistema no dejó continuar la preparación.',
-    hint: 'Vuelve a intentarlo; puede que el sistema pida una autorización adicional.',
+    hint: 'Vuelve a intentarlo. Si sigue fallando, exporta el diagnóstico para soporte.',
   },
   helper_denied: {
     headline: 'No se concedió la autorización que Safent pedía.',
@@ -59,11 +59,11 @@ const COPY: Record<FailureCode, FailureCopy> = {
   },
   pull_interrupted: {
     headline: 'La descarga se interrumpió.',
-    hint: 'Vuelve a intentarlo: Safent continúa desde donde se quedó.',
+    hint: 'Comprueba tu conexión a internet y vuelve a intentarlo.',
   },
   port_exhausted: {
-    headline: 'Safent no encontró un puerto libre en este equipo.',
-    hint: 'Cierra aplicaciones que puedan estar ocupando muchos puertos y vuelve a intentarlo.',
+    headline: 'Safent no pudo preparar su conexión local.',
+    hint: 'Vuelve a intentarlo. Si sigue fallando, exporta el diagnóstico para soporte.',
   },
   container_start_failed: {
     headline: 'Safent no arrancó.',
@@ -79,7 +79,7 @@ const COPY: Record<FailureCode, FailureCopy> = {
   },
   companion_migration_failed: {
     headline: 'Anuncios no pudo poner al día sus datos.',
-    hint: 'Vuelve a intentarlo. Tus datos de Anuncios siguen intactos.',
+    hint: 'Vuelve a intentarlo. Si sigue fallando, exporta el diagnóstico para soporte.',
   },
   companion_unreachable: {
     headline: 'Anuncios no responde ahora mismo.',
@@ -102,7 +102,7 @@ const COPY: Record<FailureCode, FailureCopy> = {
     hint: 'Puedes volver a intentarlo cuando quieras.',
   },
   cli_porcelain_unsupported: {
-    headline: 'Safent no pudo entenderse con lo que hay instalado en este equipo.',
+    headline: 'Esta copia de Safent no pudo iniciar la preparación.',
     hint: 'Descarga una copia completa desde la página oficial. Puedes exportar el diagnóstico de arranque para soporte.',
   },
   repair_ineffective: {
@@ -110,7 +110,7 @@ const COPY: Record<FailureCode, FailureCopy> = {
     hint: 'Vuelve a intentarlo. Si sigue fallando, exporta el diagnóstico.',
   },
   local_storage_conflict: {
-    headline: 'Algo en este equipo ya está usando el almacén local de Safent.',
+    headline: 'Safent no pudo acceder a su espacio local.',
     hint: 'Cierra otras copias de Safent que puedan estar abiertas y vuelve a intentarlo.',
   },
   engine_digest_missing: {
@@ -128,17 +128,25 @@ const FALLBACK: FailureCopy = {
  * Never throws on an unrecognized code: the wire crosses a process boundary
  * (the embedded CLI), so a future/unknown FailureCode must degrade to an
  * honest generic message rather than crash the one failure screen FR-033
- * promises. See UI-STATES.md for the known gap (no `cancelled` code exists
- * yet for the §6 SIGINT path).
+ * promises. Recovery actions must follow the runtime's retryable flag, never
+ * an inference from the error text or the user's other applications.
  */
 export function copyForFailure(code: FailureCode, retryable = true): FailureCopy {
-  // A generic machine failure carries no trustworthy identity of a blocker.
-  // Do not infer a foreign VM from stderr or offer a stop action from this code.
+  const copy = COPY[code] ?? FALLBACK
   if (code === 'machine_start_failed' && !retryable) {
     return {
-      headline: 'Safent necesita tu atención para arrancar.',
-      hint: 'Este bloqueo no se resuelve repitiendo el arranque. Exporta el diagnóstico para revisar la causa; Safent no detendrá ninguna otra máquina por su cuenta.',
+      headline: 'Safent no pudo preparar su motor.',
+      hint: 'No necesitas configurar otras aplicaciones. Exporta el diagnóstico para revisar el problema.',
     }
   }
-  return COPY[code] ?? FALLBACK
+  // These actionable explanations do not ask the owner to retry an operation
+  // the runtime has forbidden. All other blocked failures get a safe next step.
+  const hasIndependentRecovery = [
+    'unsupported_os', 'unsupported_arch', 'cli_porcelain_unsupported',
+    'engine_digest_missing', 'restore_failed',
+  ].includes(code)
+  if (!retryable && !hasIndependentRecovery) {
+    return { headline: copy.headline, hint: 'Safent ha detenido la preparación. Exporta el diagnóstico para revisar el problema.' }
+  }
+  return copy
 }

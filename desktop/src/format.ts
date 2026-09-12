@@ -2,7 +2,7 @@ import type { ProgressUnit, StageProgress } from './lifecycle.js'
 
 const UNIT_LABEL: Record<ProgressUnit, string> = {
   bytes: 'MB',
-  layers: 'capas',
+  layers: 'partes',
   steps: 'pasos',
 }
 
@@ -10,7 +10,7 @@ function toDisplayNumber(value: number, unit: ProgressUnit): number {
   return unit === 'bytes' ? value / (1024 * 1024) : value
 }
 
-/** "932 de 932 MB" / "3 de 5 capas" — never a raw byte count (not owner language). */
+/** "932 de 932 MB" / "3 de 5 partes" — no infrastructure vocabulary. */
 export function formatProgress(stage: StageProgress): string | undefined {
   if (stage.done === undefined) return undefined
   const unit = stage.unit ?? 'bytes'
