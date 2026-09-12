@@ -103,7 +103,7 @@ const COPY: Record<FailureCode, FailureCopy> = {
   },
   cli_porcelain_unsupported: {
     headline: 'Safent no pudo entenderse con lo que hay instalado en este equipo.',
-    hint: 'Vuelve a intentarlo. Si sigue fallando, descarga Safent de nuevo desde la página oficial.',
+    hint: 'Descarga una copia completa desde la página oficial. Puedes exportar el diagnóstico de arranque para soporte.',
   },
   repair_ineffective: {
     headline: 'Safent no consiguió avanzar en este equipo.',
