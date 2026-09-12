@@ -760,7 +760,6 @@ img, svg { display: block; }
   background: var(--card2);
   color: var(--ink);
   border-color: var(--accent);
-  transform: translateY(-1px);
 }
 
 /* ── Messages ────────────────────────────────────────────────────────────── */
@@ -1365,7 +1364,6 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
 .office-agent-card:hover {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
-  transform: translateY(-1px);
 }
 
 .office-agent-card:focus-visible {
@@ -1816,7 +1814,6 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   background: var(--slate-5);
   color: var(--color-text);
   border-color: var(--color-border);
-  transform: translateY(-1px);
 }
 
 /* Ghost — border-only, minimal */
@@ -2041,7 +2038,6 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,0.07),
     var(--shadow-depth-hover);
-  transform: translateY(-1px);
   background:
     linear-gradient(180deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0) 100%),
     color-mix(in srgb, var(--accent) 3%, var(--card));
@@ -2338,7 +2334,6 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,0.07),
     var(--shadow-depth-hover);
-  transform: translateY(-1px);
 }
 
 .skill-row__info { flex: 1; min-width: 0; }
@@ -2401,7 +2396,6 @@ details[open] .tool-summary-group__chevron { transform: rotate(90deg); }
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,0.07),
     var(--shadow-depth-hover);
-  transform: translateY(-1px);
 }
 
 .skill-hub-result__info { flex: 1; min-width: 0; }
@@ -4943,7 +4937,6 @@ details[open] .cv-teach-chevron {
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,0.07),
     var(--shadow-depth-hover);
-  transform: translateY(-1px);
 }
 
 /* ── ListRow — depth + smooth hover ─────────────────────────────────────── */
@@ -4981,7 +4974,6 @@ details[open] .cv-teach-chevron {
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,0.07),
     var(--shadow-depth-hover);
-  transform: translateY(-1px);
 }
 
 .ds-list-row--clickable:focus-visible {
@@ -5383,7 +5375,6 @@ details[open] .cv-teach-chevron {
 .usage-agent-row:hover {
   border-color: var(--color-border) !important;
   background: var(--slate-5) !important;
-  transform: translateY(-1px);
 }
 
 .usage-agent-row:focus-visible {
@@ -5454,7 +5445,6 @@ details[open] .cv-teach-chevron {
 .card--hoverable:hover {
   border-color: var(--color-border);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  transform: translateY(-1px);
 }
 
 .card--hoverable:focus-visible {
