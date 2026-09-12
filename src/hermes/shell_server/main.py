@@ -5,7 +5,7 @@ Escucha SOLO en 127.0.0.1:7517. Expone:
   /healthz
   /api/v1/profile                       perfil del SO (personal-desktop, etc)
   /api/v1/runtime/status                estado live del agente (D-Bus get_runtime_status)
-  /api/v1/runtime/agent-stream          SSE: floor de la Office (status + stats) en push
+  /api/v1/runtime/agent-stream          SSE: actividad real del runtime en push
 
   /api/v1/chat                          POST mensaje → encola vía ControlPlanePort
                                          Devuelve {task_id, stream_path}
@@ -1062,7 +1062,7 @@ def create_app() -> FastAPI:
         """Real live runtime status from the daemon via D-Bus GetRuntimeStatus.
 
         Fail-soft: if the daemon is unavailable returns the idle shape with
-        available=false — never 500s, never blocks the Office view from rendering.
+        available=false — never 500s and never blocks the task activity UI.
         """
         try:
             data = await app.state.dbus_proxy.call_dict("get_runtime_status")

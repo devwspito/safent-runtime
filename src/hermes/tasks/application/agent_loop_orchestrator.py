@@ -265,9 +265,9 @@ class AgentLoopOrchestrator:
                 conversation_id=_conv_id_for_inject,
             )
             await chunk_sink.emit_status(task_id=item.id, status="in_progress")
-            # Wire the chat task into live_activity so the Office floor animates
-            # the agent character while the response is in-flight — even during
-            # pure narrative replies that invoke no tool calls. The entry is
+            # Wire the chat task into live_activity so the task UI reports real
+            # in-flight work even during pure narrative replies that invoke no
+            # tool calls. The entry is
             # cleared by worker_pool._worker_loop's finally block
             # (live_activity.clear(item.id)) on task completion or failure.
             _chat_agent_id = _resolve_chat_agent_id(item.payload)
