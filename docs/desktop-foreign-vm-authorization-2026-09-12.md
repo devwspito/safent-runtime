@@ -114,3 +114,53 @@ npm run build
 Typecheck y build correctos. No suite Rust (sin cambios Rust), QA visual nueva,
 VM real ni autorización de parada implementada. La corrección es renderer-only;
 no convierte el guard de UI en autorización de seguridad del backend.
+
+## Investigación del efecto nativo: bloqueo confirmado, segundo corte
+
+El segundo corte incorpora como base el arreglo CLI `d49e3a5` además de la UI
+`85d15ad`. No añade un comando de parada ni una autorización decorativa.
+
+Se leyó el código oficial de **Podman v6.1.1**, la versión del bundle, no sólo
+su ayuda ni una simulación de la operación:
+
+- [`cmd/podman/machine/stop.go`](https://github.com/containers/podman/blob/v6.1.1/cmd/podman/machine/stop.go):
+  `stop [MACHINE]` acepta un nombre y llama `VMExists(vmName)` seguido de
+  `shim.Stop(mc, vmProvider, false)`. No tiene parámetro de identidad esperada,
+  generación o compare-and-stop.
+- [`pkg/machine/shim/host.go`](https://github.com/containers/podman/blob/v6.1.1/pkg/machine/shim/host.go):
+  `Stop` obtiene el lock de la máquina, ejecuta `mc.Refresh()` y después
+  `stopLocked`. Este último comprueba el estado y ejecuta `mp.StopVM(mc, false)`.
+  La identidad revisada por Safent no participa en esa sección crítica.
+- [`pkg/machine/vmconfigs/machine.go`](https://github.com/containers/podman/blob/v6.1.1/pkg/machine/vmconfigs/machine.go):
+  `Refresh` (líneas 116–123) relee el archivo y hace `json.Unmarshal(content, mc)`;
+  puede reemplazar la configuración que `VMExists` había leído anteriormente.
+- [`pkg/machine/lock/lock.go`](https://github.com/containers/podman/blob/v6.1.1/pkg/machine/lock/lock.go):
+  lock por `<directorio configuración>/<nombre>.lock`. Un lock propio de Safent
+  no sustituye esa exclusión. Retener el lock Podman desde el padre mientras el
+  CLI hijo intenta adquirirlo causaría bloqueo; no hay protocolo CLI documentado
+  para transferirlo y ejecutar una comprobación esperada dentro de él.
+
+Intercalado que una comprobación extra antes de `spawn` **no elimina**:
+
+1. Safent observa y obtiene consentimiento para VM A, nombre N, identidad I1.
+2. Revalida I1 y estado activo.
+3. Otro cliente Podman detiene/recrea N como VM B con identidad I2.
+4. El CLI de Safent resuelve N, o refresca su configuración bajo lock, y detiene B.
+
+No se reprodujo este intercalado contra una VM real ni se afirma explotación
+certificada; es una limitación identificada en la frontera pública del código
+oficial. Las comprobaciones posteriores sólo detectarían un efecto ya producido.
+Señalizar procesos/PIDs o llamar directamente al hipervisor no es equivalente:
+omitiría la parada/limpieza Podman y abriría otra frontera no certificada.
+
+**Decisión de implementación:** mantener la parada ajena sin exponer. El flujo
+completo necesita una primitiva Podman que compare identidad/generación esperada
+**dentro de su lock**, inmediatamente antes de `StopVM`, y conserve la parada
+ordenada/limpieza. Integrarla requiere cambiar/verificar el binario empaquetado,
+sus pins y firmas, o una API upstream equivalente. Esto excede un cambio seguro
+del renderer/Rust wrapper con el binario actual. No se introduce fork, resolver,
+worker o dependencia paralela sin acordar ese alcance.
+
+Cuando exista dicha primitiva se puede aplicar el contrato one-use anterior.
+Hasta entonces la resolución manual y el mensaje no-retryable son el resultado
+honesto; no existe un botón activo «Autorizar detener» en esta entrega.
