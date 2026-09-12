@@ -174,7 +174,7 @@ RUN python3 -c "import hermes, fastapi, uvicorn, playwright, dbus_fast, composio
       import hermes.runtime.__main__, hermes.shell_server.main, hermes.egress_proxy.__main__, \
              hermes.audit_tail_service.__main__, hermes.runtime.semantic_tool_index; \
       from run_agent import AIAgent; from hermes_cli.runtime_provider import resolve_runtime_provider; \
-      from tools.mcp_tool_config import _load_mcp_config; from tools.mcp_tool import get_mcp_status; \
+      from tools.mcp_tool_config import _load_mcp_config; from tools.mcp_tool_discovery import get_mcp_status; \
       print('IMPORT SMOKE OK')"
 
 # ── Service accounts — IDENTICAL uids to the OS build ─────────────────────────
@@ -256,7 +256,7 @@ COPY ops/keys/runtime-manifest.pub /usr/share/hermes/keys/runtime-manifest.pub
 # TODO: add hermes-egress-blocklist-refresh.timer to re-download daily at runtime.
 RUN mkdir -p /usr/share/hermes && \
     ( curl -LsSf --max-time 60 \
-        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt" \
+        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light.txt" \
         -o /usr/share/hermes/egress-blocklist.txt \
       && wc -l /usr/share/hermes/egress-blocklist.txt \
       && echo "INFO: hagezi light blocklist bundled" ) \

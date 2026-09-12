@@ -5,7 +5,7 @@
 #   ./ops/container/build.sh            # validate version, build image
 #   ./ops/container/build.sh --push     # …then push :<VERSION> and :latest
 #
-# SINGLE SOURCE OF VERSION TRUTH: the repo-root `VERSION` file. This script syncs it
+# SINGLE SOURCE OF VERSION TRUTH: the repo-root `VERSION` file. This script
 # validates pyproject.toml, builds the image tagged BOTH :<VERSION> and :latest,
 # and VERIFIES the baked image reports that exact version. The wheel is built once,
 # inside the Containerfile; this wrapper never builds a redundant host wheel.
@@ -50,7 +50,13 @@ PYPROJECT_VERSION="$(sed -nE 's/^version = "([^"]+)"/\1/p' pyproject.toml | head
 # 2) Build the image, tagged BOTH :<VERSION> and :latest. Content-addressed
 # layers stay reusable; use the engine's explicit --no-cache only for diagnosis.
 echo "[*] Building → ${IMAGE_VERSIONED} (+ :latest)"
-"$RUNTIME" build \
+BUILD_FORMAT_ARGS=()
+# Podman defaults to OCI, whose image format discards Dockerfile HEALTHCHECK.
+# The delivered image is also consumed by Docker/Compose, so retain that metadata.
+if [ "$(basename "$RUNTIME")" = "podman" ]; then
+  BUILD_FORMAT_ARGS+=(--format docker)
+fi
+"$RUNTIME" build "${BUILD_FORMAT_ARGS[@]}" \
   --build-arg SAFENT_EDITION=community \
   --build-arg GIT_SHA="${GIT_SHA}" \
   -f ops/container/Containerfile \
