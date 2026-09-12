@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 const api = vi.hoisted(() => ({ getComposioStatus: vi.fn(), listComposioConnected: vi.fn(), listComposioApps: vi.fn(), getWebSearchStatus: vi.fn() }))
 vi.mock('../api/client', async () => ({ ...await vi.importActual('../api/client'), ...api }))
+vi.mock('../api/crm', () => ({ listCrmConnections: vi.fn().mockResolvedValue({ context: 'a'.repeat(64), connections: [], limit: 100 }) }))
 import IntegrationsView from './IntegrationsView'
 let container: HTMLDivElement
 let root: Root

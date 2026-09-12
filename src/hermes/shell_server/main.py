@@ -1435,7 +1435,7 @@ def create_app() -> FastAPI:
     )
 
     app.state.ads_session_jar = AdsSessionJar()
-    app.include_router(create_ads_bridge_router())
+    app.include_router(create_ads_bridge_router(_DB_PATH, vault))
 
     # ------------------------------------------------------------------
     # New REST routers: providers native, agents, skills hub, mcp,
@@ -1509,6 +1509,9 @@ def create_app() -> FastAPI:
     from hermes.shell_server.instance.api import create_instance_router  # noqa: PLC0415
 
     app.include_router(create_instance_router(_DB_PATH, vault))
+    from hermes.shell_server.cowork.crm_api import create_crm_router  # noqa: PLC0415
+
+    app.include_router(create_crm_router(_DB_PATH, vault))
 
     # UI-triggered update: GET reports current/latest version + verified
     # manifest digests (T005). Requesting the update/uninstall/companion
