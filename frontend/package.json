@@ -12,13 +12,13 @@
   "dependencies": {
     "@base-ui/react": "^1.8.0",
     "@novnc/novnc": "^1.7.0",
-    "dompurify": "^3.4.11",
+    "dompurify": "^3.4.15",
     "lucide-react": "^1.21.0",
     "marked": "^18.0.5",
     "motion": "^12.41.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.27.0",
+    "react-router-dom": "^7.18.3",
     "recharts": "^3.9.0",
     "sileo": "^0.1.5"
   },
