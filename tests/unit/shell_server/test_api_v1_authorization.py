@@ -107,12 +107,14 @@ async def _first_response_status(
 
 def _api_v1_routes(app: Any) -> Iterator[tuple[str, str]]:
     """(método, path concreto) para cada ruta HTTP bajo /api/v1/*."""
-    for route in app.routes:
+    from tests.route_inventory import route_inventory
+
+    for route, route_path in route_inventory(app.routes):
         if not isinstance(route, APIRoute):
             continue  # excluye las 2 rutas WebSocket — ver docstring del módulo
-        if not route.path.startswith("/api/v1/"):
+        if not route_path.startswith("/api/v1/"):
             continue
-        path = _concrete_path(route.path)
+        path = _concrete_path(route_path)
         for method in route.methods or set():
             if method == "HEAD":
                 continue  # ya cubierto por el GET correspondiente

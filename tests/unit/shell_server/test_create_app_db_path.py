@@ -69,6 +69,7 @@ class TestTwoCreateAppCallsUseIndependentDbPaths:
         db_path_a = tmp_path / "instance-a" / "shell-state.db"
         monkeypatch.setenv("HERMES_SHELL_DB", str(db_path_a))
         create_app()
+        assert db_path_a.parent.stat().st_mode & 0o777 == 0o700
         assert db_path_a.exists(), (
             "create_app() #1 did not create its own sqlite db at HERMES_SHELL_DB "
             f"({db_path_a}) — did it reuse a stale module-level _DB_PATH?"
@@ -77,9 +78,23 @@ class TestTwoCreateAppCallsUseIndependentDbPaths:
         db_path_b = tmp_path / "instance-b" / "shell-state.db"
         monkeypatch.setenv("HERMES_SHELL_DB", str(db_path_b))
         create_app()
+        assert db_path_b.parent.stat().st_mode & 0o777 == 0o700
         assert db_path_b.exists(), (
             "create_app() #2 did not create its own sqlite db at the NEW "
             f"HERMES_SHELL_DB ({db_path_b}) — it likely reused create_app() #1's "
             "DB path (the import-time-binding regression this test guards)."
         )
         assert db_path_a != db_path_b
+
+    def test_existing_unsafe_directory_is_not_silently_repaired(self, tmp_path, monkeypatch):
+        from hermes.security.configuration_lock import ConfigurationLockError
+        from hermes.shell_server.main import create_app
+
+        directory = tmp_path / "unsafe"
+        directory.mkdir(mode=0o777)
+        directory.chmod(0o777)
+        monkeypatch.setenv("HERMES_SHELL_DB", str(directory / "state.db"))
+        with pytest.raises(ConfigurationLockError, match="directory is unsafe"):
+            create_app()
+        assert directory.stat().st_mode & 0o777 == 0o777
+        assert not (directory / "state.db").exists()

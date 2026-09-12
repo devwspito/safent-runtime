@@ -688,6 +688,12 @@ def create_app() -> FastAPI:
     # Resolved HERE, at call time — see `_resolve_db_path()` docstring. Every
     # `_DB_PATH` reference below this point is this local, per-call binding.
     _DB_PATH = _resolve_db_path()
+    # Establish the protected state directory before any repository can create
+    # it with the process umask. Existing unsafe directories remain rejected.
+    from hermes.security.configuration_lock import configuration_lock  # noqa: PLC0415
+
+    with configuration_lock(_DB_PATH):
+        pass
 
     audit_writer = _build_audit_tail_writer()
     prometheus_exporter = _build_prometheus_exporter()

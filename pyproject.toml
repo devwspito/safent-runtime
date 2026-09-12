@@ -150,6 +150,7 @@ asyncio_mode = "auto"
 addopts = "-ra --strict-markers --strict-config -m 'not requires_chromium and not requires_llm and not requires_external_ocr and not integration and not requires_network and not requires_vm and not requires_openshell'"
 markers = [
     "unit: pruebas unitarias puras",
+    "security: regresiones de seguridad y confinamiento",
     "integration: pruebas con DB / red / sistemas externos (opt-in)",
     "requires_chromium: requiere Chromium binario instalado via `playwright install`",
     "requires_llm: requiere HERMES_MODEL + HERMES_API_KEY contra provider LLM real",
