@@ -29,8 +29,8 @@ set NoNewPrivileges PER-UNIT. Use `ops/container/run-safent.sh` (or replicate it
 - `src/hermes/` — the entire product (one Python package, `hermes`):
   - daemon + **Nous** reasoning engine (`runtime/`),
   - **Safent UI** (`safent/` — QML compositor + apps),
-  - **React web app** (`frontend/` → built to `/opt/safent-webapp`, served at `/app/`): chat, Office "agent floor" (`frontend/src/views/OfficeView.tsx`), security, skills, MCP, providers, memory. The single official UI (the legacy vanilla `shell_server/webui/` was removed),
-  - MCP / skills / composio (`tool_search`/`tool_call`, **ruflo** swarm).
+  - **React interface** (`frontend/` → built to `/opt/safent-webapp`, served at `/app/` and embedded by the native shell): chat, tasks, security, skills, MCP, providers and memory. The packaged-agent/Office catalog was removed; Hermes may still delegate dynamically. The legacy vanilla `shell_server/webui/` was also removed,
+  - MCP / skills / composio (`tool_search`/`tool_call`) and native Hermes delegation.
 - `ops/container/` — the Playwright Containerfile (the delivery).
 - `ops/agent-cage/` — OpenShell cage (binary + systemd drop-in).
 - `ops/agents-os-edition/` — systemd units, dbus policy, netns/nftables, launcher scripts, MCP seed (the Containerfile COPIES these subdirs).
