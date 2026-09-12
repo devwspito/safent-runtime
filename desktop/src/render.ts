@@ -1,6 +1,7 @@
 import { copyForFailure } from './failure-copy.js'
 import { activeStage, type StageProgress, type UiState } from './lifecycle.js'
 import { formatProgress, progressPercent } from './format.js'
+import type { CancellationPhase } from './native-action.js'
 
 export interface ScreenElements {
   readonly preparing: HTMLElement
@@ -125,6 +126,23 @@ export function render(state: UiState, els: ScreenElements): void {
  */
 export function manageFocusOnTransition(previousKind: UiState['kind'], state: UiState, els: ScreenElements): void {
   if (state.kind === previousKind) return
+  if (state.kind === 'preparing') els.preparing.querySelector<HTMLElement>('h1')?.focus()
   if (state.kind === 'failed') els.failedHeading.focus()
   if (state.kind === 'reconnecting') els.reconnectingHeading.focus()
+}
+
+export function renderCancellation(state: UiState, phase: CancellationPhase, hasAttempt: boolean, els: ScreenElements): void {
+  if (state.kind !== 'preparing') return
+  const pending = phase === 'requesting' || phase === 'requested'
+  els.cancelButton.disabled = !hasAttempt || !state.cancelable || pending
+  els.cancelButton.textContent = pending ? 'Cancelación pendiente' : 'Cancelar'
+  els.cancelButton.setAttribute('aria-busy', String(phase === 'requesting'))
+  els.cancelNote.setAttribute('role', phase === 'error' ? 'alert' : 'status')
+  const note = phase === 'requesting' ? 'Solicitando cancelar la preparación…'
+    : phase === 'requested' ? 'Cancelación solicitada. Esperando a que Safent termine esta operación.'
+    : phase === 'error' ? 'No se pudo confirmar la cancelación. La preparación puede continuar; revisa el estado antes de volver a solicitarla.'
+    : !state.cancelable ? 'Esta fase ya no se puede cancelar; espera a que termine.'
+    : ''
+  els.cancelNote.textContent = note
+  setHidden(els.cancelNote, !note)
 }

@@ -509,7 +509,6 @@ export function postInstallRequest(
 
 export function getInstallRequests(): Promise<InstallRequestsListResponse> {
   return request<InstallRequestsListResponse>('/system/requests')
-    .catch(() => ({ requests: [] }))
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────
@@ -963,14 +962,9 @@ export interface SystemUpdateStatus {
   checked_at?: string
 }
 
-/** Falls back to a "nothing to see here" shape so a transient failure never surfaces a false update prompt. */
+/** A failed check is unknown, not evidence that no update exists. */
 export function getSystemUpdate(): Promise<SystemUpdateStatus> {
-  return request<SystemUpdateStatus>('/system/update').catch(() => ({
-    current_version: '',
-    latest_version: null,
-    update_available: false,
-    updating: false,
-  }))
+  return request<SystemUpdateStatus>('/system/update')
 }
 
 /** Drops an uninstall marker; the host `safent agent` runs `safent uninstall` (removes the

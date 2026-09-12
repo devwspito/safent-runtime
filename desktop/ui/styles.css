@@ -50,7 +50,7 @@ h1:focus-visible { outline: none; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .btn { appearance: none; display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 8px 14px; border: 1px solid transparent; border-radius: 8px; background: var(--button-bg); color: var(--button-fg); font: inherit; font-size: 12px; font-weight: 550; cursor: pointer; transition: opacity 120ms ease-out, transform 120ms ease-out; }
 .btn-secondary { background: transparent; color: var(--fg); border-color: var(--line); }
-.btn:active:not(:disabled) { transform: scale(.98); }
+.btn:active:not(:disabled):not(:focus-visible) { transform: scale(.98); }
 .btn:disabled { opacity: .5; cursor: default; }
 :focus-visible { outline: 2px solid var(--muted); outline-offset: 4px; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }

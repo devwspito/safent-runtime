@@ -14,9 +14,13 @@ export interface ApprovalCardProps {
 
 type State = 'idle' | 'allowing' | 'denying' | 'resolved' | 'expired'
 
-/** A scoped decision, not a grant of general permissions. The server gate
- * remains authoritative for MFA, enterprise routing and single consumption. */
-export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps) {
+/** A scoped decision, not a standing permission. Replacing a proposal mounts
+ * fresh interaction state; the server still owns routing and consumption. */
+export default function ApprovalCard(props: ApprovalCardProps) {
+  return <ApprovalDecision key={props.approval.proposal_id} {...props} />
+}
+
+function ApprovalDecision({ approval, onResolved }: ApprovalCardProps) {
   const t = useT()
   const { locale } = useLocale()
   const id = useId()
@@ -25,6 +29,9 @@ export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps
   // Guard synchronously: a double click can precede React's next render.
   const submitted = useRef(false)
   const trigger = useRef<HTMLButtonElement>(null)
+  const denyTrigger = useRef<HTMLButtonElement>(null)
+  const lastDecision = useRef<'once' | 'deny'>('deny')
+  const mounted = useRef(true)
   const previousState = useRef(state)
   const enterprise = approval.route === 'enterprise'
   const title = approvalTitle(approval.kind, approval.summary, locale)
@@ -33,23 +40,29 @@ export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps
   const terminal = state === 'resolved' || state === 'expired'
 
   useEffect(() => {
-    if (state === 'idle' && previousState.current !== 'idle') trigger.current?.focus()
+    const action = lastDecision.current === 'deny' ? denyTrigger.current : trigger.current
+    if (state === 'idle' && previousState.current !== 'idle'
+      && (document.activeElement === document.body || document.activeElement === action)) action?.focus()
     previousState.current = state
   }, [state])
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
 
   async function decide(decision: 'once' | 'deny') {
     if (submitted.current || terminal || (enterprise && decision === 'once')) return
     submitted.current = true
+    lastDecision.current = decision
     setError('')
     setState(decision === 'once' ? 'allowing' : 'denying')
     try {
       await resolveApproval(approval.proposal_id, decision)
+      if (!mounted.current) return
       setState('resolved')
       // Approval acknowledgement is not proof of tool execution. The chat's
       // tool-result event, not `live`, establishes the outcome of the action.
       sileo.success({ title: t(decision === 'once' ? 'approval.toast.allowed' : 'approval.toast.denied') })
       onResolved()
     } catch (err) {
+      if (!mounted.current) return
       submitted.current = false
       const code = err instanceof ApiError ? err.code : undefined
       if (code === 'proposal_invalid' || code === 'expired') {
@@ -105,7 +118,7 @@ export default function ApprovalCard({ approval, onResolved }: ApprovalCardProps
         </footer> : <footer className={css.footer}>
           <span className={css.hint}>{t('approval.scope.hint')}</span>
           <div className={css.actions}>
-            <Button size="sm" variant="ghost" disabled={busy} loading={state === 'denying'} onClick={() => void decide('deny')}>
+            <Button ref={denyTrigger} size="sm" variant="ghost" disabled={busy} loading={state === 'denying'} onClick={() => void decide('deny')}>
               {t('approval.btn.deny')}
             </Button>
             {!enterprise && <Button ref={trigger} size="sm" variant="primary" disabled={busy} loading={state === 'allowing'} onClick={approve}>

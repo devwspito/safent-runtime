@@ -20,7 +20,7 @@
 .details { padding: 0 var(--space-4) var(--space-3); }
 .details summary { display: flex; align-items: center; gap: var(--space-2); width: fit-content; color: var(--color-text-muted); font-size: var(--text-sm); cursor: pointer; list-style: none; padding-block: var(--space-1); }
 .details summary::-webkit-details-marker { display: none; }
-.details summary > svg { transition: transform var(--dur-base) var(--ease); }
+.details summary > svg { flex: none; }
 .details[open] summary > svg { transform: rotate(180deg); }
 .parameters { margin-top: var(--space-2); max-height: 280px; overflow: auto; padding: var(--space-3); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md); background: var(--color-bg); }
 .parameters > div + div { margin-top: var(--space-3); }

@@ -46,6 +46,17 @@ describe('CompanionInstallAction', () => {
     })
   }
 
+  it('retries a failed status read without submitting install or repair from unknown state', async () => {
+    getInstallRequests.mockRejectedValueOnce(new Error('private failure'))
+    await render(availability('unavailable', 'not_installed'))
+    expect(container.textContent).toContain('No se pudo comprobar la instalación')
+    expect(container.textContent).not.toContain('private failure')
+    await act(async () => { container.querySelector<HTMLButtonElement>('button')!.click() })
+    expect(getInstallRequests).toHaveBeenCalledTimes(2)
+    expect(postInstallRequest).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('Instalar')
+  })
+
   it.each([
     ['ready', null] as const,
     ['loading', null] as const,

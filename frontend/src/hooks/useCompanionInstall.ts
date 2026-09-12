@@ -17,6 +17,8 @@ const ACTIVE_POLL_MS = 5_000
 const COMPANION_SLUG = 'safent-ads'
 
 export type CompanionInstallPhase =
+  | { kind: 'checking' }
+  | { kind: 'unavailable' }
   /** Ready, loading, or a reason this flow has no action for (unauthorized/no_accounts). */
   | { kind: 'hidden' }
   | { kind: 'install' }
@@ -30,6 +32,7 @@ export interface CompanionInstall {
   install: () => void
   repair: () => void
   retry: () => void
+  refresh: () => void
 }
 
 function isLive(status: InstallRequestStatus | null): boolean {
@@ -73,21 +76,35 @@ export function useCompanionInstall(availability: AdsAvailability): CompanionIns
   const aliveRef = useRef(true)
   const submittingRef = useRef(false)
   const prevAppliedRef = useRef(false)
+  const [checked, setChecked] = useState(false)
+  const [readError, setReadError] = useState(false)
+  const polling = useRef(false)
+  const generation = useRef(0)
 
   const poll = useCallback(() => {
+    if (polling.current) return
+    polling.current = true
+    const epoch = ++generation.current
     getInstallRequests().then((res) => {
-      if (!aliveRef.current) return
+      if (!aliveRef.current || generation.current !== epoch) return
       const live = res.requests.find(
         (r) => r.verb === 'install_companion' || r.verb === 'repair_companion',
       )
       setStatus(live ?? null)
+      setReadError(false)
+    }).catch(() => {
+      if (aliveRef.current && generation.current === epoch) setReadError(true)
+    }).finally(() => {
+      if (!aliveRef.current || generation.current !== epoch) return
+      polling.current = false
+      setChecked(true)
     })
   }, [])
 
   useEffect(() => {
     aliveRef.current = true
     poll() // pick up a request already in flight from the OTHER surface (sidebar vs. card)
-    return () => { aliveRef.current = false }
+    return () => { aliveRef.current = false; generation.current += 1; polling.current = false }
   }, [poll])
 
   const active = isLive(status)
@@ -107,7 +124,7 @@ export function useCompanionInstall(availability: AdsAvailability): CompanionIns
   }, [status, availability])
 
   const fire = useCallback((verb: HostVerb) => {
-    if (active || submittingRef.current) return // FR-008: never a second install while one is live
+    if (active || submittingRef.current || !checked || readError || polling.current) return
     submittingRef.current = true
     postInstallRequest(verb, { slug: COMPANION_SLUG })
       .then((res) => {
@@ -119,12 +136,13 @@ export function useCompanionInstall(availability: AdsAvailability): CompanionIns
         setStatus({ verb, state: 'failed', expires_at: new Date().toISOString() })
       })
       .finally(() => { submittingRef.current = false })
-  }, [active])
+  }, [active, checked, readError])
 
   const install = useCallback(() => fire('install_companion'), [fire])
   const repair = useCallback(() => fire('repair_companion'), [fire])
   const retry = useCallback(() => fire(status?.verb ?? 'install_companion'), [fire, status])
 
-  const phase = deriveCompanionInstallPhase(availability, status)
-  return { phase, install, repair, retry }
+  const phase: CompanionInstallPhase = !checked ? { kind: 'checking' }
+    : readError ? { kind: 'unavailable' } : deriveCompanionInstallPhase(availability, status)
+  return { phase, install, repair, retry, refresh: poll }
 }

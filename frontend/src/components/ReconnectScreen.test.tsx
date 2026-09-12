@@ -35,6 +35,7 @@ describe('ReconnectScreen', () => {
     expect(alerts.length).toBe(1)
     expect(container.querySelectorAll('button').length).toBe(1)
     expect(container.textContent).toContain('Reabre Safent')
+    expect(document.activeElement).toBe(container.querySelector('h1'))
   })
 
   it.each([

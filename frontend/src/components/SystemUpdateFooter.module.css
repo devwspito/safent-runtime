@@ -1,0 +1,12 @@
+.footer { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; padding: var(--space-3) var(--space-4); font-size: var(--text-xs); color: var(--color-text-muted); }
+.footer p { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.native span { display: block; }
+.version { display: flex; align-items: baseline; gap: var(--space-2); justify-content: space-between; }
+.version:empty { display: none; }
+.available { color: var(--color-text); text-align: right; overflow-wrap: anywhere; }
+.notice { display: grid; gap: var(--space-1); justify-items: start; }
+.actions { display: flex; align-items: center; gap: var(--space-2); }
+.actions > button:first-child:not(:last-child) { flex: 1; }
+.actions button { min-width: 0; font-size: var(--text-xs); }
+.actions button[aria-disabled='true'] { opacity: .5; cursor: default; }
+.error { color: var(--color-danger); }

@@ -6,7 +6,9 @@
  * no retry loop, one screen, one action.
  */
 import { useT } from '../lib/i18n'
+import { useEffect, useRef } from 'react'
 import type { AuthStatus } from '../lib/token'
+import css from './ReconnectScreen.module.css'
 
 export interface ReconnectScreenProps {
   reason: Extract<AuthStatus, { kind: 'unauthenticated' }>['reason']
@@ -14,39 +16,34 @@ export interface ReconnectScreenProps {
 
 export function ReconnectScreen({ reason }: ReconnectScreenProps) {
   const t = useT()
+  const heading = useRef<HTMLHeadingElement>(null)
+  useEffect(() => { heading.current?.focus() }, [])
 
   return (
     <div
       role="alert"
       aria-live="assertive"
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 'var(--space-3)',
-        minHeight: '100vh',
-        padding: 'var(--space-6)',
-        textAlign: 'center',
-      }}
+      className={css.screen}
     >
-      <h1 style={{ fontSize: 'var(--text-xl, 1.25rem)', margin: 0 }}>
+      <div className={css.content}>
+      <div className={css.brand}><span aria-hidden="true">S</span>Safent</div>
+      <h1 ref={heading} tabIndex={-1}>
         {t('reconnect.title')}
       </h1>
-      <p style={{ color: 'var(--color-text-muted)', margin: 0, maxWidth: '32em' }}>
+      <p>
         {t(`reconnect.reason.${reason}`)}
       </p>
-      <p style={{ color: 'var(--color-text-muted)', margin: 0, maxWidth: '32em' }}>
+      <p>
         {t('reconnect.hint')}
       </p>
       <button
         type="button"
         className="cv-btn cv-btn--primary"
-        style={{ marginTop: 'var(--space-2)' }}
         onClick={() => window.location.reload()}
       >
         {t('reconnect.action')}
       </button>
+      </div>
     </div>
   )
 }

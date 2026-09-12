@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { JSDOM } from 'jsdom'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { manageFocusOnTransition, render, type ScreenElements } from './render.js'
+import { manageFocusOnTransition, render, renderCancellation, type ScreenElements } from './render.js'
 import type { UiState } from './lifecycle.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -52,6 +52,21 @@ describe('render — index.html fixture starts with only the preparing screen vi
 })
 
 describe('render(preparing)', () => {
+  it('describes a requested cancellation without claiming it is complete', () => {
+    const state: UiState = { kind: 'preparing', stages: [], cancelable: true }
+    render(state, els)
+    renderCancellation(state, 'requested', true, els)
+    expect(els.cancelNote.textContent).toContain('Esperando')
+    expect(els.cancelNote.hasAttribute('hidden')).toBe(false)
+    expect(els.cancelButton.disabled).toBe(true)
+    expect(els.cancelButton.textContent).toBe('Cancelación pendiente')
+  })
+  it('never reenables cancellation past the irreversible stage even after IPC failure', () => {
+    const state: UiState = { kind: 'preparing', stages: [], cancelable: false }
+    renderCancellation(state, 'error', true, els)
+    expect(els.cancelButton.disabled).toBe(true)
+    expect(els.cancelNote.getAttribute('role')).toBe('alert')
+  })
   it('shows the live stage label and a real, non-fabricated progress value', () => {
     const state: UiState = {
       kind: 'preparing',
@@ -162,6 +177,13 @@ describe('render(reconnecting) — FR-012 safety net', () => {
 })
 
 describe('manageFocusOnTransition — NFR-005', () => {
+  it('moves focus out of the hidden failure screen when retry returns to preparing', () => {
+    const state: UiState = { kind: 'preparing', stages: [], cancelable: true }
+    els.retryButton.focus()
+    render(state, els)
+    manageFocusOnTransition('failed', state, els)
+    expect(dom.window.document.activeElement === byId('preparing-heading')).toBe(true)
+  })
   it('moves focus to the failed heading only when entering the failed screen', () => {
     render({ kind: 'failed', stageId: 'health', code: 'daemon_unhealthy', detail: 'x', retryable: true, retrying: false }, els)
     manageFocusOnTransition('preparing', { kind: 'failed', stageId: 'health', code: 'daemon_unhealthy', detail: 'x', retryable: true, retrying: false }, els)

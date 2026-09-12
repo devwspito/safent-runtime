@@ -84,3 +84,28 @@ it('recognizes an expired request from the structured code, not translated copy'
   expect(container.textContent).toContain('Esta solicitud caducó')
   expect(container.textContent).not.toContain('Permitir una vez')
 })
+
+it('restores the rejected action on failure, never moves the owner onto approve', async () => {
+  let fail!: (reason: Error) => void
+  resolve.mockReturnValueOnce(new Promise((_yes, no) => { fail = no }))
+  render()
+  const deny = button('Rechazar')
+  await act(async () => { deny.focus(); deny.click() })
+  await act(async () => { fail(new Error('offline')) })
+  expect(document.activeElement).toBe(deny)
+  expect(container.querySelector('[role=alert]')).not.toBeNull()
+})
+
+it('does not resolve or toast a replacement proposal from a late decision response', async () => {
+  let finish!: (value: unknown) => void
+  resolve.mockReturnValueOnce(new Promise(yes => { finish = yes }))
+  render()
+  await act(async () => button('Permitir una vez').click())
+  render({ ...approval, proposal_id: 'proposal-2', summary: 'Otra solicitud' })
+  await act(async () => { finish({ ok: true }) })
+  expect(onResolved).not.toHaveBeenCalled()
+  expect(success).not.toHaveBeenCalled()
+  expect(button('Permitir una vez').disabled).toBe(false)
+  await act(async () => button('Rechazar').click())
+  expect(resolve).toHaveBeenLastCalledWith('proposal-2', 'deny')
+})

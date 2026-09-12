@@ -4542,6 +4542,8 @@ details[open] .cv-teach-chevron {
   box-shadow: var(--shadow-floating);
   width: 100%;
   max-width: 400px;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
   padding: var(--sp-6);
   display: flex;
   flex-direction: column;
@@ -4562,12 +4564,14 @@ details[open] .cv-teach-chevron {
   color: var(--ink2);
   line-height: 1.55;
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .confirm-card__actions {
   display: flex;
   justify-content: flex-end;
   gap: var(--sp-3);
+  flex-wrap: wrap;
   margin-top: var(--sp-2);
 }
 

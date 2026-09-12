@@ -1,228 +1,163 @@
-/**
- * SystemUpdateFooter — sidebar footer: current version, "Actualizar" (only
- * when a newer version is REALLY confirmed — contracts/update.md §3, 028
- * FR-015/SC-006), and "Desinstalar". A single click drops an install-request
- * (verb `update_system`) and the footer shows honest, named-stage progress
- * read back from that same request until the app relaunches on its own.
- */
-import { useCallback, useEffect, useState } from 'react'
-import { sileo } from 'sileo'
+/** Independent native-app and engine-update status. Requests are acknowledgements,
+ * not proof of installation, restart or removal. No unsigned VERSION checks. */
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { RefreshCw, Trash2 } from 'lucide-react'
-import {
-  getSystemUpdate,
-  requestSystemUninstall,
-  postInstallRequest,
-  getInstallRequests,
-  type SystemUpdateStatus,
-} from '../api/client'
+import { getSystemUpdate, requestSystemUninstall, postInstallRequest, getInstallRequests, type SystemUpdateStatus } from '../api/client'
 import type { InstallRequestStatus, SafentUpdateGlobal } from '../api/types'
 import { useConfirmDialog } from './ConfirmDialog'
 import { useT } from '../lib/i18n'
 import { stageLabelKey, formatProgress } from '../lib/installStages'
+import css from './SystemUpdateFooter.module.css'
 
 const SYSTEM_UPDATE_POLL_MS = 15 * 60_000
-// While an update is in flight, poll fast: the owner is WATCHING "Updating…"
-// and must see completion (or the stale-flag expiry) in seconds, not in 15 min.
 const SYSTEM_UPDATE_ACTIVE_POLL_MS = 20_000
 
-function injectedUpdate(): SafentUpdateGlobal | undefined {
-  if (typeof window === 'undefined') return undefined
-  return (window as unknown as { __safentUpdate?: SafentUpdateGlobal }).__safentUpdate
-}
-
-/** Native APP availability is distinct from the daemon's engine update. */
 function nativeAppVersion(): string | null {
   const value = (window as unknown as { __safentNativeUpdater?: unknown }).__safentNativeUpdater
   if (!value || typeof value !== 'object') return null
   const data = value as Record<string, unknown>
   return data.status === 'unavailable' && data.reason === 'integration_missing'
     && typeof data.app_version === 'string' && data.app_version.length <= 64
-    && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(data.app_version)
-    ? data.app_version : null
+    && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(data.app_version) ? data.app_version : null
 }
 
-interface UpdateSignal {
-  /** "is_newer" — a newer version is REALLY confirmed, from at least one source that could check. */
-  available: boolean
-  latestVersion: string
-}
-
-/** The Tauri host shell (has real internet) and the daemon (whose egress cage can
- *  block its own check) each compute this independently — the UI trusts whichever
- *  source actually managed to check (contracts/update.md §3 "dos fuentes, una verdad"). */
-function resolveUpdateSignal(status: SystemUpdateStatus): UpdateSignal {
-  const host = injectedUpdate()
-  if (host) {
-    return { available: host.available, latestVersion: host.to?.app ?? status.latest_version ?? '' }
-  }
-  return {
-    available: !!status.update_available,
-    latestVersion: status.latest_version || '',
-  }
+function resolveUpdateSignal(status: SystemUpdateStatus | null) {
+  const host = (window as unknown as { __safentUpdate?: SafentUpdateGlobal }).__safentUpdate
+  return { available: host ? host.available : !!status?.update_available,
+    latestVersion: host?.to?.app ?? status?.latest_version ?? '' }
 }
 
 export function SystemUpdateFooter() {
   const t = useT()
   const [status, setStatus] = useState<SystemUpdateStatus | null>(null)
   const [liveRequest, setLiveRequest] = useState<InstallRequestStatus | null>(null)
-  const [confirmUpdate, confirmUpdateDialog] = useConfirmDialog()
-
+  const [readError, setReadError] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [action, setAction] = useState<'update' | 'uninstall' | null>(null)
+  const [actionError, setActionError] = useState('')
+  const [uninstallRequested, setUninstallRequested] = useState(false)
+  const [confirm, confirmDialog] = useConfirmDialog()
+  const mounted = useRef(false)
+  const generation = useRef(0)
+  const reading = useRef(false)
+  const submitting = useRef(false)
+  const mutating = useRef(false)
+  const currentSnapshot = useRef('')
   const updating = liveRequest?.state === 'pending' || liveRequest?.state === 'claimed'
 
-  const poll = useCallback(() => {
-    getSystemUpdate().then(setStatus)
-    getInstallRequests().then((res) => {
-      setLiveRequest(res.requests.find((r) => r.verb === 'update_system') ?? null)
-    })
+  const poll = useCallback(async () => {
+    if (reading.current || mutating.current) return
+    reading.current = true
+    const epoch = ++generation.current
+    setLoading(true)
+    const [update, requests] = await Promise.allSettled([getSystemUpdate(), getInstallRequests()])
+    if (!mounted.current || epoch !== generation.current) return
+    const updateValid = update.status === 'fulfilled' && typeof update.value?.current_version === 'string' && !!update.value.current_version.trim()
+    if (updateValid) setStatus(update.value)
+    if (requests.status === 'fulfilled' && Array.isArray(requests.value.requests)) {
+      setLiveRequest(requests.value.requests.find(request => request.verb === 'update_system') ?? null)
+    }
+    setReadError(!updateValid || requests.status === 'rejected'
+      || requests.status === 'fulfilled' && !Array.isArray(requests.value.requests))
+    setLoading(false)
+    reading.current = false
   }, [])
 
   useEffect(() => {
-    poll()
-    const id = setInterval(poll, updating ? SYSTEM_UPDATE_ACTIVE_POLL_MS : SYSTEM_UPDATE_POLL_MS)
-    return () => clearInterval(id)
+    mounted.current = true
+    void poll()
+    const timer = setInterval(() => { void poll() }, updating ? SYSTEM_UPDATE_ACTIVE_POLL_MS : SYSTEM_UPDATE_POLL_MS)
+    return () => {
+      mounted.current = false
+      generation.current += 1
+      reading.current = false
+      clearInterval(timer)
+    }
   }, [poll, updating])
 
-  async function fireUpdate() {
-    try {
-      const res = await postInstallRequest('update_system')
-      if (res.request) setLiveRequest(res.request)
-      sileo.success({ title: t('sysupdate.toast.started') })
-    } catch {
-      sileo.error({ title: t('sysupdate.err.start') })
-    }
-  }
+  const signal = resolveUpdateSignal(status)
+  const failed = !updating && liveRequest?.state === 'failed'
+  const expired = !updating && liveRequest?.state === 'expired'
+  const available = !updating && signal.available
+  const canRetry = expired || failed && liveRequest?.last_failure?.retryable !== false
+  const blocked = updating || readError || loading || uninstallRequested
+  currentSnapshot.current = JSON.stringify([signal, liveRequest?.state, liveRequest?.expires_at, blocked])
 
-  async function handleUpdateClick() {
-    const ok = await confirmUpdate({
-      title: t('sysupdate.confirm.title'),
-      description: t('sysupdate.confirm.body'),
-      confirmLabel: t('sysupdate.confirm.ok'),
-    })
-    if (!ok) return
-    await fireUpdate()
-  }
-
-  async function handleUninstallClick() {
-    const ok = await confirmUpdate({
-      title: t('sysuninstall.confirm.title'),
-      description: t('sysuninstall.confirm.body'),
-      confirmLabel: t('sysuninstall.confirm.ok'),
-    })
-    if (!ok) return
+  async function requestAction(kind: 'update' | 'uninstall') {
+    if (submitting.current || blocked || kind === 'update' && failed && !canRetry) return
+    submitting.current = true
+    setAction(kind)
+    setActionError('')
+    const snapshot = currentSnapshot.current
     try {
-      await requestSystemUninstall()
-      sileo.success({ title: t('sysuninstall.toast.started') })
+      const accepted = await confirm({
+        title: t(kind === 'update' ? 'sysupdate.confirm.title' : 'sysuninstall.confirm.title'),
+        description: t(kind === 'update' ? 'sysupdate.confirm.body' : 'sysuninstall.confirm.body'),
+        confirmLabel: t(kind === 'update' ? 'sysupdate.confirm.ok' : 'sysuninstall.confirm.ok'),
+        variant: kind === 'uninstall' ? 'danger' : 'default',
+      })
+      if (!mounted.current || !accepted) return
+      if (snapshot !== currentSnapshot.current) {
+        setActionError(t('sysupdate.changed'))
+        return
+      }
+      // Older reads must not erase an acknowledged request with their pre-POST view.
+      generation.current += 1
+      reading.current = false
+      mutating.current = true
+      if (kind === 'update') {
+        const result = await postInstallRequest('update_system')
+        if (!mounted.current) return
+        if (!result.accepted || !result.request || result.request.verb !== 'update_system') throw new Error('unconfirmed')
+        setLiveRequest(result.request)
+      } else {
+        const result = await requestSystemUninstall()
+        if (!mounted.current) return
+        if (!result.ok) throw new Error('unconfirmed')
+        setUninstallRequested(true)
+      }
     } catch {
-      sileo.error({ title: t('sysuninstall.err.start') })
+      if (mounted.current) {
+        setActionError(t(kind === 'update' ? 'sysupdate.err.start' : 'sysuninstall.err.start'))
+        // The request may have reached the host. Check before another human retry.
+        setReadError(true)
+      }
+    } finally {
+      mutating.current = false
+      submitting.current = false
+      if (mounted.current) setAction(null)
     }
   }
 
   const appVersion = nativeAppVersion()
-  const nativeNotice = appVersion ? (
-    <p style={{ margin: 0, fontSize: 'var(--text-xs)', color: 'var(--color-text-dim)', lineHeight: 1.5 }}>
-      {t('sysupdate.native.version').replace('{v}', appVersion)}
-      <span style={{ display: 'block' }}>{t('sysupdate.native.unavailable')}</span>
-    </p>
-  ) : null
-  if (!status?.current_version) return nativeNotice
-
-  const signal = resolveUpdateSignal(status)
-  const available = !updating && signal.available
-  const availableLabel = signal.latestVersion
-    ? `${t('sysupdate.available')} · v${signal.latestVersion}`
-    : t('sysupdate.available')
-  const failed = !updating && liveRequest?.state === 'failed'
-  const expired = !updating && liveRequest?.state === 'expired'
-  const showAction = available || updating || failed || expired
-
-  return (
-    <div
-      style={{
-        display: 'flex', flexDirection: 'column', gap: 'var(--space-1)',
-        padding: `var(--space-2) var(--space-4) var(--space-3)`,
-        fontSize: 'var(--text-xs)', color: 'var(--color-text-dim)',
-      }}
-    >
-      {nativeNotice}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', minWidth: 0 }}>
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {t('sysupdate.current').replace('{v}', status.current_version)}
-        </span>
-        <span style={{ flex: 1 }} />
-        {available && (
-          <span
-            title={availableLabel}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--color-accent)', whiteSpace: 'nowrap', maxWidth: '55%' }}
-          >
-            <span aria-hidden="true" style={{
-              width: 6, height: 6, borderRadius: '50%', background: 'var(--color-accent)',
-              animation: 'pulse-dot 1.6s ease-in-out infinite', flex: '0 0 auto',
-            }} />
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {signal.latestVersion ? `v${signal.latestVersion}` : t('sysupdate.available')}
-            </span>
-          </span>
-        )}
-      </div>
-
-      {updating && (
-        <p aria-live="polite" style={{ margin: 0 }}>
-          {t(stageLabelKey(liveRequest?.stage))}
-          {formatProgress(liveRequest?.progress) && ` (${formatProgress(liveRequest?.progress)})`}
-          {' — '}
-          {t('sysupdate.relaunch_notice')}
-        </p>
-      )}
-
-      {(failed || expired) && (
-        <p role="alert" style={{ margin: 0, color: 'var(--color-danger)' }}>
-          {failed
-            ? (liveRequest?.last_failure?.label || t('sysupdate.err.generic'))
-            : t('sysupdate.expired')}
-        </p>
-      )}
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-        {showAction && (
-          <button
-            type="button"
-            className="cv-btn cv-btn--ghost cv-btn--sm"
-            style={{
-              height: 'auto', padding: `3px var(--space-2)`, fontSize: 'var(--text-xs)',
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-              flex: 1, minWidth: 0,
-              ...(available ? {
-                color: 'var(--color-accent)',
-                borderColor: 'color-mix(in srgb, var(--color-accent) 45%, transparent)',
-              } : {}),
-            }}
-            onClick={failed || expired ? fireUpdate : handleUpdateClick}
-            disabled={updating}
-            title={available ? availableLabel : undefined}
-            aria-label={available ? `${availableLabel} — ${t('sysupdate.action')}` : t('sysupdate.action')}
-          >
-            <RefreshCw size={13} className={updating ? 'spin' : undefined} aria-hidden="true" style={{ flex: '0 0 auto' }} />
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {updating ? t('sysupdate.updating') : (failed || expired) ? t('sysupdate.retry') : t('sysupdate.action')}
-            </span>
-          </button>
-        )}
-        <button
-          type="button"
-          className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger"
-          style={{
-            height: 'auto', padding: `3px 7px`,
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto',
-          }}
-          onClick={handleUninstallClick}
-          disabled={updating}
-          title={t('sysuninstall.action')}
-          aria-label={t('sysuninstall.action')}
-        >
-          <Trash2 size={13} aria-hidden="true" />
-        </button>
-      </div>
-      {confirmUpdateDialog}
+  const label = signal.latestVersion ? `${t('sysupdate.available')} · v${signal.latestVersion}` : t('sysupdate.available')
+  return <section className={css.footer} aria-label={t('sysupdate.section')}>
+    {appVersion && <p className={css.native}>{t('sysupdate.native.version').replace('{v}', appVersion)}
+      <span>{t('sysupdate.native.unavailable')}</span></p>}
+    <div className={css.version}>
+      {status?.current_version && <span>{t('sysupdate.current').replace('{v}', status.current_version)}</span>}
+      {available && !readError && <span className={css.available} title={label}>{signal.latestVersion ? `v${signal.latestVersion}` : t('sysupdate.available')}</span>}
     </div>
-  )
+    {!status && loading && <p role="status">{t('sysupdate.checking')}</p>}
+    {readError && <div className={css.notice}><p role="status">{t('sysupdate.unknown')}</p>
+      <button type="button" className="cv-btn cv-btn--ghost cv-btn--sm" disabled={loading} onClick={() => { void poll() }}>{t('sysupdate.check_again')}</button></div>}
+    {updating && <p role="status">{t(stageLabelKey(liveRequest?.stage))}
+      {formatProgress(liveRequest?.progress) && ` (${formatProgress(liveRequest?.progress)})`}{' — '}{t('sysupdate.relaunch_notice')}</p>}
+    {(failed || expired) && <p role="alert" className={css.error}>{failed ? t('sysupdate.err.generic') : t('sysupdate.expired')}</p>}
+    {actionError && <p role="alert" className={css.error}>{actionError}</p>}
+    {uninstallRequested && <p role="status">{t('sysuninstall.toast.started')}</p>}
+    {status?.current_version && <div className={css.actions}>
+      {(available && !failed || updating || canRetry) && <button type="button" className="cv-btn cv-btn--ghost cv-btn--sm"
+        onClick={() => { void requestAction('update') }} aria-disabled={blocked || action !== null}
+        aria-label={available ? `${label} — ${t('sysupdate.action')}` : t('sysupdate.action')}>
+        <RefreshCw size={13} aria-hidden="true" />
+        {action === 'update' ? t('sysupdate.requesting') : updating ? t('sysupdate.updating') : canRetry ? t('sysupdate.retry') : t('sysupdate.action')}
+      </button>}
+      <button type="button" className="cv-btn cv-btn--ghost cv-btn--sm cv-btn--danger" onClick={() => { void requestAction('uninstall') }}
+        aria-disabled={blocked || action !== null} title={t('sysuninstall.action')} aria-label={t('sysuninstall.action')}>
+        <Trash2 size={13} aria-hidden="true" />
+      </button>
+    </div>}
+    {confirmDialog}
+  </section>
 }

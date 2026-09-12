@@ -1,4 +1,4 @@
-import { act } from 'react-dom/test-utils'
+import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
@@ -37,6 +37,7 @@ describe('SystemUpdateFooter', () => {
   let root: Root
 
   beforeEach(() => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     getSystemUpdate.mockReset().mockResolvedValue(status())
     requestSystemUninstall.mockReset().mockResolvedValue({ ok: true })
     postInstallRequest.mockReset()
@@ -52,6 +53,7 @@ describe('SystemUpdateFooter', () => {
   afterEach(() => {
     act(() => { root.unmount() })
     container.remove()
+    vi.unstubAllGlobals()
   })
 
   async function render() {
@@ -62,10 +64,10 @@ describe('SystemUpdateFooter', () => {
     })
   }
 
-  it('renders nothing before the first status response arrives', async () => {
+  it('shows an explicit check before the first status response arrives', async () => {
     getSystemUpdate.mockReturnValue(new Promise(() => { /* never resolves */ }))
     await render()
-    expect(container.innerHTML).toBe('')
+    expect(container.textContent).toContain('Comprobando estado')
   })
 
   it('SC-006: shows the version quietly with NO Actualizar button when nothing is newer', async () => {
@@ -164,7 +166,7 @@ describe('SystemUpdateFooter', () => {
     expect(container.textContent).toContain('Se cerrará y volverá a abrirse')
   })
 
-  it('a failed update shows the backend-supplied reason and a Reintentar action, never a stuck spinner', async () => {
+  it('a failed update shows safe failure copy and a reviewed retry, never a stuck spinner', async () => {
     getSystemUpdate.mockResolvedValue(status())
     getInstallRequests.mockResolvedValue({
       requests: [{
@@ -176,9 +178,87 @@ describe('SystemUpdateFooter', () => {
     })
     await render()
 
-    expect(container.textContent).toContain('Se cortó la descarga')
+    expect(container.textContent).toContain('No se pudo completar la actualización')
     const retryBtn = Array.from(container.querySelectorAll('button'))
       .find(b => b.textContent?.includes('Reintentar'))
     expect(retryBtn).not.toBeUndefined()
+    await act(async () => { retryBtn!.click() })
+    expect(document.querySelector('[role=alertdialog]')).not.toBeNull()
+    expect(postInstallRequest).not.toHaveBeenCalled()
+  })
+
+  it('exposes a recoverable failed check without pretending no update exists', async () => {
+    getSystemUpdate.mockRejectedValueOnce(new Error('private network error'))
+    await render()
+    expect(container.textContent).toContain('No se pudo comprobar el estado')
+    expect(container.textContent).not.toContain('private network')
+    await act(async () => { container.querySelector<HTMLButtonElement>('button')!.click() })
+    expect(getSystemUpdate).toHaveBeenCalledTimes(2)
+    expect(container.textContent).toContain('Versión 0.8.0')
+    expect(container.textContent).not.toContain('No se pudo comprobar')
+  })
+
+  it('never repeats a POST while its acknowledgement is pending, including a second click on confirm', async () => {
+    getSystemUpdate.mockResolvedValue(status({ update_available: true, latest_version: '0.9.0' }))
+    let finish!: (value: unknown) => void
+    postInstallRequest.mockReturnValueOnce(new Promise(yes => { finish = yes }))
+    await render()
+    const update = container.querySelector<HTMLButtonElement>('button')!
+    await act(async () => { update.click(); update.click() })
+    const confirm = document.querySelector<HTMLButtonElement>('.confirm-card__actions button:last-child')!
+    await act(async () => { confirm.click(); confirm.click() })
+    await act(async () => { update.click() })
+    expect(postInstallRequest).toHaveBeenCalledExactlyOnceWith('update_system')
+    expect(container.textContent).toContain('Solicitud pendiente')
+    const pending = { verb: 'update_system', state: 'pending', expires_at: 'qa' }
+    getInstallRequests.mockResolvedValue({ requests: [pending] })
+    await act(async () => { finish({ accepted: true, request: pending }) })
+    expect(container.textContent).toContain('Se cerrará')
+  })
+
+  it('does not turn an unconfirmed update response into success or replay it automatically', async () => {
+    getSystemUpdate.mockResolvedValue(status({ update_available: true }))
+    postInstallRequest.mockResolvedValue({ accepted: true })
+    await render()
+    await act(async () => { container.querySelector<HTMLButtonElement>('button')!.click() })
+    await act(async () => { document.querySelector<HTMLButtonElement>('.confirm-card__actions button:last-child')!.click() })
+    expect(container.textContent).toContain('No se pudo confirmar la solicitud')
+    expect(container.textContent).toContain('Comprobar estado')
+    expect(postInstallRequest).toHaveBeenCalledOnce()
+  })
+
+  it('does not offer retry when the host declares the failure non-retryable', async () => {
+    getInstallRequests.mockResolvedValue({ requests: [{ verb: 'update_system', state: 'failed', expires_at: 'qa', last_failure: { retryable: false } }] })
+    await render()
+    expect(container.textContent).not.toContain('Reintentar')
+  })
+
+  it('requires a new review when the checked version changes while confirmation is open', async () => {
+    vi.useFakeTimers()
+    try {
+      getSystemUpdate.mockResolvedValue(status({ update_available: true, latest_version: '0.9.0' }))
+      await render()
+      await act(async () => { container.querySelector<HTMLButtonElement>('button')!.click() })
+      getSystemUpdate.mockResolvedValue(status({ update_available: true, latest_version: '0.10.0' }))
+      await act(async () => { await vi.advanceTimersByTimeAsync(15 * 60_000) })
+      await act(async () => { document.querySelector<HTMLButtonElement>('.confirm-card__actions button:last-child')!.click() })
+      expect(postInstallRequest).not.toHaveBeenCalled()
+      expect(container.textContent).toContain('El estado cambió durante la revisión')
+    } finally { vi.useRealTimers() }
+  })
+
+  it('preserves the last known active request when its status check fails', async () => {
+    vi.useFakeTimers()
+    try {
+      getInstallRequests.mockResolvedValue({ requests: [{ verb: 'update_system', state: 'claimed', expires_at: 'qa' }] })
+      await render()
+      await act(async () => { await Promise.resolve() })
+      getInstallRequests.mockRejectedValueOnce(new Error('offline'))
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+      expect(getInstallRequests).toHaveBeenCalledTimes(3)
+      expect(container.textContent).toContain('No se pudo comprobar el estado')
+      expect(container.querySelector('button[aria-label="Actualizar"]')?.getAttribute('aria-disabled')).toBe('true')
+      expect(postInstallRequest).not.toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
   })
 })

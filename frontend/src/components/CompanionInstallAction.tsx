@@ -22,9 +22,14 @@ export interface CompanionInstallActionProps {
 
 export function CompanionInstallAction({ availability, compact = false }: CompanionInstallActionProps) {
   const t = useT()
-  const { phase, install, repair, retry } = useCompanionInstall(availability)
+  const { phase, install, repair, retry, refresh } = useCompanionInstall(availability)
 
   if (phase.kind === 'hidden') return null
+  if (phase.kind === 'checking') return <span role="status">{t('sysupdate.checking')}</span>
+  if (phase.kind === 'unavailable') return <div>
+    {!compact && <p role="status">{t('ads.install.unknown')}</p>}
+    <button type="button" className="cv-btn cv-btn--ghost cv-btn--sm" title={t('ads.install.unknown')} onClick={refresh}>{t('sysupdate.check_again')}</button>
+  </div>
 
   if (phase.kind === 'installing') {
     const stageText = t(stageLabelKey(phase.stage))

@@ -2,9 +2,9 @@ import { initialState, reduceLifecycle } from './lifecycle.js';
 import { isTauriRuntime, requestCancel, requestRetry, requestDiagnostics, subscribeToBootstrapState } from './ipc.js';
 import { reduceBootstrapSnapshot } from './bootstrap-state.js';
 import { diagnosticsAction } from './diagnostics-action.js';
-import { nativeAction } from './native-action.js';
+import { nativeAction, nativeCancellation } from './native-action.js';
 import { renderNativeUpdater } from './native-updater.js';
-import { manageFocusOnTransition, render } from './render.js';
+import { manageFocusOnTransition, render, renderCancellation } from './render.js';
 function requireElement(id) {
     const el = document.getElementById(id);
     if (!el)
@@ -38,14 +38,17 @@ function main() {
     renderNativeUpdater(requireElement('native-updater'), window.__safentNativeUpdater);
     let state = initialState;
     let attemptId;
+    const cancel = nativeCancellation(requestCancel, () => {
+        renderCancellation(state, cancel.phase, attemptId !== undefined, els);
+    });
     render(state, els);
     els.cancelButton.disabled = true;
     const apply = (next) => {
         const previousKind = state.kind;
         state = next;
+        cancel.sync(attemptId, state.kind === 'preparing');
         render(state, els);
-        if (attemptId === undefined)
-            els.cancelButton.disabled = true;
+        renderCancellation(state, cancel.phase, attemptId !== undefined, els);
         manageFocusOnTransition(previousKind, state, els);
     };
     const actionError = requireElement('action-error');
@@ -64,8 +67,11 @@ function main() {
             throw new Error('Bootstrap attempt is not available');
         return attemptId;
     };
-    const cancel = nativeAction(() => requestCancel(currentAttempt()), showActionError, 'No se pudo solicitar la cancelación. Safent puede seguir preparando tu espacio; comprueba el estado antes de reintentar.');
-    const retry = nativeAction(() => requestRetry(currentAttempt()), showActionError, 'No se pudo solicitar el reintento. Puedes volver a intentarlo sin perder los detalles del fallo.');
+    let retryAttempt;
+    const retry = nativeAction(() => requestRetry(currentAttempt()), message => {
+        if (retryAttempt === attemptId && state.kind === 'failed')
+            showActionError(message);
+    }, 'No se pudo solicitar el reintento. Puedes volver a intentarlo sin perder los detalles del fallo.');
     const diagnosticsNote = requireElement('diagnostics-note');
     const exportDiagnostic = diagnosticsAction(els.diagnosticsButton, diagnosticsNote, requestDiagnostics);
     els.diagnosticsButton.disabled = !isTauriRuntime();
@@ -78,11 +84,15 @@ function main() {
     els.cancelButton.addEventListener('click', () => {
         if (els.cancelButton.disabled)
             return;
-        void cancel();
+        const heldFocus = document.activeElement === els.cancelButton;
+        void cancel.request();
+        if (heldFocus)
+            els.cancelNote.focus();
     });
     els.retryButton.addEventListener('click', () => {
         if (els.retryButton.disabled)
             return;
+        retryAttempt = attemptId;
         const previous = state;
         const pending = reduceLifecycle(state, { source: 'retry-requested' });
         apply(pending);

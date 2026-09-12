@@ -2,9 +2,9 @@ import { initialState, reduceLifecycle, type UiState } from './lifecycle.js'
 import { isTauriRuntime, requestCancel, requestRetry, requestDiagnostics, subscribeToBootstrapState } from './ipc.js'
 import { reduceBootstrapSnapshot } from './bootstrap-state.js'
 import { diagnosticsAction } from './diagnostics-action.js'
-import { nativeAction } from './native-action.js'
+import { nativeAction, nativeCancellation } from './native-action.js'
 import { renderNativeUpdater } from './native-updater.js'
-import { manageFocusOnTransition, render, type ScreenElements } from './render.js'
+import { manageFocusOnTransition, render, renderCancellation, type ScreenElements } from './render.js'
 
 function requireElement<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id)
@@ -44,14 +44,18 @@ function main(): void {
     (window as unknown as { __safentNativeUpdater?: unknown }).__safentNativeUpdater)
   let state: UiState = initialState
   let attemptId: number | undefined
+  const cancel = nativeCancellation(requestCancel, () => {
+    renderCancellation(state, cancel.phase, attemptId !== undefined, els)
+  })
   render(state, els)
   els.cancelButton.disabled = true
 
   const apply = (next: UiState): void => {
     const previousKind = state.kind
     state = next
+    cancel.sync(attemptId, state.kind === 'preparing')
     render(state, els)
-    if (attemptId === undefined) els.cancelButton.disabled = true
+    renderCancellation(state, cancel.phase, attemptId !== undefined, els)
     manageFocusOnTransition(previousKind, state, els)
   }
 
@@ -71,9 +75,10 @@ function main(): void {
     if (attemptId === undefined) throw new Error('Bootstrap attempt is not available')
     return attemptId
   }
-  const cancel = nativeAction(() => requestCancel(currentAttempt()), showActionError,
-    'No se pudo solicitar la cancelación. Safent puede seguir preparando tu espacio; comprueba el estado antes de reintentar.')
-  const retry = nativeAction(() => requestRetry(currentAttempt()), showActionError,
+  let retryAttempt: number | undefined
+  const retry = nativeAction(() => requestRetry(currentAttempt()), message => {
+    if (retryAttempt === attemptId && state.kind === 'failed') showActionError(message)
+  },
     'No se pudo solicitar el reintento. Puedes volver a intentarlo sin perder los detalles del fallo.')
 
   const diagnosticsNote = requireElement('diagnostics-note')
@@ -86,11 +91,14 @@ function main(): void {
 
   els.cancelButton.addEventListener('click', () => {
     if (els.cancelButton.disabled) return
-    void cancel()
+    const heldFocus = document.activeElement === els.cancelButton
+    void cancel.request()
+    if (heldFocus) els.cancelNote.focus()
   })
 
   els.retryButton.addEventListener('click', () => {
     if (els.retryButton.disabled) return
+    retryAttempt = attemptId
     const previous = state
     const pending = reduceLifecycle(state, { source: 'retry-requested' })
     apply(pending)
