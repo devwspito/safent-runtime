@@ -26,6 +26,10 @@ tauri-plugin-updater = "2"
 # Verifies runtime-manifest.json's signature ourselves — the updater plugin
 # only knows about latest.json (contracts/update.md §2).
 minisign-verify = "0.2"
+base64 = "0.22"
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
 
 # Unix-only: engine_adapter.rs lands the bootstrap secret on a dedicated fd via dup2 (app-engine.md §5).
 [target.'cfg(unix)'.dependencies]

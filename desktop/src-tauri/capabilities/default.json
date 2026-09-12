@@ -8,6 +8,8 @@
     "allow-cancel-bootstrap",
     "allow-retry-bootstrap",
     "allow-export-diagnostics",
-    "allow-get-bootstrap-state"
+    "allow-get-bootstrap-state",
+    "allow-check-native-update",
+    "allow-install-native-update"
   ]
 }

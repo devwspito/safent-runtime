@@ -96,7 +96,9 @@ pub fn create_main_window(app: &AppHandle, policy: WindowPolicy) -> tauri::Resul
             .inner_size(1280.0, 860.0)
             .min_inner_size(900.0, 600.0)
             .initialization_script(BLOCK_CONTEXT_MENU_JS)
-            .initialization_script(crate::update::availability::initialization_script())
+            .initialization_script(crate::update::availability::initialization_script(
+                crate::update::native::configured(app),
+            ))
             .on_navigation(move |url| is_navigation_allowed(policy.authorized().as_ref(), url))
             .build()?;
 
@@ -137,7 +139,14 @@ pub fn install_tray(app: &AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let quit_item = MenuItem::with_id(app, "quit", "Salir de Safent", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_item, &restart_item, &quit_item])?;
+    let update_item = MenuItem::with_id(
+        app,
+        "check-native-update",
+        "Buscar actualizaciones de la app…",
+        true,
+        None::<&str>,
+    )?;
+    let menu = Menu::with_items(app, &[&open_item, &update_item, &restart_item, &quit_item])?;
 
     let mut tray = TrayIconBuilder::new()
         .menu(&menu)
@@ -145,6 +154,7 @@ pub fn install_tray(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("Safent")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => focus_existing(app),
+            "check-native-update" => crate::update::native::check_from_tray(app.clone()),
             "restart-engine" => {
                 let _ = app.emit(RESTART_ENGINE_EVENT, ());
             }
