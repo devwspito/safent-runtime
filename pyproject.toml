@@ -99,6 +99,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
+"hermes.runtime" = ["managed_ads_tool_schemas.json"]
 "hermes.lumen" = ["qml/*.qml", "qml/*.js", "qml/icons/*.svg", "qml/qmldir", "qml/fonts/*.ttf"]
 # spec 014: el overlay y las 6 capability apps reusan/llevan sus .qml; deben
 # horneárse en el wheel o QQmlApplicationEngine no los encuentra (file not found).

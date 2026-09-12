@@ -1060,6 +1060,13 @@ class DbusRuntimeServiceWiring:
         from hermes.runtime.managed_llm import apply_signed_gateway
         return apply_signed_gateway(self, bundle_json)
 
+    def apply_managed_ads_policy(self, *, bundle_json: str, sender_uid: int) -> dict:
+        self._authorize_and_resolve(sender_uid, operation='apply_managed_ads_policy')
+        from hermes.runtime.managed_ads_policy import apply_signed_ads
+        if self._association_store is None:
+            raise PermissionError('Enterprise association unavailable')
+        return apply_signed_ads(self._association_store, bundle_json)
+
     @_serialized_local_llm_write
     def set_active_provider(self, *, provider_id: str, sender_uid: int) -> dict:
         """Activa un provider — endpoint ÚNICO que la UI llama para CUALQUIER
@@ -1749,6 +1756,10 @@ class DbusRuntimeServiceWiring:
         self._authorize_shell_server_caller(
             sender_uid, operation="mint_companion_owner_assertion"
         )
+        if slug == 'safent-ads':
+            policy = _ads_routing_policy()
+            if policy is not None and policy.mode == 'managed':
+                raise PermissionError('Local Ads owner assertions forbidden while managed')
         authority = self._require_companion_sso_authority()
         assertion = authority.mint_owner_assertion(slug=slug)
         return {"assertion": assertion.assertion, "expires_at": assertion.expires_at}
@@ -7742,6 +7753,10 @@ def _neus_write_mcp_entry(
     """
     from hermes_cli.config import load_config, save_config  # noqa: PLC0415
 
+    if server_id == 'safent-ads':
+        policy = _ads_routing_policy()
+        if policy is not None and policy.mode == 'managed':
+            raise PermissionError('Native local Ads configuration forbidden while managed')
     cfg = load_config()
     mcp_servers: dict = cfg.setdefault("mcp_servers", {})
     entry: dict = {
@@ -7889,6 +7904,27 @@ _COMPANION_SEED_LABELS: dict[str, str] = {
 }
 
 
+def _ads_routing_policy():
+    import os
+    from pathlib import Path
+    from hermes.runtime.managed_ads_policy import read_ads_policy
+    return read_ads_policy(Path(os.environ.get('HERMES_SHELL_DB', '/var/lib/hermes/shell-state.db')))
+
+
+async def reconcile_managed_ads_client(manager):
+    from hermes.mcp.domain.value_objects import McpServerId
+    if manager is None:
+        return
+    try:
+        policy = _ads_routing_policy()
+    except PermissionError:
+        await manager.disconnect(McpServerId('safent-ads'))
+        raise
+    if policy is not None and policy.mode == 'managed':
+        await manager.disconnect(McpServerId('safent-ads'))
+        await _mcp_connect(manager, 'safent-ads', ['managed-ads'])
+
+
 def _import_seed_companion_servers() -> None:
     """Import not-yet-imported companion-backed seeds (fail-soft per slug).
 
@@ -7911,6 +7947,13 @@ def _import_seed_companion_servers() -> None:
     existing = {e["server_id"] for e in _neus_load_entries()}
     changed = False
     for slug in sorted(_SEEDED_MCP_SLUGS):
+        if slug == 'safent-ads':
+            try:
+                policy = _ads_routing_policy()
+                if policy is not None and policy.mode == 'managed':
+                    continue
+            except PermissionError:
+                continue
         if slug in imported:
             continue
         endpoint = get_companion(slug)
@@ -8355,6 +8398,12 @@ def _grant_mcp_egress_for_managed_remote(server_id: str) -> None:
     """
     if server_id not in _MANAGED_REMOTE_MCP_SLUGS:
         return
+    if server_id == 'safent-ads':
+        policy = _ads_routing_policy()
+        if policy is not None and policy.mode == 'managed':
+            # No MCP subprocess is used in this mode. Never consult legacy
+            # endpoint overrides or mint a grant for a local companion.
+            return
     host = _resolve_managed_remote_endpoint_host(server_id) or _resolve_paired_cloud_host()
     if not host:
         return
@@ -8466,6 +8515,9 @@ def _autowire_companion_env(server_id: str, resolved_env: dict[str, str]) -> Non
         return
     if "ADS_BEARER" not in resolved_env and "NODE_EXTRA_CA_CERTS" not in resolved_env:
         return
+    policy = _ads_routing_policy()
+    if policy is not None and policy.mode == 'managed':
+        raise PermissionError('Local Ads credentials forbidden for managed instance')
     try:
         from hermes.shell_server.companions import (  # noqa: PLC0415
             get_companion,
@@ -8498,6 +8550,17 @@ async def _mcp_connect(
         Transport,
         TrustLevel,
     )
+    if server_id == 'safent-ads':
+        policy = _ads_routing_policy()
+        if policy is not None and policy.mode == 'managed':
+            # The scoped factory consumes this inert descriptor; no subprocess,
+            # URL override, CA file or local bearer may be selected here.
+            if getattr(manager, '_scoped_client_factory', None) is None:
+                raise PermissionError('Managed Ads client unavailable')
+            return await manager.connect(
+                server_id=McpServerId(server_id), slug=ServerSlug(server_id),
+                transport=Transport.stdio(['managed-ads']), trust_level=TrustLevel.MANAGED_REMOTE,
+            )
     # Auto-wire the owner's ACTIVE LLM provider into MCPs that declare OpenAI-compatible
     # BYOK keys but leave them empty (e.g. ruflo's swarm: env has OPENAI_BASE_URL="" /
     # OPENAI_API_KEY=""). The MCP child is spawned by the launcher and does NOT inherit
@@ -8758,6 +8821,17 @@ async def reconnect_persisted_mcp_servers(manager) -> None:
     # provisioned file, not the image), same "land then reconnect below" flow.
     _import_seed_companion_servers()
     entries = _neus_load_entries()
+    try:
+        ads_policy = _ads_routing_policy()
+    except PermissionError:
+        entries = [entry for entry in entries if entry['server_id'] != 'safent-ads']
+    else:
+        if ads_policy is not None and ads_policy.mode == 'managed':
+            entries = [entry for entry in entries if entry['server_id'] != 'safent-ads']
+            try:
+                await reconcile_managed_ads_client(manager)
+            except Exception:
+                logger.warning('hermes.dbus.managed_ads_unavailable')
     if not entries:
         return
     for entry in entries:

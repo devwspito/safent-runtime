@@ -99,7 +99,7 @@ async def build_mcp_tool_specs(
                     qualified_name=tool.qualified_name,
                     bare_tool_name=tool.name,
                     description=tool.description,
-                    input_schema=None,  # schema is from tool entity (no raw schema here)
+                    input_schema=tool.input_schema,
                     auto_executable=tool.auto_executable,
                     broker=broker,
                     consent_context=consent_context,

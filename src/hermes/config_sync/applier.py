@@ -146,6 +146,7 @@ _ALLOWED_VERBS: frozenset[str] = frozenset(
         "list_agents",
         "list_providers",
         "apply_managed_llm_gateway",
+        "apply_managed_ads_policy",
         "list_mcp_servers",
         "list_consents",
         "list_egress_grants",
@@ -332,6 +333,18 @@ class PolicyApplier:
         self._proxy = proxy
         self._directory_store = directory_store
 
+    async def _apply_ads(self, payload: PolicyPayload, envelope: str | None, result: ApplyResult) -> None:
+        if payload.ads is None:
+            return
+        if envelope is None:
+            result.failed.append('ads:signed_envelope_required')
+            return
+        response = await self._call_mutator('apply_managed_ads_policy', envelope)
+        if response.get('ok') is True:
+            result.applied += 1
+        else:
+            result.failed.append('ads:managed_policy_failed')
+
     async def apply(
         self,
         payload: PolicyPayload,
@@ -347,6 +360,8 @@ class PolicyApplier:
         "" preserves existing callers that don't scope agent access yet.
         """
         result = ApplyResult()
+
+        await self._apply_ads(payload, signed_bundle_json, result)
 
         # Phase 1: upsert everything
         if payload.llm_instance_id is not None:
