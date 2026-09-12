@@ -92,8 +92,9 @@ class TestMainRegistersSigtermExactlyOnce:
         model monitor / composio poller have no graceful hook of their own)
         must still be wired, not just the three named shutdown calls."""
         source = _MAIN_PY.read_text(encoding="utf-8")
-        assert re.search(r"async def _cancel_stragglers_after_grace", source)
-        assert "t.cancel()" in source
+        assert re.search(r"async def _cancel_runtime_tasks_after_grace", source)
+        assert "task.cancel()" in source
+        assert "not task.cancelling()" in source
 
 
 class TestCombinedSigtermHandlerFiresEveryAction:
