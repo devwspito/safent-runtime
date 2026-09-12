@@ -6,6 +6,14 @@
   "note": "Fuente única de verdad para desktop/scripts/stage-runtime.sh. Todo hash es sha256 del archivo EXACTO publicado en la URL indicada (recalculado a mano el 10-sep-2026, no copiado de research.md). Los digests de imagen OCI (machine_image) son los del propio registro (content-addressable: el digest ES el sha256 del blob, por eso no se descarga el blob de 932 MB para 'verificarlo' — el propio stage-runtime.sh lo verifica en el momento real de la descarga).",
   "targets": {
     "aarch64-apple-darwin": {
+      "private_build": {
+        "source_commit": "8303f2e25b675ea7f82099d615c60969aec15870",
+        "source_sha256": "8a2584618a4ea0cfc3b0e95f7e07c8567b926df71fb7e8311102194b25a343b9",
+        "patch_sha256": "98a9009e247a0365aad6332857c73add6361351177eeaa3eacd2026f77a2a18b",
+        "go_version": "1.25.9",
+        "go_sha256": "9528be7329b9770631a6bd09ca2f3a73ed7332bec01d87435e75e92d8f130363",
+        "binary_sha256": "7e0a99204954942f1a1145f09a682eeb45eea543393aad9a2ee69f1b2cc10716"
+      },
       "has_machine": true,
       "podman_version": "6.1.1",
       "podman_source": "containers/podman (repo renombrado a podman-container-tools/podman; la URL containers/podman redirige)",

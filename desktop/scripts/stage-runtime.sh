@@ -168,6 +168,14 @@ case "$TARGET" in
       echo "    partial work on $(uname -s)." >&2
       exit "$EXIT_PLATFORM"
     fi
+    # Always validate the independently built, immutable private client, including
+    # cache hits. Never silently fall back to the stock client from the .pkg.
+    command -v python3 >/dev/null 2>&1 || exit "$EXIT_USAGE"
+    [ -n "${SAFENT_PRIVATE_PODMAN_DIR:-}" ] || {
+      echo "[x] SAFENT_PRIVATE_PODMAN_DIR required: verified private macOS build" >&2
+      exit "$EXIT_STAGE"
+    }
+    python3 "$SCRIPT_DIR/lib/verify-private-podman.py" "$SAFENT_PRIVATE_PODMAN_DIR" "$LOCKFILE" || exit "$EXIT_STAGE"
     command -v pkgutil >/dev/null 2>&1 || { echo "[x] need 'pkgutil' (macOS only) on PATH" >&2; exit "$EXIT_USAGE"; }
     ;;
 esac
@@ -186,6 +194,9 @@ echo "[*] stage-runtime: target=$TARGET lock=$LOCKFILE dest=$DEST"
 
 # ---- already staged with matching hashes? skip the network entirely -----------
 _already_staged() {
+  # Darwin contains a patched binary, not the original .pkg entries. Restage
+  # from verified cached downloads and the private artifact on every invocation.
+  [ "$TARGET" != aarch64-apple-darwin ] || return 1
   jq -e '.targets[$t].entries // empty' --arg t "$TARGET" "$LOCKFILE" >/dev/null 2>&1 || return 1
   local n
   n="$(jq -r '.targets[$t].entries | length' --arg t "$TARGET" "$LOCKFILE")"
@@ -536,6 +547,9 @@ case "$TARGET" in
   x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) _stage_linux ;;
   aarch64-apple-darwin)                               _stage_macos ;;
 esac
+if [ "$TARGET" = aarch64-apple-darwin ]; then
+  python3 "$SCRIPT_DIR/lib/verify-private-podman.py" "$SAFENT_PRIVATE_PODMAN_DIR" "$LOCKFILE" "$DEST" || exit "$EXIT_STAGE"
+fi
 _stage_app_files
 
 # Permissions + symlinks + (on macOS) xattrs, uniformly, regardless of which
