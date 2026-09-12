@@ -227,6 +227,7 @@ COPY ops/agents-os-edition/dbus/org.hermes.Runtime1.conf /usr/share/dbus-1/syste
 COPY ops/agents-os-edition/netns/          /etc/nftables/hermes/
 COPY ops/agents-os-edition/modules-load.d/ /etc/modules-load.d/
 COPY ops/agents-os-edition/seed/mcp-servers.json /usr/share/hermes/seed/
+COPY ops/agents-os-edition/seed/excel-mcp-overrides.txt /usr/share/hermes/seed/
 # Managed-scope overlay (administrator-pinned hermes_cli config keys). Holds the
 # runtime posture on every boot regardless of the persisted config.yaml — see the
 # file header (plugins.hook_callback_timeout: 0 keeps the HITL gate unbounded).
