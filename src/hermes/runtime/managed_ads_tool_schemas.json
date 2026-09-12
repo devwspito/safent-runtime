@@ -1,4 +1,485 @@
 {
+  "propose_ad_child": {
+    "$defs": {
+      "CauseArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "maxLength": 140,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          },
+          "signal_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Signal Id"
+          },
+          "rule_id": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z]{1,2}\\d{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rule Id"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "CauseArgs",
+        "type": "object"
+      },
+      "CountryTargetingArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "countries": {
+            "items": {
+              "pattern": "^[A-Z]{2}$",
+              "type": "string"
+            },
+            "maxItems": 25,
+            "minItems": 1,
+            "title": "Countries",
+            "type": "array"
+          }
+        },
+        "required": [
+          "countries"
+        ],
+        "title": "CountryTargetingArgs",
+        "type": "object"
+      },
+      "CpcBidArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "amount": {
+            "pattern": "^[0-9]{1,6}(\\.[0-9]{1,2})?$",
+            "title": "Amount",
+            "type": "string"
+          },
+          "currency": {
+            "const": "EUR",
+            "title": "Currency",
+            "type": "string"
+          }
+        },
+        "required": [
+          "amount",
+          "currency"
+        ],
+        "title": "CpcBidArgs",
+        "type": "object"
+      },
+      "GoogleAdGroupNativeArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "type": {
+            "const": "SEARCH_STANDARD",
+            "title": "Type",
+            "type": "string"
+          },
+          "bidding_strategy": {
+            "const": "MANUAL_CPC",
+            "title": "Bidding Strategy",
+            "type": "string"
+          },
+          "cpc_bid": {
+            "$ref": "#/$defs/CpcBidArgs"
+          },
+          "targeting_mode": {
+            "const": "INHERIT_CAMPAIGN",
+            "title": "Targeting Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "bidding_strategy",
+          "cpc_bid",
+          "targeting_mode"
+        ],
+        "title": "GoogleAdGroupNativeArgs",
+        "type": "object"
+      },
+      "GoogleAdGroupPlanArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "schema_version": {
+            "const": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "PAUSED",
+            "title": "Status",
+            "type": "string"
+          },
+          "platform": {
+            "const": "google",
+            "title": "Platform",
+            "type": "string"
+          },
+          "kind": {
+            "const": "ad_set",
+            "title": "Kind",
+            "type": "string"
+          },
+          "native": {
+            "$ref": "#/$defs/GoogleAdGroupNativeArgs"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "platform",
+          "kind",
+          "native"
+        ],
+        "title": "GoogleAdGroupPlanArgs",
+        "type": "object"
+      },
+      "GoogleRsaNativeArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "RESPONSIVE_SEARCH_AD",
+            "title": "Type",
+            "type": "string"
+          },
+          "headlines": {
+            "items": {
+              "maxLength": 30,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 15,
+            "minItems": 3,
+            "title": "Headlines",
+            "type": "array"
+          },
+          "descriptions": {
+            "items": {
+              "maxLength": 90,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 4,
+            "minItems": 2,
+            "title": "Descriptions",
+            "type": "array"
+          },
+          "final_url": {
+            "description": "Explicit HTTPS landing page, never fetched by Safent; no credential-bearing URL or private IP.",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Final Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "headlines",
+          "descriptions",
+          "final_url"
+        ],
+        "title": "GoogleRsaNativeArgs",
+        "type": "object"
+      },
+      "GoogleRsaPlanArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "schema_version": {
+            "const": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "PAUSED",
+            "title": "Status",
+            "type": "string"
+          },
+          "platform": {
+            "const": "google",
+            "title": "Platform",
+            "type": "string"
+          },
+          "kind": {
+            "const": "ad",
+            "title": "Kind",
+            "type": "string"
+          },
+          "native": {
+            "$ref": "#/$defs/GoogleRsaNativeArgs"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "platform",
+          "kind",
+          "native"
+        ],
+        "title": "GoogleRsaPlanArgs",
+        "type": "object"
+      },
+      "MetaAdNativeArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "creative_id": {
+            "pattern": "^[0-9]{1,32}$",
+            "title": "Creative Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "creative_id"
+        ],
+        "title": "MetaAdNativeArgs",
+        "type": "object"
+      },
+      "MetaAdPlanArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "schema_version": {
+            "const": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "PAUSED",
+            "title": "Status",
+            "type": "string"
+          },
+          "platform": {
+            "const": "meta",
+            "title": "Platform",
+            "type": "string"
+          },
+          "kind": {
+            "const": "ad",
+            "title": "Kind",
+            "type": "string"
+          },
+          "native": {
+            "$ref": "#/$defs/MetaAdNativeArgs"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "platform",
+          "kind",
+          "native"
+        ],
+        "title": "MetaAdPlanArgs",
+        "type": "object"
+      },
+      "MetaAdSetNativeArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "budget_mode": {
+            "const": "CAMPAIGN",
+            "title": "Budget Mode",
+            "type": "string"
+          },
+          "billing_event": {
+            "const": "IMPRESSIONS",
+            "title": "Billing Event",
+            "type": "string"
+          },
+          "optimization_goal": {
+            "const": "LINK_CLICKS",
+            "title": "Optimization Goal",
+            "type": "string"
+          },
+          "destination_type": {
+            "const": "WEBSITE",
+            "title": "Destination Type",
+            "type": "string"
+          },
+          "targeting": {
+            "$ref": "#/$defs/MetaChildTargetingArgs"
+          },
+          "dsa_beneficiary": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Dsa Beneficiary",
+            "type": "string"
+          },
+          "dsa_payor": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Dsa Payor",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "budget_mode",
+          "billing_event",
+          "optimization_goal",
+          "destination_type",
+          "targeting",
+          "dsa_beneficiary",
+          "dsa_payor"
+        ],
+        "title": "MetaAdSetNativeArgs",
+        "type": "object"
+      },
+      "MetaAdSetPlanArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "schema_version": {
+            "const": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "PAUSED",
+            "title": "Status",
+            "type": "string"
+          },
+          "platform": {
+            "const": "meta",
+            "title": "Platform",
+            "type": "string"
+          },
+          "kind": {
+            "const": "ad_set",
+            "title": "Kind",
+            "type": "string"
+          },
+          "native": {
+            "$ref": "#/$defs/MetaAdSetNativeArgs"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "platform",
+          "kind",
+          "native"
+        ],
+        "title": "MetaAdSetPlanArgs",
+        "type": "object"
+      },
+      "MetaChildTargetingArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "geo_locations": {
+            "$ref": "#/$defs/CountryTargetingArgs"
+          },
+          "age_min": {
+            "maximum": 65,
+            "minimum": 18,
+            "title": "Age Min",
+            "type": "integer"
+          },
+          "age_max": {
+            "maximum": 65,
+            "minimum": 18,
+            "title": "Age Max",
+            "type": "integer"
+          },
+          "targeting_automation": {
+            "$ref": "#/$defs/TargetingAutomationArgs"
+          }
+        },
+        "required": [
+          "geo_locations",
+          "age_min",
+          "age_max",
+          "targeting_automation"
+        ],
+        "title": "MetaChildTargetingArgs",
+        "type": "object"
+      },
+      "TargetingAutomationArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "advantage_audience": {
+            "const": 0,
+            "title": "Advantage Audience",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "advantage_audience"
+        ],
+        "title": "TargetingAutomationArgs",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "entity_ref": {
+        "title": "Entity Ref",
+        "type": "string"
+      },
+      "child_plan": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/GoogleAdGroupPlanArgs"
+          },
+          {
+            "$ref": "#/$defs/GoogleRsaPlanArgs"
+          },
+          {
+            "$ref": "#/$defs/MetaAdSetPlanArgs"
+          },
+          {
+            "$ref": "#/$defs/MetaAdPlanArgs"
+          }
+        ],
+        "title": "Child Plan"
+      },
+      "cause": {
+        "$ref": "#/$defs/CauseArgs"
+      }
+    },
+    "required": [
+      "entity_ref",
+      "child_plan",
+      "cause"
+    ],
+    "title": "ManagedAdChildArgs",
+    "type": "object"
+  },
   "list_platform_accounts": {
     "additionalProperties": false,
     "properties": {},

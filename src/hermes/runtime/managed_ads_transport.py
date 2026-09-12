@@ -25,6 +25,7 @@ TOOLS = frozenset(
         "get_entity_metrics",
         "propose_budget_change",
         "propose_pause",
+        "propose_ad_child",
         "get_proposal",
         "get_approval_review",
     }

@@ -102,12 +102,22 @@ async def main():
         broker = DenyingBroker()
         context = ConsentContext(tenant_id=uuid4(), operator_id=uuid4())
         register_mcp_tools_in_nous_registry(server, broker, context, asyncio.get_running_loop())
-        name = "mcp__safent-ads__propose_pause"
-        assert registry.get_schema(name)["parameters"]["required"] == ["grant_id", "arguments"]
-        args = {"grant_id": "explicit-grant", "arguments": {"entity_ref": "scoped"}}
-        output = await asyncio.to_thread(registry.get_entry(name).handler, args)
-        assert json.loads(output)["error"].startswith("mcp_read_blocked")
-        assert len(broker.calls) == 1 and broker.calls[0][0].parameters["args"] == args
+        for tool in ("propose_pause", "propose_ad_child"):
+            name = "mcp__safent-ads__" + tool
+            assert registry.get_schema(name)["parameters"]["required"] == ["grant_id", "arguments"]
+            args = {"grant_id": "explicit-grant", "arguments": {"entity_ref": "scoped"}}
+            if tool == "propose_ad_child":
+                args["arguments"]["child_plan"] = {
+                    "schema_version": 1,
+                    "platform": "meta",
+                    "kind": "ad",
+                    "status": "PAUSED",
+                    "native": {"name": "Fixture child", "creative_id": "789"},
+                }
+            output = await asyncio.to_thread(registry.get_entry(name).handler, args)
+            assert json.loads(output)["error"].startswith("mcp_read_blocked")
+            assert broker.calls[-1][0].parameters["args"] == args
+        assert len(broker.calls) == 2
         from tools.mcp_tool_common import _core
 
         assert "safent-ads" not in _core._servers
@@ -123,8 +133,8 @@ async def main():
         assert (root / "config.yaml").read_text() == before
         await manager.disconnect(McpServerId("safent-ads"))
         print(
-            f"PASS Hermes {version('hermes-agent')}: 8 managed Ads schemas; "
-            "exact args reach broker once; no local discovery/subprocess/network"
+            f"PASS Hermes {version('hermes-agent')}: 9 managed Ads schemas; "
+            "pause/child exact args each reach broker once; no local discovery/subprocess/network"
         )
 
 
