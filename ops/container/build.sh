@@ -58,6 +58,7 @@ if [ "$(basename "$RUNTIME")" = "podman" ]; then
 fi
 "$RUNTIME" build "${BUILD_FORMAT_ARGS[@]}" \
   --build-arg SAFENT_EDITION=community \
+  --build-arg SAFENT_VERSION="${VERSION}" \
   --build-arg GIT_SHA="${GIT_SHA}" \
   -f ops/container/Containerfile \
   -t "${IMAGE_VERSIONED}" \
