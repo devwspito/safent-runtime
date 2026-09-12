@@ -164,3 +164,23 @@ worker o dependencia paralela sin acordar ese alcance.
 Cuando exista dicha primitiva se puede aplicar el contrato one-use anterior.
 Hasta entonces la resolución manual y el mensaje no-retryable son el resultado
 honesto; no existe un botón activo «Autorizar detener» en esta entrega.
+
+Instrucciones manuales para el propietario: abrir la aplicación que gestiona
+Podman, identificar la máquina activa y revisar los contenedores/tareas que
+dependen de ella. Guardar el trabajo y detenerla allí sólo si se desea interrumpir
+esas cargas; no eliminarla ni resetear Podman. Después cerrar y volver a abrir
+Safent. Si no se puede identificar con certeza el bloqueo, exportar el diagnóstico
+y no detener nada. No se ofrece un comando con un nombre supuesto.
+
+Reproducción determinista **del modelo de concurrencia**, sin proceso Podman,
+VM, red ni cambios en servicios:
+
+```sh
+python3 desktop/tests/foreign_vm_stop_race_repro.py
+# 2 pruebas correctas: precheck externo permite parar la sustitución;
+# la comparación hipotética dentro del lock la rechaza sin detener nada.
+```
+
+La segunda prueba expresa el requisito de la primitiva futura, no una función
+disponible o certificada en producto. Estos dos casos no se suman a las pruebas
+del renderer ni se presentan como validación nativa de autorización.
