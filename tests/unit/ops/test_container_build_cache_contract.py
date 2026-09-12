@@ -55,6 +55,8 @@ def test_container_pins_current_security_toolchain():
     assert "ARG TAILSCALE_VERSION=1.102.4" in containerfile
     assert "npx --yes playwright install" not in containerfile
     assert "COPY ops/agents-os-edition/seed/excel-mcp-overrides.txt" in containerfile
+    assert "fastmcp-2.14.7.dist-info" in containerfile
+    assert "! find /var/lib/hermes/uv-cache" in containerfile
 
 
 def test_local_build_overrides_base_image_version_label():

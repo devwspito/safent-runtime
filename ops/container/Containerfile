@@ -165,13 +165,17 @@ ARG PLAYWRIGHT_MCP_VERSION=0.0.80
 ARG AGENT_BROWSER_VERSION=0.31.1
 RUN npm install -g --ignore-scripts "npm@${NPM_VERSION}" \
     && npm install -g --ignore-scripts "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" "agent-browser@${AGENT_BROWSER_VERSION}" \
+    && [ "$(npm --version)" = "${NPM_VERSION}" ] \
+    && [ "$(node -p "require('/usr/lib/node_modules/@playwright/mcp/package.json').version")" = "${PLAYWRIGHT_MCP_VERSION}" ] \
     && chmod +x /usr/lib/node_modules/agent-browser/bin/agent-browser-* \
     && PLAYWRIGHT_CLI=/usr/lib/node_modules/@playwright/mcp/node_modules/playwright/cli.js \
     && [ -f "${PLAYWRIGHT_CLI}" ] \
     && node "${PLAYWRIGHT_CLI}" install chromium \
     && CHROME="$(node -e "const {chromium}=require(require.resolve('playwright',{paths:['/usr/lib/node_modules/@playwright/mcp']}));process.stdout.write(chromium.executablePath())")" \
     && [ -n "$CHROME" ] && ln -sf "$CHROME" /usr/bin/chromium-browser \
-    && echo "chromium -> $CHROME"
+    && echo "chromium -> $CHROME" \
+    && npm cache clean --force \
+    && rm -rf /root/.npm
 
 # Builder-stage import smoke — fail the BUILD (not runtime) on a missing dep.
 RUN python3 -c "import hermes, fastapi, uvicorn, playwright, dbus_fast, composio, mcp, fastembed; \
@@ -514,6 +518,9 @@ RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache /var/lib/hermes/
     done ; \
     echo "▸ warming npx mcp-remote" ; \
     HOME=/var/lib/hermes/mcp-home timeout 240 npx -y mcp-remote@0.8.6 --help </dev/null >/dev/null 2>&1 || true ; \
+    find /var/lib/hermes/uv-cache -type d -name 'excel_mcp_server-0.1.8.dist-info' -print -quit | grep -q . && \
+    find /var/lib/hermes/uv-cache -type d -name 'fastmcp-3.2.0.dist-info' -print -quit | grep -q . && \
+    ! find /var/lib/hermes/uv-cache -type d -name 'fastmcp-2.14.7.dist-info' -print -quit | grep -q . && \
     chown -R hermes:hermes-work /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache \
       /var/lib/hermes/xdg-cache /var/lib/hermes/mcp-home && \
     chmod -R g+rwX /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache \
