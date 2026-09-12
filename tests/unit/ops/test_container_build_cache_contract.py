@@ -47,6 +47,13 @@ def test_container_uses_current_mcp_import_and_blocklist_path():
     assert "dns-blocklists/main/domains/light.txt" not in containerfile
 
 
+def test_local_build_overrides_base_image_version_label():
+    script = _read("ops/container/build.sh")
+    containerfile = _read("ops/container/Containerfile")
+    assert '--build-arg SAFENT_VERSION="${VERSION}"' in script
+    assert 'LABEL org.opencontainers.image.version="${SAFENT_VERSION}"' in containerfile
+
+
 def test_source_installer_preserves_cache_and_data_by_default():
     script = _read("ops/container/install.sh")
     assert "builder prune" not in script

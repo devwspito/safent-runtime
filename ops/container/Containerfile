@@ -567,8 +567,10 @@ RUN mkdir -p /usr/share/hermes && echo "${SAFENT_EDITION}" > /usr/share/hermes/e
 # OCI label org.opencontainers.image.revision). CI passes GIT_SHA=${{ github.sha }};
 # local builds default to "dev". This ends the "which version am I running?" guesswork.
 ARG GIT_SHA=dev
+ARG SAFENT_VERSION=dev
 RUN echo "${GIT_SHA}" > /usr/share/hermes/build
 LABEL org.opencontainers.image.revision="${GIT_SHA}"
+LABEL org.opencontainers.image.version="${SAFENT_VERSION}"
 # Cloud config-sync: enable it UNCONDITIONALLY (both editions). The unit's
 # ConditionPathExists=/var/lib/hermes/instance/.enterprise keeps it inert in
 # community edition (no pairing marker). The companion hermes-config-sync.path
