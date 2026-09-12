@@ -155,17 +155,20 @@ RUN cd /tmp/frontbuild && rm -rf dist && npm run build \
 # both at the base's bundled Chromium and symlink it to the unit-expected path
 # (Ubuntu apt chromium is a snap stub that won't run in a container).
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-ARG PLAYWRIGHT_MCP_VERSION=0.0.29
+ARG NPM_VERSION=11.19.1
+ARG PLAYWRIGHT_MCP_VERSION=0.0.80
 # PIN agent-browser (2026-07-05 audit): its `snapshot --json` schema is unpinned and
 # the adapter's _parse_snapshot_json is schema-sensitive — an unpinned install lets a
 # silent upstream bump change the accessibility-tree payload the LLM/driver consumes.
 # 0.31.1 is the version red-teamed + evaluated (see project_safent_agent_browser_go_nogo_fase4).
 # Bump this ARG deliberately (and re-verify the snapshot fixture) when moving versions.
 ARG AGENT_BROWSER_VERSION=0.31.1
-RUN npm install -g --ignore-scripts "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" "agent-browser@${AGENT_BROWSER_VERSION}" \
+RUN npm install -g --ignore-scripts "npm@${NPM_VERSION}" \
+    && npm install -g --ignore-scripts "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" "agent-browser@${AGENT_BROWSER_VERSION}" \
     && chmod +x /usr/lib/node_modules/agent-browser/bin/agent-browser-* \
-    && npx --yes playwright install chromium \
-    && CHROME="$(find /ms-playwright -type f -name chrome -path '*chrome-linux*' | head -1)" \
+    && PLAYWRIGHT_CLI="$(node -p "require.resolve('playwright/cli', {paths: ['/usr/lib/node_modules/@playwright/mcp']})")" \
+    && node "${PLAYWRIGHT_CLI}" install chromium \
+    && CHROME="$(node -e "const {chromium}=require(require.resolve('playwright',{paths:['/usr/lib/node_modules/@playwright/mcp']}));process.stdout.write(chromium.executablePath())")" \
     && [ -n "$CHROME" ] && ln -sf "$CHROME" /usr/bin/chromium-browser \
     && echo "chromium -> $CHROME"
 
@@ -333,7 +336,7 @@ RUN chmod 0755 /usr/libexec/hermes/openshell && \
 # INVARIANT: this entire block is best-effort (`|| echo WARN`).  A failed trivy
 # install must never break the image bake — the Security Center's heuristic fallback
 # (HeuristicFallbackScanner) is the correct degraded path and is already tested.
-ARG TRIVY_VERSION=v0.71.2
+ARG TRIVY_VERSION=v0.74.0
 # CACHE DIR FUERA DEL VOLUMEN: run-safent.sh monta `-v safent-data:/var/lib/hermes`,
 # así que una DB horneada bajo /var/lib/hermes/* queda SOMBREADA por el volumen en
 # runtime → trivy no la encuentra → degrada a [] = teatro (este era el bug). En
@@ -366,7 +369,7 @@ RUN ARCH="$(uname -m)"; \
 # drop 127.0.0.0/8 + Tailscale CGNAT 100.64.0.0/10), so agent tailnet access is forced
 # through the audited egress allowlist. See specs/022-tailnet-connectivity/plan.md.
 # Static binary = no deps = works offline under the cage. Pinned + no `latest`.
-ARG TAILSCALE_VERSION=1.102.3
+ARG TAILSCALE_VERSION=1.102.4
 RUN ARCH="$(uname -m)"; \
     case "$ARCH" in \
       x86_64)  TS_ARCH="amd64" ;; \
@@ -501,7 +504,7 @@ RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache /var/lib/hermes/
     # pin AND that this warm spec stays token-identical to the seed's argv (uv caches the
     # environment by its exact requirements; the real boot spawns `--offline`, so any
     # difference between the two is a cache miss the seed can never recover from).
-    for spec in "--from excel-mcp-server --with mcp<2 excel-mcp-server stdio" \
+    for spec in "--from excel-mcp-server==0.1.8 --with mcp<2 --overrides /usr/share/hermes/seed/excel-mcp-overrides.txt excel-mcp-server stdio" \
                 "--from office-word-mcp-server --with mcp==2.2.0 word_mcp_server" \
                 "--from office-powerpoint-mcp-server --with mcp<2 ppt_mcp_server"; do \
       echo "▸ warming uvx $spec" ; \

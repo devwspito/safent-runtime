@@ -1,0 +1,5 @@
+# excel-mcp-server 0.1.8 imports FastMCP from the `mcp` SDK and does not import
+# the standalone `fastmcp` distribution. Its stale `<3` dependency nevertheless
+# pulled vulnerable fastmcp 2.14.7 into the offline image. Keep the hardened
+# Excel release while overriding only that unused transitive dependency.
+fastmcp==3.2.0

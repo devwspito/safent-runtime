@@ -47,6 +47,15 @@ def test_container_uses_current_mcp_import_and_blocklist_path():
     assert "dns-blocklists/main/domains/light.txt" not in containerfile
 
 
+def test_container_pins_current_security_toolchain():
+    containerfile = _read("ops/container/Containerfile")
+    assert "ARG NPM_VERSION=11.19.1" in containerfile
+    assert "ARG PLAYWRIGHT_MCP_VERSION=0.0.80" in containerfile
+    assert "ARG TRIVY_VERSION=v0.74.0" in containerfile
+    assert "ARG TAILSCALE_VERSION=1.102.4" in containerfile
+    assert "npx --yes playwright install" not in containerfile
+
+
 def test_local_build_overrides_base_image_version_label():
     script = _read("ops/container/build.sh")
     containerfile = _read("ops/container/Containerfile")

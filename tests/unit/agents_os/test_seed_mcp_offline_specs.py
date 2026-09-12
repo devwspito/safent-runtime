@@ -58,7 +58,7 @@ def _seeds() -> list[dict]:
 def _warmed_specs() -> list[list[str]]:
     """Los `spec` del bucle `for spec in … ; do … uvx $spec` del Containerfile."""
     source = _CONTAINERFILE.read_text(encoding="utf-8")
-    start = source.index('for spec in "--from excel-mcp-server')
+    start = source.index('for spec in "--from excel-mcp-server==0.1.8')
     end = source.index("; do", start)
     return [spec.split() for spec in re.findall(r'"([^"]+)"', source[start:end])]
 
@@ -98,6 +98,22 @@ class TestExcelSeedPinsMcpV1:
         argv = _seed_argv("excel")
         assert "--with" in argv
         assert argv[argv.index("--with") + 1] == "mcp<2"
+
+    def test_excel_uses_audited_fastmcp_override(self) -> None:
+        argv = _seed_argv("excel")
+        assert argv[argv.index("--from") + 1] == "excel-mcp-server==0.1.8"
+        assert argv[argv.index("--overrides") + 1] == (
+            "/usr/share/hermes/seed/excel-mcp-overrides.txt"
+        )
+        override_path = (
+            _REPO_ROOT
+            / "ops"
+            / "agents-os-edition"
+            / "seed"
+            / "excel-mcp-overrides.txt"
+        )
+        override = override_path.read_text(encoding="utf-8")
+        assert "fastmcp==3.2.0" in override
 
     def test_constraint_comes_after_the_from_package(self) -> None:
         argv = _seed_argv("excel")
