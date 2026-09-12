@@ -1929,10 +1929,13 @@ async def _run(*, systemd_notify: bool, bootstrap=None) -> None:
     # with two retries; on failure we leave BROWSER_CDP_URL unset and the seatbelt
     # (cycle_cdp_context.install_jail_block_local_session) ensures any subsequent
     # browse call hard-fails instead of running unconfined.
+    startup_tasks = []
     if jailed_browser_manager is not None:
-        asyncio.create_task(
-            _eager_start_jailed_browser(jailed_browser_manager),
-            name="jailed-browser-eager-start",
+        startup_tasks.append(
+            asyncio.create_task(
+                _eager_start_jailed_browser(jailed_browser_manager),
+                name="jailed-browser-eager-start",
+            )
         )
 
     # MCP: reconectar al boot los servidores que el operador configuró
@@ -1941,9 +1944,11 @@ async def _run(*, systemd_notify: bool, bootstrap=None) -> None:
         from hermes.agents_os.infrastructure.dbus_runtime_service import (  # noqa: PLC0415
             reconnect_persisted_mcp_servers,
         )
-        asyncio.create_task(
-            reconnect_persisted_mcp_servers(mcp_server_manager),
-            name="mcp-reconnect",
+        startup_tasks.append(
+            asyncio.create_task(
+                reconnect_persisted_mcp_servers(mcp_server_manager),
+                name="mcp-reconnect",
+            )
         )
 
     # P3 — ModelHealthMonitor: detecta caída del LLM local y emite
@@ -1984,6 +1989,7 @@ async def _run(*, systemd_notify: bool, bootstrap=None) -> None:
     # Ejecutar en paralelo: loop principal + socket de stream + D-Bus (si disponible)
     # + ModelHealthMonitor (P3) + trigger sources (P2).
     tasks = [
+        *startup_tasks,
         asyncio.create_task(orchestrator.run_forever(), name="agent-loop"),
         asyncio.create_task(_serve_unix_socket(unix_socket, sock_path), name="stream-socket"),
     ]
@@ -2024,12 +2030,6 @@ async def _run(*, systemd_notify: bool, bootstrap=None) -> None:
     # on the gather absorbs it without turning a clean stop into an error.
     _SIGTERM_GRACE_S = 5.0
 
-    async def _cancel_stragglers_after_grace() -> None:
-        await asyncio.sleep(_SIGTERM_GRACE_S)
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-
     def _handle_sigterm() -> None:
         from hermes.runtime.managed_llm_bootstrap import process_admission  # noqa: PLC0415
 
@@ -2045,7 +2045,8 @@ async def _run(*, systemd_notify: bool, bootstrap=None) -> None:
         if browser_guard is not None:
             browser_guard.signal_shutdown()
         asyncio.create_task(
-            _cancel_stragglers_after_grace(), name="sigterm-grace-cancel"
+            _cancel_runtime_tasks_after_grace(tasks, _SIGTERM_GRACE_S),
+            name="sigterm-grace-cancel",
         )
 
     event_loop = asyncio.get_event_loop()
@@ -2067,6 +2068,18 @@ async def _run(*, systemd_notify: bool, bootstrap=None) -> None:
 
     await asyncio.gather(*tasks, return_exceptions=True)
     logger.info("hermes.runtime.loop_stopped")
+
+
+async def _cancel_runtime_tasks_after_grace(tasks, grace_seconds: float) -> None:
+    """Request cancellation once; the existing daemon gather joins each task.
+
+    Repeated SIGTERM must not cancel a coroutine again while it is releasing
+    its client/session in finally. This owns tasks, not external browser units.
+    """
+    await asyncio.sleep(grace_seconds)
+    for task in tasks:
+        if not task.done() and not task.cancelling():
+            task.cancel()
 
 
 async def _eager_start_jailed_browser(manager) -> None:

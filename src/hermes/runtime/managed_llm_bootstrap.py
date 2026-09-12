@@ -123,7 +123,7 @@ def _read_receipt(fd: int, db_path: Path) -> tuple[Generation, Path]:
         expected_root = db_path.absolute().parent.resolve(strict=True) / "managed-profiles"
         if (
             profile.parent != expected_root
-            or not profile.name.startswith(f"g{data['generation']}-")
+            or not profile.name.startswith(f"g{data['generation']}-p{os.getpid()}-")
             or os.environ.get("HERMES_HOME") != str(profile)
             or os.environ.get("HOME") != str(profile)
         ):

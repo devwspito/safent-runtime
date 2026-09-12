@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import stat
-import tempfile
 from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlparse
 
 from hermes.runtime.model_config import ModelConfig
+from hermes.security.configuration_lock import configuration_lock
 
 _PRIVATE_DIRECTORY_MODE = 0o700
 
@@ -159,18 +160,30 @@ def create_profile_home(db_path: Path, generation: int) -> Path:
     """Create a fresh private home for ONE daemon boot, never reuse personal data."""
     if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
         raise ValueError("Invalid corporate generation")
-    parent = db_path.absolute().parent.resolve(strict=True)
-    root = parent / "managed-profiles"
-    with suppress(FileExistsError):
-        root.mkdir(mode=0o700)
-    info = root.lstat()
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.geteuid()
-        or stat.S_IMODE(info.st_mode) != _PRIVATE_DIRECTORY_MODE
-    ):
-        raise PermissionError("Corporate profile directory is unsafe")
-    return Path(tempfile.mkdtemp(prefix=f"g{generation}-", dir=root))
+    from hermes.runtime.managed_profile_retention import prune_profile_homes  # noqa: PLC0415
+
+    with configuration_lock(db_path):
+        parent = db_path.absolute().parent.resolve(strict=True)
+        root = parent / "managed-profiles"
+        with suppress(FileExistsError):
+            root.mkdir(mode=0o700)
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(directory)
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != _PRIVATE_DIRECTORY_MODE
+            ):
+                raise PermissionError("Corporate profile directory is unsafe")
+            # Allocation and retention share the same process/thread lock. A
+            # recorded PID is conservative liveness evidence, not authority.
+            prune_profile_homes(db_path)
+            name = f"g{generation}-p{os.getpid()}-{secrets.token_hex(8)}"
+            os.mkdir(name, mode=0o700, dir_fd=directory)
+            return root / name
+        finally:
+            os.close(directory)
 
 
 def write_profile(profile_home: Path, profile: Mapping) -> None:
