@@ -24,6 +24,8 @@ import css from './AdsView.module.css'
 import { ManagedAdsView } from './ManagedAdsView'
 import { adsPolicyKey } from '../api/managedAds'
 import { AdsWorkspaceContext } from '../components/AdsWorkspaceContext'
+import { AdsCapsSetup } from '../components/AdsCapsSetup'
+import { readAdsCsrf, supportsNativeCaps } from '../lib/adsCaps'
 
 const ADS_IFRAME_SRC = '/ads/'
 
@@ -104,6 +106,7 @@ function AdsPanel({ noAccounts }: { noAccounts: boolean }) {
   const setPanelActive = workspace?.setPanelActive
   const returnButton = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLIFrameElement>(null)
+  const [showCaps, setShowCaps] = useState(false)
   // The companion can request this one navigation, never an arbitrary URL or
   // a credential operation. Revalidate the actual iframe and current permission.
   useEffect(() => {
@@ -135,12 +138,14 @@ function AdsPanel({ noAccounts }: { noAccounts: boolean }) {
       <Button size="sm" variant="ghost" onClick={() => { setState('loading'); setRevision(value => value + 1) }}>
         <RefreshCw size={13} aria-hidden />{t('ads.frame.reload')}
       </Button>
+      {canConfigureConnections && supportsNativeCaps() && <Button size="sm" variant="secondary" onClick={() => setShowCaps(value => !value)}>{locale === 'en' ? 'Spending limits' : 'Límites de gasto'}</Button>}
     </header>
     {canConfigureConnections && <div className={`${css.hint} ${css.connectionsSetup}`}>
       <span>{t('ads.connections.setup_hint')}</span>
       <Link className="cv-btn cv-btn--ghost cv-btn--sm" to="/capacidades?tab=integraciones">{t('ads.connections.setup_action')}</Link>
     </div>}
     {noAccounts && <p className={css.hint}>{t('ads.state.no_accounts.desc')}</p>}
+    {showCaps && canConfigureConnections && <AdsCapsSetup getCsrf={() => readAdsCsrf(panelRef.current)} onClose={() => setShowCaps(false)} />}
     <div className={css.frameWrap}>
       {state !== 'loaded' && <div className={css.loading} role={state === 'error' ? 'alert' : 'status'}>
         {state === 'loading' ? t('ads.frame.loading') : t('ads.frame.error')}

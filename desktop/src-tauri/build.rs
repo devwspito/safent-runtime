@@ -14,6 +14,8 @@ fn main() {
             "read_host_folder_file",
             "approve_host_folder_write",
             "write_host_folder_file",
+            "get_ads_hard_caps",
+            "save_ads_hard_caps",
             "open_provider_oauth",
             "show_native_updater",
             "get_native_update_status",

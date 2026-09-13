@@ -35,6 +35,7 @@ mod diagnostics;
 mod domain;
 mod engine_adapter;
 mod folder_bridge;
+mod ads_caps;
 mod ports;
 mod reconcile;
 mod selftest;
@@ -226,6 +227,7 @@ fn main() {
         }))
         .manage(policy.clone())
         .manage(folder_bridge::FolderBridge::default())
+        .manage(ads_caps::AdsCapsState::default())
         .manage(diagnostics::DiagnosticsState::default())
         .manage(update::native::NativeUpdater::default())
         .plugin(tauri_plugin_dialog::init())
@@ -239,6 +241,8 @@ fn main() {
             folder_bridge::read_host_folder_file,
             folder_bridge::approve_host_folder_write,
             folder_bridge::write_host_folder_file,
+            ads_caps::get_ads_hard_caps,
+            ads_caps::save_ads_hard_caps,
             window_policy::open_provider_oauth,
             window_policy::show_native_updater,
             window_policy::get_native_update_status,

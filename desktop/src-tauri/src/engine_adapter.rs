@@ -194,6 +194,63 @@ impl EngineProbe for EmbeddedCliDriver {
 }
 
 impl EmbeddedCliDriver {
+    pub(crate) fn ads_caps_status(&self) -> Result<String, EngineError> {
+        self.ads_caps_command(None)
+    }
+
+    pub(crate) fn reload_ads_caps(&self, expected: &str) -> Result<String, EngineError> {
+        self.ads_caps_command(Some(expected))
+    }
+
+    fn ads_caps_command(&self, expected: Option<&str>) -> Result<String, EngineError> {
+        let valid_hash = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        if self.config.companion_image.is_none() || expected.is_some_and(|hash| !valid_hash(hash)) {
+            return Err(EngineError::Protocol("caps_unavailable".into()));
+        }
+        let mut config = self.config.clone();
+        config.hard_timeout = Duration::from_secs(if expected.is_some() { 90 } else { 15 });
+        config.stall_timeout = Duration::from_secs(15);
+        let driver = Self::new(config);
+        let mut args = vec![if expected.is_some() {
+            "caps-reload"
+        } else {
+            "caps-status"
+        }
+        .into()];
+        if let Some(hash) = expected {
+            args.push(hash.into());
+        }
+        let mut acknowledgement = None;
+        let result =
+            driver.run_porcelain("companion", &args, false, &CancelSignal::new(), |event| {
+                let hash = match event {
+                    WireEvent::CapsReloaded { caps_digest } if expected.is_some() => caps_digest,
+                    WireEvent::CapsStatus { caps_digest } if expected.is_none() => caps_digest,
+                    WireEvent::Stage { .. }
+                    | WireEvent::Progress { .. }
+                    | WireEvent::Done { .. } => return Ok(()),
+                    _ => return Err(EngineError::Protocol("caps_unavailable".into())),
+                };
+                if acknowledgement.is_some()
+                    || !valid_hash(&hash)
+                    || expected.is_some_and(|value| value != hash)
+                {
+                    return Err(EngineError::Protocol("caps_ack_invalid".into()));
+                }
+                acknowledgement = Some(hash);
+                Ok(())
+            })?;
+        if !result.exit_ok {
+            return Err(EngineError::Protocol("caps_unavailable".into()));
+        }
+        acknowledgement.ok_or(EngineError::Protocol("caps_ack_missing".into()))
+    }
+
     /// One closed marker-consumer tick. Claim/lease/status handling stays in
     /// the shared CLI consumer; no arbitrary verb, image, URL or args enter.
     pub(crate) fn consume_companion_requests(
@@ -300,7 +357,9 @@ impl EmbeddedCliDriver {
                     });
                 }
                 WireEvent::Ready { .. } => ready = true,
-                WireEvent::Facts { .. } => {
+                WireEvent::Facts { .. }
+                | WireEvent::CapsReloaded { .. }
+                | WireEvent::CapsStatus { .. } => {
                     return Err(EngineError::Protocol(
                         "unexpected `facts` event from a non-probe verb".to_string(),
                     ));
@@ -968,6 +1027,10 @@ fn spawn_stream_reader<R: Read + Send + 'static>(
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t")]
 enum WireEvent {
+    #[serde(rename = "caps_reloaded")]
+    CapsReloaded { caps_digest: String },
+    #[serde(rename = "caps_status")]
+    CapsStatus { caps_digest: String },
     #[serde(rename = "stage")]
     Stage {
         id: String,
@@ -1214,6 +1277,76 @@ mod missing_cli_tests {
             !cause.retryable,
             "a missing executable never fixes itself on retry: {cause:?}"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod caps_ack_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    fn driver(lines: &[String], exit: i32) -> (tempfile::TempDir, EmbeddedCliDriver) {
+        let root = tempfile::tempdir().unwrap();
+        let cli = root.path().join("safent");
+        let body = format!(
+            "#!/bin/sh\n{}\nexit {exit}\n",
+            lines
+                .iter()
+                .map(|line| format!("printf '%s\\n' '{}'", line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        std::fs::write(&cli, body).unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = EmbeddedCliConfig::with_defaults(
+            cli,
+            root.path().join("podman"),
+            root.path().join("state"),
+            ImageRef::new("ghcr.io/example/core", "sha256:core").unwrap(),
+            Some(ImageRef::new("ghcr.io/example/ads", "sha256:ads").unwrap()),
+        );
+        (root, EmbeddedCliDriver::new(config))
+    }
+    #[test]
+    fn reload_requires_one_exact_memory_ack_and_successful_exit() {
+        let hash = "a".repeat(64);
+        let good = format!(r#"{{"t":"caps_reloaded","caps_digest":"{hash}"}}"#);
+        let (_dir, d) = driver(&[good.clone()], 0);
+        assert_eq!(d.reload_ads_caps(&hash).unwrap(), hash);
+        for (lines, code) in [
+            (vec![], 0),
+            (vec![good.clone(), good.clone()], 0),
+            (vec![good.clone()], 1),
+            (
+                vec![format!(
+                    r#"{{"t":"caps_reloaded","caps_digest":"{}"}}"#,
+                    "b".repeat(64)
+                )],
+                0,
+            ),
+            (vec![r#"{"t":"ready"}"#.into()], 0),
+            (
+                vec![format!(r#"{{"t":"caps_status","caps_digest":"{hash}"}}"#)],
+                0,
+            ),
+        ] {
+            let (_dir, d) = driver(&lines, code);
+            assert!(d.reload_ads_caps(&hash).is_err());
+        }
+    }
+    #[test]
+    fn status_is_readonly_and_does_not_accept_reload_ack() {
+        let hash = "a".repeat(64);
+        let (_dir, d) = driver(
+            &[format!(r#"{{"t":"caps_status","caps_digest":"{hash}"}}"#)],
+            0,
+        );
+        assert_eq!(d.ads_caps_status().unwrap(), hash);
+        assert!(d.reload_ads_caps("../../x").is_err());
+        let (_dir, d) = driver(
+            &[format!(r#"{{"t":"caps_reloaded","caps_digest":"{hash}"}}"#)],
+            0,
+        );
+        assert!(d.ads_caps_status().is_err());
     }
 }
 

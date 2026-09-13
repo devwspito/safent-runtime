@@ -19,6 +19,8 @@ tempfile = "3"
 # compare VersionSet, drive the Tauri updater plugin for the wrapper's own self-update.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
 # Same crate tauri-plugin-updater itself depends on for RemoteRelease — one semver
 # implementation across the whole update path, not two that could disagree.
 semver = { version = "1", features = ["serde"] }

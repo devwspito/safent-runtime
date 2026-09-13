@@ -706,7 +706,9 @@ mod tests {
                 "allow-pick-host-folder",
                 "allow-read-host-folder-file",
                 "allow-approve-host-folder-write",
-                "allow-write-host-folder-file"
+                "allow-write-host-folder-file",
+                "allow-get-ads-hard-caps",
+                "allow-save-ads-hard-caps"
             ])
         );
         assert!(include_str!("../build.rs").contains("\"open_ads_setup\","));
