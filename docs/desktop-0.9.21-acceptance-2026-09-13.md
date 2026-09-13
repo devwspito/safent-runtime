@@ -86,3 +86,34 @@ No se conectaron cuentas externas ni se publicaron anuncios o cambiaron
 presupuestos en esta reparación. Al tratarse de una instalación limpia, las
 cuentas y el modelo aún requieren su configuración desde la UI. El respaldo
 privado de la desinstalación anterior permanece intacto.
+
+## Corrección persistente y controles de aislamiento
+
+El commit `ddc5260` declara `net.ipv4.ip_forward=1` al crear el core en ambos
+launchers, antes del montaje de `/proc/sys` como solo lectura. La convergencia
+comprueba el valor efectivo del kernel; no da por válida una declaración o un
+`sysctl -w` que no haya surtido efecto. La adopción de contenedores antiguos
+conserva las comprobaciones de identidad, volumen, puerto y red. Los errores
+de recarga siguen siendo errores, pero permiten reintentar sin borrar datos.
+
+El commit `5813fa4` fija también la interfaz de entrada `veth-hmcp-host` en
+las excepciones FORWARD/NAT de Ads. Esto evita que una IP de origen MCP
+suplantada desde otra interfaz aproveche el encaminamiento. OUTPUT, los
+destinos/puertos autorizados y las políticas por defecto DROP no se amplían.
+
+La misma restricción de interfaz se aplicó al core en ejecución con una
+transacción `nft` comprobada antes con `--check`. Después de aplicarla:
+
+- `verify-ads` volvió a terminar con exit 0.
+- Desde el namespace MCP: TCP a Ads `10.201.0.10:8443` conectó.
+- Desde el mismo namespace: PostgreSQL `10.201.0.11:5432`, WAN directa y DNS
+  TCP directo agotaron el tiempo de conexión, como exige la jaula.
+- Desde el namespace del navegador: Ads `10.201.0.10:8443` permaneció bloqueado.
+
+Se probó además la creación con el Podman 6.1.1 realmente empaquetado: un
+contenedor efímero de la misma imagen, sin red, raíz de solo lectura y sin
+capacidades, recibió el sysctl en creación y leyó el valor efectivo 1. Se
+retiró automáticamente al terminar; el sysctl de la VM no cambió.
+
+Estos resultados comprueban la reparación y el aislamiento en el Mac, pero
+no sustituyen una aceptación de instalación limpia del paquete firmado 0.9.21.
