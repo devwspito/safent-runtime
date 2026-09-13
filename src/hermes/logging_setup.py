@@ -19,6 +19,117 @@ from __future__ import annotations
 
 import logging
 import sys
+from copy import deepcopy
+from http import HTTPStatus
+from typing import Any
+from urllib.parse import urlsplit
+
+_HTTP_LOG_FIELDS = 5
+_ASCII_SPACE = 32
+_ASCII_DELETE = 127
+
+
+def _http_status_phrase(status: object) -> str:
+    try:
+        return HTTPStatus(status).phrase if isinstance(status, int) else ""
+    except ValueError:
+        return ""
+
+
+def _http_target_without_secrets(value: object) -> str:
+    """Preserve routing metadata, not query/fragment/userinfo or control bytes."""
+    try:
+        parsed = urlsplit(str(value))
+        path = parsed.path or "/"
+        if parsed.scheme:
+            host = parsed.hostname or ""
+            if ":" in host:
+                host = f"[{host}]"
+            port = f":{parsed.port}" if parsed.port is not None else ""
+            path = f"{parsed.scheme}://{host}{port}{path}"
+        return "".join(
+            char if ord(char) >= _ASCII_SPACE and ord(char) != _ASCII_DELETE else "_"
+            for char in path
+        )
+    except (TypeError, ValueError):
+        return "[invalid HTTP target]"
+
+
+class HttpMetadataFilter(logging.Filter):
+    """Sanitize before Uvicorn formats its request tuple or HTTPX renders a URL.
+
+    HTTPcore DEBUG payloads can include complete credential-bearing headers.
+    Retain their event name/level only; the HTTPX INFO event retains the request
+    method, origin, path and response status. Unknown transport messages never
+    fall back to interpolating their payload.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if record.name == "uvicorn.access":
+            if isinstance(args, tuple) and len(args) == _HTTP_LOG_FIELDS:
+                client, method, target, version, status = args
+                record.args = (
+                    client,
+                    method,
+                    _http_target_without_secrets(target),
+                    version,
+                    status,
+                )
+            else:
+                # Preserve AccessFormatter's five-field contract even for a
+                # malformed/third-party event, never render its original text.
+                record.args = ("unknown", "UNKNOWN", "[invalid HTTP target]", "?", 0)
+            record.msg = '%s - "%s %s HTTP/%s" %d'
+            record.exc_info, record.exc_text, record.stack_info = None, None, None
+        elif record.name == "httpx" or record.name.startswith("httpx."):
+            if (
+                record.msg == 'HTTP Request: %s %s "%s %d %s"'
+                and isinstance(args, tuple)
+                and len(args) == _HTTP_LOG_FIELDS
+            ):
+                method, target, version, status, _reason = args
+                record.args = (
+                    method,
+                    _http_target_without_secrets(target),
+                    version,
+                    status,
+                    _http_status_phrase(status),
+                )
+            else:
+                record.msg, record.args = "HTTP transport diagnostic (payload omitted)", ()
+            record.exc_info, record.exc_text, record.stack_info = None, None, None
+        elif record.name == "httpcore" or record.name.startswith("httpcore."):
+            # HTTPcore's event names are fixed dotted identifiers; its values
+            # and exceptions are opaque data, not safe forensic metadata.
+            event = str(record.msg).split(" ", 1)[0]
+            if not event or not all(
+                char.isascii() and (char.isalnum() or char in "._") for char in event
+            ):
+                event = "transport"
+            record.msg, record.args = f"HTTP transport {event} (payload omitted)", ()
+            record.exc_info, record.exc_text, record.stack_info = None, None, None
+        return True
+
+
+def uvicorn_log_config() -> dict[str, Any]:
+    """Uvicorn-owned config: redaction survives its startup dictConfig call."""
+    from uvicorn.config import LOGGING_CONFIG  # noqa: PLC0415
+
+    config = deepcopy(LOGGING_CONFIG)
+    config["filters"] = {"http_metadata": {"()": HttpMetadataFilter}}
+    config["handlers"]["access"]["filters"] = ["http_metadata"]
+    config["handlers"]["http_metadata"] = {
+        **config["handlers"]["default"],
+        "filters": ["http_metadata"],
+    }
+    for name in ("httpx", "httpcore"):
+        config["loggers"][name] = {
+            "handlers": ["http_metadata"],
+            "level": "INFO",
+            "propagate": False,
+        }
+    return config
 
 
 def configure_structured_logging(

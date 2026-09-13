@@ -1650,7 +1650,7 @@ def create_app() -> FastAPI:
 def main() -> int:
     import uvicorn  # noqa: PLC0415
 
-    from hermes.logging_setup import configure_structured_logging  # noqa: PLC0415
+    from hermes.logging_setup import configure_structured_logging, uvicorn_log_config  # noqa: PLC0415
 
     configure_structured_logging(service="hermes-shell-server", version="0.4.0")
     # Default 127.0.0.1 (production-safe). Para VM con SLIRP hostfwd,
@@ -1664,6 +1664,7 @@ def main() -> int:
         host=host,
         port=port,
         log_level="info",
+        log_config=uvicorn_log_config(),
         # V (forensics + DoS): record HTTP footsteps (the daemon audit logs agent
         # actions, not attacker HTTP calls), cap concurrent connections, and drop
         # idle keep-alives so a connection flood can't exhaust the single-loop daemon.
