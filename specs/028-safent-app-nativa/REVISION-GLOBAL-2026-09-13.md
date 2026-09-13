@@ -1,13 +1,13 @@
 # Revisión global — 13 de septiembre de 2026
 
-No equiparar una compilación nativa correcta con la finalización de todo Safent. Este resumen contrasta los documentos vigentes y separa las nuevas pruebas indicadas abajo de los pendientes de despliegue. La referencia de negocio es `lumen-control-enterprise/CIERRE-2026-09-12.md` (HEAD auditado `e4996a5`), que sustituye `SAFENT-PENDIENTES.md`. El resultado del nuevo paquete nativo se registra por separado en `ADS-FACTORY-0.9.10.md`; 0.9.9 falló aceptación GUI y no se promovió.
+No equiparar una compilación nativa correcta con la finalización de todo Safent. Este resumen contrasta los documentos vigentes y separa las nuevas pruebas indicadas abajo de los pendientes de despliegue. La referencia de negocio es `lumen-control-enterprise/CIERRE-2026-09-12.md` (producto auditado `e4996a5`), que sustituye `SAFENT-PENDIENTES.md`. El paquete en preparación se registra en `ADS-FACTORY-0.9.12.md`: 0.9.9 falló aceptación GUI; 0.9.10 recuperó el arranque; 0.9.11 fue cancelada antes de distribuir instaladores al descubrir el fallo de logging OAuth. No se promovieron esas candidatas a estable.
 
 | Frente | Pendiente verificado en la documentación vigente |
 |---|---|
 | Community nativa | DMG 0.9.10 recupera Ads y reabre con los mismos IDs/puerto; pins, proyección privada y MCP comprobados en el Mac. Falta cerrar primera configuración funcional Ads, permisos del SO, OAuth real, En vivo/VNC y todos los recorridos nativos. Instalación mediante updater entre versiones aún no acreditada. |
 | Enterprise/Friendog | Despliegue cloud real, dominio/TLS, IAM, digests/secretos, carga en VM pequeña, reinicio y backup externo. Lo documentado acredita pruebas offline/restauración PostgreSQL aislada. |
-| Google/Meta | Login y consentimiento reales del propietario. Meta loopback HTTP con puerto dinámico no certificado. OAuth Ads no concede IAM/GCP/GTM/Analytics. Enterprise tiene inventario Analytics/GTM, no provisión GCP genérica ni edición/publicación GTM o informes GA completos. |
-| Ads/autonomía | Defecto descubierto en primera entrada real: falta alta de negocio con base vacía, en corrección mediante UI/API. Operación administrada sostenida entre instancias y cuentas reales aún pendiente. No existe cobertura universal de formatos/ediciones publicitarias; faltan keywords/geotargeting Google y upload/attach de creativos nuevos. |
+| Google/Meta | Google Friendog vuelve a pedir verificar identidad y Facebook muestra login; comprobado de nuevo en navegador. Faltan cliente/configuración y consentimiento reales. Google Desktop usa client ID + PKCE; Meta requiere App ID/Secret de la instalación y su loopback HTTP dinámico no está certificado. OAuth Ads no concede IAM/GCP/GTM/Analytics. Enterprise tiene inventario Analytics/GTM de lectura, no provisión GCP genérica ni edición/publicación GTM o informes GA completos. |
+| Ads/autonomía | Alta de negocio inicial implementada y probada mediante UI/API en Ads 0.2.6, incluida en 0.2.7 con seguridad de logs; aceptación nativa nueva aún pendiente. `managed-central` tiene grants/operación administrada, pero no monta las altas OAuth/platform-apps: conexión OAuth central desde UI Enterprise pendiente. Operación sostenida entre instancias/cuentas reales y cobertura de formatos pendiente; faltan keywords/geotargeting Google y upload/attach de creativos nuevos. |
 | CRM | Validar con CRM real. El corte actual ofrece lecturas GET gobernadas; escrituras genéricas, webhooks y SSH no implementados. |
 | Folder/conocimiento | GCS/IAM reales, PDF/OCR, búsqueda vectorial/híbrida y escala. Hoy texto/Markdown acotado, búsqueda literal y citas. Subir un archivo no equivale a indexarlo; no hay purga automática de historial/intenciones. |
 | Equipo/Tareas | Recorrido desplegado entre instancias con UI/D-Bus/red reales y efecto de herramienta aprobado dentro del mismo encargo. Admisión incierta requiere revisión de evidencia; no replay automático. |
@@ -22,6 +22,14 @@ No equiparar una compilación nativa correcta con la finalización de todo Safen
 
 Cambios de infraestructura de pruebas: Enterprise `5965a51bda43301a2db61d1e08a4ec48550dcf25` añade frontend, PostgreSQL y contratos Runtime a CI con pins explícitos; revisión independiente sin objeciones. CI hospedado aún no ejecutado. Runtime `1b9c8058762821de2d1f1de673860dfc17e895e6` conserva el informe global y las dos fixtures corregidas.
 
+## Hallazgos posteriores a la primera revisión
+
+- La UI nativa mostró un diálogo de tareas sin cierre con Escape ni retorno de foco. Corregido en `c2687ef`: Base UI existente, bloqueo durante envío y 362 pruebas frontend aprobadas; pendiente probar el nuevo artefacto real.
+- La auditoría OAuth encontró fuga de canarios en HTTPX/Meta, Uvicorn/Community y callback de login Enterprise. Ningún secreto real se usó. Ads `998ff6c` cierra la emisión de transporte/errores; 3446 unitarias y 56 focales PASS. Se publicó 0.2.7 por digest, no `latest`.
+- Runtime `f608025` conserva trazas HTTP sin query/fragmento ni datos opacos de transporte. Snapshot de primera versión del parche: 7502 PASS, 21 SKIP, 250 exclusiones, 439.04 s. Refuerzos finales de stack/excepción y reason phrase remota: 15 focales PASS, separados de esa full. Mypy detecta una anotación genérica preexistente y no se declara globalmente verde por ese comando.
+- Enterprise `c0a2b5a` protege todos los callbacks, incluido `/auth/callback`, y no guarda texto del proveedor en el error. Reproducción 5 FAIL/1 PASS antes; 19 focales PASS después; revisión independiente con configuración e importación reales de Uvicorn. Sin despliegue cloud. Typecheck según comando de CI: 89 módulos aprobados; sin ese flag faltan stubs externos.
+- Native 0.9.12/core 0.9.12 (`e6cd08e`) + Ads 0.2.7 es la siguiente candidata. La prueba de actualización real aún no se sustituye por estas suites.
+
 ## Fuentes principales
 
 Runtime, bajo `specs/028-safent-app-nativa/`: `inventario-ui-community.md`, `revision-community-crm-2026-09-12.md`, `revision-task-ce-native-roundtrip-2026-09-12.md`, `revision-llm-functional-admission-2026-09-12.md`, `ADS-FACTORY-0.9.9.md`.
@@ -30,4 +38,4 @@ Runtime, bajo `docs/`: `runtime-final-regression-2026-09-12.md`, `managed-ads-ch
 
 Enterprise: `CIERRE-2026-09-12.md`, `docs/deploy-vm-2026-09-12.md`, `docs/google-connections-01-2026-09-12.md`, `docs/knowledge-01-2026-09-12.md`, `docs/files-knowledge-mcp-2026-09-12.md`, `docs/enterprise-final-regression-2026-09-12.md`.
 
-La lectura documental no identificó un nuevo bug crítico de código. Sí confirma pendientes funcionales y de aceptación que no quedan cerrados por publicar el DMG. No se modificaron campañas, presupuestos ni permisos de proveedores durante esta revisión.
+La revisión no fue sólo documental: los defectos de arranque, primera entrada, teclado y logging se reprodujeron y corrigieron en cortes verificables. Siguen existiendo los pendientes funcionales y de aceptación indicados arriba; publicar un DMG no los cierra. No se modificaron campañas, presupuestos ni permisos de proveedores durante esta revisión.
