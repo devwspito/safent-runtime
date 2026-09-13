@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=16
+_CLI_REV=17
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -1959,6 +1959,149 @@ cmd_companion_remove() {
   fi
 }
 
+# Host-only hard-cap operations. No amount, path, image selector or provider
+# mutation arrives through argv. The native owner dialog writes the fixed file;
+# this command only restarts its existing broker and proves what it loaded.
+_caps_cleanup() {
+  if [ -n "${_CAPS_CHILD:-}" ]; then
+    kill "$_CAPS_CHILD" 2>/dev/null || true
+    kill -KILL "$_CAPS_CHILD" 2>/dev/null || true
+  fi
+  [ -z "${_CAPS_CAPTURE:-}" ] || rm -f "$_CAPS_CAPTURE"
+}
+
+_caps_run() {
+  # Bound every engine command by the SAME 60-second deadline. Never forward
+  # engine diagnostics or unvalidated helper output into the browser/log stream.
+  _CAPS_OUTPUT=""
+  [ "$(date +%s)" -lt "$_CAPS_DEADLINE" ] || return 124
+  "$@" >"$_CAPS_CAPTURE" 2>/dev/null &
+  _CAPS_CHILD=$!
+  while kill -0 "$_CAPS_CHILD" 2>/dev/null; do
+    _caps_now="$(date +%s)"
+    if [ "$_caps_now" -ge "$_CAPS_DEADLINE" ]; then
+      kill "$_CAPS_CHILD" 2>/dev/null || true
+      kill -KILL "$_CAPS_CHILD" 2>/dev/null || true
+      wait "$_CAPS_CHILD" 2>/dev/null || true
+      _CAPS_CHILD=""
+      return 124
+    fi
+    if [ $((_caps_now - _CAPS_HEARTBEAT)) -ge 5 ]; then
+      _stage_progress "$((_caps_now - _CAPS_STARTED))" 60 steps
+      _CAPS_HEARTBEAT="$_caps_now"
+    fi
+    sleep 1
+  done
+  _caps_rc=0
+  wait "$_CAPS_CHILD" || _caps_rc=$?
+  _CAPS_CHILD=""
+  [ "$_caps_rc" -eq 0 ] || return "$_caps_rc"
+  [ "$(wc -c <"$_CAPS_CAPTURE")" -le 4096 ] || return 1
+  _CAPS_OUTPUT="$(cat "$_CAPS_CAPTURE")"
+}
+
+_caps_sha_valid() {
+  [ "${#1}" -eq 64 ] || return 1
+  case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+_caps_begin() {
+  _stage companion_reload "Verificando los topes autorizados de Anuncios"
+  _CAPS_STARTED="$(date +%s)"
+  _CAPS_DEADLINE=$((_CAPS_STARTED + 60))
+  _CAPS_HEARTBEAT="$_CAPS_STARTED"
+  _CAPS_CHILD=""
+  _CAPS_CAPTURE="$(mktemp "$SAFENT_STATE_HOME/.caps-status.XXXXXX")" \
+    || _die_porcelain companion_unreachable "No se pudo verificar el broker de Anuncios." true
+  trap '_caps_cleanup' EXIT
+  trap '_caps_cleanup; exit 1' INT TERM HUP
+  [ -f "$COMPANION_COMPOSE" ] && [ ! -L "$COMPANION_COMPOSE" ] \
+    && [ -f "$COMPANION_STATE/image" ] && [ ! -L "$COMPANION_STATE/image" ] \
+    || _die_porcelain companion_network_conflict "Anuncios no tiene una instalacion fija verificable. Repara la app antes de cambiar topes." false
+  _companion_update_env
+  # A current native pin must agree with the persisted release. A caller cannot
+  # use this operation as an image update, and a missing local image is not pulled.
+  _caps_run "$RT" image inspect -f '{{.Id}}' "$SAFENT_ADS_IMAGE" \
+    || _die_porcelain companion_network_conflict "No se encuentra la imagen instalada de Anuncios." false
+  _CAPS_IMAGE_ID=${_CAPS_OUTPUT#sha256:}
+  _caps_sha_valid "$_CAPS_IMAGE_ID" \
+    || _die_porcelain companion_network_conflict "La identidad de la imagen de Anuncios no es valida." false
+  # The cached compose service must still use the immutable exported pin.
+  _caps_declared_image="$(awk '$0 == "  ads-broker:" {broker=1; next} broker && /^  [^ ]/ {exit} broker && $1 == "image:" {print $2; exit}' "$COMPANION_COMPOSE")"
+  [ "$_caps_declared_image" = '${SAFENT_ADS_IMAGE:-safent-ads:local}' ] \
+    || _die_porcelain companion_network_conflict "La definicion del broker no coincide con la instalacion de Safent." false
+  _caps_guard_broker \
+    || _die_porcelain companion_network_conflict "No se pudo confirmar la identidad y el montaje del broker de esta instalacion." false
+}
+
+_caps_guard_broker() {
+  _caps_run "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" ps -q -a ads-broker || return 1
+  _CAPS_BROKER_ID="$_CAPS_OUTPUT"
+  _caps_sha_valid "$_CAPS_BROKER_ID" || return 1
+  _caps_run "$RT" inspect -f '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.Image}}|{{range .Mounts}}{{if eq .Destination "/etc/ads-broker/caps.yaml"}}{{.Source}}|{{.RW}}{{end}}{{end}}' "$_CAPS_BROKER_ID" || return 1
+  case "$_CAPS_OUTPUT" in
+    "safent-ads|ads-broker|$_CAPS_IMAGE_ID|$COMPANION_STATE/caps.yaml|false"|\
+    "safent-ads|ads-broker|sha256:$_CAPS_IMAGE_ID|$COMPANION_STATE/caps.yaml|false") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_caps_loaded_digest() {
+  # UID 10001 is ALREADY authorized by SO_PEERCRED; GID 10003 can traverse the
+  # existing 0660 broker socket. No allowlist, root privilege or mount changes.
+  _caps_run "$RT" exec --user 10001:10003 "$_CAPS_BROKER_ID" \
+    python -m safent_ads.tools.hard_caps_status || return 1
+  # Deliberately a closed one-line protocol, not a permissive JSON extractor:
+  # reject duplicate keys, unknown fields, extra records and noncanonical hashes.
+  case "$_CAPS_OUTPUT" in *'
+'*) return 1 ;; esac
+  printf '%s\n' "$_CAPS_OUTPUT" | grep -Eq '^[[:space:]]*\{[[:space:]]*"caps_digest"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"[[:space:]]*\}[[:space:]]*$' || return 1
+  _CAPS_LOADED="$(printf '%s\n' "$_CAPS_OUTPUT" | sed -n 's/^[[:space:]]*{[[:space:]]*"caps_digest"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)"[[:space:]]*}[[:space:]]*$/\1/p')"
+  _caps_sha_valid "$_CAPS_LOADED"
+}
+
+_caps_complete() {
+  _stage_done
+  if [ "$PORCELAIN" -eq 1 ]; then
+    printf '{"t":"%s","caps_digest":"%s"}\n' "$1" "$_CAPS_LOADED"
+  else
+    printf '[ok] Topes cargados por el broker: %s\n' "$_CAPS_LOADED"
+  fi
+}
+
+cmd_companion_caps_status() {
+  [ "$#" -eq 0 ] || { _stage companion_reload "Verificando Anuncios"; _die_porcelain companion_network_conflict "caps-status no acepta argumentos." false; }
+  _caps_begin
+  _caps_loaded_digest \
+    || _die_porcelain companion_unreachable "No se pudo verificar que topes tiene cargados Anuncios. No se ha cambiado nada." true
+  _caps_complete caps_status
+}
+
+cmd_companion_caps_reload() {
+  if [ "$#" -ne 1 ] || ! _caps_sha_valid "${1:-}"; then
+    _stage companion_reload "Verificando Anuncios"
+    _die_porcelain companion_network_conflict "caps-reload requiere un unico digest SHA256 valido." false
+  fi
+  _CAPS_EXPECTED="$1"
+  _caps_begin
+  [ -f "$COMPANION_STATE/caps.yaml" ] && [ ! -L "$COMPANION_STATE/caps.yaml" ] \
+    && [ "$(_sha256 "$COMPANION_STATE/caps.yaml")" = "$_CAPS_EXPECTED" ] \
+    || _die_porcelain companion_network_conflict "Los topes guardados cambiaron antes de aplicarlos. Vuelve a confirmar los importes." false
+  # Atomic host replacement changes the inode of the read-only bind. Restart
+  # alone would retain the old inode, hence recreate ONLY the verified broker.
+  _caps_run "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" up -d \
+    --no-deps --force-recreate --no-build --pull never ads-broker \
+    || _die_porcelain companion_unreachable "No se pudo recargar el broker. El estado puede haber cambiado; verifica o restaura los topes antes de operar." true
+  while [ "$(date +%s)" -lt "$_CAPS_DEADLINE" ]; do
+    if _caps_guard_broker && _caps_loaded_digest && [ "$_CAPS_LOADED" = "$_CAPS_EXPECTED" ]; then
+      _caps_complete caps_reloaded
+      return 0
+    fi
+    sleep 1
+  done
+  _die_porcelain companion_unreachable "El broker no confirmo los topes solicitados. No se consideran aplicados; verifica o restaura la configuracion." true
+}
+
 cmd_companion() {
   case "${1:-}" in
     requests) cmd_companion_requests ;;
@@ -1967,9 +2110,11 @@ cmd_companion() {
     status) cmd_companion_status ;;
     update) cmd_companion_update ;;
     rotate) cmd_companion_rotate ;;
+    caps-status) shift; cmd_companion_caps_status "$@" ;;
+    caps-reload) shift; cmd_companion_caps_reload "$@" ;;
     remove) cmd_companion_remove "${2:-}" ;;
     *)
-      echo "Usage: safent companion install|repair|status|update|rotate|remove [--purge]" >&2
+      echo "Usage: safent companion install|repair|status|update|rotate|caps-status|caps-reload SHA256|remove [--purge]" >&2
       exit 1
       ;;
   esac
@@ -2882,6 +3027,8 @@ safent - control your local Safent
   safent companion status             is the companion up? containers, /mcp/health
   safent companion update             pull the latest companion image and recreate it
   safent companion rotate             issue a new /mcp bearer on both sides, restart ads-api
+  safent companion caps-status        verify the hard-cap digest loaded by the broker
+  safent companion caps-reload SHA256 recreate only the pinned broker and verify its loaded digest
   safent companion remove [--purge]   stop + remove the companion (keeps its state unless --purge)
 
   safent brake release   release the emergency brake without MFA (host access == owner;
@@ -2924,7 +3071,7 @@ case "${1:-open}" in
   agent|watch)                 cmd_agent ;;
   status|estado)               cmd_status ;;
   logs|log)                    cmd_logs ;;
-  companion|compañero)         cmd_companion "${2:-}" "${3:-}" ;;
+  companion|compañero)         shift; cmd_companion "$@" ;;
   pair|vincular)               cmd_pair "${2:-}" ;;
   unpair|desvincular)          cmd_unpair ;;
   uninstall|desinstalar)       shift; cmd_uninstall "$@" ;;
