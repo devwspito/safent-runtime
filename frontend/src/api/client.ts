@@ -304,8 +304,54 @@ export function getNativeActive(): Promise<Provider | null> {
     })
 }
 
-export function setActiveProvider(providerId: string): Promise<unknown> {
-  return request<unknown>(`/providers/${encodeURIComponent(providerId)}/activate`, { method: 'POST' })
+export interface NativeModelSelection {
+  provider_id: 'openai-codex'
+  active_model: string
+}
+export interface NativeModelCatalog extends NativeModelSelection { models: string[] }
+
+function nativeModelResult(value: unknown): NativeModelSelection {
+  if (!value || typeof value !== 'object' || !('provider_id' in value) || value.provider_id !== 'openai-codex'
+    || !('active_model' in value) || typeof value.active_model !== 'string' || value.active_model.length > 128) {
+    throw new ApiError('No se pudo verificar el modelo.', 502, null)
+  }
+  return { provider_id: 'openai-codex', active_model: value.active_model }
+}
+
+export async function getNativeModelCatalog(): Promise<NativeModelCatalog> {
+  const value = await request<unknown>('/providers/native/models', { timeoutMs: 60_000 })
+  const selection = nativeModelResult(value)
+  const models = (value as { models?: unknown }).models
+  if (!Array.isArray(models) || !models.length || models.length > 1_000
+    || models.some(model => typeof model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(model))) {
+    throw new ApiError('No se pudo verificar el catálogo de modelos.', 502, null)
+  }
+  return { ...selection, models: [...new Set(models)] }
+}
+
+export async function selectNativeModel(payload: NativeModelSelection & { model: string }): Promise<NativeModelSelection> {
+  const value = await request<unknown>('/providers/native/model', {
+    method: 'PATCH', timeoutMs: 60_000,
+    body: JSON.stringify({ provider_id: payload.provider_id, model: payload.model, expected_model: payload.active_model }),
+  })
+  const selection = nativeModelResult(value)
+  if (selection.active_model !== payload.model) throw new ApiError('No se pudo confirmar el cambio de modelo.', 502, null)
+  return selection
+}
+
+export async function setActiveProvider(providerId: string): Promise<unknown> {
+  try {
+    const result = await request<unknown>(`/providers/${encodeURIComponent(providerId)}/activate`, { method: 'POST' })
+    if (!result || typeof result !== 'object' || Array.isArray(result)
+      || ('ok' in result && result.ok === false)
+      || !('provider_id' in result) || typeof result.provider_id !== 'string' || !result.provider_id
+      || !(('ok' in result && result.ok === true) || ('is_active' in result && result.is_active === true))) {
+      throw new ApiError('No se pudo confirmar la activación del proveedor.', 502, null)
+    }
+    return result
+  } catch (error) {
+    throw new ApiError('No se pudo confirmar la activación del proveedor.', error instanceof ApiError && error.status !== 200 ? error.status : 502, null)
+  }
 }
 
 /** `code` (PROV-03, specs/025-safent-repaso): honest classification of a

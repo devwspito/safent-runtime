@@ -16,6 +16,7 @@ Design rules:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from hermes.shell_server.providers.domain import ProviderKind
 
@@ -96,7 +97,19 @@ _KIND_MAP: dict[ProviderKind, tuple[str, str, str, bool]] = {
 }
 
 
-def kind_to_native_target(kind: ProviderKind) -> NativeProviderTarget:
+def native_provider_for_endpoint(provider_id: str, base_url: str | None) -> str:
+    """A custom compatible URL is not the official OpenAI Responses service."""
+    if provider_id not in {"openai", "openai-api"} or not base_url:
+        return provider_id
+    try:
+        host = (urlsplit(base_url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return "custom"
+    official = host == "api.openai.com" or host.endswith(".api.openai.com")
+    return provider_id if official else "custom"
+
+
+def kind_to_native_target(kind: ProviderKind, *, base_url: str | None = None) -> NativeProviderTarget:
     """Return the native hermes_cli target for ``kind``.
 
     Always succeeds: unknown kinds fall back to ``openai-api`` with
@@ -106,14 +119,14 @@ def kind_to_native_target(kind: ProviderKind) -> NativeProviderTarget:
     if entry is None:
         # Unmapped kind: treat as generic OpenAI-compatible.
         return NativeProviderTarget(
-            provider_id="openai-api",
+            provider_id=native_provider_for_endpoint("openai-api", base_url),
             env_var="OPENAI_API_KEY",
             base_url_env_var="OPENAI_BASE_URL",
             needs_base_url=True,
         )
     pid, env_var, base_url_env_var, needs_base_url = entry
     return NativeProviderTarget(
-        provider_id=pid,
+        provider_id=native_provider_for_endpoint(pid, base_url),
         env_var=env_var,
         base_url_env_var=base_url_env_var,
         needs_base_url=needs_base_url,

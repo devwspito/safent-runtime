@@ -93,11 +93,11 @@ def _load_native_model_config() -> ModelConfig | None:
     # litellm-style model string para que el motor sepa de qué provider hablar.
     model_string = f"{pid}/{model}"
     base_url = (m.get("base_url") or "").strip() or None
-    api_key: str | None = None
+    api_key: str | None = (m.get("api_key") or m.get("api") or None) if pid == "custom" else None
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
         pc = PROVIDER_REGISTRY.get(pid)
-        if pc is not None:
+        if pc is not None and api_key is None:
             for var in (getattr(pc, "api_key_env_vars", ()) or ()):
                 v = os.environ.get(var)
                 if v:
@@ -129,9 +129,13 @@ def _load_native_model_config() -> ModelConfig | None:
         extra={"provider": pid, "model": model_string, "has_key": api_key is not None},
     )
     from dataclasses import replace  # noqa: PLC0415
+
+    from hermes.shell_server.providers.native_sync import native_provider_for_endpoint  # noqa: PLC0415
+    effective_pid = native_provider_for_endpoint(pid, base_url)
+    model_string = f"{effective_pid}/{model}"
     return replace(ModelConfig.from_provider(
         model=model_string, api_key=api_key, base_url=base_url
-    ), native_provider=pid)
+    ), native_provider=effective_pid)
 
 
 def resolve_model_config(db_path: Path) -> ModelConfig | None:

@@ -877,6 +877,30 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(self._wiring.get_native_active())
 
     @method()
+    async def ListNativeProviderModels(self, provider_id: "s") -> "s":  # noqa: N802,F821,UP037
+        """Read the native account catalog without blocking the daemon loop."""
+        import asyncio  # noqa: PLC0415
+        sender_uid = await self._resolve_current_sender_uid()
+        result = await asyncio.to_thread(
+            self._wiring.list_native_provider_models,
+            provider_id=provider_id, sender_uid=sender_uid,
+        )
+        return json.dumps(result)
+
+    @method()
+    async def SetNativeProviderModel(  # noqa: N802
+        self, provider_id: "s", model: "s", expected_model: "s",  # noqa: F821,UP037
+    ) -> "s":  # noqa: F821,UP037
+        """Model-only owner write; the daemon revalidates policy and catalog."""
+        import asyncio  # noqa: PLC0415
+        sender_uid = await self._resolve_current_sender_uid()
+        result = await asyncio.to_thread(
+            self._wiring.set_native_provider_model,
+            provider_id=provider_id, model=model, expected_model=expected_model, sender_uid=sender_uid,
+        )
+        return json.dumps(result)
+
+    @method()
     async def StartProviderOauth(self, provider_id: "s") -> "s":  # noqa: N802,F821,UP037
         """Inicia device-code OAuth de una suscripción (Nous Portal).
 

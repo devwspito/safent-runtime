@@ -844,7 +844,7 @@ class DbusRuntimeServiceWiring:
             return
 
         try:
-            target = kind_to_native_target(provider.kind)
+            target = kind_to_native_target(provider.kind, base_url=provider.base_url)
 
             key = (api_key or "").strip()
             # Inactive aliases stay in the vault. Providers sharing an env-var
@@ -862,22 +862,26 @@ class DbusRuntimeServiceWiring:
                 if declared_vars:
                     env_var = declared_vars[0]
 
-            if env_var:
+            if env_var and target.provider_id != "custom":
                 _write_hermes_env(env_var, key)
 
             bu = (provider.base_url or "").strip()
-            if not bu and target.base_url_env_var:
+            if not bu and target.base_url_env_var and target.provider_id != "custom":
                 _write_hermes_env(target.base_url_env_var, '')
                 import os as _os
                 _os.environ.pop(target.base_url_env_var, None)
-            if bu and target.base_url_env_var:
+            if bu and target.base_url_env_var and target.provider_id != "custom":
                 _write_hermes_env(target.base_url_env_var, bu)
                 if registry_cfg is not None:
                     declared_bu_var = getattr(registry_cfg, "base_url_env_var", "") or ""
                     if declared_bu_var and declared_bu_var != target.base_url_env_var:
                         _write_hermes_env(declared_bu_var, bu)
 
-            if set_active:
+            if target.provider_id == "custom":
+                _write_hermes_model_config(
+                    "custom", (provider.default_model or "").strip(), bu, api_key=key,
+                )
+            elif set_active:
                 _write_hermes_model_config(
                     target.provider_id,
                     (provider.default_model or "").strip(),
@@ -888,9 +892,9 @@ class DbusRuntimeServiceWiring:
             # key on the next cycle without restart (mirrors configure_native_provider).
             try:
                 import os as _os  # noqa: PLC0415
-                if env_var and key:
+                if env_var and key and target.provider_id != "custom":
                     _os.environ[env_var] = key
-                elif env_var:
+                elif env_var and target.provider_id != "custom":
                     _os.environ.pop(env_var, None)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("hermes.dbus.native_sync_env_load_failed: %s", exc)
@@ -2880,6 +2884,23 @@ class DbusRuntimeServiceWiring:
     def get_native_active(self) -> dict:
         """Provider nativo activo según config.yaml ({} si ninguno). Read-only."""
         return _read_native_active()
+
+    def list_native_provider_models(self, *, provider_id: str, sender_uid: int) -> dict:
+        """Live account-scoped model choices; never OAuth credentials."""
+        from hermes.providers.infrastructure import native_model_selection  # noqa: PLC0415
+        return native_model_selection.list_models(
+            self, provider_id=provider_id, sender_uid=sender_uid,
+        )
+
+    def set_native_provider_model(
+        self, *, provider_id: str, model: str, expected_model: str, sender_uid: int,
+    ) -> dict:
+        """Select a discovered model while retaining the native OAuth connection."""
+        from hermes.providers.infrastructure import native_model_selection  # noqa: PLC0415
+        return native_model_selection.select_model(
+            self, provider_id=provider_id, model=model,
+            expected_model=expected_model, sender_uid=sender_uid,
+        )
 
     # ------------------------------------------------------------------
     # Web search backend keys (Brave/Tavily/Exa) — mejora de web_search.
@@ -6029,6 +6050,11 @@ async def _nous_validate_model_string(
             explicit_base_url=req.explicit_base_url,
             target_model=req.target_model,
         )
+        if rt.get("api_mode") == "codex_responses":
+            from hermes.providers.infrastructure.native_probe import (  # noqa: PLC0415
+                probe_responses_runtime,
+            )
+            return probe_responses_runtime(rt, bare)
         # HONEST reachability+auth probe: hit the CONFIGURED endpoint with a
         # 1-token completion and let it RAISE on 404 / 401 / offline / DNS. The
         # OLD path ran the full agent loop (AIAgent.run_conversation), which
@@ -6858,13 +6884,26 @@ def _write_hermes_env(var: str, value: str) -> None:
     _os.replace(tmp, env_path)
 
 
-def _write_hermes_model_config(provider_id: str, model: str, base_url: str = "") -> None:
+def _write_hermes_model_config(
+    provider_id: str, model: str, base_url: str = "", *, api_key: str | None = None,
+) -> None:
     """Fija model.{provider,default,base_url} en config.yaml — TRIGGER del path
     nativo: si está, el motor resuelve por hermes_cli (no por vault/catálogo)."""
     from hermes_cli.config import load_config, save_config  # noqa: PLC0415
     cfg = load_config() or {}
     m = dict(cfg.get("model") or {})
+    if m.get("provider") != provider_id:
+        # Transport and inline custom credential belong to the previous selection.
+        m.pop("api_mode", None)
+        m.pop("api_key", None)
+        m.pop("api", None)
     m["provider"] = provider_id
+    if provider_id == "custom":
+        # Let Hermes infer the custom endpoint's native protocol; do not carry
+        # a previous Codex/Anthropic mode into a newly selected custom endpoint.
+        m.pop("api_mode", None)
+        if api_key is not None:
+            m["api_key"] = api_key
     if model:
         m["default"] = model
     if base_url:
