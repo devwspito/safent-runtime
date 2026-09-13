@@ -2368,6 +2368,11 @@ class NousReasoningEngine:
         external_specs = await self._resolve_external_specs(active_agent_id)
         external_catalog = _ExternalToolCatalog(external_specs)
 
+        if "chat_message" in (safe_context.trigger or ""):
+            from hermes.runtime.ads_chat_guidance import append_ads_chat_guidance  # noqa: PLC0415
+
+            system_prompt = append_ads_chat_guidance(system_prompt, external_specs)
+
         agent = await asyncio.to_thread(
             self._build_governed_agent,
             model_config, system_prompt, loop, tenant_id, external_catalog,
