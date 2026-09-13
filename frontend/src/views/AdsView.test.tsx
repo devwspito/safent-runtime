@@ -270,4 +270,21 @@ describe('AdsView', () => {
     act(() => root.render(<MemoryRouter initialEntries={['/anuncios?connect=https://evil.test&secret=invalid']}><AdsView /></MemoryRouter>))
     expect(container.querySelector('iframe')?.getAttribute('src')).toBe('/ads/')
   })
+
+  it('refreshes the iframe capability when permissions resolve after the panel has loaded', () => {
+    setAvailability('ready')
+    useFeatures.mockReturnValue({ edition: 'community', isLoading: true, allowed: () => false })
+    render()
+    const oldFrame = container.querySelector('iframe')!
+    expect(oldFrame.hasAttribute('data-safent-setup')).toBe(false)
+    useFeatures.mockReturnValue({ edition: 'community', isLoading: false, allowed: () => true })
+    render()
+    const readyFrame = container.querySelector('iframe')!
+    expect(readyFrame).not.toBe(oldFrame)
+    expect(readyFrame.getAttribute('data-safent-setup')).toBe('true')
+    useFeatures.mockReturnValue({ edition: 'community', isLoading: false, allowed: () => false })
+    render()
+    expect(container.querySelector('iframe')).not.toBe(readyFrame)
+    expect(container.querySelector('iframe')?.hasAttribute('data-safent-setup')).toBe(false)
+  })
 })

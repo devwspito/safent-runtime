@@ -145,7 +145,7 @@ function AdsPanel({ noAccounts }: { noAccounts: boolean }) {
       {state !== 'loaded' && <div className={css.loading} role={state === 'error' ? 'alert' : 'status'}>
         {state === 'loading' ? t('ads.frame.loading') : t('ads.frame.error')}
       </div>}
-      <iframe ref={panelRef} key={`${revision}:${connectProvider ?? ''}`}
+      <iframe ref={panelRef} key={`${revision}:${connectProvider ?? ''}:${canConfigureConnections}`}
         src={connectProvider ? `/ads/conexiones?provider=${connectProvider}` : ADS_IFRAME_SRC}
         data-safent-setup={canConfigureConnections ? 'true' : undefined}
         title={t('ads.iframe.title')} className={css.frame}
