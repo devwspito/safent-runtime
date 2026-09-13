@@ -46,6 +46,17 @@ case "$1" in
     exit 0 ;;
   inspect)
     case "$*" in
+      *'{{.Config.Image}}'*)
+        mount="${FAKE_DATA_MOUNT:-volume|agent-test-data}"
+        if [ "${FAKE_CHANGED_CORE_IDENTITY:-0}" = 1 ] && [ "${!#}" = "$FAKE_CORE_ID" ]; then mount='volume|foreign-data'; fi
+        printf '%s|%s|%s|%s\n' "$FAKE_CORE_ID" "${FAKE_CORE_REF:-$SAFENT_IMAGE}" "$FAKE_CORE_IMAGE_ID" "$mount"
+        exit 0 ;;
+      *NetworkSettings.Networks*)
+        ip="${FAKE_CORE_IP:-10.201.0.2}"
+        [ ! -f "${FAKE_CORE_RECREATED:-/nonexistent}" ] || ip=10.201.0.2
+        if [ "${!#}" = "$FAKE_FOREIGN_ID" ]; then ip=10.201.0.2; fi
+        case "$*" in *'{{.Id}}|'*) printf '%s|%s\n' "${!#}" "$ip";; *) echo "$ip";; esac
+        exit 0 ;;
       *com.docker.compose.service*)
         case "$4" in c1) role=ads-api;; c2) role=ads-db;; c3) role=ads-worker;; c4) role=ads-broker;; c5) role=ads-migrate;; *) exit 1;; esac
         case "$*" in
@@ -93,11 +104,17 @@ case "$1" in
     exit 0
     ;;
   pull) exit 0 ;;
+  ps)
+    if [ "${2:-}" = --all ]; then
+      echo "$FAKE_CORE_ID"
+      [ "${FAKE_FOREIGN_CORE_IP:-0}" != 1 ] || echo "$FAKE_FOREIGN_ID"
+    fi
+    exit 0 ;;
   image)
     case "$*" in
       *'{{.Id}}'*)
         # Real Podman returns an unprefixed image ID (not a manifest digest).
-        case "${!#}" in docker.io/library/postgres@sha256:*) echo "${FAKE_DB_IMAGE_ID#sha256:}";; *) echo "${FAKE_ADS_IMAGE_ID#sha256:}";; esac ;;
+        case "${!#}" in docker.io/library/postgres@sha256:*) echo "${FAKE_DB_IMAGE_ID#sha256:}";; ghcr.io/devwspito/safent@sha256:*) echo "$FAKE_CORE_IMAGE_ID";; *) echo "${FAKE_ADS_IMAGE_ID#sha256:}";; esac ;;
     esac
     exit 0 ;;
   port) echo "${FAKE_PUBLISHED_PORT:-127.0.0.1:35335}"; exit 0 ;;
@@ -230,10 +247,90 @@ def _base_env(
         "FAKE_ADS_IMAGE_ID": "sha256:" + "c" * 64,
         "FAKE_DB_IMAGE_ID": "sha256:" + "d" * 64,
         "FAKE_OLD_IMAGE_ID": "sha256:" + "e" * 64,
+        "FAKE_CORE_ID": "1" * 64,
+        "FAKE_FOREIGN_ID": "2" * 64,
+        "FAKE_CORE_IMAGE_ID": "3" * 64,
     }
 
 
 class TestCompanionInstall:
+    @pytest.mark.parametrize("explicit_engine_only", [False, True])
+    def test_failed_scaffold_preserves_existing_core_unless_companion_disabled(
+        self, tmp_path: Path, fake_bin_dir: Path, explicit_engine_only: bool
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        provision = state_home / "companions" / "ads" / "bin" / "provision.sh"
+        provision.write_text("#!/bin/sh\nexit 1\n")
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_CORE_IP="10.201.0.14", FAKE_RUNNING="false")
+        # Existing stopped core forces the native up path in either mode.
+        argv = ["sh", str(_SAFENT_CLI), "up", "--porcelain"]
+        if explicit_engine_only:
+            argv.append("--no-companion")
+        result = subprocess.run(argv, env=env, capture_output=True, text=True,
+                                timeout=20, check=False)
+        lines = log.read_text().splitlines()
+        if explicit_engine_only:
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert any(line.startswith("run -d ") for line in lines)
+        else:
+            assert result.returncode != 0
+            assert "companion_network_conflict" in result.stdout
+            assert not any(line.startswith("rm ") or line.startswith("run -d ") for line in lines)
+
+    @pytest.mark.parametrize("verb", ["install", "repair"])
+    def test_healthy_same_image_reserved_core_ip_repairs_before_compose(
+        self, tmp_path: Path, fake_bin_dir: Path, verb: str
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_CORE_IP="10.201.0.14", FAKE_CORE_RECREATED=str(tmp_path / "recreated"),
+                   SAFENT_DATA_VOLUME="custom-preserved-data", FAKE_DATA_MOUNT="volume|custom-preserved-data",
+                   FAKE_PUBLISHED_PORT="127.0.0.1:41234")
+        before = subprocess.run(["sh", str(_SAFENT_CLI), "facts", "--json"], env=env,
+                                capture_output=True, text=True, timeout=20, check=False)
+        assert json.loads(before.stdout)["companionHealth"] == "unreachable"
+        for _ in range(2):
+            result = subprocess.run(["sh", str(_SAFENT_CLI), "companion", verb, "--porcelain"],
+                                    env=env, capture_output=True, text=True, timeout=20, check=False)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert "private-regression-ticket" not in result.stdout + result.stderr
+        lines = log.read_text().splitlines()
+        runs = [line for line in lines if line.startswith("run -d --name agent-test ")]
+        assert len(runs) == 1
+        assert "--network safent-companions --ip 10.201.0.2" in runs[0]
+        assert "-p 127.0.0.1:41234:7517" in runs[0]
+        assert "-v custom-preserved-data:/var/lib/hermes" in runs[0]
+        assert lines.index(runs[0]) < next(i for i, line in enumerate(lines) if " up -d" in line)
+        assert not any(line.startswith("volume rm") for line in lines)
+
+    @pytest.mark.parametrize("override", [
+        {"FAKE_FOREIGN_CORE_IP": "1"},
+        {"FAKE_CORE_REF": "ghcr.io/foreign/core@sha256:" + "a" * 64},
+        {"FAKE_DATA_MOUNT": "bind|agent-test-data"},
+        {"FAKE_PUBLISHED_PORT": "0.0.0.0:35335"},
+        {"FAKE_PUBLISHED_PORT": "127.0.0.1:35335\n0.0.0.0:35335"},
+        {"FAKE_CHANGED_CORE_IDENTITY": "1"},
+    ])
+    def test_reserved_core_recovery_rejects_foreign_or_ambiguous_identity(
+        self, tmp_path: Path, fake_bin_dir: Path, override: dict[str, str]
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_CORE_IP="10.201.0.14", **override)
+        result = subprocess.run(["sh", str(_SAFENT_CLI), "companion", "repair", "--porcelain"],
+                                env=env, capture_output=True, text=True, timeout=20, check=False)
+        assert result.returncode != 0
+        lines = log.read_text().splitlines()
+        assert not any(line.startswith("rm ") or " up -d" in line for line in lines)
+        assert not any("verify-ads" in line for line in lines)
+
     @pytest.mark.parametrize("role,recorded", [
         (role, "ghcr.io/devwspito/safent-ads@sha256:" + "f" * 64)
         for role in ["ads-api", "ads-worker", "ads-broker", "ads-db", "ads-migrate"]
@@ -312,7 +409,7 @@ class TestCompanionInstall:
         assert "safent-companion-runtime:/etc/hermes/companions:ro" in runs[0]
         assert env["SAFENT_IMAGE"] in runs[0]
         assert lines.index(runs[0]) < next(i for i, line in enumerate(lines) if "verify-ads" in line)
-        assert sum(line.startswith("rm -f agent-test") for line in lines) == 1
+        assert sum(line == "rm -f " + env["FAKE_CORE_ID"] for line in lines) == 1
 
     @pytest.mark.parametrize("override", [
         {"FAKE_DATA_MOUNT": "volume|other-data"},
@@ -332,7 +429,7 @@ class TestCompanionInstall:
             env=env, capture_output=True, text=True, timeout=20, check=False,
         )
         assert result.returncode != 0
-        assert "rm -f agent-test" not in log.read_text()
+        assert not any(line.startswith("rm ") for line in log.read_text().splitlines())
         assert "verify-ads" not in log.read_text()
 
     @pytest.mark.parametrize("verb", ["install", "repair"])

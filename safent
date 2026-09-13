@@ -123,6 +123,9 @@ COMPANION_NETWORK="safent-companions"
 COMPANION_HOST="ads.safent.internal"
 COMPANION_PORT="8443"
 COMPANION_IP="10.201.0.10"
+# The native engine must never consume Ads' static .10-.14 reservations,
+# including on legacy networks whose dynamic pool still spans the whole /24.
+CORE_COMPANION_IP="10.201.0.2"
 COMPANION_COMPOSE="$COMPANION_BIN_DIR/compose.yaml"
 # --no-companion itself is recognized from ANY position, not only $1 — see
 # the --porcelain filter loop below, which now also catches this flag.
@@ -546,9 +549,8 @@ _fetch_companion_file() {
 # Scaffold the safent-ads companion (024) BEFORE _run: companions.json has
 # to exist for the read-only bind _run adds. Mirrors run-safent.sh's own
 # companion phase exactly — same provision.sh, fetched rather than shipped a
-# second time in this CLI. NEVER fatal to Safent's own boot (FR-3): any
-# failure here just leaves COMPANION_RUN_ARGS empty and _run starts without
-# --network/the companion binds, same as --no-companion.
+# second time in this CLI. Missing scaffold leaves COMPANION_RUN_ARGS empty;
+# _run rejects that state before removal unless --no-companion was explicit.
 #
 # --scaffold (028 T015): network + TLS + bearer + companions.json only —
 # local, image-independent, always fast. The companion's actual SERVICE
@@ -562,7 +564,7 @@ _provision_companion() {
   mkdir -p "$COMPANION_BIN_DIR" 2>/dev/null || true
   for _cf in provision.sh compose.yaml caps.template.yaml; do
     _fetch_companion_file "$_cf" || {
-      echo "[!] Companion: could not obtain $_cf — starting Safent without it." >&2
+      echo "[!] Companion: could not obtain $_cf — preparation incomplete." >&2
       return 0
     }
   done
@@ -574,9 +576,9 @@ _provision_companion() {
   # final URL on stdout, never provisioning chatter. Its exit status (the
   # only thing this `if` actually needs) is untouched by the redirect.
   if SAFENT_PODMAN="$RT" "$COMPANION_BIN_DIR/provision.sh" --scaffold >&2; then
-    COMPANION_RUN_ARGS="--network safent-companions -v safent-companion-runtime:/etc/hermes/companions:ro"
+    COMPANION_RUN_ARGS="--network safent-companions --ip $CORE_COMPANION_IP -v safent-companion-runtime:/etc/hermes/companions:ro"
   else
-    echo "[!] Companion scaffolding failed — starting Safent without it (FR-3)." >&2
+    echo "[!] Companion scaffolding failed — preparation incomplete." >&2
   fi
 }
 
@@ -589,7 +591,22 @@ _run() {
   _ensure_seccomp
   _provision_companion
   _active_image="$(_image)"
-  "$RT" rm -f "$NAME" >/dev/null 2>&1 || true
+  if [ "$NO_COMPANION" -eq 0 ]; then
+    [ -n "$COMPANION_RUN_ARGS" ] \
+      || _die_porcelain companion_network_conflict "No se pudo preparar la conexion de Anuncios. Se conserva el motor existente para reintentar." true
+    _prepare_core_recreation && _core_address_available \
+      || _die_porcelain companion_network_conflict "No se pudo verificar una conexion libre y la identidad de Safent. No se ha retirado ningun contenedor." false
+    if [ -n "$_core_replace_id" ]; then
+      # Remove the observed immutable ID, never a name another process could
+      # have replaced between preflight and removal. Never remove a volume.
+      [ "$(_core_identity_snapshot "$_core_replace_id")" = "$_core_replace_snapshot" ] \
+        || _die_porcelain companion_network_conflict "La identidad de Safent ha cambiado durante la preparacion. No se ha retirado ningun contenedor." false
+      "$RT" rm -f "$_core_replace_id" >/dev/null 2>&1 \
+        || _die_porcelain companion_network_conflict "No se pudo detener el motor verificado de Safent para preparar su conexion." true
+    fi
+  else
+    "$RT" rm -f "$NAME" >/dev/null 2>&1 || true
+  fi
   if [ -n "$PORT_PIN" ]; then publish="127.0.0.1:${PORT_PIN}:7517"; else publish="127.0.0.1::7517"; fi
   # AppArmor (Linux hosts only — Ubuntu/Debian ship it enforcing by default; see
   # run-safent.sh for the full rationale): under an enforcing profile, rootful
@@ -1666,7 +1683,8 @@ _run_with_heartbeat() {
   wait "$_hb_pid"
 }
 
-# Legacy/engine-only containers can be healthy without the private projection.
+# Legacy/engine-only containers can be healthy without the private projection,
+# or occupy an Ads reservation on an old unbounded network.
 # Reuse the normal hardened launch, preserving the observed port and data volume.
 # Its bootstrap ticket is deliberately discarded: only the outer boot may Ready.
 _companion_converge_core() (
@@ -1695,6 +1713,11 @@ _companion_install_or_repair() {
   _stage companion_scaffold "Preparando el andamiaje del companion"
   _run_with_heartbeat env SAFENT_PODMAN="$RT" "$COMPANION_BIN_DIR/provision.sh" --scaffold \
     || _die_porcelain companion_network_conflict "No se pudo preparar la red/estado del companion" true
+
+  # Free any legacy core reservation BEFORE compose starts the migration.
+  # The same hardened launch repairs projection and topology together.
+  _run_with_heartbeat _companion_converge_core \
+    || _die_porcelain companion_network_conflict "No se pudo preparar la conexion segura de Safent conservando sus datos y puerto. No se ha iniciado Anuncios." false
   _stage_done
 
   _stage companion_up "Instalando el companion"
@@ -1710,8 +1733,8 @@ _companion_install_or_repair() {
 
   _stage companion_reload "Registrando el companion en Safent"
   _running || _die_porcelain companion_unreachable "Safent no esta disponible para registrar el companion" false
-  _run_with_heartbeat _companion_converge_core \
-    || _die_porcelain companion_unreachable "No se pudo preparar la conexion segura de Anuncios sin cambiar los datos o el puerto de Safent" false
+  _container_matches_desired \
+    || _die_porcelain companion_unreachable "La conexion verificada de Safent ha cambiado durante la preparacion. Revisa el estado antes de reintentar." false
   _companion_images_match \
     || _die_porcelain companion_unreachable "Anuncios no esta ejecutando todas las imagenes verificadas de esta version de Safent. Reintenta la preparacion." true
   "$RT" exec -u root "$NAME" /usr/libexec/hermes/hermes-companion-bearer >&2 \
@@ -2264,7 +2287,7 @@ cmd_facts() {
   fi
   companion_health=unknown
   if [ "$engine_running" = true ] && [ -n "$RT" ]; then
-    if _companion_images_match && "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
+    if _core_network_matches && _companion_images_match && "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
         health-ads >/dev/null 2>&1; then
       companion_health=reachable
     else
@@ -2596,11 +2619,59 @@ cmd_ensure_images() {
 # the bare local image ID {{.Image}}). A non-digest-pinned $IMAGE (a bare
 # terminal install without SAFENT_ENGINE_DIGEST) can never safely claim
 # convergence this way — it always re-runs, unchanged from before.
+_core_network_matches() {
+  _core_ip="$("$RT" inspect --type container --format '{{with index .NetworkSettings.Networks "safent-companions"}}{{.IPAddress}}{{end}}' "$NAME" 2>/dev/null)" || return 1
+  [ "$_core_ip" = "$CORE_COMPANION_IP" ]
+}
+
+_core_identity_snapshot() {
+  "$RT" inspect --type container --format '{{.Id}}|{{.Config.Image}}|{{.Image}}|{{range .Mounts}}{{if eq .Destination "/var/lib/hermes"}}{{.Type}}|{{.Name}}{{end}}{{end}}' "$1" 2>/dev/null
+}
+
+_prepare_core_recreation() {
+  _core_replace_id=""; _core_replace_snapshot=""
+  _exists || return 0
+  _core_replace_snapshot="$(_core_identity_snapshot "$NAME")" || return 1
+  _core_replace_id="${_core_replace_snapshot%%|*}"
+  printf '%s\n' "$_core_replace_id" | grep -Eq '^[0-9a-f]{64}$' || return 1
+  _core_fields="${_core_replace_snapshot#*|}"
+  _core_ref="${_core_fields%%|*}"; _core_fields="${_core_fields#*|}"
+  _core_image_id="${_core_fields%%|*}"; _core_data="${_core_fields#*|}"
+  printf '%s\n' "$_core_ref" | grep -Eq '^ghcr[.]io/devwspito/safent@sha256:[0-9a-f]{64}$' || return 1
+  [ "$_core_data" = "volume|$DATA_VOLUME" ] || return 1
+  _core_expected_id="$("$RT" image inspect --format '{{.Id}}' "$_core_ref" 2>/dev/null)" || return 1
+  _core_image_id="${_core_image_id#sha256:}"; _core_expected_id="${_core_expected_id#sha256:}"
+  printf '%s\n' "$_core_expected_id" | grep -Eq '^[0-9a-f]{64}$' || return 1
+  [ "$_core_image_id" = "$_core_expected_id" ] || return 1
+  _core_port_binding="$("$RT" port "$_core_replace_id" 7517 2>/dev/null)" || return 1
+  case "$_core_port_binding" in 127.0.0.1:*) ;; *) return 1 ;; esac
+  _core_port="${_core_port_binding#127.0.0.1:}"
+  case "$_core_port" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_core_port" -ge 1 ] && [ "$_core_port" -le 65535 ] || return 1
+  [ -z "$PORT_PIN" ] || [ "$PORT_PIN" = "$_core_port" ] || return 1
+  PORT_PIN="$_core_port"
+}
+
+_core_address_available() {
+  _core_network_ids="$("$RT" ps --all --quiet --no-trunc)" || return 1
+  for _core_peer in $_core_network_ids; do
+    printf '%s\n' "$_core_peer" | grep -Eq '^[0-9a-f]{64}$' || return 1
+    _core_peer_row="$("$RT" inspect --type container --format '{{.Id}}|{{with index .NetworkSettings.Networks "safent-companions"}}{{.IPAddress}}{{end}}' "$_core_peer" 2>/dev/null)" || return 1
+    [ "${_core_peer_row%%|*}" = "$_core_peer" ] || return 1
+    case "${_core_peer_row#*|}" in *'|'*|*'
+'*) return 1 ;; esac
+    if [ "${_core_peer_row#*|}" = "$CORE_COMPANION_IP" ]; then
+      [ "$_core_peer" = "$_core_replace_id" ] || return 1
+    fi
+  done
+}
+
 _container_matches_desired() {
   _exists && _running || return 1
   if [ "$NO_COMPANION" -eq 0 ]; then
     _projection_mount="$("$RT" inspect --format '{{range .Mounts}}{{if eq .Destination "/etc/hermes/companions"}}{{.Type}}|{{.Name}}|{{.RW}}{{end}}{{end}}' "$NAME" 2>/dev/null || true)"
     [ "$_projection_mount" = 'volume|safent-companion-runtime|false' ] || return 1
+    _core_network_matches || return 1
   fi
   case "$IMAGE" in
     *@sha256:*) ;;

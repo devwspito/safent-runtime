@@ -1776,6 +1776,9 @@ class TestSeccompProfileIsCopiedFromTheBundleIntoPrivateState:
         )
         env["SAFENT_PODMAN"] = str(pinned)
         env["SAFENT_STATE_HOME"] = str(tmp_path / "home" / ".safent")
+        # This is a fresh bundled install, not an existing container with
+        # unspecified image/data identity that the CLI may safely replace.
+        env["FAKE_CONTAINER_EXISTS"] = "false"
 
         result, _ticket = _run_up_with_secret_pipe(
             "--porcelain", env=env, capsys=capsys, with_companion=True
@@ -1784,6 +1787,8 @@ class TestSeccompProfileIsCopiedFromTheBundleIntoPrivateState:
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         calls = _podman_calls(podman_log)
         assert not any("run --rm --entrypoint cat" in call for call in calls), calls
+        assert not any(call.startswith("rm ") for call in calls), calls
+        assert any("--network safent-companions --ip 10.201.0.2" in call for call in calls)
         scaffold_dir = Path(env["SAFENT_STATE_HOME"]) / "companions" / "ads" / "bin"
         for name in ("provision.sh", "compose.yaml", "caps.template.yaml"):
             assert (scaffold_dir / name).read_bytes() == (pinned_dir / name).read_bytes()
