@@ -91,6 +91,12 @@ case "$1" in
     [ "$FAKE_CONTAINER_EXISTS" = "true" ] && exit 0 || exit 1
     ;;
   image)
+    if [ "$2" = "inspect" ]; then
+      [ "$FAKE_IMAGE_LOCAL" = "true" ] || exit 1
+      [ "${FAKE_PINNED_IMAGE_LOOKUP_FAILS:-false}" != true ] || exit 1
+      printf '%s\\n' "${FAKE_PINNED_IMAGE_ID:-}"
+      exit 0
+    fi
     [ "$2" = "exists" ] || exit 0
     [ "$FAKE_IMAGE_LOCAL" = "true" ] && exit 0 || exit 1
     ;;
@@ -440,6 +446,37 @@ class TestEveryProgressUnitIsInTheClosedVocabulary:
 
 
 class TestFactsIsPureObservation:
+    @pytest.mark.parametrize(
+        ("actual_id", "pinned_id", "lookup_fails", "matches"),
+        [
+            ("a" * 64, "a" * 64, False, True),
+            ("a" * 64, "sha256:" + "a" * 64, False, True),
+            ("a" * 64, "b" * 64, False, False),
+            ("a" * 64, "a" * 64, True, False),
+            ("", "", False, False),
+            ("not-an-image-id", "not-an-image-id", False, False),
+        ],
+    )
+    def test_index_alias_requires_identical_pinned_content(
+        self, tmp_path: Path, fake_bin_dir: Path,
+        actual_id: str, pinned_id: str, lookup_fails: bool, matches: bool,
+    ) -> None:
+        desired = "sha256:" + "d" * 64
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home",
+            podman_log=tmp_path / "podman.log", image_digest="e" * 64,
+            extra_env={
+                "SAFENT_IMAGE": "ghcr.io/devwspito/safent@" + desired,
+                "FAKE_CONTAINER_IMAGE_ID": actual_id,
+                "FAKE_PINNED_IMAGE_ID": pinned_id,
+                "FAKE_PINNED_IMAGE_LOOKUP_FAILS": str(lookup_fails).lower(),
+            },
+        )
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, result.stderr
+        expected = desired if matches else "sha256:" + "e" * 64
+        assert json.loads(result.stdout)["engineContainer"]["imageDigest"] == expected
+
     def test_bare_facts_emits_one_line_of_parseable_json(self, tmp_path: Path, fake_bin_dir: Path) -> None:
         podman_log = tmp_path / "podman.log"
         env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)

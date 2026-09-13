@@ -2221,6 +2221,30 @@ _machines_json() {
   echo "[$out]"
 }
 
+_container_image_digest() {
+  _cid_digest="$("$RT" inspect --type container -f '{{.ImageDigest}}' "$NAME" 2>/dev/null || true)"
+  [ -n "$_cid_digest" ] || _cid_digest="$("$RT" inspect --type container -f '{{.Image}}' "$NAME" 2>/dev/null || true)"
+  # Podman may retain the multiarch index digest after a tag pull, even
+  # when the container was created with the signed platform-digest ref.
+  # Accept that alias ONLY when lookup of the exact pinned ref resolves to
+  # the container's identical content ID. Never trust a tag, name or label.
+  case "$IMAGE" in
+    *@sha256:*)
+      _cid_want="${IMAGE#*@}"
+      if [ "$_cid_digest" != "$_cid_want" ] && printf '%s\n' "$_cid_want" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+        _cid_actual="$("$RT" inspect --type container -f '{{.Image}}' "$NAME" 2>/dev/null || true)"
+        _cid_pinned="$("$RT" image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
+        _cid_actual="${_cid_actual#sha256:}"
+        _cid_pinned="${_cid_pinned#sha256:}"
+        if [ "$_cid_actual" = "$_cid_pinned" ] && printf '%s\n' "$_cid_actual" | grep -Eq '^[0-9a-f]{64}$'; then
+          _cid_digest="$_cid_want"
+        fi
+      fi
+      ;;
+  esac
+  printf '%s\n' "$_cid_digest"
+}
+
 cmd_facts() {
   case "$OS" in Darwin) os_id=darwin ;; Linux) os_id=linux ;; *) os_id="$OS" ;; esac
   arch="$(uname -m 2>/dev/null || echo unknown)"
@@ -2243,8 +2267,7 @@ cmd_facts() {
     # only in the (defensive, not expected in this app's own flow — every
     # container it creates runs an image pulled BY digest) case where
     # podman has no digest recorded for this container's image at all.
-    d="$("$RT" inspect -f '{{.ImageDigest}}' "$NAME" 2>/dev/null || true)"
-    [ -n "$d" ] || d="$("$RT" inspect -f '{{.Image}}' "$NAME" 2>/dev/null || true)"
+    d="$(_container_image_digest)"
     [ -n "$d" ] && engine_digest="\"$(_json_str "$d")\""
   fi
 
@@ -2713,8 +2736,7 @@ _container_matches_desired() {
     *@sha256:*) ;;
     *) return 1 ;;
   esac
-  _d="$("$RT" inspect --type container -f '{{.ImageDigest}}' "$NAME" 2>/dev/null || true)"
-  [ -n "$_d" ] || _d="$("$RT" inspect --type container -f '{{.Image}}' "$NAME" 2>/dev/null || true)"
+  _d="$(_container_image_digest)"
   [ "$_d" = "${IMAGE#*@}" ]
 }
 
