@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { Dialog } from '@base-ui/react/dialog'
 import { sileo } from 'sileo'
 import { Calendar, ChevronLeft, ChevronRight, Trash2, X } from 'lucide-react'
 import { useT, useLocale } from '../lib/i18n'
@@ -825,7 +826,7 @@ interface TaskModalProps {
   agents: Agent[]
   presetDate: string | null
   onClose: () => void
-  onCreate: (payload: CreateTaskPayload) => void
+  onCreate: (payload: CreateTaskPayload) => Promise<void>
 }
 
 function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
@@ -843,11 +844,8 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
   const dateRef = useRef<HTMLInputElement>(null)
   const agentRef = useRef<HTMLSelectElement>(null)
   const riskRef = useRef<HTMLSelectElement>(null)
-  const overlayRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    nameRef.current?.focus()
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  const returnFocus = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  const submitting = useRef(false)
 
   function toggleDay(day: number) {
     setSelectedDays(prev => {
@@ -862,6 +860,7 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
   }
 
   async function handleCreate() {
+    if (submitting.current) return
     const name = nameRef.current?.value.trim() ?? ''
     let prompt = promptRef.current?.value.trim() ?? ''
     const errors: typeof fieldErrors = {}
@@ -898,6 +897,7 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
     const date = dateRef.current?.value ?? ''
     const cron = buildCron({ mode, days, date, time })
 
+    submitting.current = true
     setCreating(true)
     try {
       await onCreate({
@@ -909,6 +909,7 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
         one_shot: mode === 'once',
       })
     } finally {
+      submitting.current = false
       setCreating(false)
     }
   }
@@ -916,27 +917,18 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
   const customAgents = agents.filter(a => !a.is_default)
 
   return (
-    <motion.div
-      className="modal-overlay"
-      ref={overlayRef}
-      onClick={e => { if (e.target === overlayRef.current) onClose() }}
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-    >
-      <motion.div
-        className="modal-card"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('cal.modal.title')}
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, y: 16 }}
-        transition={SPRING}
+    <Dialog.Root open onOpenChange={open => { if (!open && !submitting.current) onClose() }}>
+      <Dialog.Portal>
+      <Dialog.Backdrop className="modal-overlay" />
+      <Dialog.Popup
+        className={`modal-card ${styles.taskPopup}`}
+        initialFocus={nameRef}
+        finalFocus={returnFocus}
+        aria-busy={creating}
       >
         <div className={styles.modalHead}>
-          <h3 className={styles.modalTitle}>{t('cal.modal.title')}</h3>
-          <button className={styles.modalCloseBtn} onClick={onClose} aria-label={t('cal.modal.close.aria')}>
+          <Dialog.Title className={styles.modalTitle}>{t('cal.modal.title')}</Dialog.Title>
+          <button className={styles.modalCloseBtn} disabled={creating} onClick={() => { if (!submitting.current) onClose() }} aria-label={t('cal.modal.close.aria')}>
             <X size={14} aria-hidden="true" />
           </button>
         </div>
@@ -1064,12 +1056,13 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
         </div>
 
         <div className={styles.modalActions}>
-          <Button variant="ghost" size="sm" onClick={onClose}>{t('cal.cancel')}</Button>
+          <Button variant="ghost" size="sm" disabled={creating} onClick={() => { if (!submitting.current) onClose() }}>{t('cal.cancel')}</Button>
           <Button variant="primary" size="sm" onClick={handleCreate} loading={creating}>
             {t('cal.create')}
           </Button>
         </div>
-      </motion.div>
-    </motion.div>
+      </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
   )
 }
