@@ -59,7 +59,7 @@ from datetime import UTC, datetime
 from functools import wraps
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from hermes.agents_os.application.audit_hash_chain import AuditHashChainSigner
 from hermes.agents_os.application.consent_manager import Capability
@@ -3075,7 +3075,10 @@ class DbusRuntimeServiceWiring:
             return None, None
         from hermes.integrations.composio.composio_client import ComposioClient  # noqa: PLC0415
 
-        return ComposioClient(cred.api_key), cred.entity_id
+        return ComposioClient(
+            cred.api_key,
+            auth_config_ids=self._composio_integrations_repo().auth_config_ids(),
+        ), cred.entity_id
 
     @staticmethod
     def _composio_to_dict(obj: Any) -> dict:
@@ -3119,8 +3122,11 @@ class DbusRuntimeServiceWiring:
             if "401" in detail or "Unauthorized" in detail:
                 return {"ok": False, "error": "Key inválida o revocada (Composio 401). Genera una nueva en composio.dev → Settings → API Keys."}
             return {"ok": False, "error": f"No se pudo validar contra Composio Cloud: {detail[:200]}"}
-        self._composio_integrations_repo().set_credential(
-            kind="composio", api_key=key
+        repo = self._composio_integrations_repo()
+        previous = repo.get_or_none(kind="composio")
+        repo.set_credential(
+            kind="composio", api_key=key,
+            entity_id=previous.entity_id if previous else f"safent-{uuid4()}",
         )
         logger.info(
             "hermes.dbus.composio_key_set", extra={"by_uid": sender_uid, "toolkits": len(toolkits)}

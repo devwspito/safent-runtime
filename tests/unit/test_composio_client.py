@@ -119,6 +119,9 @@ def _fake_sdk(
 
     # connected_accounts.delete → void
     sdk.connected_accounts.delete.return_value = delete_return
+    sdk.connected_accounts.get.side_effect = lambda connection_id: SimpleNamespace(
+        id=connection_id, user_id="user-1",
+    )
 
     # connected_accounts.link → ConnectionRequest
     sdk.connected_accounts.link.return_value = (
@@ -345,14 +348,14 @@ class TestDeleteConnection:
     @pytest.mark.asyncio
     async def test_passes_connection_id_to_sdk(self) -> None:
         sdk = _fake_sdk()
-        await _client(sdk).delete_connection("conn-xyz")
+        await _client(sdk).delete_connection("conn-xyz", entity_id="user-1")
 
         sdk.connected_accounts.delete.assert_called_once_with("conn-xyz")
 
     @pytest.mark.asyncio
     async def test_returns_none(self) -> None:
         sdk = _fake_sdk()
-        result = await _client(sdk).delete_connection("conn-xyz")
+        result = await _client(sdk).delete_connection("conn-xyz", entity_id="user-1")
 
         assert result is None
 

@@ -15,8 +15,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 from composio import Composio
 from composio.exceptions import ComposioError
@@ -32,6 +33,15 @@ _SAFE_DETAIL_MAX = 300
 # y NO se soportan todavía. Esta clasificación es COMPARTIDA: la usan el SO, la
 # TUI y la tool del agente (connect_integration) — la fuente única es el daemon.
 _OAUTH_SIMPLE_SCHEMES = frozenset({"OAUTH2", "OAUTH1"})
+ADS_TOOLKITS = frozenset({"googleads", "metaads"})
+
+
+def _managed_oauth_available(item: Any) -> bool | None:
+    """SDK 0.13.1 explicitly distinguishes supported auth from managed auth."""
+    schemes = getattr(item, "composio_managed_auth_schemes", None)
+    if not isinstance(schemes, (list, tuple)):
+        return None
+    return bool({str(value).upper() for value in schemes} & _OAUTH_SIMPLE_SCHEMES)
 
 
 def _extract_auth_schemes(item: Any) -> tuple[str, ...]:
@@ -56,7 +66,10 @@ def _extract_auth_schemes(item: Any) -> tuple[str, ...]:
                 break
     out: list[str] = []
     for c in candidates:
-        mode = getattr(c, "mode", None) or getattr(c, "auth_mode", None) or getattr(c, "scheme", None) or c
+        mode = (
+            getattr(c, "mode", None) or getattr(c, "auth_mode", None)
+            or getattr(c, "scheme", None) or c
+        )
         if isinstance(mode, str):
             out.append(mode.strip().upper())
     return tuple(out)
@@ -111,6 +124,17 @@ class ToolkitInfo:
     description: str
     auth_schemes: tuple[str, ...] = ()
     oauth_simple: bool = True
+    managed_auth_available: bool | None = None
+    setup_required: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AuthConfigInfo:
+    """Only non-secret metadata crosses the administration API boundary."""
+
+    id: str
+    toolkit_slug: str
+    status: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +154,7 @@ class ConnectedAccountInfo:
     toolkit_slug: str
     entity_id: str
     status: str
+    auth_config_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,12 +177,17 @@ class ComposioApiError(Exception):
 class ComposioClient:
     """Async Composio client backed by the official SDK.  One instance per API key."""
 
-    def __init__(self, api_key: str, *, sdk: Composio | None = None) -> None:
+    def __init__(
+        self, api_key: str, *, sdk: Composio | None = None,
+        auth_config_ids: Mapping[str, str] | None = None,
+    ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
         self._api_key = api_key
         # Accept an injected SDK for tests; otherwise construct with the real key.
         self._sdk: Composio = sdk if sdk is not None else Composio(api_key=api_key)
+        # Server/owner-selected configuration only, never tool-call parameters.
+        self._auth_config_ids = dict(auth_config_ids or {})
         # Composio v0.9+ REJECTS manual tools.execute() without a CONCRETE version
         # ("Toolkit version not specified" 502; "latest" is NOT accepted in manual
         # execution, nor as a global/dict default). So the agent could discover + call
@@ -220,13 +250,21 @@ class ComposioClient:
                     continue
 
             schemes = _extract_auth_schemes(item)
+            managed = _managed_oauth_available(item)
+            selected = bool(self._auth_config_ids.get(slug.lower()))
+            simple = selected or (
+                managed if managed is not None else
+                False if slug.lower() in ADS_TOOLKITS else _is_oauth_simple(schemes)
+            )
             results.append(
                 ToolkitInfo(
                     slug=slug,
                     name=name,
                     description=description,
                     auth_schemes=schemes,
-                    oauth_simple=_is_oauth_simple(schemes),
+                    oauth_simple=simple,
+                    managed_auth_available=managed,
+                    setup_required=slug.lower() in ADS_TOOLKITS and not simple,
                 )
             )
 
@@ -238,6 +276,13 @@ class ComposioClient:
         puede determinar el esquema, no bloquea.
         """
         slug = toolkit_slug.strip().lower()
+        if slug in ADS_TOOLKITS:
+            selected = self._auth_config_ids.get(slug)
+            if selected:
+                await self.validate_auth_config(slug, selected)
+            else:
+                await self._guarded(lambda: self._assert_managed_ads(slug))
+            return
         toolkits = await self.list_toolkits(search=slug, limit=200)
         match = next((t for t in toolkits if t.slug.lower() == slug), None)
         if match is None:
@@ -320,7 +365,31 @@ class ComposioClient:
                 status=item.status,
             )
             for item in response.items
+            if item.user_id == entity_id and item.status == "ACTIVE"
         ]
+
+    async def get_connected_account(
+        self, connection_id: str, *, entity_id: str,
+    ) -> ConnectedAccountInfo:
+        """Scoped status for OAuth confirmation; never returns state/tokens.
+
+        Status can still be INITIATED. Callers admitting API execution must
+        additionally require ACTIVE and the expected toolkit/auth-config.
+        """
+        def _get() -> ConnectedAccountInfo:
+            account = self._sdk.connected_accounts.get(connection_id)
+            if (
+                getattr(account, "id", None) != connection_id
+                or getattr(account, "user_id", None) != entity_id or not entity_id
+            ):
+                raise ComposioApiError(404, "No se encuentra esta conexión en tu espacio.")
+            return ConnectedAccountInfo(
+                id=account.id, entity_id=entity_id, status=account.status,
+                toolkit_slug=getattr(getattr(account, "toolkit", None), "slug", ""),
+                auth_config_id=getattr(getattr(account, "auth_config", None), "id", ""),
+            )
+
+        return await self._guarded(_get)
 
     async def initiate_connection(
         self,
@@ -337,11 +406,19 @@ class ComposioClient:
         """
 
         def _call() -> ConnectionInitResult:
-            auth_config_id = self._resolve_managed_auth_config_id(toolkit_slug)
+            slug = toolkit_slug.strip().lower()
+            selected = self._auth_config_ids.get(slug)
+            if selected:
+                auth_config_id = self._validate_auth_config(slug, selected).id
+            else:
+                if slug in ADS_TOOLKITS:
+                    self._assert_managed_ads(slug)
+                auth_config_id = self._resolve_managed_auth_config_id(slug)
             req = self._sdk.connected_accounts.link(
                 entity_id,
                 auth_config_id,
                 callback_url=redirect_url,
+                **({"allow_multiple": True} if slug in ADS_TOOLKITS else {}),
             )
             return ConnectionInitResult(
                 connected_account_id=req.id,
@@ -350,6 +427,45 @@ class ComposioClient:
             )
 
         return await self._guarded(_call)
+
+    def _assert_managed_ads(self, toolkit_slug: str) -> None:
+        toolkit = self._sdk.toolkits.get(slug=toolkit_slug)
+        if (
+            getattr(toolkit, "slug", "").lower() != toolkit_slug
+            or getattr(toolkit, "enabled", False) is not True
+            or _managed_oauth_available(toolkit) is not True
+        ):
+            raise ComposioApiError(
+                409, "Falta preparar esta conexión en Safent. "
+                "La administración debe seleccionar una configuración OAuth válida; "
+                "no necesitas crear una aplicación ni copiar secretos.",
+            )
+
+    def _validate_auth_config(self, toolkit_slug: str, config_id: str) -> AuthConfigInfo:
+        # get() is scoped by our Composio project API key. Do not serialize the
+        # SDK object: it can contain credentials even though this method only
+        # needs the public identity, scheme and status.
+        try:
+            config = self._sdk.auth_configs.get(config_id)
+        except (APIError, ComposioError) as exc:
+            # Auth-config SDK responses can include secret fields. Never echo
+            # upstream error bodies to the owner/daemon/UI for this operation.
+            raise ComposioApiError(409, "La configuración OAuth no está disponible.") from exc
+        actual_slug = getattr(getattr(config, "toolkit", None), "slug", "")
+        if (
+            getattr(config, "id", None) != config_id
+            or actual_slug != toolkit_slug
+            or getattr(config, "status", None) != "ENABLED"
+            or getattr(config, "auth_scheme", None) not in _OAUTH_SIMPLE_SCHEMES
+        ):
+            raise ComposioApiError(
+                409, "La configuración OAuth no está disponible para esta plataforma. "
+                "Pide a la administración que la revise.",
+            )
+        return AuthConfigInfo(id=config.id, toolkit_slug=actual_slug, status="ENABLED")
+
+    async def validate_auth_config(self, toolkit_slug: str, config_id: str) -> AuthConfigInfo:
+        return await self._guarded(lambda: self._validate_auth_config(toolkit_slug, config_id))
 
     def _resolve_managed_auth_config_id(self, toolkit_slug: str) -> str:
         """Return an existing enabled managed auth config ID, or create one.
@@ -371,11 +487,18 @@ class ComposioClient:
         )
         return created.id
 
-    async def delete_connection(self, connection_id: str) -> None:
+    async def delete_connection(self, connection_id: str, *, entity_id: str) -> None:
         """Delete a connected account by ID."""
-        await self._guarded(
-            lambda: self._sdk.connected_accounts.delete(connection_id)
-        )
+        def _delete() -> None:
+            account = self._sdk.connected_accounts.get(connection_id)
+            if (
+                getattr(account, "id", None) != connection_id
+                or getattr(account, "user_id", None) != entity_id or not entity_id
+            ):
+                raise ComposioApiError(404, "No se encuentra esta conexión en tu espacio.")
+            self._sdk.connected_accounts.delete(connection_id)
+
+        await self._guarded(_delete)
 
     async def _latest_toolkit_version(self, tool_slug: str) -> str | None:
         """Newest concrete version of the toolkit owning `tool_slug`, cached per toolkit.

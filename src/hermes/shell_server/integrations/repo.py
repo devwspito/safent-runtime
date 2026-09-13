@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS integrations (
   api_key_ciphertext BLOB,
   created_at         TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS integration_auth_configs (
+  kind TEXT NOT NULL,
+  toolkit_slug TEXT NOT NULL,
+  auth_config_id TEXT NOT NULL,
+  PRIMARY KEY (kind, toolkit_slug)
+);
 """
 
 # Secret-id prefix used as AAD for AES-GCM.  Stable; do NOT change after
@@ -119,6 +125,31 @@ class SQLiteIntegrationsRepository:
             return self.get(kind=kind)
         except IntegrationNotFound:
             return None
+
+    def auth_config_ids(self, *, kind: str = "composio") -> dict[str, str]:
+        """Non-secret, owner-selected OAuth configuration IDs for this instance."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT toolkit_slug, auth_config_id FROM integration_auth_configs WHERE kind = ?",
+                (kind,),
+            ).fetchall()
+        return {row["toolkit_slug"]: row["auth_config_id"] for row in rows}
+
+    def set_auth_config(self, *, toolkit_slug: str, auth_config_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO integration_auth_configs(kind, toolkit_slug, auth_config_id) "
+                "VALUES ('composio', ?, ?) ON CONFLICT(kind, toolkit_slug) "
+                "DO UPDATE SET auth_config_id=excluded.auth_config_id",
+                (toolkit_slug, auth_config_id),
+            )
+
+    def clear_auth_config(self, *, toolkit_slug: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM integration_auth_configs WHERE kind='composio' AND toolkit_slug=?",
+                (toolkit_slug,),
+            )
 
     # ----------------------------------------------------------------
     # Secret reveal — ONLY for outbound HTTP calls to Composio

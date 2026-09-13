@@ -20,10 +20,13 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+from http import HTTPStatus
 from pathlib import Path
+from typing import Literal
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from hermes.integrations.composio.composio_client import (
     ComposioApiError,
@@ -31,6 +34,7 @@ from hermes.integrations.composio.composio_client import (
 )
 from hermes.shell_server.integrations.domain import IntegrationNotFound
 from hermes.shell_server.integrations.repo import SQLiteIntegrationsRepository
+from hermes.shell_server.security.owner_confirmation import require_owner_session
 from hermes.shell_server.security.secrets import SecretsVault
 
 logger = logging.getLogger(__name__)
@@ -44,8 +48,8 @@ _KIND = "composio"
 
 
 class SetApiKeyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     api_key: str = Field(min_length=1)
-    entity_id: str = Field(default="default", min_length=1)
 
 
 class ComposioStatusResponse(BaseModel):
@@ -58,6 +62,22 @@ class ToolkitItem(BaseModel):
     slug: str
     name: str
     description: str
+    oauth_simple: bool = False
+    managed_auth_available: bool | None = None
+    setup_required: bool = False
+
+
+class AuthConfigRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    auth_config_id: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class AuthConfigResponse(BaseModel):
+    toolkit_slug: str
+    auth_config_id: str | None
+
+
+AdsToolkit = Literal["googleads", "metaads"]
 
 
 class ConnectedAccountItem(BaseModel):
@@ -65,11 +85,12 @@ class ConnectedAccountItem(BaseModel):
     toolkit_slug: str
     entity_id: str
     status: str
+    auth_config_id: str = ""
 
 
 class ConnectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     toolkit_slug: str = Field(min_length=1)
-    entity_id: str | None = None
     redirect_url: str | None = None
 
 
@@ -84,7 +105,7 @@ class ConnectResponse(BaseModel):
 # ----------------------------------------------------------------
 
 
-def create_integrations_router(db_path: Path) -> APIRouter:
+def create_integrations_router(db_path: Path) -> APIRouter:  # noqa: PLR0915 - explicit scoped endpoints
     """Create the integrations API router.
 
     db_path is bound at construction time so tests can inject a temp path
@@ -101,15 +122,20 @@ def create_integrations_router(db_path: Path) -> APIRouter:
     # ----------------------------------------------------------------
 
     @router.post("/composio/key", response_model=ComposioStatusResponse)
-    async def set_composio_key(body: SetApiKeyRequest) -> ComposioStatusResponse:
+    async def set_composio_key(body: SetApiKeyRequest, request: Request) -> ComposioStatusResponse:
         """Store the Composio API key (encrypted).
 
         The key is NEVER echoed back.  Only the `has_key` flag is returned.
         """
-        integration = _repo().set_credential(
+        require_owner_session(request)
+        repo = _repo()
+        previous = repo.get_or_none(kind=_KIND)
+        integration = repo.set_credential(
             kind=_KIND,
             api_key=body.api_key,
-            entity_id=body.entity_id,
+            # Existing installs retain their connections. New installs cannot
+            # collide through the historical shared entity "default".
+            entity_id=previous.entity_id if previous else f"safent-{uuid4()}",
         )
         logger.info("hermes.integrations.composio.key_stored")
         return ComposioStatusResponse(
@@ -117,6 +143,38 @@ def create_integrations_router(db_path: Path) -> APIRouter:
             enabled=integration.enabled,
             entity_id=integration.entity_id,
         )
+
+    @router.get("/composio/auth-configs/{toolkit_slug}", response_model=AuthConfigResponse)
+    async def get_auth_config(toolkit_slug: AdsToolkit, request: Request) -> AuthConfigResponse:
+        require_owner_session(request)
+        return AuthConfigResponse(
+            toolkit_slug=toolkit_slug,
+            auth_config_id=_repo().auth_config_ids().get(toolkit_slug),
+        )
+
+    @router.put("/composio/auth-configs/{toolkit_slug}", response_model=AuthConfigResponse)
+    async def select_auth_config(
+        toolkit_slug: AdsToolkit, body: AuthConfigRequest, request: Request,
+    ) -> AuthConfigResponse:
+        require_owner_session(request)
+        repo = _repo()
+        client = _build_client(repo)
+        try:
+            await client.validate_auth_config(toolkit_slug, body.auth_config_id)
+        except ComposioApiError as exc:
+            # Provider errors can contain credential-bearing SDK objects.
+            raise HTTPException(
+                409, "No se puede usar esta configuración OAuth. "
+                "Comprueba que pertenece a esta plataforma y que está activa.",
+            ) from exc
+        repo.set_auth_config(toolkit_slug=toolkit_slug, auth_config_id=body.auth_config_id)
+        return AuthConfigResponse(toolkit_slug=toolkit_slug, auth_config_id=body.auth_config_id)
+
+    @router.delete("/composio/auth-configs/{toolkit_slug}", response_model=AuthConfigResponse)
+    async def clear_auth_config(toolkit_slug: AdsToolkit, request: Request) -> AuthConfigResponse:
+        require_owner_session(request)
+        _repo().clear_auth_config(toolkit_slug=toolkit_slug)
+        return AuthConfigResponse(toolkit_slug=toolkit_slug, auth_config_id=None)
 
     # ----------------------------------------------------------------
     # Status
@@ -156,7 +214,11 @@ def create_integrations_router(db_path: Path) -> APIRouter:
         except ComposioApiError as exc:
             raise HTTPException(502, f"Composio error: {exc}") from exc
         return [
-            ToolkitItem(slug=t.slug, name=t.name, description=t.description)
+            ToolkitItem(
+                slug=t.slug, name=t.name, description=t.description,
+                oauth_simple=t.oauth_simple, managed_auth_available=t.managed_auth_available,
+                setup_required=t.setup_required,
+            )
             for t in toolkits
         ]
 
@@ -192,11 +254,12 @@ def create_integrations_router(db_path: Path) -> APIRouter:
     # ----------------------------------------------------------------
 
     @router.post("/composio/connect", response_model=ConnectResponse)
-    async def connect_app(body: ConnectRequest) -> ConnectResponse:
+    async def connect_app(body: ConnectRequest, request: Request) -> ConnectResponse:
         """Initiate OAuth for a toolkit; returns the redirect URL for the user."""
+        require_owner_session(request)
         repo = _repo()
         client = _build_client(repo)
-        entity_id = body.entity_id or _get_entity_id(repo)
+        entity_id = _get_entity_id(repo)
         try:
             result = await client.initiate_connection(
                 toolkit_slug=body.toolkit_slug,
@@ -204,11 +267,32 @@ def create_integrations_router(db_path: Path) -> APIRouter:
                 redirect_url=body.redirect_url,
             )
         except ComposioApiError as exc:
-            raise HTTPException(502, f"Composio error: {exc}") from exc
+            raise HTTPException(
+                HTTPStatus.CONFLICT if exc.status_code == HTTPStatus.CONFLICT else 502,
+                "No se pudo iniciar la conexión. Si falta preparar la aplicación, "
+                "debe hacerlo la administración de Safent, no cada usuario.",
+            ) from exc
         return ConnectResponse(
             connected_account_id=result.connected_account_id,
             redirect_url=result.redirect_url,
             status=result.status,
+        )
+
+    @router.get("/composio/connected/{connection_id}", response_model=ConnectedAccountItem)
+    async def get_connection(connection_id: str) -> ConnectedAccountItem:
+        repo = _repo()
+        try:
+            account = await _build_client(repo).get_connected_account(
+                connection_id, entity_id=_get_entity_id(repo),
+            )
+        except ComposioApiError as exc:
+            raise HTTPException(
+                404 if exc.status_code in {403, 404} else 502,
+                "No se puede comprobar esta conexión en tu espacio.",
+            ) from exc
+        return ConnectedAccountItem(
+            id=account.id, toolkit_slug=account.toolkit_slug, entity_id=account.entity_id,
+            status=account.status, auth_config_id=account.auth_config_id,
         )
 
     # ----------------------------------------------------------------
@@ -216,13 +300,18 @@ def create_integrations_router(db_path: Path) -> APIRouter:
     # ----------------------------------------------------------------
 
     @router.delete("/composio/connected/{connection_id}")
-    async def delete_connection(connection_id: str) -> dict:
+    async def delete_connection(connection_id: str, request: Request) -> dict:
         """Delete a connected account from Composio cloud."""
-        client = _build_client(_repo())
+        require_owner_session(request)
+        repo = _repo()
+        client = _build_client(repo)
         try:
-            await client.delete_connection(connection_id)
+            await client.delete_connection(connection_id, entity_id=_get_entity_id(repo))
         except ComposioApiError as exc:
-            raise HTTPException(502, f"Composio error: {exc}") from exc
+            raise HTTPException(
+                404 if exc.status_code in {403, 404} else 502,
+                "No se puede desconectar esta cuenta de tu espacio.",
+            ) from exc
         logger.info(
             "hermes.integrations.composio.connection_deleted",
             extra={"connection_id": connection_id},
@@ -253,7 +342,7 @@ def _build_client(repo: SQLiteIntegrationsRepository) -> ComposioClient:
             "Composio API key not configured. "
             "POST /api/v1/integrations/composio/key first.",
         )
-    return ComposioClient(api_key=api_key)
+    return ComposioClient(api_key=api_key, auth_config_ids=repo.auth_config_ids())
 
 
 def _get_entity_id(repo: SQLiteIntegrationsRepository) -> str:
