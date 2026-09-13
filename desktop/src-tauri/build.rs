@@ -8,6 +8,7 @@ fn main() {
             "install_podman",
             "read_host_clipboard",
             "write_host_clipboard",
+            "open_ads_oauth",
             "cancel_bootstrap",
             "retry_bootstrap",
             "export_diagnostics",

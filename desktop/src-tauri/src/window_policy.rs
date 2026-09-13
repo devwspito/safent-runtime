@@ -93,8 +93,9 @@ pub fn is_navigation_allowed(authorized: Option<&Url>, target: &Url) -> bool {
     bundled || authorized.is_some_and(|origin| same_origin(origin, target))
 }
 
-/// Only authorization-code URLs for the two reviewed providers may leave
-/// the webview, and their redirect must return to this exact live instance.
+/// Reviewed provider URLs and Composio's opaque Connect Link may leave the
+/// webview. Direct provider redirects must return to this exact live instance;
+/// Composio's callback is bound server-side when the broker creates the link.
 pub fn is_external_oauth_allowed(authorized: Option<&Url>, target: &Url) -> bool {
     let Some(origin) = authorized else {
         return false;
@@ -106,6 +107,18 @@ pub fn is_external_oauth_allowed(authorized: Option<&Url>, target: &Url) -> bool
         || target.fragment().is_some()
     {
         return false;
+    }
+    if target.host_str() == Some("connect.composio.dev") {
+        return target.query().is_none()
+            && target
+                .path()
+                .strip_prefix("/link/lk_")
+                .is_some_and(|token| {
+                    (1..=128).contains(&token.len())
+                        && token
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+                });
     }
     let provider = match (target.host_str(), target.path()) {
         (Some("accounts.google.com"), "/o/oauth2/v2/auth") => "google",
@@ -171,44 +184,115 @@ fn oauth_open_failed(app: &AppHandle) {
     app.dialog().message("No se pudo abrir esta conexión de forma segura. Vuelve a iniciarla desde Anuncios y comprueba que hay un navegador disponible.").title("Conexión de Anuncios").show(|_| {});
 }
 
-fn open_oauth_in_system_browser(app: &AppHandle, url: &Url) {
+const OAUTH_OPEN_DENIED: &str = "Esta conexión no se puede abrir de forma segura desde Safent.";
+const OAUTH_OPEN_FAILED: &str = "No se pudo abrir el navegador. Vuelve a intentarlo.";
+
+fn validated_oauth_open_request(
+    authorized: Option<&Url>,
+    requester: &Url,
+    window_label: &str,
+    raw_url: &str,
+) -> Result<Url, String> {
+    if window_label != MAIN_WINDOW_LABEL
+        || !authorized.is_some_and(|origin| same_origin(origin, requester))
+        || !requester.username().is_empty()
+        || requester.password().is_some()
+        || raw_url.len() > 8192
+        || raw_url
+            .bytes()
+            .any(|byte| byte <= b' ' || byte == 127 || byte == b'\\')
+    {
+        return Err(OAUTH_OPEN_DENIED.into());
+    }
+    let target = Url::parse(raw_url).map_err(|_| OAUTH_OPEN_DENIED.to_string())?;
+    if !is_external_oauth_allowed(authorized, &target) {
+        return Err(OAUTH_OPEN_DENIED.into());
+    }
+    Ok(target)
+}
+
+/// One purpose only: open a reviewed Ads consent URL outside the webview.
+/// Both the remote capability and the currently authorized boot origin gate
+/// this IPC. No generic shell/open command or arbitrary navigation is exposed.
+#[tauri::command]
+pub async fn open_ads_oauth(
+    window: WebviewWindow,
+    policy: tauri::State<'_, WindowPolicy>,
+    url: String,
+) -> Result<(), String> {
+    let requester = window.url().map_err(|_| OAUTH_OPEN_DENIED.to_string())?;
+    let target = validated_oauth_open_request(
+        policy.authorized().as_ref(),
+        &requester,
+        window.label(),
+        &url,
+    )?;
+    tauri::async_runtime::spawn_blocking(move || launch_system_browser(&target))
+        .await
+        .map_err(|_| OAUTH_OPEN_FAILED.to_string())?
+}
+
+fn system_browser_command(url: &Url) -> Result<std::process::Command, String> {
     // No shell and no PATH lookup. Never log the URL (it contains OAuth state).
     #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("/usr/bin/open")
-        .arg("--")
-        .arg(url.as_str())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let mut command = {
+        let mut command = std::process::Command::new("/usr/bin/open");
+        command.arg("--");
+        command
+    };
     #[cfg(target_os = "linux")]
-    let result = std::process::Command::new("/usr/bin/xdg-open")
-        .arg(url.as_str())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let mut command = std::process::Command::new("/usr/bin/xdg-open");
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    match result {
-        Ok(mut child) => {
-            let app = app.clone();
-            std::thread::spawn(move || {
-                if !child.wait().is_ok_and(|status| status.success()) {
-                    oauth_open_failed(&app);
-                }
-            });
-        }
-        Err(_) => {
-            oauth_open_failed(app);
-        }
+    {
+        command
+            .arg(url.as_str())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        Ok(command)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = url;
-        oauth_open_failed(app);
+        Err(OAUTH_OPEN_FAILED.into())
     }
 }
 
+fn launch_system_browser(url: &Url) -> Result<(), String> {
+    let mut child = system_browser_command(url)?
+        .spawn()
+        .map_err(|_| OAUTH_OPEN_FAILED.to_string())?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(OAUTH_OPEN_FAILED.into())
+                }
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(OAUTH_OPEN_FAILED.into());
+            }
+        }
+    }
+}
+
+fn open_oauth_in_system_browser(app: &AppHandle, url: &Url) {
+    let app = app.clone();
+    let url = url.clone();
+    std::thread::spawn(move || {
+        if launch_system_browser(&url).is_err() {
+            oauth_open_failed(&app);
+        }
+    });
+}
 /// Builds the single product window: bundled shell UI first, navigation
 /// locked to `policy`'s authorized origin, closing hides instead of quitting
 /// (FR-030, research.md: "cerrar la ventana no detiene el motor").
@@ -233,7 +317,7 @@ pub fn create_main_window(app: &AppHandle, policy: WindowPolicy) -> tauri::Resul
                     open_oauth_in_system_browser(&oauth_app, &url);
                 } else if matches!(
                     url.host_str(),
-                    Some("accounts.google.com" | "www.facebook.com")
+                    Some("accounts.google.com" | "www.facebook.com" | "connect.composio.dev")
                 ) {
                     oauth_open_failed(&oauth_app);
                 }
@@ -313,6 +397,125 @@ pub fn install_tray(app: &AppHandle) -> tauri::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_oauth_allows_only_the_reviewed_connect_link() {
+        let origin = url("http://127.0.0.1:35335/");
+        let connect = url("https://connect.composio.dev/link/lk_fixture-123");
+        assert!(is_external_oauth_allowed(Some(&origin), &connect));
+        assert!(!is_external_oauth_allowed(None, &connect));
+        // Approval opens the system browser; never navigate the product webview there.
+        assert!(!is_navigation_allowed(Some(&origin), &connect));
+        for target in [
+            "http://connect.composio.dev/link/lk_fixture",
+            "https://connect.composio.dev:444/link/lk_fixture",
+            "https://connect.composio.dev.evil.example/link/lk_fixture",
+            "https://connect.composio.dev@evil.example/link/lk_fixture",
+            "https://user@connect.composio.dev/link/lk_fixture",
+            "https://connect.composio.dev/link/lk_fixture?redirect=https://evil.example",
+            "https://connect.composio.dev/link/lk_fixture#fragment",
+            "https://connect.composio.dev/link/lk_",
+            "https://connect.composio.dev/link/lk_fixture/extra",
+            "https://connect.composio.dev/link/lk_%66ixture",
+            "https://connect.composio.dev/settings",
+            "https://backend.composio.dev/api/v3.1/connected_accounts",
+            "https://dashboard.composio.dev/",
+            "https://localhost/link/lk_fixture",
+            "https://127.0.0.1/link/lk_fixture",
+            "https://[::1]/link/lk_fixture",
+            "javascript:alert(1)",
+            "file:///tmp/link/lk_fixture",
+        ] {
+            assert!(
+                !is_external_oauth_allowed(Some(&origin), &url(target)),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_opener_requires_current_runtime_window_and_never_echoes_the_url() {
+        let origin = url("http://127.0.0.1:35335/");
+        let current = url("http://127.0.0.1:35335/app/anuncios");
+        let target = "https://connect.composio.dev/link/lk_fixture";
+        assert_eq!(
+            validated_oauth_open_request(Some(&origin), &current, "main", target),
+            Ok(url(target))
+        );
+        for (authorized, requester, label) in [
+            (None, current.clone(), "main"),
+            (
+                Some(&origin),
+                url("http://127.0.0.1:9999/app/anuncios"),
+                "main",
+            ),
+            (
+                Some(&origin),
+                url("http://localhost:35335/app/anuncios"),
+                "main",
+            ),
+            (
+                Some(&origin),
+                url("https://evil.example/app/anuncios"),
+                "main",
+            ),
+            (Some(&origin), current, "other-window"),
+        ] {
+            assert_eq!(
+                validated_oauth_open_request(authorized, &requester, label, target),
+                Err(OAUTH_OPEN_DENIED.into())
+            );
+        }
+        for invalid in [
+            "https://evil.example/secret-state",
+            "https://connect.composio.dev/link/lk_fixture\n",
+            " https://connect.composio.dev/link/lk_fixture",
+            "https:\\connect.composio.dev/link/lk_fixture",
+            "https://127.0.0.1/",
+        ] {
+            assert_eq!(
+                validated_oauth_open_request(Some(&origin), &origin, "main", invalid),
+                Err(OAUTH_OPEN_DENIED.into())
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn system_browser_dispatch_uses_the_absolute_os_binary_without_a_shell() {
+        let target = url("https://connect.composio.dev/link/lk_fixture");
+        let command = system_browser_command(&target).unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(command.get_program(), "/usr/bin/open");
+            assert_eq!(args, ["--", target.as_str()]);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(command.get_program(), "/usr/bin/xdg-open");
+            assert_eq!(args, [target.as_str()]);
+        }
+    }
+
+    #[test]
+    fn remote_capability_grants_only_the_fixed_purpose_opener() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/remote-ui.json")).unwrap();
+        assert_eq!(capability["local"], false);
+        assert_eq!(capability["windows"], serde_json::json!(["main"]));
+        assert_eq!(
+            capability["permissions"],
+            serde_json::json!([
+                "allow-read-host-clipboard",
+                "allow-write-host-clipboard",
+                "allow-open-ads-oauth"
+            ])
+        );
+    }
 
     #[test]
     fn only_exact_google_ads_access_help_may_open_outside_the_live_app() {

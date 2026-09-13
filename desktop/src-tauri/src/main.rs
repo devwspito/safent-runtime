@@ -231,6 +231,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             read_host_clipboard,
             write_host_clipboard,
+            window_policy::open_ads_oauth,
             boot::cancel_bootstrap,
             boot::retry_bootstrap,
             diagnostics::export_diagnostics,
