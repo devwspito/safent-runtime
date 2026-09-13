@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState, type RefObject } from 'react'
 import { Dialog } from '@base-ui/react/dialog'
 import { sileo } from 'sileo'
 import { Calendar, ChevronLeft, ChevronRight, Trash2, X } from 'lucide-react'
@@ -268,6 +268,7 @@ export default function CalendarView() {
   const [viewMode, setViewMode] = useState<ViewMode>('board')
   const [calRef, setCalRef] = useState<Date>(() => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), 1) })
   const [modalOpen, setModalOpen] = useState(false)
+  const modalTrigger = useRef<HTMLElement | null>(null)
   const [modalPresetDate, setModalPresetDate] = useState<string | null>(null)
   const [detailTask, setDetailTask] = useState<ConfiguredTask | null>(null)
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
@@ -308,7 +309,10 @@ export default function CalendarView() {
 
   useEffect(() => { loadAll() }, [loadAll])
 
-  function openModal(presetDate: string | null = null) {
+  function openModal(trigger: HTMLElement, presetDate: string | null = null) {
+    // Safari clicks need not focus buttons: retain the actual opener, not
+    // whichever unrelated control happened to be document.activeElement.
+    modalTrigger.current = trigger
     setModalPresetDate(presetDate)
     setModalOpen(true)
   }
@@ -346,7 +350,7 @@ export default function CalendarView() {
         title={t('view.programadas')}
         subtitle={t('cal.subtitle')}
         actions={
-          <Button variant="primary" size="sm" onClick={() => openModal()}>
+          <Button variant="primary" size="sm" onClick={event => openModal(event.currentTarget)}>
             {t('cal.new_task')}
           </Button>
         }
@@ -418,7 +422,7 @@ export default function CalendarView() {
                         calRef={calRef}
                         onChangeMonth={setCalRef}
                         agentLabel={agentLabel}
-                        onDayClick={(date) => openModal(date)}
+                        onDayClick={(date, trigger) => openModal(trigger, date)}
                         onTaskClick={setDetailTask}
                       />
                     </motion.div>
@@ -441,7 +445,7 @@ export default function CalendarView() {
                           title={t('cal.empty.title')}
                           description={t('cal.empty.desc')}
                           action={
-                            <Button variant="primary" size="sm" onClick={() => openModal()}>
+                            <Button variant="primary" size="sm" onClick={event => openModal(event.currentTarget)}>
                               {t('cal.empty.cta')}
                             </Button>
                           }
@@ -506,6 +510,7 @@ export default function CalendarView() {
       {modalOpen && (
         <TaskModal
           agents={state.agents}
+          returnFocus={modalTrigger}
           presetDate={modalPresetDate}
           onClose={() => setModalOpen(false)}
           onCreate={async (payload) => {
@@ -538,7 +543,7 @@ interface MonthCalendarProps {
   calRef: Date
   onChangeMonth: (d: Date) => void
   agentLabel: (task: ConfiguredTask) => string
-  onDayClick: (date: string) => void
+  onDayClick: (date: string, trigger: HTMLElement) => void
   onTaskClick: (task: ConfiguredTask) => void
 }
 
@@ -611,12 +616,12 @@ function MonthCalendar({ tasks, calRef, onChangeMonth, agentLabel, onDayClick, o
               aria-label={t('cal.day.aria').replace('{day}', String(d.getDate()))}
               onClick={(e) => {
                 if ((e.target as Element).closest(`.${styles.taskChip}`)) return
-                onDayClick(ymd(d))
+                onDayClick(ymd(d), e.currentTarget)
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault()
-                  onDayClick(ymd(d))
+                  onDayClick(ymd(d), e.currentTarget)
                 }
               }}
             >
@@ -824,12 +829,13 @@ function TaskDetailDrawer({ task, agentLabel, onClose }: TaskDetailDrawerProps) 
 
 interface TaskModalProps {
   agents: Agent[]
+  returnFocus: RefObject<HTMLElement | null>
   presetDate: string | null
   onClose: () => void
   onCreate: (payload: CreateTaskPayload) => Promise<void>
 }
 
-function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
+function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskModalProps) {
   const t = useT()
   const initialMode: 'recurrent' | 'once' = presetDate ? 'once' : 'recurrent'
 
@@ -844,7 +850,6 @@ function TaskModal({ agents, presetDate, onClose, onCreate }: TaskModalProps) {
   const dateRef = useRef<HTMLInputElement>(null)
   const agentRef = useRef<HTMLSelectElement>(null)
   const riskRef = useRef<HTMLSelectElement>(null)
-  const returnFocus = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   const submitting = useRef(false)
 
   function toggleDay(day: number) {

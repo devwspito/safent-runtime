@@ -45,6 +45,29 @@ it('Escape closes the actual new-task dialog and restores its trigger', async ()
   expect(document.activeElement).toBe(trigger)
 })
 
+it.each(['new-task button', 'calendar day'])(
+  'Escape returns to the clicked %s when Safari leaves focus on another control',
+  async (kind) => {
+    const previous = button('Hoy')
+    previous.focus()
+    const trigger = kind === 'new-task button'
+      ? button('Nueva tarea')
+      : document.querySelector<HTMLElement>('[data-date][role="button"]')!
+    expect(document.activeElement).toBe(previous)
+    expect(document.activeElement).not.toBe(trigger)
+    // Native .click(), unlike user-event, does not first focus the trigger.
+    // Clicking a nested day label also verifies currentTarget, not target.
+    const clickTarget = kind === 'calendar day' ? trigger.querySelector('span')! : trigger
+    await act(async () => clickTarget.click())
+    await act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
+    expect(document.activeElement).toBe(document.getElementById('tm-name'))
+    await escape()
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+    expect(createTask).not.toHaveBeenCalled()
+  },
+)
+
 it('uses modal focus guards to cycle back inside instead of reaching background controls', async () => {
   await open()
   const dialog = document.querySelector('[role="dialog"]')!
