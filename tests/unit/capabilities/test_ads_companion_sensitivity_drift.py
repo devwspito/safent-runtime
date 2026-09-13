@@ -38,6 +38,17 @@ def test_child_creation_proposal_is_spend_only_for_exact_ads_slug() -> None:
     assert SensitivityCategory.SPEND not in sensitivity("mcp__other__propose_ad_child", {})
 
 
+@pytest.mark.parametrize("tool", ["propose_campaign_draft", "propose_campaign_from_draft"])
+def test_campaign_draft_writes_keep_ads_audit_classification(tool: str) -> None:
+    assert SensitivityCategory.SPEND in sensitivity(f"mcp__safent-ads__{tool}", {})
+    assert SensitivityCategory.SPEND not in sensitivity(f"mcp__other__{tool}", {})
+
+
+@pytest.mark.parametrize("tool", ["list_campaign_drafts", "get_campaign_draft"])
+def test_campaign_draft_reads_are_not_spend(tool: str) -> None:
+    assert SensitivityCategory.SPEND not in sensitivity(f"mcp__safent-ads__{tool}", {})
+
+
 _ADS_REPO = Path(
     os.environ.get("SAFENT_ADS_REPO", str(Path.home() / "Desktop" / "safent-ads"))
 )

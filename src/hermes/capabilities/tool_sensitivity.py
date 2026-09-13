@@ -94,6 +94,8 @@ _SAFENT_ADS_WRITE_TOOLS: frozenset[str] = frozenset({
     # propose_*. La paridad la vigila el propio ads
     # (tests/unit/bundle/test_mcp_registry_matches_overlay_and_contract.py).
     "propose_campaign",
+    "propose_campaign_draft",
+    "propose_campaign_from_draft",
     "propose_experiment",
     "propose_reallocation_plan",
     "generate_creative_assets",
