@@ -71,3 +71,25 @@ Composio client, Ads OAuth/configuration and owner API regressions, credential
 repository/source, tool registry/specs, read broker security route and config
 sync applier. One existing Starlette/AnyIO deprecation warning. Tests use fake
 provider transports; they do not prove live permissions or consent.
+
+## Generic tool safety boundary
+
+Google Ads and Meta Ads connections remain available for the dedicated Ads
+onboarding, but their tools are no longer published through the runtime's
+generic Composio discovery. This applies to reads as well as writes so the
+agent has one account- and policy-scoped route: Anuncios.
+
+The generic Composio surface adapter independently rejects `GOOGLEADS_*` and
+`METAADS_*` before any SDK invocation, even for an old tool specification or a
+generic human approval. Case, surrounding whitespace, account suffixes and
+misleading schemas/labels do not bypass the actual SDK-slug check. Malformed
+or non-ASCII tool slugs are rejected before network access as well.
+
+The error is `safent_ads_module_required` with the message: "Usa Anuncios para
+que se apliquen cuentas, presupuestos y aprobaciones." Gmail and other
+integrations retain their existing broker path. The lower-level SDK wrapper
+and dedicated Ads transport are not disabled by this gate.
+
+Gate validation: 107 tests passed across the new safety cases, generic
+read-broker regression, discovery/specs and SDK wrapper tests. No real Ads
+operation was executed.

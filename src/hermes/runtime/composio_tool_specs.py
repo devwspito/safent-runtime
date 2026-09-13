@@ -41,6 +41,12 @@ from hermes.integrations.composio.composio_client import (
     ComposioClient,
     ToolInfo,
 )
+from hermes.integrations.composio.tool_policy import (
+    ADS_MODULE_MESSAGE,
+    ADS_MODULE_REQUIRED,
+    is_ads_toolkit,
+    requires_ads_module,
+)
 from hermes.runtime.composio_config_source import ComposioCredential
 
 if TYPE_CHECKING:
@@ -209,6 +215,8 @@ def _tool_info_to_spec(
     (B1 fix) and appends name_suffix to disambiguate specs for multi-account
     toolkits so the LLM can pick the right account.
     """
+    if requires_ads_module(tool.slug):
+        raise ValueError(f"{ADS_MODULE_REQUIRED}: {ADS_MODULE_MESSAGE}")
     risk = classify_tool_risk(tool.slug)
 
     handler = None
@@ -278,7 +286,7 @@ async def build_composio_tool_specs(
     active_apps = {
         a.toolkit_slug
         for a in accounts
-        if a.status.upper() == "ACTIVE" and a.toolkit_slug
+        if a.status.upper() == "ACTIVE" and a.toolkit_slug and not is_ads_toolkit(a.toolkit_slug)
     }
 
     if not active_apps:
