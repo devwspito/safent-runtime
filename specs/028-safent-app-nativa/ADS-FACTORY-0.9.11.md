@@ -1,6 +1,6 @@
 # Safent Desktop 0.9.11 — primera configuración de Anuncios
 
-Estado: en preparación, no aceptado hasta verificar el artefacto firmado en la app real. La candidata 0.9.10 corrigió y probó la recuperación de red, pero descubrió una carencia funcional de primera entrada: no había forma de crear el primer negocio desde UI/API.
+Estado: **candidata cancelada, no distribuida**. La revisión OAuth descubrió una fuga de logging antes de usar credenciales reales. Workflow nativo `34741776480` cancelado; borrador prerelease `387808735` conservado con cero assets. Se continúa en `ADS-FACTORY-0.9.12.md`, sin mover este tag. La candidata 0.9.10 corrigió y probó la recuperación de red, pero descubrió una carencia funcional de primera entrada: no había forma de crear el primer negocio desde UI/API.
 
 ## Cambio acotado
 
