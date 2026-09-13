@@ -1,196 +1,206 @@
-/**
- * folderBridge — browser-mediated, per-task "bridge" to a real host folder.
- *
- * The container is in podman's VM and can't kernel-mount a host folder chosen at
- * runtime, and the browser is sandboxed on the user's machine. So a per-task
- * "bridge" is mediated by the browser via the File System Access API (Chromium):
- *
- *   1. showDirectoryPicker() → the OS folder picker returns a read-WRITE handle.
- *   2. uploadDirectoryToBridge() recursively uploads the folder into
- *      workspace/bridge/<name>/… so the agent works on it this task.
- *   3. syncBridgeToHost() writes the (possibly agent-modified) files back to the
- *      real host folder through the handle → no lasting duplicate version.
- *
- * Chromium-only (Chrome/Edge). Requires a secure context (localhost is fine).
- */
+/** Session-only folder bridge: Chromium handles or native picker-scoped capabilities. */
 import { token } from './token'
 import { listWorkspaceFiles } from '../api/client'
 import type { WorkspaceFile } from '../api/types'
 
 export interface BridgeSelection {
-  /** Sanitised folder name (used as the workspace subdir). */
   name: string
-  /** Absolute path in the container (what the agent reads), e.g.
-   *  /var/lib/hermes/workspace/bridge/<name>. */
   workspacePath: string
-  /** Relative base under the workspace: bridge/<name>. */
   relBase: string
-  /** The picked directory handle (kept for write-back this session). */
   dirHandle: FileSystemDirectoryHandle
   fileCount: number
 }
-
+type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>
+type NativeManifest = { id: string; name: string; files: { path: string; size: number }[]; total_bytes: number }
+const nativeHandles = new WeakMap<FileSystemDirectoryHandle, NativeManifest>()
 const MAX_FILES = 2000
 const MAX_FILE_BYTES = 25 * 1024 * 1024
-// Directories that are noise / huge and should never be bridged.
-const SKIP_DIRS = new Set([
-  '.git', 'node_modules', '.venv', 'venv', '__pycache__', 'dist', 'build',
-  '.next', '.turbo', '.cache', 'target', '.idea', '.DS_Store',
-])
+const MAX_TOTAL_BYTES = 256 * 1024 * 1024
+const LIMIT = 'Límite de carpeta: 2.000 archivos, 25 MB por archivo y 256 MB en total. Elige una subcarpeta; no se ha importado parcialmente.'
+const FAILED = 'No se pudo acceder a la carpeta. Vuelve a seleccionarla.'
+const UNSAFE = 'La carpeta contiene enlaces simbólicos, archivos especiales o rutas no admitidas. Elige una carpeta sin enlaces.'
+const CONFLICT = 'Un archivo cambió en tu carpeta. No se ha sobrescrito; vuelve a seleccionar la carpeta.'
 
-// The DOM lib doesn't ship the full File System Access API surface across TS
-// versions; describe the bits we use as a standalone structural type and bridge
-// with `as unknown as DirHandle` at the boundaries.
 interface FileEntryHandle {
-  kind: 'file'
-  name: string
+  kind: 'file'; name: string
   getFile(): Promise<File>
   createWritable(): Promise<{ write(d: Blob): Promise<void>; close(): Promise<void> }>
 }
 interface DirHandle {
-  kind: 'directory'
-  name: string
+  kind: 'directory'; name: string
   entries(): AsyncIterableIterator<[string, DirHandle | FileEntryHandle]>
   getDirectoryHandle(name: string, opts?: { create?: boolean }): Promise<DirHandle>
   getFileHandle(name: string, opts?: { create?: boolean }): Promise<FileEntryHandle>
-  queryPermission?(o: { mode: string }): Promise<string>
   requestPermission?(o: { mode: string }): Promise<string>
 }
-
-async function* walk(
-  dir: DirHandle,
-  prefix = '',
-): AsyncGenerator<{ file: File; rel: string }> {
-  for await (const [name, handle] of dir.entries()) {
-    const rel = prefix ? `${prefix}/${name}` : name
-    if (handle.kind === 'directory') {
-      if (SKIP_DIRS.has(name)) continue
-      yield* walk(handle, rel)
-    } else {
-      const file = await handle.getFile()
-      yield { file, rel }
-    }
+function nativeInvoke(): Invoke | undefined {
+  return (window as Window & { __TAURI__?: { core?: { invoke?: Invoke } } }).__TAURI__?.core?.invoke
+}
+async function native(command: string, args?: Record<string, unknown>): Promise<unknown> {
+  try {
+    const invoke = nativeInvoke()
+    if (!invoke) throw new Error(FAILED)
+    return await invoke(command, args)
+  } catch (error) {
+    const message = typeof error === 'string' ? error : error instanceof Error ? error.message : ''
+    throw new Error([LIMIT, UNSAFE, CONFLICT].includes(message) ? message : FAILED)
   }
 }
-
+function safePath(path: string): boolean {
+  return path.length > 0 && path.length <= 1024 && !path.includes('\\')
+    && ![...path].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+    && path.split('/').length <= 20
+    && path.split('/').every(part => part !== '' && part !== '.' && part !== '..')
+}
+function validateFiles(files: { path: string; size: number }[]): number {
+  let total = 0
+  const seen = new Set<string>()
+  if (files.length > MAX_FILES) throw new Error(LIMIT)
+  for (const file of files) {
+    if (!safePath(file.path) || seen.has(file.path)) throw new Error(UNSAFE)
+    seen.add(file.path)
+    if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_FILE_BYTES) throw new Error(LIMIT)
+    total += file.size
+    if (total > MAX_TOTAL_BYTES) throw new Error(LIMIT)
+  }
+  return total
+}
+async function browserFiles(dir: DirHandle, prefix = '', out: { file: File; path: string; size: number }[] = [], visited = { count: 0 }) {
+  for await (const [name, handle] of dir.entries()) {
+    const path = prefix ? `${prefix}/${name}` : name
+    if (!safePath(path)) throw new Error(UNSAFE)
+    if (++visited.count > 10000) throw new Error(LIMIT)
+    if (handle.kind === 'directory') await browserFiles(handle, path, out, visited)
+    else {
+      const file = await handle.getFile()
+      out.push({ file, path, size: file.size })
+      validateFiles(out)
+    }
+  }
+  return out
+}
 async function uploadOne(file: File, relPath: string): Promise<string> {
   const tok = token()
   const body = new FormData()
   body.append('file', file, file.name)
   body.append('rel_path', relPath)
-  const headers: Record<string, string> = {}
-  if (tok) headers['Authorization'] = `Bearer ${tok}`
-  const res = await fetch('/api/v1/workspace/files', { method: 'POST', headers, body })
-  if (!res.ok) throw new Error(`upload ${relPath}: HTTP ${res.status}`)
-  const j = (await res.json()) as { path?: string }
-  return j.path ?? ''
+  const res = await fetch('/api/v1/workspace/files', { method: 'POST', headers: tok ? { Authorization: `Bearer ${tok}` } : {}, body })
+  if (!res.ok) throw new Error('No se completó la importación de la carpeta. Puedes volver a intentarlo.')
+  const result: unknown = await res.json()
+  return typeof result === 'object' && result !== null && 'path' in result && typeof result.path === 'string' ? result.path : ''
+}
+function bytesFromBase64(value: unknown, expected: number): Uint8Array<ArrayBuffer> {
+  if (typeof value !== 'string' || value.length > Math.ceil(MAX_FILE_BYTES / 3) * 4) throw new Error(FAILED)
+  const raw = atob(value)
+  if (raw.length !== expected) throw new Error(CONFLICT)
+  return Uint8Array.from(raw, char => char.charCodeAt(0))
+}
+function base64FromBytes(bytes: Uint8Array): string {
+  let text = ''
+  for (let i = 0; i < bytes.length; i += 8192) text += String.fromCharCode(...bytes.subarray(i, i + 8192))
+  return btoa(text)
 }
 
-function sanitizeName(raw: string): string {
-  return (raw || 'folder').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 60) || 'folder'
-}
-
-/** Upload the picked folder into workspace/bridge/<name>/… preserving structure. */
-export async function uploadDirectoryToBridge(
-  dirHandle: FileSystemDirectoryHandle,
-): Promise<BridgeSelection> {
-  const name = sanitizeName(dirHandle.name)
-  const relBase = `bridge/${name}`
-  let count = 0
+export async function uploadDirectoryToBridge(dirHandle: FileSystemDirectoryHandle): Promise<BridgeSelection> {
+  const name = (dirHandle.name || 'folder').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 60) || 'folder'
+  // A unique session directory avoids cross-task collisions between same-named folders.
+  const relBase = `bridge/${name}-${crypto.randomUUID()}`
+  const selected = nativeHandles.get(dirHandle)
+  const files = selected ? selected.files : await browserFiles(dirHandle as unknown as DirHandle)
+  validateFiles(files)
   let firstAbs = ''
-  for await (const { file, rel } of walk(dirHandle as unknown as DirHandle)) {
-    if (count >= MAX_FILES) break
-    if (file.size > MAX_FILE_BYTES) continue
-    const relPath = `${relBase}/${rel}`
-    const abs = await uploadOne(file, relPath)
-    if (!firstAbs && abs) firstAbs = abs
-    count++
+  for (const entry of files) {
+    const file = selected
+      ? new File([bytesFromBase64(await native('read_host_folder_file', { id: selected.id, path: entry.path }), entry.size)], entry.path.split('/').pop() || 'file')
+      : (entry as unknown as { file: File }).file
+    const abs = await uploadOne(file, `${relBase}/${entry.path}`)
+    if (!firstAbs) firstAbs = abs
   }
-  // Derive the absolute bridge base from a returned absolute path (honours
-  // HERMES_WORKSPACE_DIR); fall back to the documented default.
   let workspacePath = `/var/lib/hermes/workspace/${relBase}`
   const marker = `/${relBase}/`
-  const idx = firstAbs.indexOf(marker)
-  if (idx >= 0) workspacePath = firstAbs.slice(0, idx + `/${relBase}`.length)
-  return { name, workspacePath, relBase, dirHandle, fileCount: count }
+  const index = firstAbs.indexOf(marker)
+  if (index >= 0) workspacePath = firstAbs.slice(0, index + relBase.length + 1)
+  return { name: dirHandle.name, workspacePath, relBase, dirHandle, fileCount: files.length }
 }
 
-async function ensureDir(root: DirHandle, parts: string[]): Promise<DirHandle> {
-  let cur = root
-  for (const p of parts) cur = await cur.getDirectoryHandle(p, { create: true })
-  return cur
-}
-
-/** Recursively list every FILE under a workspace subdir (via the REST listing). */
-async function listWorkspaceFilesRecursive(relBase: string): Promise<WorkspaceFile[]> {
-  const out: WorkspaceFile[] = []
-  const stack = [relBase]
+async function listBridgeFiles(base: string): Promise<WorkspaceFile[]> {
+  const out: WorkspaceFile[] = [], stack = [base], seen = new Set<string>()
   while (stack.length) {
-    const dir = stack.pop() as string
-    const entries = await listWorkspaceFiles(dir)
-    for (const e of entries) {
-      if (e.is_dir) stack.push(e.path)
-      else out.push(e)
+    const dir = stack.pop()!
+    if (seen.has(dir) || seen.size >= 10000) throw new Error(UNSAFE)
+    seen.add(dir)
+    for (const entry of await listWorkspaceFiles(dir)) {
+      if (!entry.path.startsWith(base + '/') || !safePath(entry.path.slice(base.length + 1))) throw new Error(UNSAFE)
+      if (entry.is_dir) stack.push(entry.path)
+      else out.push(entry)
+      if (out.length > MAX_FILES) throw new Error(LIMIT)
     }
   }
+  validateFiles(out.map(file => ({ path: file.path.slice(base.length + 1), size: file.size })))
   return out
 }
-
-/**
- * Write the (agent-modified) bridge files back to the real host folder through
- * the picked handle. Overwrites files in place → the user's folder ends up with
- * the results, no duplicate version. Returns the number of files written.
- */
-export async function syncBridgeToHost(sel: BridgeSelection): Promise<number> {
-  const root = sel.dirHandle as unknown as DirHandle
-  // Ask for write permission if not already granted.
-  if (root.requestPermission) {
-    const perm = await root.requestPermission({ mode: 'readwrite' })
-    if (perm !== 'granted') throw new Error('Permiso de escritura denegado sobre la carpeta.')
-  }
-
-  const files = await listWorkspaceFilesRecursive(sel.relBase)
+async function download(file: WorkspaceFile): Promise<Blob> {
   const tok = token()
-  let written = 0
-  for (const f of files) {
-    // f.path is relative to the workspace, e.g. bridge/<name>/src/index.ts.
-    const relToBridge = f.path.startsWith(sel.relBase + '/')
-      ? f.path.slice(sel.relBase.length + 1)
-      : f.name
-    const parts = relToBridge.split('/')
-    const fileName = parts.pop() as string
-    const dir = parts.length ? await ensureDir(root, parts) : root
+  const response = await fetch(`/api/v1/workspace/download?path=${encodeURIComponent(file.path)}`, { headers: tok ? { Authorization: `Bearer ${tok}` } : {} })
+  if (!response.ok) throw new Error(FAILED)
+  const blob = await response.blob()
+  if (blob.size !== file.size || blob.size > MAX_FILE_BYTES) throw new Error(CONFLICT)
+  return blob
+}
 
-    const url = `/api/v1/workspace/download?path=${encodeURIComponent(f.path)}`
-    const res = await fetch(url, {
-      headers: tok ? { Authorization: `Bearer ${tok}` } : {},
-    })
-    if (!res.ok) continue
-    const blob = await res.blob()
-    const fh = await dir.getFileHandle(fileName, { create: true })
-    const w = await fh.createWritable()
-    await w.write(blob)
-    await w.close()
-    written++
+/** Explicit save only. Native writes additionally require a native one-batch confirmation. */
+export async function syncBridgeToHost(selection: BridgeSelection): Promise<number> {
+  const files = await listBridgeFiles(selection.relBase)
+  const selected = nativeHandles.get(selection.dirHandle)
+  let batch: unknown
+  const root = selection.dirHandle as unknown as DirHandle
+  if (selected) {
+    batch = await native('approve_host_folder_write', { id: selected.id, files: files.map(file => ({ path: file.path.slice(selection.relBase.length + 1), size: file.size })) })
+    if (batch === null) throw new Error('Guardado cancelado. Tu carpeta no se ha modificado.')
+    if (typeof batch !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(batch)) throw new Error(FAILED)
+  } else if (root.requestPermission && await root.requestPermission({ mode: 'readwrite' }) !== 'granted') {
+    throw new Error('Permiso de escritura denegado sobre la carpeta.')
+  }
+  let written = 0
+  try {
+    for (const file of files) {
+      const relative = file.path.slice(selection.relBase.length + 1)
+      const blob = await download(file)
+      if (selected) {
+        await native('write_host_folder_file', { id: selected.id, batchId: batch, path: relative, data: base64FromBytes(new Uint8Array(await blob.arrayBuffer())) })
+      } else {
+        const parts = relative.split('/'), name = parts.pop()!
+        let dir = root
+        for (const part of parts) dir = await dir.getDirectoryHandle(part, { create: true })
+        const writer = await (await dir.getFileHandle(name, { create: true })).createWritable()
+        await writer.write(blob); await writer.close()
+      }
+      written++
+    }
+  } catch (error) {
+    const reason = error instanceof Error && [FAILED, LIMIT, CONFLICT, UNSAFE].includes(error.message) ? error.message : FAILED
+    throw new Error(`Guardados ${written} de ${files.length} archivos. ${reason}`)
   }
   return written
 }
-
-/** True when the browser supports the native folder picker (Chromium). */
 export function supportsFolderPicker(): boolean {
-  return typeof (window as unknown as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function'
+  return typeof nativeInvoke() === 'function' || typeof (window as unknown as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function'
 }
-
-/** Open the OS folder picker (read-write). Returns null if the user cancels. */
 export async function pickHostDirectory(): Promise<FileSystemDirectoryHandle | null> {
-  const fn = (window as unknown as {
-    showDirectoryPicker?: (o?: { mode?: string }) => Promise<FileSystemDirectoryHandle>
-  }).showDirectoryPicker
-  if (!fn) throw new Error('Tu navegador no soporta seleccionar carpetas (usa Chrome/Edge).')
-  try {
-    return await fn({ mode: 'readwrite' })
-  } catch (e) {
-    if ((e as Error).name === 'AbortError') return null
-    throw e
+  if (nativeInvoke()) {
+    const result = await native('pick_host_folder')
+    if (result === null) return null
+    if (!result || typeof result !== 'object') throw new Error(FAILED)
+    const selected = result as NativeManifest
+    if (typeof selected.id !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(selected.id) || typeof selected.name !== 'string' || !selected.name || !Array.isArray(selected.files)) throw new Error(FAILED)
+    for (const file of selected.files) if (!file || typeof file.path !== 'string') throw new Error(FAILED)
+    if (validateFiles(selected.files) !== selected.total_bytes) throw new Error(FAILED)
+    const handle = Object.freeze({ name: selected.name, kind: 'directory' }) as FileSystemDirectoryHandle
+    nativeHandles.set(handle, selected)
+    return handle
   }
+  const picker = (window as unknown as { showDirectoryPicker?: (o: { mode: string }) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker
+  if (!picker) throw new Error('Seleccionar carpetas requiere Safent para escritorio o Chrome/Edge.')
+  try { return await picker({ mode: 'readwrite' }) }
+  catch (error) { if ((error as Error).name === 'AbortError') return null; throw new Error(FAILED) }
 }

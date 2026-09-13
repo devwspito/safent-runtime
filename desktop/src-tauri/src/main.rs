@@ -34,6 +34,7 @@ mod companion_requests;
 mod diagnostics;
 mod domain;
 mod engine_adapter;
+mod folder_bridge;
 mod ports;
 mod reconcile;
 mod selftest;
@@ -224,6 +225,7 @@ fn main() {
             window_policy::focus_existing(app);
         }))
         .manage(policy.clone())
+        .manage(folder_bridge::FolderBridge::default())
         .manage(diagnostics::DiagnosticsState::default())
         .manage(update::native::NativeUpdater::default())
         .plugin(tauri_plugin_dialog::init())
@@ -233,6 +235,10 @@ fn main() {
             write_host_clipboard,
             window_policy::open_ads_oauth,
             window_policy::open_ads_setup,
+            folder_bridge::pick_host_folder,
+            folder_bridge::read_host_folder_file,
+            folder_bridge::approve_host_folder_write,
+            folder_bridge::write_host_folder_file,
             window_policy::open_provider_oauth,
             window_policy::show_native_updater,
             window_policy::get_native_update_status,

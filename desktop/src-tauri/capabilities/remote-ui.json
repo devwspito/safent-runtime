@@ -7,5 +7,5 @@
     "urls": ["http://localhost:*", "http://127.0.0.1:*"]
   },
   "windows": ["main"],
-  "permissions": ["allow-read-host-clipboard", "allow-write-host-clipboard", "allow-open-ads-oauth", "allow-open-ads-setup", "allow-open-provider-oauth", "allow-show-native-updater", "allow-get-native-update-status"]
+  "permissions": ["allow-read-host-clipboard", "allow-write-host-clipboard", "allow-open-ads-oauth", "allow-open-ads-setup", "allow-open-provider-oauth", "allow-show-native-updater", "allow-get-native-update-status", "allow-pick-host-folder", "allow-read-host-folder-file", "allow-approve-host-folder-write", "allow-write-host-folder-file"]
 }

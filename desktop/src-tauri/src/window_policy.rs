@@ -47,6 +47,13 @@ pub struct WindowPolicy {
 }
 
 impl WindowPolicy {
+    pub(crate) fn allows_host_folder(&self, label: &str, requester: &Url) -> bool {
+        label == MAIN_WINDOW_LABEL
+            && requester.username().is_empty()
+            && requester.password().is_none()
+            && self.authorized().is_some_and(|origin| same_origin(&origin, requester))
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -681,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_capability_grants_only_the_fixed_purpose_opener() {
+    fn remote_capability_grants_only_fixed_purpose_commands() {
         let capability: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/remote-ui.json")).unwrap();
         assert_eq!(capability["local"], false);
@@ -695,7 +702,11 @@ mod tests {
                 "allow-open-ads-setup",
                 "allow-open-provider-oauth",
                 "allow-show-native-updater",
-                "allow-get-native-update-status"
+                "allow-get-native-update-status",
+                "allow-pick-host-folder",
+                "allow-read-host-folder-file",
+                "allow-approve-host-folder-write",
+                "allow-write-host-folder-file"
             ])
         );
         assert!(include_str!("../build.rs").contains("\"open_ads_setup\","));
