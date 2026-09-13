@@ -14,9 +14,10 @@
  */
 import { useContext, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowLeft, Loader2, Megaphone, RefreshCw, ShieldAlert, Wrench, Unplug } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useLocale, useT } from '../lib/i18n'
 import { useAdsAvailability } from '../hooks/useAdsAvailability'
+import { useFeatures } from '../hooks/useFeatures'
 import { Button } from '../components/ui/Button'
 import type { AdsAvailabilityReason } from '../api/types'
 import css from './AdsView.module.css'
@@ -93,6 +94,8 @@ function AdsState({ icon, title, description, action, loading = false }: {
 function AdsPanel({ noAccounts }: { noAccounts: boolean }) {
   const t = useT()
   const { locale } = useLocale()
+  const features = useFeatures()
+  const canConfigureConnections = !features.isLoading && features.edition === 'community' && features.allowed('integraciones')
   const workspace = useContext(AdsWorkspaceContext)
   const setPanelActive = workspace?.setPanelActive
   const returnButton = useRef<HTMLButtonElement>(null)
@@ -113,6 +116,10 @@ function AdsPanel({ noAccounts }: { noAccounts: boolean }) {
         <RefreshCw size={13} aria-hidden />{t('ads.frame.reload')}
       </Button>
     </header>
+    {canConfigureConnections && <div className={`${css.hint} ${css.connectionsSetup}`}>
+      <span>{t('ads.connections.setup_hint')}</span>
+      <Link className="cv-btn cv-btn--ghost cv-btn--sm" to="/capacidades?tab=integraciones">{t('ads.connections.setup_action')}</Link>
+    </div>}
     {noAccounts && <p className={css.hint}>{t('ads.state.no_accounts.desc')}</p>}
     <div className={css.frameWrap}>
       {state !== 'loaded' && <div className={css.loading} role={state === 'error' ? 'alert' : 'status'}>

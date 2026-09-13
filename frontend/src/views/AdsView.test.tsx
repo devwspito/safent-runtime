@@ -1,6 +1,6 @@
-import { act } from 'react-dom/test-utils'
+import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
 
@@ -9,15 +9,18 @@ import React from 'react'
 // state renders deterministically — no timers/network involved here (that
 // is useAdsAvailability's own test file's job).
 
-const { useAdsAvailability } = vi.hoisted(() => ({
+const { useAdsAvailability, useFeatures } = vi.hoisted(() => ({
   useAdsAvailability: vi.fn(),
+  useFeatures: vi.fn(),
 }))
 
 vi.mock('../hooks/useAdsAvailability', () => ({ useAdsAvailability }))
+vi.mock('../hooks/useFeatures', () => ({ useFeatures }))
 
 import AdsView from './AdsView'
 import type { AdsAvailability } from '../hooks/useAdsAvailability'
 import { adsPolicyFixture } from '../api/managedAds.fixtures'
+import { I18nProvider } from '../lib/i18n'
 
 function noop() { /* refresh stub */ }
 
@@ -31,13 +34,17 @@ describe('AdsView', () => {
     render()
     expect(container.querySelector('iframe')).toBeNull()
     expect(container.textContent).toContain('Administrado por Enterprise')
+    expect(container.textContent).not.toContain('Configurar conexiones')
+    expect(useFeatures).not.toHaveBeenCalled()
     expect(container.querySelector('select')?.value).toBe('')
   })
   let container: HTMLDivElement
   let root: Root
 
   beforeEach(() => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     useAdsAvailability.mockReset()
+    useFeatures.mockReset().mockReturnValue({ edition: 'community', isLoading: false, allowed: (view: string) => view === 'integraciones' })
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -46,6 +53,8 @@ describe('AdsView', () => {
   afterEach(() => {
     act(() => { root.unmount() })
     container.remove()
+    vi.unstubAllGlobals()
+    localStorage.clear()
   })
 
   function render() {
@@ -59,6 +68,7 @@ describe('AdsView', () => {
     render()
 
     expect(container.querySelector('iframe')).toBeNull()
+    expect(container.textContent).not.toContain('Configurar conexiones')
     expect(container.textContent).toContain('Comprobando el servicio de anuncios')
   })
 
@@ -82,6 +92,7 @@ describe('AdsView', () => {
       render()
 
       expect(container.querySelector('iframe')).toBeNull()
+      expect(container.textContent).not.toContain('Configurar conexiones')
       expect(container.textContent).toContain(expectedTitle)
       const button = Array.from(container.querySelectorAll('button'))
         .find((b) => b.textContent?.includes(expectedAction))
@@ -135,5 +146,66 @@ describe('AdsView', () => {
     setAvailability('ready')
     render()
     expect(container.textContent).toContain('Abriendo el panel')
+  })
+
+  it.each(['ready', 'no_accounts'])('offers the central connection setup from the Community host with %s', state => {
+    setAvailability(state === 'ready' ? 'ready' : 'unavailable', state === 'ready' ? null : 'no_accounts')
+    render()
+    const link = container.querySelector('a[href="/capacidades?tab=integraciones"]')!
+    expect(link.textContent).toBe('Configurar conexiones')
+    expect(link.getAttribute('target')).toBeNull()
+    expect(link.closest('iframe')).toBeNull()
+    expect(container.textContent).toContain('Las conexiones de Anuncios se preparan en Integraciones.')
+    expect(container.textContent).not.toMatch(/ya autorizad|conexiones activas|App Secret/)
+    expect(container.querySelector('iframe')?.getAttribute('src')).toBe('/ads/')
+  })
+
+  it.each([
+    { edition: 'community', isLoading: true, allowed: () => true },
+    { edition: 'community', isLoading: false, allowed: () => false },
+    { edition: 'associate', isLoading: false, allowed: () => true },
+  ])('hides the setup shortcut when Community permission is absent or unresolved (case %#)', features => {
+    useFeatures.mockReturnValue(features)
+    setAvailability('ready')
+    render()
+    expect(container.querySelector('iframe')).not.toBeNull()
+    expect(container.querySelector('a[href="/capacidades?tab=integraciones"]')).toBeNull()
+    expect(container.textContent).not.toContain('Las conexiones de Anuncios se preparan')
+  })
+
+  it('removes the setup shortcut when the Integrations grant is withdrawn', () => {
+    setAvailability('ready')
+    render()
+    expect(container.querySelector('a[href="/capacidades?tab=integraciones"]')).not.toBeNull()
+    useFeatures.mockReturnValue({ edition: 'community', isLoading: false, allowed: () => false })
+    render()
+    expect(container.querySelector('a[href="/capacidades?tab=integraciones"]')).toBeNull()
+  })
+
+  it('navigates the host router to the confirmed Integrations tab without changing iframe security', () => {
+    function Destination() {
+      const location = useLocation()
+      return <p>{location.pathname}{location.search}</p>
+    }
+    setAvailability('ready')
+    act(() => {
+      root.render(<MemoryRouter initialEntries={['/anuncios']}><Routes>
+        <Route path="/anuncios" element={<AdsView />} />
+        <Route path="/capacidades" element={<Destination />} />
+      </Routes></MemoryRouter>)
+    })
+    const link = container.querySelector<HTMLAnchorElement>('a[href="/capacidades?tab=integraciones"]')!
+    expect(link).not.toBeNull()
+    act(() => link.click())
+    expect(container.textContent).toBe('/capacidades?tab=integraciones')
+    expect(container.querySelector('iframe')).toBeNull()
+  })
+
+  it('shows the central setup guidance in English', () => {
+    setAvailability('ready')
+    localStorage.setItem('safent_ui_locale', 'en')
+    act(() => { root.render(<I18nProvider><MemoryRouter><AdsView /></MemoryRouter></I18nProvider>) })
+    expect(container.textContent).toContain('Ads connections are set up in Integrations.')
+    expect(container.querySelector('a[href="/capacidades?tab=integraciones"]')?.textContent).toBe('Configure connections')
   })
 })
