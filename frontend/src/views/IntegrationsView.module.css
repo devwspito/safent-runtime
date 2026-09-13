@@ -278,6 +278,36 @@
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
 
+.metaCallback,
+.metaField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-base);
+  color: var(--color-text-muted);
+}
+
+.metaFields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.metaField {
+  flex: 1 1 180px;
+}
+
+.metaField .keyInput {
+  flex: none;
+  width: 100%;
+}
+
+.metaCallback .keyInput {
+  flex: 1 1 280px;
+}
+
 /* ── Web search status row ───────────────────────────────────────────────── */
 
 .wsStatus {

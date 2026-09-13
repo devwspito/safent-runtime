@@ -1,11 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "remote-ui",
-  "description": "Safent web UI: host clipboard for Live/Teaching and the fixed-purpose Ads consent opener. The opener also verifies the live boot origin and reviewed OAuth destinations. No generic shell, navigation, window, event, or app control.",
+  "description": "Safent web UI: host clipboard, fixed-purpose OAuth openers and the native updater review dialog. Commands verify the live boot origin. No generic shell, navigation, window, event, direct update check or install permission.",
   "local": false,
   "remote": {
     "urls": ["http://localhost:*", "http://127.0.0.1:*"]
   },
   "windows": ["main"],
-  "permissions": ["allow-read-host-clipboard", "allow-write-host-clipboard", "allow-open-ads-oauth"]
+  "permissions": ["allow-read-host-clipboard", "allow-write-host-clipboard", "allow-open-ads-oauth", "allow-open-provider-oauth", "allow-show-native-updater"]
 }

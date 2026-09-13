@@ -20,6 +20,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from http import HTTPStatus
 from pathlib import Path
@@ -27,7 +28,7 @@ from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from hermes.integrations.composio.composio_client import (
     ComposioApiError,
@@ -41,6 +42,8 @@ from hermes.shell_server.security.secrets import SecretsVault
 logger = logging.getLogger(__name__)
 
 _KIND = "composio"
+_MAX_APP_SECRET_LENGTH = 4096
+_MAX_META_SETUP_BODY = 8192
 
 
 # ----------------------------------------------------------------
@@ -76,6 +79,12 @@ class AuthConfigRequest(BaseModel):
 class AuthConfigResponse(BaseModel):
     toolkit_slug: str
     auth_config_id: str | None
+
+
+class MetaSetupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    client_id: str = Field(pattern=r"^[0-9]{5,30}$")
+    client_secret: SecretStr
 
 
 AdsToolkit = Literal["googleads", "metaads"]
@@ -114,6 +123,7 @@ def create_integrations_router(db_path: Path) -> APIRouter:  # noqa: PLR0915 - e
     """
     _init_schema(db_path)
     router = APIRouter(prefix="/api/v1/integrations", tags=["integrations"])
+    meta_setup_lock = asyncio.Lock()
 
     def _repo() -> SQLiteIntegrationsRepository:
         return SQLiteIntegrationsRepository(db_path=db_path, vault=SecretsVault())
@@ -194,6 +204,54 @@ def create_integrations_router(db_path: Path) -> APIRouter:  # noqa: PLR0915 - e
         repo.set_auth_config(toolkit_slug=toolkit_slug, auth_config_id=body.auth_config_id)
         await _refresh_ads(request)
         return AuthConfigResponse(toolkit_slug=toolkit_slug, auth_config_id=body.auth_config_id)
+
+    @router.post(
+        "/composio/meta/setup", response_model=dict[str, bool],
+        openapi_extra={"requestBody": {"required": True, "content": {
+            "application/json": {"schema": MetaSetupRequest.model_json_schema()},
+        }}},
+    )
+    async def prepare_meta(request: Request) -> dict[str, bool]:
+        require_owner_session(request)
+        # Default FastAPI validation can echo the entire input (including the
+        # app secret) for a missing field. Validate privately and fail redacted.
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > _MAX_META_SETUP_BODY:
+                raise HTTPException(413, "Los datos de la aplicación son demasiado largos.")
+        try:
+            body = MetaSetupRequest.model_validate(json.loads(raw))
+        except (ValueError, TypeError):
+            raise HTTPException(
+                400, "Revisa el identificador y la clave de la aplicación.",
+            ) from None
+        secret = body.client_secret.get_secret_value()
+        if not secret.strip() or len(secret) > _MAX_APP_SECRET_LENGTH or not secret.isprintable():
+            raise HTTPException(400, "Revisa la clave de la aplicación de Meta.")
+        if meta_setup_lock.locked():
+            raise HTTPException(409, "Ya se está preparando Meta. Espera unos segundos.")
+        async with meta_setup_lock:
+            repo = _repo()
+            fingerprint = repo.credential_fingerprint()
+            if fingerprint is None:
+                raise HTTPException(409, "Conecta primero Composio en Integraciones.")
+            client = _build_client(repo)
+            try:
+                result = await asyncio.wait_for(client.prepare_meta_auth_config(
+                    client_id=body.client_id, client_secret=secret,
+                ), timeout=30)
+            except (ComposioApiError, TimeoutError):
+                raise HTTPException(
+                    409, "No se pudo preparar Meta. Revisa los datos y vuelve a intentarlo.",
+                ) from None
+            if not repo.set_auth_config_for_credential(
+                toolkit_slug="metaads", auth_config_id=result.id,
+                expected_fingerprint=fingerprint,
+            ):
+                raise HTTPException(409, "La conexión de Composio cambió. Vuelve a intentarlo.")
+        await _refresh_ads(request)
+        return {"ready": True}
 
     @router.delete("/composio/auth-configs/{toolkit_slug}", response_model=AuthConfigResponse)
     async def clear_auth_config(toolkit_slug: AdsToolkit, request: Request) -> AuthConfigResponse:

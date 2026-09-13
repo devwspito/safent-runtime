@@ -1,12 +1,13 @@
-import { useEffect, useReducer, useRef, useState } from 'react'
+import { useEffect, useId, useReducer, useRef, useState, useSyncExternalStore, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { sileo } from 'sileo'
 import { Check, Plug, Globe, RefreshCw, Search } from 'lucide-react'
-import { useT, type TranslationKey } from '../lib/i18n'
+import { useLocale, useT, type TranslationKey } from '../lib/i18n'
+import { getAuthStatus, subscribeAuthStatus } from '../lib/token'
 import { composioAppName } from '../lib/composio'
 import {
   getComposioStatus, listComposioConnected, listComposioApps,
-  connectComposioApp, setComposioApiKey,
+  connectComposioApp, setComposioApiKey, setupComposioMeta,
   getWebSearchStatus, setWebSearchKey,
   ApiError,
 } from '../api/client'
@@ -255,6 +256,7 @@ export default function IntegrationsView() {
                     </span>
                   </div>
               )}
+              {composioState.status === 'ready' && <MetaSetupCard />}
               <p className={styles.adsNote}>
                 {t('int.ads.guidance')}{' '}
                 <Link className={styles.adsLink} to="/anuncios">{t('int.ads.open')}</Link>
@@ -522,6 +524,161 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
         </Button>
       </div>
     </div>
+  )
+}
+
+// ── Owner preparation for Meta Ads (separate from account authorization) ──────
+
+const META_CALLBACK_URL = 'https://backend.composio.dev/api/v1/auth-apps/add'
+
+// Local copy keeps this small setup surface independent of the shared catalog.
+const META_SETUP_COPY = {
+  es: {
+    title: 'Preparar Meta Ads en Composio',
+    help: 'Configuración inicial: quien administra la app de Meta debe añadir esta dirección de retorno a su configuración de acceso (OAuth).',
+    developerLink: 'Abrir Meta for Developers',
+    callback: 'Dirección de retorno de Meta',
+    copy: 'Copiar dirección',
+    copied: 'Dirección copiada.',
+    copyError: 'No se pudo copiar. Selecciona la dirección de retorno y cópiala manualmente.',
+    appId: 'Identificador de la app (App ID)',
+    appSecret: 'Clave de la app (App Secret)',
+    privacy: 'La clave de la app (App Secret) se guarda en Composio, no en el navegador. Preparar la app no autoriza ninguna cuenta publicitaria.',
+    prepare: 'Preparar Meta',
+    preparing: 'Preparando Meta…',
+    invalid: 'Introduce el identificador numérico de la app (de 5 a 30 dígitos) y su clave.',
+    failed: 'No se pudo preparar Meta. Revisa la app, su identificador y clave y la conexión de Composio; vuelve a introducir la clave de la app para reintentar.',
+    session: 'Tu sesión ha caducado. Vuelve a abrir Safent antes de preparar Meta.',
+    owner: 'Sólo el propietario de Safent puede preparar Meta. Revisa tu sesión.',
+    limited: 'Hay demasiados intentos. Espera un momento antes de volver a preparar Meta.',
+    ready: 'Meta está preparada en Composio. Todavía debes autorizar cada cuenta publicitaria en Anuncios.',
+    ads: 'Ir a Anuncios',
+  },
+  en: {
+    title: 'Prepare Meta Ads in Composio',
+    help: 'One-time setup: the Meta app administrator must add this callback to its OAuth settings.',
+    developerLink: 'Open Meta for Developers',
+    callback: 'Meta callback',
+    copy: 'Copy callback',
+    copied: 'Callback copied.',
+    copyError: 'Could not copy. Select the callback and copy it manually.',
+    appId: 'App ID',
+    appSecret: 'App Secret',
+    privacy: 'The App Secret is stored in Composio, not in the browser. Preparing the app does not authorize any advertising account.',
+    prepare: 'Prepare Meta',
+    preparing: 'Preparing Meta…',
+    invalid: 'Enter your Meta app’s numeric App ID (5 to 30 digits) and App Secret.',
+    failed: 'Could not prepare Meta. Check the app, its credentials and the Composio connection; enter the App Secret again to retry.',
+    session: 'Your session expired. Reopen Safent before preparing Meta.',
+    owner: 'Only the Safent owner can prepare Meta. Check your session.',
+    limited: 'Too many attempts. Wait a moment before preparing Meta again.',
+    ready: 'Meta is prepared in Composio. You still need to authorize each advertising account in Ads.',
+    ads: 'Go to Ads',
+  },
+} as const
+
+function MetaSetupCard() {
+  // Safent is single-owner: use the existing session gate, never infer a role
+  // from form data. The endpoint enforces the owner session independently.
+  const auth = useSyncExternalStore(subscribeAuthStatus, getAuthStatus)
+  return auth.kind === 'authenticated' ? <MetaSetupForm /> : null
+}
+
+function MetaSetupForm() {
+  const { locale } = useLocale()
+  const copy = META_SETUP_COPY[locale]
+  const id = useId()
+  const clientRef = useRef<HTMLInputElement>(null)
+  const secretRef = useRef<HTMLInputElement>(null)
+  const callbackRef = useRef<HTMLInputElement>(null)
+  const inFlight = useRef(false)
+  const generation = useRef(0)
+  const [saving, setSaving] = useState(false)
+  const [feedback, setFeedback] = useState<'invalid' | 'failed' | 'session' | 'owner' | 'limited' | 'ready' | null>(null)
+  const [copyFeedback, setCopyFeedback] = useState<'copied' | 'copyError' | null>(null)
+
+  useEffect(() => {
+    generation.current++
+    return () => { generation.current++ }
+  }, [])
+
+  async function prepare(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (inFlight.current || getAuthStatus().kind !== 'authenticated') return
+    const clientId = clientRef.current?.value.trim() ?? ''
+    const clientSecret = secretRef.current?.value.trim() ?? ''
+    if (!/^[0-9]{5,30}$/.test(clientId) || !clientSecret || clientSecret.length > 4096) {
+      setFeedback('invalid')
+      return
+    }
+    const current = generation.current
+    inFlight.current = true
+    setSaving(true)
+    setFeedback(null)
+    // Keep secrets out of React state and browser persistence. Clear the field
+    // before sending, including when the server rejects this attempt.
+    if (secretRef.current) secretRef.current.value = ''
+    try {
+      await setupComposioMeta({ client_id: clientId, client_secret: clientSecret })
+      if (generation.current === current) setFeedback('ready')
+    } catch (failure) {
+      if (generation.current !== current) return
+      const status = failure instanceof ApiError ? failure.status : 0
+      setFeedback(status === 401 ? 'session' : status === 403 ? 'owner' : status === 429 ? 'limited' : 'failed')
+    } finally {
+      if (generation.current === current) {
+        inFlight.current = false
+        setSaving(false)
+      }
+    }
+  }
+
+  async function copyCallback() {
+    const current = generation.current
+    try {
+      await navigator.clipboard.writeText(META_CALLBACK_URL)
+      if (generation.current === current) setCopyFeedback('copied')
+    } catch {
+      if (generation.current !== current) return
+      setCopyFeedback('copyError')
+      callbackRef.current?.focus()
+      callbackRef.current?.select()
+    }
+  }
+
+  return (
+    <form className={styles.setupCard} aria-labelledby={`${id}-title`} onSubmit={event => void prepare(event)} noValidate>
+      <h3 id={`${id}-title`} className={styles.setupCardTitle}>{copy.title}</h3>
+      <p className={styles.setupCardBody}>{copy.help}{' '}
+        <a className={styles.adsLink} href="https://developers.facebook.com/apps/" target="_blank" rel="noopener noreferrer">{copy.developerLink}</a>
+      </p>
+      <div className={styles.metaCallback}>
+        <label htmlFor={`${id}-callback`}>{copy.callback}</label>
+        <div className={styles.formInline}>
+          <input ref={callbackRef} id={`${id}-callback`} className={styles.keyInput} value={META_CALLBACK_URL} readOnly spellCheck={false} />
+          <Button type="button" variant="secondary" size="sm" onClick={() => void copyCallback()}>{copy.copy}</Button>
+        </div>
+        {copyFeedback && <p className={styles.setupCardBody} role="status">{copy[copyFeedback]}</p>}
+      </div>
+      <p id={`${id}-privacy`} className={styles.setupCardBody}>{copy.privacy}</p>
+      <div className={styles.metaFields}>
+        <label className={styles.metaField} htmlFor={`${id}-client`}>{copy.appId}
+          <input ref={clientRef} id={`${id}-client`} className={styles.keyInput} type="text" inputMode="numeric" autoComplete="off" spellCheck={false}
+            required disabled={saving} maxLength={30} aria-invalid={feedback === 'invalid' || undefined} aria-describedby={`${id}-privacy`}
+            onChange={() => setFeedback(null)} />
+        </label>
+        <label className={styles.metaField} htmlFor={`${id}-secret`}>{copy.appSecret}
+          <input ref={secretRef} id={`${id}-secret`} className={styles.keyInput} type="password" autoComplete="new-password" spellCheck={false}
+            required disabled={saving} maxLength={4096} aria-invalid={feedback === 'invalid' || undefined} aria-describedby={`${id}-privacy`}
+            onChange={() => setFeedback(null)} />
+        </label>
+        <Button type="submit" variant="primary" size="sm" loading={saving} disabled={saving}>
+          {saving ? copy.preparing : copy.prepare}
+        </Button>
+      </div>
+      {feedback && <p className={feedback === 'ready' ? styles.setupCardBody : styles.errorText} role={feedback === 'ready' ? 'status' : 'alert'}>{copy[feedback]}</p>}
+      {feedback === 'ready' && <Link className={styles.adsLink} to="/anuncios">{copy.ads}</Link>}
+    </form>
   )
 }
 

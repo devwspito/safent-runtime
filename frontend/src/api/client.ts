@@ -448,6 +448,33 @@ export function setComposioApiKey(apiKey: string): Promise<unknown> {
   })
 }
 
+export interface ComposioMetaSetupInput {
+  client_id: string
+  client_secret: string
+}
+
+export interface ComposioMetaSetupResult {
+  ready: true
+}
+
+/** Owner-only preparation, not account authorization. Never retain provider error bodies. */
+export async function setupComposioMeta(input: ComposioMetaSetupInput): Promise<ComposioMetaSetupResult> {
+  try {
+    const result = await request<unknown>('/integrations/composio/meta/setup', {
+      method: 'POST',
+      body: JSON.stringify({ client_id: input.client_id, client_secret: input.client_secret }),
+    })
+    if (!result || typeof result !== 'object' || !('ready' in result) || result.ready !== true) {
+      throw new ApiError('No se pudo confirmar la preparación de Meta Ads.', 502, null)
+    }
+    return { ready: true }
+  } catch (failure) {
+    // Upstream failures may echo submitted credentials. Only the status is
+    // needed to choose a safe, local message; neither body nor cause escapes.
+    throw new ApiError('No se pudo preparar Meta Ads.', failure instanceof ApiError ? failure.status : 0, null)
+  }
+}
+
 export function disconnectComposioApp(connectionId: string): Promise<unknown> {
   return request<unknown>(`/integrations/composio/connected/${encodeURIComponent(connectionId)}`, {
     method: 'DELETE',

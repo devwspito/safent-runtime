@@ -160,11 +160,15 @@ pub fn is_external_oauth_allowed(authorized: Option<&Url>, target: &Url) -> bool
         && redirect.path() == format!("/ads/api/v1/platform-accounts/{provider}/reconnect/callback")
 }
 
-/// The one provider access-recovery link exposed by the Ads panel. It is not
-/// an OAuth endpoint and grants no permission to other Cloud paths or queries.
+/// Fixed provider administration links exposed by the UI. These are not OAuth
+/// endpoints and grant no permission to other destinations, paths, or queries.
 fn is_external_help_allowed(authorized: Option<&Url>, target: &Url) -> bool {
     authorized.is_some()
-        && target.as_str() == "https://console.cloud.google.com/google/ads-apis/overview"
+        && matches!(
+            target.as_str(),
+            "https://console.cloud.google.com/google/ads-apis/overview"
+                | "https://developers.facebook.com/apps/"
+        )
 }
 
 fn is_meta_oauth_path(path: &str) -> bool {
@@ -186,6 +190,74 @@ fn oauth_open_failed(app: &AppHandle) {
 
 const OAUTH_OPEN_DENIED: &str = "Esta conexión no se puede abrir de forma segura desde Safent.";
 const OAUTH_OPEN_FAILED: &str = "No se pudo abrir el navegador. Vuelve a intentarlo.";
+const CODEX_DEVICE_URL: &str = "https://auth.openai.com/codex/device";
+
+fn native_updater_caller_allowed(
+    authorized: Option<&Url>,
+    requester: &Url,
+    window_label: &str,
+) -> bool {
+    window_label == MAIN_WINDOW_LABEL
+        && authorized.is_some_and(|origin| same_origin(origin, requester))
+        && requester.username().is_empty()
+        && requester.password().is_none()
+}
+
+/// Opens the existing host-owned review flow. The product supplies no URL,
+/// artifact, check ID, or install instruction; installation still needs the
+/// native confirmation dialog and the updater's verified host-only snapshot.
+#[tauri::command]
+pub fn show_native_updater(
+    app: AppHandle,
+    window: WebviewWindow,
+    policy: tauri::State<'_, WindowPolicy>,
+) -> Result<(), String> {
+    const DENIED: &str =
+        "No se pudo abrir la actualización de Safent. Vuelve a intentarlo desde la app.";
+    let requester = window.url().map_err(|_| DENIED.to_string())?;
+    if !native_updater_caller_allowed(policy.authorized().as_ref(), &requester, window.label()) {
+        return Err(DENIED.into());
+    }
+    crate::update::native::check_from_tray(app);
+    Ok(())
+}
+
+fn validated_provider_oauth_open_request(
+    authorized: Option<&Url>,
+    requester: &Url,
+    window_label: &str,
+    raw_url: &str,
+) -> Result<Url, String> {
+    if raw_url != CODEX_DEVICE_URL
+        || window_label != MAIN_WINDOW_LABEL
+        || !authorized.is_some_and(|origin| same_origin(origin, requester))
+        || !requester.username().is_empty()
+        || requester.password().is_some()
+    {
+        return Err(OAUTH_OPEN_DENIED.into());
+    }
+    Url::parse(CODEX_DEVICE_URL).map_err(|_| OAUTH_OPEN_DENIED.to_string())
+}
+
+/// Separate permission from Ads: only the exact Codex device authorization
+/// page. No device code, redirect, query, fragment, or arbitrary URL is accepted.
+#[tauri::command]
+pub async fn open_provider_oauth(
+    window: WebviewWindow,
+    policy: tauri::State<'_, WindowPolicy>,
+    url: String,
+) -> Result<(), String> {
+    let requester = window.url().map_err(|_| OAUTH_OPEN_DENIED.to_string())?;
+    let target = validated_provider_oauth_open_request(
+        policy.authorized().as_ref(),
+        &requester,
+        window.label(),
+        &url,
+    )?;
+    tauri::async_runtime::spawn_blocking(move || launch_system_browser(&target))
+        .await
+        .map_err(|_| OAUTH_OPEN_FAILED.to_string())?
+}
 
 fn validated_oauth_open_request(
     authorized: Option<&Url>,
@@ -512,9 +584,107 @@ mod tests {
             serde_json::json!([
                 "allow-read-host-clipboard",
                 "allow-write-host-clipboard",
-                "allow-open-ads-oauth"
+                "allow-open-ads-oauth",
+                "allow-open-provider-oauth",
+                "allow-show-native-updater"
             ])
         );
+    }
+
+    #[test]
+    fn codex_device_opener_is_exact_and_separate_from_ads() {
+        let origin = url("http://127.0.0.1:35335/");
+        let current = url("http://127.0.0.1:35335/app/proveedores");
+        assert_eq!(
+            validated_provider_oauth_open_request(
+                Some(&origin),
+                &current,
+                "main",
+                CODEX_DEVICE_URL
+            ),
+            Ok(url(CODEX_DEVICE_URL))
+        );
+        assert!(!is_external_oauth_allowed(
+            Some(&origin),
+            &url(CODEX_DEVICE_URL)
+        ));
+        assert!(!is_navigation_allowed(
+            Some(&origin),
+            &url(CODEX_DEVICE_URL)
+        ));
+        for target in [
+            "http://auth.openai.com/codex/device",
+            "https://auth.openai.com:443/codex/device",
+            "https://auth.openai.com:444/codex/device",
+            "https://auth.openai.com/codex/device?code=fixture",
+            "https://auth.openai.com/codex/device#fragment",
+            "https://auth.openai.com/codex/device/",
+            "https://auth.openai.com/codex/%64evice",
+            "https://auth.openai.com/codex/../codex/device",
+            "https://user@auth.openai.com/codex/device",
+            "https://auth.openai.com.evil.example/codex/device",
+            "https://auth.openai.com/oauth/authorize",
+            "https://connect.composio.dev/link/lk_fixture",
+            "https://127.0.0.1/codex/device",
+            "https://localhost/codex/device",
+            "file:///tmp/codex/device",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(
+                validated_provider_oauth_open_request(Some(&origin), &current, "main", target),
+                Err(OAUTH_OPEN_DENIED.into())
+            );
+        }
+        assert!(
+            validated_provider_oauth_open_request(None, &current, "main", CODEX_DEVICE_URL)
+                .is_err()
+        );
+        assert!(validated_provider_oauth_open_request(
+            Some(&origin),
+            &url("http://127.0.0.1:9999/"),
+            "main",
+            CODEX_DEVICE_URL
+        )
+        .is_err());
+        assert!(validated_provider_oauth_open_request(
+            Some(&origin),
+            &current,
+            "other",
+            CODEX_DEVICE_URL
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn native_updater_dialog_requires_the_current_main_boot_origin() {
+        let origin = url("http://127.0.0.1:35335/");
+        let current = url("http://127.0.0.1:35335/app");
+        assert!(native_updater_caller_allowed(
+            Some(&origin),
+            &current,
+            "main"
+        ));
+        assert!(!native_updater_caller_allowed(None, &current, "main"));
+        assert!(!native_updater_caller_allowed(
+            Some(&origin),
+            &current,
+            "other"
+        ));
+        for requester in [
+            "http://127.0.0.1:9999/app",
+            "http://localhost:35335/app",
+            "https://127.0.0.1:35335/app",
+            "http://evil.example:35335/app",
+            "http://user@127.0.0.1:35335/app",
+            "tauri://localhost/",
+            "file:///app",
+        ] {
+            assert!(!native_updater_caller_allowed(
+                Some(&origin),
+                &url(requester),
+                "main"
+            ));
+        }
     }
 
     #[test]
@@ -538,6 +708,35 @@ mod tests {
         ] {
             assert!(
                 !is_external_help_allowed(Some(&origin), &Url::parse(target).unwrap()),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_exact_meta_app_admin_help_may_open_outside_the_live_app() {
+        let origin = url("http://127.0.0.1:35335/");
+        let help = url("https://developers.facebook.com/apps/");
+        assert!(is_external_help_allowed(Some(&origin), &help));
+        assert!(!is_external_help_allowed(None, &help));
+        assert!(!is_external_oauth_allowed(Some(&origin), &help));
+        assert!(!is_navigation_allowed(Some(&origin), &help));
+        for target in [
+            "http://developers.facebook.com/apps/",
+            "https://developers.facebook.com:444/apps/",
+            "https://developers.facebook.com.evil.example/apps/",
+            "https://user@developers.facebook.com/apps/",
+            "https://developers.facebook.com/apps",
+            "https://developers.facebook.com/apps/123/",
+            "https://developers.facebook.com/apps/?next=https://evil.example",
+            "https://developers.facebook.com/apps/#fragment",
+            "https://developers.facebook.com/docs/",
+            "https://developers.facebook.com/%61pps/",
+            "file:///apps/",
+            "javascript:alert(1)",
+        ] {
+            assert!(
+                !is_external_help_allowed(Some(&origin), &url(target)),
                 "{target}"
             );
         }

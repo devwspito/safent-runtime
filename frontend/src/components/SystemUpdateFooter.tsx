@@ -27,7 +27,67 @@ function resolveUpdateSignal(status: SystemUpdateStatus | null) {
     latestVersion: host?.to?.app ?? status?.latest_version ?? '' }
 }
 
+function NativeAppUpdateFooter({ appVersion, available }: { appVersion:string; available:boolean }) {
+  const t = useT()
+  const [opening, setOpening] = useState(false)
+  const [error, setError] = useState(false)
+  const [requested, setRequested] = useState(false)
+  const pending = useRef(false)
+  const alive = useRef(true)
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
+
+  async function showUpdater() {
+    if (pending.current || !available) return
+    pending.current = true
+    setOpening(true)
+    setError(false)
+    setRequested(false)
+    try {
+      const invoke = (window as unknown as {
+        __TAURI__?: { core?: { invoke?: (command:string) => Promise<unknown> } };
+      }).__TAURI__?.core?.invoke
+      if (!invoke) throw new Error('unavailable')
+      await invoke('show_native_updater')
+      if (alive.current) setRequested(true)
+    } catch {
+      if (alive.current) setError(true)
+    } finally {
+      pending.current = false
+      if (alive.current) setOpening(false)
+    }
+  }
+
+  return <section className={css.footer} aria-label={t('sysupdate.section')}>
+    <p className={css.native}>{t('sysupdate.native.version').replace('{v}', appVersion)}</p>
+    {available ? <>
+      <button type="button" className="cv-btn cv-btn--ghost cv-btn--sm" disabled={opening}
+        aria-busy={opening} onClick={() => { void showUpdater() }}>
+        <RefreshCw size={13} aria-hidden="true" />
+        {t(opening ? 'sysupdate.native.opening' : 'sysupdate.native.check')}
+      </button>
+      {requested && <p role="status">{t('sysupdate.native.requested')}</p>}
+      {error && <p role="alert" className={css.error}>{t('sysupdate.native.error')}</p>}
+    </> : <p role="status">{t('sysupdate.native.unavailable')}</p>}
+  </section>
+}
+
 export function SystemUpdateFooter() {
+  const value = (window as unknown as { __safentNativeUpdater?: unknown }).__safentNativeUpdater
+  if (value && typeof value === 'object') {
+    const data = value as Record<string, unknown>
+    const available = data.status === 'available' && data.reason === 'app_only'
+    const unavailable = data.status === 'unavailable' && data.reason === 'signing_configuration_missing'
+    if ((available || unavailable) && typeof data.app_version === 'string'
+      && data.app_version.length <= 64 && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(data.app_version)) {
+      // The native signed bundle owns app, engine and companion versions.
+      // Never poll or offer the independent legacy engine updater in this mode.
+      return <NativeAppUpdateFooter appVersion={data.app_version} available={available} />
+    }
+  }
+  return <LegacySystemUpdateFooter />
+}
+
+function LegacySystemUpdateFooter() {
   const t = useT()
   const [status, setStatus] = useState<SystemUpdateStatus | null>(null)
   const [liveRequest, setLiveRequest] = useState<InstallRequestStatus | null>(null)

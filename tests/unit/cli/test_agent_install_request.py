@@ -144,8 +144,14 @@ case "$1" in
     # file probe, _fetch_companion_file) always misses -> forces the cache
     # tier (pre-seeded below). `run --rm --network none -- <image> python -m
     # safent_ads.tools.gen_keys` is scripted so ensure_secrets/
-    # ensure_sso_keypair succeed.
+    # ensure_sso_keypair succeed. The channel probe returns only a fixed
+    # RFC 7748 public key; consume its stdin without logging master material.
     for a in "$@"; do
+      if [ "$a" = "safent_ads.tools.composio_channel_key" ]; then
+        cat >/dev/null
+        printf '%s\n' 'hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo='
+        exit 0
+      fi
       if [ "$a" = "safent_ads.tools.gen_keys" ]; then
         echo "ADS_APPROVAL_SIGNING_KEY=new-seed"
         echo "ADS_APPROVAL_PUBLIC_KEY=new-pub"
@@ -234,6 +240,25 @@ def fake_bin_dir(tmp_path: Path) -> Path:
     curl.write_text(_FAKE_CURL)
     curl.chmod(0o755)
     return bin_dir
+
+
+def test_fake_channel_pin_probe_never_logs_stdin(tmp_path: Path, fake_bin_dir: Path) -> None:
+    log = tmp_path / "podman.log"
+    synthetic_master = "synthetic-regression-master-stdin-only"
+    result = subprocess.run(
+        [
+            str(fake_bin_dir / "podman"), "run", "--rm", "-i", "--network", "none",
+            "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--", "synthetic-image", "python", "-m", "safent_ads.tools.composio_channel_key",
+        ],
+        input=synthetic_master + "\n",
+        env={**os.environ, "FAKE_PODMAN_LOG": str(log)},
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert result.returncode == 0
+    assert result.stdout == "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=\n"
+    assert result.stderr == ""
+    assert synthetic_master not in log.read_text()
 
 
 def _seed_state_home(state_home: Path) -> None:
@@ -579,6 +604,10 @@ class TestCompanionInstall:
             for ln in log_lines
         )
         assert "[ok] Companion instalado." in result.stdout
+        pin = state_home / "companions" / "ads" / "sso" / "ads-composio-channel.pub"
+        assert pin.read_text() == "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=\n"
+        assert pin.stat().st_mode & 0o777 == 0o444
+        assert any("python -m safent_ads.tools.composio_channel_key" in ln for ln in log_lines)
 
     def test_porcelain_emits_scaffold_up_and_reload_stages(
         self, tmp_path: Path, fake_bin_dir: Path

@@ -9,6 +9,8 @@ fn main() {
             "read_host_clipboard",
             "write_host_clipboard",
             "open_ads_oauth",
+            "open_provider_oauth",
+            "show_native_updater",
             "cancel_bootstrap",
             "retry_bootstrap",
             "export_diagnostics",

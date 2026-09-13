@@ -67,3 +67,42 @@ it('revokes only the supplied real connection ID, safely encoded', async () => {
   await (await import('./client')).disconnectComposioApp('ca_actual/123?x')
   expect(fetch).toHaveBeenCalledWith('/api/v1/integrations/composio/connected/ca_actual%2F123%3Fx', expect.objectContaining({ method: 'DELETE' }))
 })
+
+const metaCredentials = { client_id: '1234567890', client_secret: 'synthetic-meta-secret-only' }
+
+it('prepares Meta through the owner endpoint and exposes only readiness', async () => {
+  const fetch = respond({ ready: true, client_secret: metaCredentials.client_secret, account: 'not-authorized' })
+  expect(await (await import('./client')).setupComposioMeta(metaCredentials)).toEqual({ ready: true })
+  expect(fetch).toHaveBeenCalledWith('/api/v1/integrations/composio/meta/setup', expect.objectContaining({
+    method: 'POST', body: JSON.stringify(metaCredentials),
+    headers: expect.objectContaining({ Authorization: 'Bearer fictitious-test-session' }),
+  }))
+  expect(localStorage.getItem('safent_token')).toBe('fictitious-test-session')
+  expect(localStorage.length).toBe(1)
+})
+
+it.each([null, {}, { ready: false }, { ready: 'true' }, { connected: true }, []])('rejects unconfirmed Meta readiness (%j)', async payload => {
+  respond(payload)
+  await expect((await import('./client')).setupComposioMeta(metaCredentials)).rejects.toMatchObject({ status: 502, body: null })
+})
+
+it.each([400, 403, 429, 500, 502, 503])('does not retain credential-bearing Meta errors from HTTP %s', async status => {
+  respond({ detail: { message: metaCredentials.client_secret, client_secret: metaCredentials.client_secret } }, status)
+  const failure = await (await import('./client')).setupComposioMeta(metaCredentials).catch(error => error)
+  expect(failure).toMatchObject({ status, body: null, message: 'No se pudo preparar Meta Ads.' })
+  expect(failure.message).not.toContain(metaCredentials.client_secret)
+  expect(failure.cause).toBeUndefined()
+  expect(JSON.stringify(failure)).not.toContain(metaCredentials.client_secret)
+})
+
+it('does not retain credential-bearing network errors from Meta setup', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error(metaCredentials.client_secret)))
+  await expect((await import('./client')).setupComposioMeta(metaCredentials)).rejects.toMatchObject({ status: 0, body: null, message: 'No se pudo preparar Meta Ads.' })
+})
+
+it('does not send Meta credentials without an authenticated session', async () => {
+  localStorage.clear()
+  const fetch = respond({ ready: true })
+  await expect((await import('./client')).setupComposioMeta(metaCredentials)).rejects.toMatchObject({ status: 401, body: null })
+  expect(fetch).not.toHaveBeenCalled()
+})

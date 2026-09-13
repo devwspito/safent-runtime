@@ -30,6 +30,53 @@ def sdk():
 
 
 @pytest.mark.asyncio
+async def test_meta_setup_creates_custom_oauth_not_managed_or_api_key():
+    fake = sdk()
+    fake.auth_configs.create.return_value = NS(id="ac-owned")
+    client = ComposioClient("test", sdk=fake)
+    result = await client.prepare_meta_auth_config(
+        client_id="123456", client_secret="PRIVATE-APP-SECRET",
+    )
+    assert result.id == "ac-owned"
+    args = fake.auth_configs.create.call_args.args
+    assert args[0] == "metaads"
+    assert args[1]["type"] == "use_custom_auth"
+    assert args[1]["auth_scheme"] == "OAUTH2"
+    assert args[1]["credentials"] == {
+        "client_id": "123456", "client_secret": "PRIVATE-APP-SECRET",
+        "oauth_redirect_uri": "https://backend.composio.dev/api/v1/auth-apps/add",
+        "scopes": "ads_read,ads_management,business_management",
+    }
+    assert args[1]["is_enabled_for_tool_router"] is False
+    assert "PRIVATE-APP-SECRET" not in repr(result)
+    fake.connected_accounts.link.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_meta_setup_retry_reuses_its_named_configuration():
+    fake = sdk()
+    fake.auth_configs.list.return_value = NS(items=[NS(name="Safent Meta 123456", id="ac-owned")])
+    result = await ComposioClient("test", sdk=fake).prepare_meta_auth_config(
+        client_id="123456", client_secret="private",
+    )
+    assert result.id == "ac-owned"
+    fake.auth_configs.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_meta_setup_does_not_guess_between_duplicate_names():
+    fake = sdk()
+    fake.auth_configs.list.return_value = NS(items=[
+        NS(name="Safent Meta 123456", id="ac-one"), NS(name="Safent Meta 123456", id="ac-two"),
+    ])
+    with pytest.raises(ComposioApiError):
+        await ComposioClient("test", sdk=fake).prepare_meta_auth_config(
+            client_id="123456", client_secret="private",
+        )
+    fake.auth_configs.create.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_custom_meta_uses_selected_config_without_creating_managed():
     fake = sdk()
     client = ComposioClient("test", sdk=fake, auth_config_ids={"metaads": "ac-owned"})

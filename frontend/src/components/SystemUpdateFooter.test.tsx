@@ -98,6 +98,81 @@ describe('SystemUpdateFooter', () => {
     expect(container.querySelector('button')).toBeNull()
   })
 
+  it('always offers the signed native app review without checking or offering an engine update', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('__TAURI__', { core: { invoke } })
+    vi.stubGlobal('__safentNativeUpdater', { status:'available', reason:'app_only', app_version:'0.9.19' })
+    getSystemUpdate.mockResolvedValue(status({ update_available:true, latest_version:'99.0.0' }))
+    await render()
+    expect(container.textContent).toContain('App nativa 0.9.19')
+    const button = container.querySelector('button')!
+    expect(button.textContent).toContain('Buscar actualización de la app')
+    expect(invoke).not.toHaveBeenCalled()
+    expect(getSystemUpdate).not.toHaveBeenCalled()
+    expect(getInstallRequests).not.toHaveBeenCalled()
+    await act(async () => { button.click() })
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('show_native_updater')
+    expect(postInstallRequest).not.toHaveBeenCalled()
+    expect(container.textContent).not.toContain('99.0.0')
+    expect(container.textContent).toContain('antes de instalar')
+    expect(document.querySelector('[role=alertdialog]')).toBeNull()
+  })
+
+  it('does not poll or automatically invoke the native updater', async () => {
+    vi.useFakeTimers()
+    try {
+      const invoke = vi.fn().mockResolvedValue(undefined)
+      vi.stubGlobal('__TAURI__', { core: { invoke } })
+      vi.stubGlobal('__safentNativeUpdater', { status:'available', reason:'app_only', app_version:'0.9.19' })
+      await render()
+      await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60_000) })
+      expect(invoke).not.toHaveBeenCalled()
+      expect(getSystemUpdate).not.toHaveBeenCalled()
+      expect(getInstallRequests).not.toHaveBeenCalled()
+      expect(postInstallRequest).not.toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('singleflights the native dialog request and safely offers retry after IPC failure', async () => {
+    let reject!:(error:Error) => void
+    const invoke = vi.fn().mockReturnValueOnce(new Promise((_, fail) => { reject = fail })).mockResolvedValue(undefined)
+    vi.stubGlobal('__TAURI__', { core: { invoke } })
+    vi.stubGlobal('__safentNativeUpdater', { status:'available', reason:'app_only', app_version:'0.9.19' })
+    await render()
+    const button = container.querySelector('button')!
+    await act(async () => { button.click(); button.click() })
+    expect(invoke).toHaveBeenCalledTimes(1)
+    expect(button.disabled).toBe(true)
+    await act(async () => { reject(new Error('private IPC details')) })
+    expect(container.textContent).toContain('No se pudo abrir el actualizador')
+    expect(container.textContent).not.toContain('private IPC details')
+    expect(button.disabled).toBe(false)
+    await act(async () => { button.click() })
+    expect(invoke).toHaveBeenCalledTimes(2)
+    expect(container.querySelector('[role=alert]')).toBeNull()
+    expect(postInstallRequest).not.toHaveBeenCalled()
+  })
+
+  it('does not fall back to the engine updater when the native bridge is missing', async () => {
+    vi.stubGlobal('__TAURI__', undefined)
+    vi.stubGlobal('__safentNativeUpdater', { status:'available', reason:'app_only', app_version:'0.9.19' })
+    await render()
+    await act(async () => { container.querySelector('button')!.click() })
+    expect(container.textContent).toContain('No se pudo abrir el actualizador')
+    expect(postInstallRequest).not.toHaveBeenCalled()
+    expect(getSystemUpdate).not.toHaveBeenCalled()
+  })
+
+  it('shows an unsigned native build honestly without offering independent engine mutation', async () => {
+    vi.stubGlobal('__safentNativeUpdater', { status:'unavailable', reason:'signing_configuration_missing', app_version:'0.9.19' })
+    await render()
+    expect(container.textContent).toContain('App nativa 0.9.19')
+    expect(container.textContent).toContain('no está disponible en esta compilación')
+    expect(container.querySelector('button')).toBeNull()
+    expect(getSystemUpdate).not.toHaveBeenCalled()
+    expect(postInstallRequest).not.toHaveBeenCalled()
+  })
+
   it('does not hide an independently available engine update because the native updater is unavailable', async () => {
     getSystemUpdate.mockResolvedValue(status({ update_available: true, latest_version: '0.8.1' }))
     ;(window as unknown as Record<string, unknown>).__safentNativeUpdater = {

@@ -2,6 +2,7 @@ import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { AlertCircle, Cloud, Cpu, Globe, Server } from 'lucide-react'
 import { useT } from '../lib/i18n'
+import { hasNativeProviderOAuthOpener, openProviderOAuthUrl } from '../lib/providerOAuth'
 import {
   listProviders, listNativeProviders, getNativeActive, addProvider, configureNativeProvider, setActiveProvider,
   testProvider, deleteProvider, startProviderOAuth, getProviderOAuthStatus,
@@ -134,6 +135,9 @@ export function useProviderOAuthConnect(onConnected: () => void) {
   const t = useT()
   const [connectingId, setConnectingId] = useState<string | null>(null)
   const [notice, setNotice] = useState<{ text:string; url?:string; code?:string; error?:boolean } | null>(null)
+  const [openingBrowser, setOpeningBrowser] = useState(false)
+  const openingRef = useRef(false)
+  const activeLink = useRef<{ url:string; code?:string; name:string; request:number } | null>(null)
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const generation = useRef(0)
   const pending = useRef(false)
@@ -143,8 +147,25 @@ export function useProviderOAuthConnect(onConnected: () => void) {
   useEffect(() => () => {
     generation.current++
     pending.current = false
+    activeLink.current = null
     if (pollRef.current) clearTimeout(pollRef.current)
   }, [])
+
+  async function openOAuthPage() {
+    const link = activeLink.current
+    if (!link || openingRef.current) return
+    openingRef.current = true
+    setOpeningBrowser(true)
+    const result = await openProviderOAuthUrl(link.url)
+    if (link.request !== generation.current || !pending.current || activeLink.current !== link) return
+    openingRef.current = false
+    setOpeningBrowser(false)
+    setNotice({
+      url:link.url, code:link.code,
+      text:result === 'failed' ? t('providers.oauth.open.failed') : t('providers.oauth.waiting').replace('{name}',link.name),
+      error:result === 'failed',
+    })
+  }
 
   async function startOAuthConnect(providerId: string, name: string) {
     if (pending.current) return
@@ -154,6 +175,9 @@ export function useProviderOAuthConnect(onConnected: () => void) {
     const finish = (text:string, error = true) => {
       if (!current()) return
       pending.current = false
+      activeLink.current = null
+      openingRef.current = false
+      setOpeningBrowser(false)
       setConnectingId(null)
       setNotice({text,error})
     }
@@ -184,8 +208,8 @@ export function useProviderOAuthConnect(onConnected: () => void) {
     if (!session) { finish(t('providers.oauth.err.connect')); return }
     const code = typeof r.user_code === 'string' ? r.user_code : undefined
     setNotice({text:t('providers.oauth.waiting').replace('{name}', name),url,code})
-    // The persistent link also works when the browser blocks an asynchronous popup.
-    try { window.open(url, '_blank', 'noopener,noreferrer') } catch { /* link remains available */ }
+    activeLink.current = {url,code,name,request}
+    void openOAuthPage()
     const seconds = (value:unknown, fallback:number) => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
     const intervalMs = Math.min(30000, Math.max(2000, seconds(r.poll_interval,4)*1000))
     const deadline = Date.now() + Math.min(1800, seconds(r.expires_in,600))*1000
@@ -221,16 +245,26 @@ export function useProviderOAuthConnect(onConnected: () => void) {
     pollRef.current = setTimeout(poll, intervalMs)
   }
 
-  return { connectingId, startOAuthConnect, notice }
+  return { connectingId, startOAuthConnect, notice, openOAuthPage, openingBrowser }
 }
 
-function OAuthNotice({ notice }: { notice:ReturnType<typeof useProviderOAuthConnect>['notice'] }) {
+export function OAuthNotice({ notice, onOpen, openingBrowser }: {
+  notice:ReturnType<typeof useProviderOAuthConnect>['notice'];
+  onOpen:() => Promise<void>; openingBrowser:boolean;
+}) {
   const t = useT()
   if (!notice) return null
   return <div className={css.oauthNotice} role={notice.error ? 'alert' : 'status'}>
     <span>{notice.text}</span>
     {notice.code && <code aria-label={t('providers.oauth.code')}>{notice.code}</code>}
-    {notice.url && <a href={notice.url} target="_blank" rel="noopener noreferrer">{t('providers.oauth.open')}</a>}
+    {notice.url && <a href={notice.url} target="_blank" rel="noopener noreferrer"
+      aria-busy={openingBrowser} aria-disabled={openingBrowser}
+      onClick={event => {
+        if (hasNativeProviderOAuthOpener()) {
+          event.preventDefault()
+          if (!openingBrowser) void onOpen()
+        }
+      }}>{t(openingBrowser ? 'providers.oauth.opening_browser' : 'providers.oauth.open')}</a>}
   </div>
 }
 
@@ -510,7 +544,7 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
   const inFlight = useRef(false)
   const alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
-  const { connectingId, startOAuthConnect, notice } = useProviderOAuthConnect(onRefresh)
+  const { connectingId, startOAuthConnect, notice, openOAuthPage, openingBrowser } = useProviderOAuthConnect(onRefresh)
 
   const label = badgeLabel(provider)
   const displayLabel = badgeDisplayLabel(label, t)
@@ -650,7 +684,7 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
 
       <div className={css.rowLeft}>
         <span className={css.rowName}>{name}</span>
-        <OAuthNotice notice={notice} />
+        <OAuthNotice notice={notice} onOpen={openOAuthPage} openingBrowser={openingBrowser} />
         <div className={css.rowMeta}>
           {/* Per-kind colour pill — CSS custom property set inline */}
           <span
@@ -994,7 +1028,7 @@ function CodexProviderCard({ onAdded, onToast }: CodexProviderCardProps) {
   const pending = useRef(false)
   const alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
-  const { connectingId, startOAuthConnect, notice } = useProviderOAuthConnect(onAdded)
+  const { connectingId, startOAuthConnect, notice, openOAuthPage, openingBrowser } = useProviderOAuthConnect(onAdded)
   const oauthPending = connectingId === CODEX_PROVIDER_ID
 
   async function handleApiKeySave() {
@@ -1046,7 +1080,7 @@ function CodexProviderCard({ onAdded, onToast }: CodexProviderCardProps) {
       <div className={css.customCardHeader}>
         <p className={css.customCardIntro}>{t('providers.codex.explain')}</p>
       </div>
-      <OAuthNotice notice={notice} />
+      <OAuthNotice notice={notice} onOpen={openOAuthPage} openingBrowser={openingBrowser} />
 
       <div className={css.formStack}>
         <div className={css.formField}>

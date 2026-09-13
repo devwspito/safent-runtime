@@ -31,6 +31,7 @@ def setup(tmp_path, monkeypatch):
     repo = SQLiteIntegrationsRepository(db_path=db, vault=SecretsVault())
     repo.set_credential(kind="composio", api_key="fake-key", entity_id="server-owned-entity")
     fake = NS(
+        prepare_meta_auth_config=AsyncMock(return_value=NS(id="ac-meta-setup")),
         validate_auth_config=AsyncMock(),
         initiate_connection=AsyncMock(
             return_value=NS(
@@ -84,6 +85,7 @@ def test_rejected_configuration_is_not_persisted_or_leaked(setup):
         ("delete", "/auth-configs/metaads", None),
         ("post", "/connect", {"toolkit_slug": "metaads"}),
         ("post", "/key", {"api_key": "replacement"}),
+        ("post", "/meta/setup", {"client_id": "123456789", "client_secret": "fake-secret"}),
         ("delete", "/connected/ca-owned", None),
     ],
 )
@@ -96,6 +98,7 @@ def test_daemon_cannot_mutate_owner_connections(setup, token, method, path, body
     fake.validate_auth_config.assert_not_called()
     fake.initiate_connection.assert_not_called()
     fake.delete_connection.assert_not_called()
+    fake.prepare_meta_auth_config.assert_not_called()
     assert repo.reveal_api_key(kind="composio") == "fake-key"
 
 
@@ -194,3 +197,77 @@ def test_foreign_confirmation_has_no_metadata_leak(setup):
     response = client.get(f"{BASE}/connected/ca-foreign")
     assert response.status_code == 404
     assert "FOREIGN-SECRET" not in response.text
+
+
+def test_meta_setup_stores_only_configuration_id_and_refreshes_ads(setup):
+    client, repo, fake = setup
+    refresh = NS(ensure=AsyncMock())
+    client.app.state.composio_lease_refresh = refresh
+    result = client.post(f"{BASE}/meta/setup", json={
+        "client_id": "1063816289878236", "client_secret": "NEVER-STORE-META-SECRET",
+    })
+    assert result.status_code == 200
+    assert result.json() == {"ready": True}
+    assert repo.auth_config_ids() == {"metaads": "ac-meta-setup"}
+    assert b"NEVER-STORE-META-SECRET" not in repo._db_path.read_bytes()
+    refresh.ensure.assert_awaited_once_with(force=True)
+    fake.prepare_meta_auth_config.assert_awaited_once_with(
+        client_id="1063816289878236", client_secret="NEVER-STORE-META-SECRET",
+    )
+
+
+@pytest.mark.parametrize("secret", ["", " ", "x" * 4097, "secret\n"])
+def test_meta_setup_rejects_bad_secret_without_echo(setup, secret):
+    client, _, fake = setup
+    result = client.post(
+        f"{BASE}/meta/setup", json={"client_id": "123456", "client_secret": secret},
+    )
+    assert result.status_code == 400
+    fake.prepare_meta_auth_config.assert_not_called()
+    assert result.json() == {"detail": "Revisa la clave de la aplicación de Meta."}
+
+
+def test_meta_setup_failure_is_redacted_and_preserves_previous_mapping(setup):
+    client, repo, fake = setup
+    repo.set_auth_config(toolkit_slug="metaads", auth_config_id="ac-previous")
+    fake.prepare_meta_auth_config.side_effect = ComposioApiError(403, "SECRET-IN-PROVIDER-ERROR")
+    result = client.post(
+        f"{BASE}/meta/setup", json={"client_id": "123456", "client_secret": "fake"},
+    )
+    assert result.status_code == 409
+    assert "SECRET-IN-PROVIDER" not in result.text
+    assert repo.auth_config_ids() == {"metaads": "ac-previous"}
+
+
+def test_meta_setup_cannot_attach_result_to_rotated_composio_key(setup):
+    client, repo, fake = setup
+    async def rotate(**_kwargs):
+        repo.set_credential(kind="composio", api_key="rotated-key", entity_id="server-owned-entity")
+        return NS(id="ac-old-project")
+    fake.prepare_meta_auth_config.side_effect = rotate
+    result = client.post(
+        f"{BASE}/meta/setup", json={"client_id": "123456", "client_secret": "fake"},
+    )
+    assert result.status_code == 409
+    assert repo.auth_config_ids() == {}
+
+
+@pytest.mark.parametrize("body", [
+    {"client_secret": "NEVER-ECHO-SECRET"},
+    {"client_id": "bad", "client_secret": "NEVER-ECHO-SECRET"},
+    {"client_id": "123456", "client_secret": {"secret": "NEVER-ECHO-SECRET"}},
+    {"client_id": "123456", "client_secret": "fake", "extra": "NEVER-ECHO-SECRET"},
+])
+def test_meta_setup_validation_never_echoes_secret_input(setup, body):
+    client, _, fake = setup
+    result = client.post(f"{BASE}/meta/setup", json=body)
+    assert result.status_code == 400
+    assert "NEVER-ECHO-SECRET" not in result.text
+    fake.prepare_meta_auth_config.assert_not_called()
+
+
+def test_meta_setup_limits_body_before_processing_credentials(setup):
+    client, _, fake = setup
+    result = client.post(f"{BASE}/meta/setup", content=b"x" * 8193)
+    assert result.status_code == 413
+    fake.prepare_meta_auth_config.assert_not_called()

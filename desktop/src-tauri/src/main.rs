@@ -232,6 +232,8 @@ fn main() {
             read_host_clipboard,
             write_host_clipboard,
             window_policy::open_ads_oauth,
+            window_policy::open_provider_oauth,
+            window_policy::show_native_updater,
             boot::cancel_bootstrap,
             boot::retry_bootstrap,
             diagnostics::export_diagnostics,

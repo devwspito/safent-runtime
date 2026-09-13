@@ -487,6 +487,45 @@ class ComposioClient:
 
         return await self._guarded(resolve)
 
+    async def prepare_meta_auth_config(
+        self, *, client_id: str, client_secret: str,
+    ) -> AuthConfigInfo:
+        """Owner-only setup. Secret goes straight to Composio, never into local storage.
+
+        A deterministic name recovers a successful remote create after a lost
+        response. Existing configurations are never updated or deleted here.
+        """
+        def prepare() -> AuthConfigInfo:
+            try:
+                name = f"Safent Meta {client_id}"
+                configs = self._sdk.auth_configs.list(
+                    toolkit_slug="metaads", is_composio_managed=False,
+                    search=name, limit=1000,
+                )
+                matches = [item for item in configs.items if getattr(item, "name", None) == name]
+                if len(matches) > 1:
+                    raise ComposioApiError(409, "Hay varias configuraciones de esta aplicación.")
+                if matches:
+                    return self._validate_auth_config("metaads", matches[0].id)
+                # Toolkit-specific credential fields are advertised by the toolkit
+                # definition; the generated SDK only types common OAuth fields.
+                options: Any = {
+                    "type": "use_custom_auth", "auth_scheme": "OAUTH2", "name": name,
+                    "is_enabled_for_tool_router": False,
+                    "credentials": {
+                        "client_id": client_id, "client_secret": client_secret,
+                        "oauth_redirect_uri": "https://backend.composio.dev/api/v1/auth-apps/add",
+                        "scopes": "ads_read,ads_management,business_management",
+                    },
+                }
+                created = self._sdk.auth_configs.create("metaads", options)
+                return self._validate_auth_config("metaads", created.id)
+            except (APIError, ComposioError) as exc:
+                # Neither SDK errors nor response bodies may echo app credentials.
+                raise ComposioApiError(502, "No se pudo preparar Meta en Composio.") from exc
+
+        return await self._guarded(prepare)
+
     def _resolve_managed_auth_config_id(self, toolkit_slug: str) -> str:
         """Return an existing enabled managed auth config ID, or create one.
 
