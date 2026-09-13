@@ -4,7 +4,7 @@ use crate::ports::CancelSignal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
 use tauri::{Manager, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
@@ -15,12 +15,59 @@ const MAX_BYTES: usize = 128 * 1024;
 const MAX_MINOR: u64 = 1_000_000_000_000;
 
 #[derive(Default)]
-pub struct AdsCapsState(Mutex<Option<EmbeddedCliConfig>>);
+pub struct AdsCapsState {
+    config: Mutex<Option<EmbeddedCliConfig>>,
+    activity: Arc<CapsActivity>,
+}
 impl AdsCapsState {
     pub(crate) fn configure(&self, config: EmbeddedCliConfig) {
-        if let Ok(mut state) = self.0.lock() {
+        if let Ok(mut state) = self.config.lock() {
             *state = Some(config);
         }
+    }
+
+    pub(crate) fn begin_close(&self) {
+        self.activity.begin_close();
+    }
+
+    pub(crate) fn wait_idle(&self) {
+        self.activity.wait_idle();
+    }
+}
+
+#[derive(Default)]
+struct CapsActivity {
+    // (operation in flight, normal exit requested)
+    state: Mutex<(bool, bool)>,
+    wake: Condvar,
+}
+impl CapsActivity {
+    fn begin(self: &Arc<Self>) -> Result<CapsFlight, String> {
+        let mut state = self.state.lock().map_err(|_| UNAVAILABLE.to_string())?;
+        if state.0 || state.1 {
+            return Err("ads_caps_busy".into());
+        }
+        state.0 = true;
+        Ok(CapsFlight(self.clone()))
+    }
+
+    fn begin_close(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).1 = true;
+    }
+
+    fn wait_idle(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        while state.0 {
+            state = self.wake.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+struct CapsFlight(Arc<CapsActivity>);
+impl Drop for CapsFlight {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap_or_else(|e| e.into_inner()).0 = false;
+        self.0.wake.notify_all();
     }
 }
 
@@ -231,7 +278,7 @@ fn caller(window: &WebviewWindow) -> Result<EmbeddedCliConfig, String> {
     }
     window
         .state::<AdsCapsState>()
-        .0
+        .config
         .lock()
         .map_err(|_| UNAVAILABLE.to_string())?
         .clone()
@@ -276,12 +323,16 @@ pub async fn save_ads_hard_caps(
 ) -> Result<Option<CapsSaved>, String> {
     let config = caller(&window)?;
     validate_change(&change)?;
+    // Register before yielding so a normal app exit cannot race the worker.
+    // The guard also covers the native confirmation and any verified rollback.
+    let flight = window.state::<AdsCapsState>().activity.begin()?;
     let control = window
         .state::<crate::bootstrap_control::BootstrapControl>()
         .inner()
         .clone();
     let app = window.app_handle().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _flight = flight;
         let _exclusive = control
             .reserve_companion(CancelSignal::new())
             .map_err(|_| "ads_caps_busy".to_string())?;
@@ -492,6 +543,42 @@ mod caps_file {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[test]
+    fn normal_exit_drains_an_in_flight_operation_and_rejects_new_ones() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let activity = Arc::new(CapsActivity::default());
+        let flight = activity.begin().unwrap();
+        assert!(activity.begin().is_err());
+        activity.begin_close();
+        assert!(activity.begin().is_err());
+        let (sent, received) = mpsc::channel();
+        let waiting = activity.clone();
+        let worker = std::thread::spawn(move || {
+            waiting.wait_idle();
+            sent.send(()).unwrap();
+        });
+        assert!(received.recv_timeout(Duration::from_millis(30)).is_err());
+        drop(flight);
+        received.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        assert!(activity.begin().is_err());
+    }
+
+    #[test]
+    fn operation_guard_releases_on_error_and_idle_exit_needs_no_worker() {
+        let activity = Arc::new(CapsActivity::default());
+        let operation = || -> Result<(), String> {
+            let _flight = activity.begin()?;
+            Err(UNAVAILABLE.into())
+        };
+        assert!(operation().is_err());
+        activity.wait_idle();
+        assert!(activity.begin().is_ok());
+        activity.begin_close();
+        activity.wait_idle();
+        assert!(activity.begin().is_err());
+    }
     const ORIGINAL:&str="defaults:\n  max_step_pct: 30\n  max_changes_per_day: 2\n  autonomy_enabled: false\naccounts: {}\n";
     fn change() -> CapsChange {
         CapsChange {

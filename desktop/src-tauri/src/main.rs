@@ -28,6 +28,7 @@ mod update;
 // Bootstrap engine (specs/028-safent-app-nativa, T007/T008/T009/T011): pure
 // domain + reconciler + ports/adapter + the observe-plan-apply loop — THE
 // default and only boot path (main() below).
+mod ads_caps;
 mod boot;
 mod bootstrap_control;
 mod companion_requests;
@@ -35,7 +36,6 @@ mod diagnostics;
 mod domain;
 mod engine_adapter;
 mod folder_bridge;
-mod ads_caps;
 mod ports;
 mod reconcile;
 mod selftest;
@@ -283,12 +283,16 @@ fn main() {
                 }
                 api.prevent_exit();
                 if consumer.begin_exit() {
+                    app.state::<ads_caps::AdsCapsState>().begin_close();
                     let handle = app.clone();
                     std::thread::spawn(move || {
                         // Do not wait on a worker/event emitter from the UI
                         // thread. Drain before exiting or replacing this app.
                         let consumer = handle.state::<companion_requests::CompanionRequests>();
                         consumer.stop();
+                        // Owner-confirmed caps may be applying or restoring.
+                        // Drain normal quits; this is not force-kill recovery.
+                        handle.state::<ads_caps::AdsCapsState>().wait_idle();
                         consumer.finish_exit();
                         handle.exit(code.unwrap_or(0));
                     });
