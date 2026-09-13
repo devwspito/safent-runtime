@@ -350,9 +350,16 @@ merge_vendor_credentials() {
 # here", `ensure_sso_keypair`'s own idempotency check below distinguishes
 # "real key already generated" (non-empty) from "just the placeholder".
 ensure_sso_placeholder() {
-  [ -e "$STATE/sso/ads-sso.key" ] && return 0
-  : > "$STATE/sso/ads-sso.key"
-  chmod 0400 "$STATE/sso/ads-sso.key"
+  if [ ! -e "$STATE/sso/ads-sso.key" ]; then
+    : > "$STATE/sso/ads-sso.key"
+    chmod 0400 "$STATE/sso/ads-sso.key"
+  fi
+  # Root-owned projection exists before image startup; an empty pin must fail
+  # closed until the actual install-derived public key replaces it atomically.
+  if [ ! -e "$STATE/sso/ads-composio-channel.pub" ]; then
+    : > "$STATE/sso/ads-composio-channel.pub"
+    chmod 0444 "$STATE/sso/ads-composio-channel.pub"
+  fi
 }
 
 ensure_sso_keypair() {
@@ -362,6 +369,7 @@ ensure_sso_keypair() {
   # key already exists" and never generate the real one (T015/T016 boundary).
   if [ -s "$STATE/sso/ads-sso.key" ]; then
     _sync_sso_public_key_to_broker_env
+    _ensure_composio_channel_pin
     return 0
   fi
   log "generando par Ed25519 de SSO (puente de sesión, 026)…"
@@ -382,6 +390,7 @@ ensure_sso_keypair() {
   pub_urlsafe="$(printf '%s' "$pub_std" | tr '+/' '-_')"
   _write_sso_public_key_to_api_env "$pub_urlsafe"
   _sync_sso_public_key_to_broker_env
+  _ensure_composio_channel_pin
   log "par Ed25519 de SSO generado (0400) en $STATE/sso/ads-sso.key"
 }
 
@@ -418,31 +427,32 @@ publish_runtime_projection() {
   cp "$STATE/tls/ca.crt" "$projection/ads-ca.crt"
   cp "$STATE/bearer" "$projection/ads.bearer"
   cp "$STATE/sso/ads-sso.key" "$projection/ads-sso.key"
+  cp "$STATE/sso/ads-composio-channel.pub" "$projection/ads-composio-channel.pub"
   chmod 0400 "$projection/ads.bearer" "$projection/ads-sso.key"
-  chmod 0444 "$projection/companions.json" "$projection/ads-ca.crt"
+  chmod 0444 "$projection/companions.json" "$projection/ads-ca.crt" "$projection/ads-composio-channel.pub"
   if COPYFILE_DISABLE=1 tar --format ustar -C "$projection" -cf - \
-      companions.json ads-ca.crt ads.bearer ads-sso.key \
+      companions.json ads-ca.crt ads.bearer ads-sso.key ads-composio-channel.pub \
     | "$RUNTIME" run --rm -i --network none --user 0:0 --read-only \
         --cap-drop ALL --security-opt no-new-privileges \
         -v "$COMPANION_RUNTIME_VOLUME:/runtime" --entrypoint /bin/sh \
         "$image" -ec '
           umask 077
           next="$(mktemp -d /runtime/.next.XXXXXX)"
-          trap '\''rm -f "$next/ads.bearer" "$next/ads-sso.key" "$next/ads-ca.crt" "$next/companions.json"; rmdir "$next"'\'' EXIT
+          trap '\''rm -f "$next/ads.bearer" "$next/ads-sso.key" "$next/ads-ca.crt" "$next/ads-composio-channel.pub" "$next/companions.json"; rmdir "$next"'\'' EXIT
           tar --no-same-owner -xf - -C "$next"
           chmod 0400 "$next/ads.bearer" "$next/ads-sso.key"
-          chmod 0444 "$next/companions.json" "$next/ads-ca.crt"
-          for file in ads.bearer ads-sso.key ads-ca.crt companions.json; do
+          chmod 0444 "$next/companions.json" "$next/ads-ca.crt" "$next/ads-composio-channel.pub"
+          for file in ads.bearer ads-sso.key ads-ca.crt ads-composio-channel.pub companions.json; do
             mv -f "$next/$file" "/runtime/$file"
           done
           chmod 0755 /runtime
         '; then
     rm -f "$projection/companions.json" "$projection/ads-ca.crt" \
-      "$projection/ads.bearer" "$projection/ads-sso.key"
+      "$projection/ads.bearer" "$projection/ads-sso.key" "$projection/ads-composio-channel.pub"
     rmdir "$projection"
   else
     rm -f "$projection/companions.json" "$projection/ads-ca.crt" \
-      "$projection/ads.bearer" "$projection/ads-sso.key"
+      "$projection/ads.bearer" "$projection/ads-sso.key" "$projection/ads-composio-channel.pub"
     rmdir "$projection"
     fail "no se pudo preparar el volumen privado de Anuncios"
   fi
@@ -481,6 +491,22 @@ _sync_sso_public_key_to_broker_env() {
     printf 'ADS_COMPANION_MODE=true\n' >> "$broker_env"
   fi
   chmod 0600 "$broker_env"
+}
+
+_ensure_composio_channel_pin() {
+  # Only a deterministic PUBLIC key returns. Master key uses stdin (not argv,
+  # container environment, logging, or host mounts). Pinning here means even
+  # a compromised Ads API cannot replace the recipient and obtain the vault.
+  local pub
+  pub="$(sed -n 's/^ADS_CREDENTIAL_MASTER_KEY=//p' "$STATE/secrets/broker.env" \
+    | "$RUNTIME" run --rm -i --network none --read-only --cap-drop ALL \
+        --security-opt no-new-privileges -- "$SAFENT_ADS_IMAGE" \
+        python -m safent_ads.tools.composio_channel_key)" \
+    || fail "no se pudo fijar el destinatario privado de Integraciones"
+  [ -n "$pub" ] || fail "falta la identidad pública del canal de Integraciones"
+  printf '%s\n' "$pub" > "$STATE/sso/ads-composio-channel.pub.tmp"
+  chmod 0444 "$STATE/sso/ads-composio-channel.pub.tmp"
+  mv -f "$STATE/sso/ads-composio-channel.pub.tmp" "$STATE/sso/ads-composio-channel.pub"
 }
 
 # ── 8. caps.yaml — hard caps template, installed once, owner edits by hand ──

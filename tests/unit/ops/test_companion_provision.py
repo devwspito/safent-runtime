@@ -68,6 +68,11 @@ if [ "$1" = "run" ]; then
       ;;
   esac
   for a in "$@"; do
+    if [ "$a" = "safent_ads.tools.composio_channel_key" ]; then
+      cat >/dev/null
+      echo "EREREREREREREREREREREREREREREREREREREREREREQ="
+      exit 0
+    fi
     if [ "$a" = "safent_ads.tools.gen_keys" ]; then
       echo "ADS_APPROVAL_SIGNING_KEY=ZmFrZS1zaWduaW5nLWtleS1iNjQ="
       echo "ADS_APPROVAL_PUBLIC_KEY=ZmFrZS1wdWJsaWMta2V5LWI2NA=="
@@ -114,7 +119,11 @@ def fake_bin_dir(tmp_path: Path) -> Path:
 
 
 def _run_provision(
-    state_dir: Path, fake_bin_dir: Path, podman_log: Path, *, extra_env: dict[str, str] | None = None
+    state_dir: Path,
+    fake_bin_dir: Path,
+    podman_log: Path,
+    *,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
@@ -135,12 +144,15 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
-@pytest.mark.parametrize("purge,label,removed", [
-    ("1", "ads-runtime-projection", True),
-    ("1", "foreign-volume", False),
-    ("1", "", False),
-    ("0", "ads-runtime-projection", False),
-])
+@pytest.mark.parametrize(
+    "purge,label,removed",
+    [
+        ("1", "ads-runtime-projection", True),
+        ("1", "foreign-volume", False),
+        ("1", "", False),
+        ("0", "ads-runtime-projection", False),
+    ],
+)
 def test_projection_purge_requires_exact_label_and_never_force(tmp_path, purge, label, removed):
     # Execute the real bounded teardown function; other teardown helpers are
     # neutral fixtures so this test cannot touch any engine or user data.
@@ -158,13 +170,27 @@ def test_projection_purge_requires_exact_label_and_never_force(tmp_path, purge, 
     runtime.chmod(0o755)
     log = tmp_path / "calls"
     result = subprocess.run(
-        ["sh", "-c", "_remove_partial_companion_containers() { :; }; "
-         "_remove_companion_network_if_unused() { :; }; "
-         "_remove_partial_companion_volume() { :; }; "
-         + function + '\n_uninstall_companion "$PURGE"'],
-        env={**os.environ, "RT": str(runtime), "CALL_LOG": str(log),
-             "VOLUME_LABEL": label, "PURGE": purge, "COMPANION_STATE": str(tmp_path / "state")},
-        capture_output=True, text=True, timeout=5, check=False,
+        [
+            "sh",
+            "-c",
+            "_remove_partial_companion_containers() { :; }; "
+            "_remove_companion_network_if_unused() { :; }; "
+            "_remove_partial_companion_volume() { :; }; "
+            + function
+            + '\n_uninstall_companion "$PURGE"',
+        ],
+        env={
+            **os.environ,
+            "RT": str(runtime),
+            "CALL_LOG": str(log),
+            "VOLUME_LABEL": label,
+            "PURGE": purge,
+            "COMPANION_STATE": str(tmp_path / "state"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     calls = log.read_text() if log.exists() else ""
@@ -177,13 +203,23 @@ def test_runtime_projection_contains_only_allowlisted_files(tmp_path, fake_bin_d
 
     archive = tmp_path / "projection.tar"
     result = _run_provision(
-        tmp_path / "state", fake_bin_dir, tmp_path / "podman.log",
+        tmp_path / "state",
+        fake_bin_dir,
+        tmp_path / "podman.log",
         extra_env={"FAKE_PROJECTION_ARCHIVE": str(archive)},
     )
     assert result.returncode == 0, result.stderr
     with tarfile.open(archive) as bundle:
         files = {member.name: member for member in bundle.getmembers()}
-        assert set(files) == {"companions.json", "ads-ca.crt", "ads.bearer", "ads-sso.key"}
+        assert set(files) == {
+            "companions.json",
+            "ads-ca.crt",
+            "ads.bearer",
+            "ads-sso.key",
+            "ads-composio-channel.pub",
+        }
+        assert files["ads-composio-channel.pub"].mode == 0o444
+        assert files["ads-composio-channel.pub"].size > 0
         assert all(member.isfile() for member in files.values())
         assert files["ads.bearer"].mode == 0o400
         assert files["ads-sso.key"].mode == 0o400
@@ -194,11 +230,20 @@ def test_runtime_projection_contains_only_allowlisted_files(tmp_path, fake_bin_d
     assert "--security-opt no-new-privileges" in commands
 
 
-@pytest.mark.parametrize("identity", ["local|0|foreign", "local|0|", "local|1|ads-runtime-projection", "nfs|0|ads-runtime-projection"])
+@pytest.mark.parametrize(
+    "identity",
+    [
+        "local|0|foreign",
+        "local|0|",
+        "local|1|ads-runtime-projection",
+        "nfs|0|ads-runtime-projection",
+    ],
+)
 def test_projection_refuses_foreign_or_host_backed_volume(tmp_path, fake_bin_dir, identity):
     log = tmp_path / "podman.log"
-    result = _run_provision(tmp_path / "state", fake_bin_dir, log,
-                            extra_env={"FAKE_VOLUME_IDENTITY": identity})
+    result = _run_provision(
+        tmp_path / "state", fake_bin_dir, log, extra_env={"FAKE_VOLUME_IDENTITY": identity}
+    )
     assert result.returncode != 0
     assert "no pertenece" in result.stderr
     assert "safent-companion-runtime:/runtime" not in log.read_text()
@@ -216,9 +261,15 @@ def test_projection_creates_once_and_reuses_owned_volume(tmp_path, fake_bin_dir)
 
 def test_projection_creation_failure_is_not_treated_as_owned(tmp_path, fake_bin_dir):
     log = tmp_path / "podman.log"
-    result = _run_provision(tmp_path / "state", fake_bin_dir, log, extra_env={
-        "FAKE_VOLUME_ABSENT": "1", "FAKE_VOLUME_CREATE_FAIL": "1",
-    })
+    result = _run_provision(
+        tmp_path / "state",
+        fake_bin_dir,
+        log,
+        extra_env={
+            "FAKE_VOLUME_ABSENT": "1",
+            "FAKE_VOLUME_CREATE_FAIL": "1",
+        },
+    )
     assert result.returncode != 0
     assert "no se pudo verificar" in result.stderr
     assert "safent-companion-runtime:/runtime" not in log.read_text()
@@ -262,8 +313,12 @@ def test_host_health_probe_uses_exact_route_and_private_tls(tmp_path, fake_bin_d
     uname.write_text(f"#!/bin/sh\nprintf '%s\\n' '{platform}'\n")
     uname.chmod(0o755)
     log = tmp_path / "curl.log"
-    result = _run_provision(tmp_path / "state", fake_bin_dir, tmp_path / "podman.log",
-                            extra_env={"FAKE_CURL_LOG": str(log)})
+    result = _run_provision(
+        tmp_path / "state",
+        fake_bin_dir,
+        tmp_path / "podman.log",
+        extra_env={"FAKE_CURL_LOG": str(log)},
+    )
     assert result.returncode == 0, result.stderr
     arguments = log.read_text().splitlines()
     assert f"ads.safent.internal:8443:{ip}" in arguments
@@ -323,7 +378,11 @@ class TestFirstRunWritesExpectedFiles:
         api_env = state_dir / "secrets" / "api.env"
         assert _mode(api_env) == 0o600
         bearer = (state_dir / "bearer").read_text().strip()
-        lines = {ln.split("=", 1)[0]: ln.split("=", 1)[1] for ln in api_env.read_text().splitlines() if "=" in ln and not ln.startswith("#")}
+        lines = {
+            ln.split("=", 1)[0]: ln.split("=", 1)[1]
+            for ln in api_env.read_text().splitlines()
+            if "=" in ln and not ln.startswith("#")
+        }
         assert lines["ADS_MCP_TOKEN"] == bearer
         assert lines["ADS_APPROVAL_SIGNING_KEY"] == "ZmFrZS1zaWduaW5nLWtleS1iNjQ="
         for required in ("ADS_SESSION_SECRET", "ADS_TOTP_ENC_KEY"):
@@ -395,10 +454,14 @@ def test_shared_composio_broker_gets_only_public_sso_key_on_upgrade(tmp_path, fa
     assert "ADS_COMPANION_MODE=true" in original
     assert "ADS_APPROVAL_SIGNING_KEY=" not in original
     # Simulate an existing release before the shared-Integrations channel.
-    broker.write_text("\n".join(
-        line for line in original.splitlines()
-        if not line.startswith(("ADS_SSO_PUBLIC_KEY=", "ADS_COMPANION_MODE="))
-    ) + "\n")
+    broker.write_text(
+        "\n".join(
+            line
+            for line in original.splitlines()
+            if not line.startswith(("ADS_SSO_PUBLIC_KEY=", "ADS_COMPANION_MODE="))
+        )
+        + "\n"
+    )
     sso_before = (state / "sso/ads-sso.key").read_bytes()
     result = _run_provision(state, fake_bin_dir, log)
     assert result.returncode == 0, result.stderr
@@ -467,9 +530,7 @@ class TestSsoKeypairUrlSafeConversion:
     through that never contained those characters (the everyday fake used
     elsewhere in this file for the gitleaks-allowlist reason above)."""
 
-    def test_plus_and_slash_are_swapped_to_dash_and_underscore(
-        self, tmp_path: Path
-    ) -> None:
+    def test_plus_and_slash_are_swapped_to_dash_and_underscore(self, tmp_path: Path) -> None:
         bin_dir = tmp_path / "fakebin"
         bin_dir.mkdir()
         podman = bin_dir / "podman"
@@ -493,9 +554,7 @@ class TestSsoKeypairUrlSafeConversion:
 
 
 class TestSecondRunIsIdempotent:
-    def test_second_run_changes_no_file(
-        self, tmp_path: Path, fake_bin_dir: Path
-    ) -> None:
+    def test_second_run_changes_no_file(self, tmp_path: Path, fake_bin_dir: Path) -> None:
         state_dir = tmp_path / "state"
         podman_log = tmp_path / "podman.log"
         first = _run_provision(state_dir, fake_bin_dir, podman_log)
@@ -707,13 +766,20 @@ class TestScaffoldMode:
         }
         scaffold = subprocess.run(
             ["bash", str(_PROVISION_SH), "--scaffold"],
-            env=env, capture_output=True, text=True, timeout=60,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         assert scaffold.returncode == 0, scaffold.stderr
         assert (state_dir / "sso" / "ads-sso.key").read_bytes() == b""
 
         full = subprocess.run(
-            ["bash", str(_PROVISION_SH)], env=env, capture_output=True, text=True, timeout=60,
+            ["bash", str(_PROVISION_SH)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         assert full.returncode == 0, full.stderr
         assert (state_dir / "sso" / "ads-sso.key").read_bytes() != b""
@@ -726,9 +792,7 @@ class TestHonoursSafentPodmanOverPath:
     never fall back to whatever happens to be on PATH once invoked from
     the embedded CLI (`safent companion install|repair`, T016)."""
 
-    def test_scaffold_uses_the_pinned_binary_never_the_one_on_path(
-        self, tmp_path: Path
-    ) -> None:
+    def test_scaffold_uses_the_pinned_binary_never_the_one_on_path(self, tmp_path: Path) -> None:
         # Two DISTINCT fake podmans, each logging to its own file: one on
         # PATH (as a terminal user's own install would have), one pinned
         # via SAFENT_PODMAN (as the desktop app ships). Only the pinned one
@@ -742,9 +806,7 @@ class TestHonoursSafentPodmanOverPath:
         bin_dir.mkdir()
         path_podman_log = tmp_path / "path-podman.log"
         path_podman = bin_dir / "podman"
-        path_podman.write_text(
-            f'#!/usr/bin/env bash\necho "$@" >> {path_podman_log}\nexit 0\n'
-        )
+        path_podman.write_text(f'#!/usr/bin/env bash\necho "$@" >> {path_podman_log}\nexit 0\n')
         path_podman.chmod(0o755)
         curl = bin_dir / "curl"
         curl.write_text(_FAKE_CURL)
@@ -784,7 +846,9 @@ class TestHonoursSafentPodmanOverPath:
         )
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         assert pinned_podman_log.exists(), "the pinned SAFENT_PODMAN binary was never invoked"
-        assert not path_podman_log.exists(), "podman on PATH was called despite SAFENT_PODMAN being set"
+        assert not path_podman_log.exists(), (
+            "podman on PATH was called despite SAFENT_PODMAN being set"
+        )
         assert (state_dir / "companions.json").exists()
 
 
@@ -979,9 +1043,7 @@ def _companion_state(tmp_path: Path, *, provisioned: bool, with_image_marker: bo
         (state_dir / "tls" / "ca.crt").write_text("dummy-ca")
         (state_dir / "secrets").mkdir()
         (state_dir / "secrets" / "api.env").write_text(
-            "ADS_MCP_TOKEN=old-bearer-value\n"
-            "ADS_SESSION_SECRET=x\n"
-            "ADS_SSO_PUBLIC_KEY=old-sso-pub\n"
+            "ADS_MCP_TOKEN=old-bearer-value\nADS_SESSION_SECRET=x\nADS_SSO_PUBLIC_KEY=old-sso-pub\n"
         )
         (state_dir / "bearer").write_text("old-bearer-value\n")
         (state_dir / "bearer").chmod(0o400)
@@ -1098,14 +1160,17 @@ class TestCompanionStatus:
         assert "containers:   0/0 running" not in result.stdout, result.stdout
         assert "containers:   4/4 running" in result.stdout
 
-    @pytest.mark.parametrize("extra,expected", [
-        ({}, "4/4"),
-        ({"FAKE_COMPOSE_IDS": "c1 c2 c4 c5"}, "3/4"),
-        ({"FAKE_MIGRATION_EXIT": "1"}, "0/4"),
-        ({"FAKE_MIGRATION_RUNNING": "true", "FAKE_MIGRATION_STATUS": "running"}, "0/4"),
-        ({"FAKE_COMPOSE_IDS": "c1 c2 c3 c4 c5 c6"}, "0/4"),
-        ({"FAKE_COMPOSE_IDS": "unknown"}, "0/4"),
-    ])
+    @pytest.mark.parametrize(
+        "extra,expected",
+        [
+            ({}, "4/4"),
+            ({"FAKE_COMPOSE_IDS": "c1 c2 c4 c5"}, "3/4"),
+            ({"FAKE_MIGRATION_EXIT": "1"}, "0/4"),
+            ({"FAKE_MIGRATION_RUNNING": "true", "FAKE_MIGRATION_STATUS": "running"}, "0/4"),
+            ({"FAKE_COMPOSE_IDS": "c1 c2 c3 c4 c5 c6"}, "0/4"),
+            ({"FAKE_COMPOSE_IDS": "unknown"}, "0/4"),
+        ],
+    )
     def test_role_inventory_distinguishes_migration_from_required_services(
         self, tmp_path, fake_cli_bin_dir, extra, expected
     ):
@@ -1113,10 +1178,17 @@ class TestCompanionStatus:
         home_dir = tmp_path / "home"
         _companion_bin_dir(home_dir, provisioned=True)
         result = _run_companion(
-            "status", fake_bin_dir=fake_cli_bin_dir, state_dir=state_dir,
-            home_dir=home_dir, podman_log=tmp_path / "podman.log",
-            extra_env={"FAKE_NETWORK_PRESENT": "1", "FAKE_COMPOSE_IDS": "c1 c2 c3 c4 c5",
-                       "FAKE_RUNNING_IDS": "c1 c2 c3 c4", **extra},
+            "status",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=tmp_path / "podman.log",
+            extra_env={
+                "FAKE_NETWORK_PRESENT": "1",
+                "FAKE_COMPOSE_IDS": "c1 c2 c3 c4 c5",
+                "FAKE_RUNNING_IDS": "c1 c2 c3 c4",
+                **extra,
+            },
         )
         assert result.returncode == 0, result.stderr
         assert f"containers:   {expected} running" in result.stdout
@@ -1147,20 +1219,28 @@ class TestCompanionUpdate:
         _companion_bin_dir(home_dir, provisioned=True)
         log_path = tmp_path / "podman.log"
         result = _run_companion(
-            "update", fake_bin_dir=fake_cli_bin_dir, state_dir=state_dir,
-            home_dir=home_dir, podman_log=log_path,
+            "update",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=log_path,
             extra_env={"SAFENT_ADS_IMAGE": override},
         )
         assert result.returncode == 0, result.stderr
         assert f"pull {_PINNED_ADS_IMAGE}" in log_path.read_text()
         assert (state_dir / "image").read_text() == _PINNED_ADS_IMAGE
 
-    @pytest.mark.parametrize("recorded", [
-        "", "ghcr.io/devwspito/safent-ads:latest", "ghcr.io/devwspito/safent-ads:v0.2.2",
-        "ghcr.io/devwspito/safent-ads@sha256:short",
-        "ghcr.io/devwspito/safent-ads@sha256:" + "G" * 64,
-        "ghcr.io/other/ads@sha256:" + "a" * 64,
-    ])
+    @pytest.mark.parametrize(
+        "recorded",
+        [
+            "",
+            "ghcr.io/devwspito/safent-ads:latest",
+            "ghcr.io/devwspito/safent-ads:v0.2.2",
+            "ghcr.io/devwspito/safent-ads@sha256:short",
+            "ghcr.io/devwspito/safent-ads@sha256:" + "G" * 64,
+            "ghcr.io/other/ads@sha256:" + "a" * 64,
+        ],
+    )
     def test_mutable_or_malformed_recorded_image_fails_before_any_effect(
         self, tmp_path: Path, fake_cli_bin_dir: Path, recorded: str
     ) -> None:
@@ -1170,17 +1250,25 @@ class TestCompanionUpdate:
         _companion_bin_dir(home_dir, provisioned=True)
         log_path = tmp_path / "podman.log"
         result = _run_companion(
-            "update", fake_bin_dir=fake_cli_bin_dir, state_dir=state_dir,
-            home_dir=home_dir, podman_log=log_path, extra_env={"SAFENT_ADS_IMAGE": ""},
+            "update",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=log_path,
+            extra_env={"SAFENT_ADS_IMAGE": ""},
         )
         assert result.returncode != 0
         assert not log_path.exists() or log_path.read_text() == ""
         assert (state_dir / "image").read_text() == recorded
 
-    @pytest.mark.parametrize("override", [
-        "ghcr.io/devwspito/safent-ads:latest", "ghcr.io/devwspito/safent-ads:v0.2.3",
-        "ghcr.io/devwspito/safent-ads@sha256:" + "b" * 64,
-    ])
+    @pytest.mark.parametrize(
+        "override",
+        [
+            "ghcr.io/devwspito/safent-ads:latest",
+            "ghcr.io/devwspito/safent-ads:v0.2.3",
+            "ghcr.io/devwspito/safent-ads@sha256:" + "b" * 64,
+        ],
+    )
     def test_even_another_digest_cannot_override_the_registered_release(
         self, tmp_path: Path, fake_cli_bin_dir: Path, override: str
     ) -> None:
@@ -1189,8 +1277,11 @@ class TestCompanionUpdate:
         _companion_bin_dir(home_dir, provisioned=True)
         log_path = tmp_path / "podman.log"
         result = _run_companion(
-            "update", fake_bin_dir=fake_cli_bin_dir, state_dir=state_dir,
-            home_dir=home_dir, podman_log=log_path,
+            "update",
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=log_path,
             extra_env={"SAFENT_ADS_IMAGE": override},
         )
         assert result.returncode != 0
@@ -1234,9 +1325,7 @@ class TestCompanionUpdate:
         assert result.returncode == 0, result.stderr
         assert (state_dir / "image").read_text() == _PINNED_ADS_IMAGE
 
-    def test_fails_loud_when_not_provisioned(
-        self, tmp_path: Path, fake_cli_bin_dir: Path
-    ) -> None:
+    def test_fails_loud_when_not_provisioned(self, tmp_path: Path, fake_cli_bin_dir: Path) -> None:
         state_dir = _companion_state(tmp_path, provisioned=False)
         home_dir = tmp_path / "home"
         _companion_bin_dir(home_dir, provisioned=False)
@@ -1439,8 +1528,11 @@ class TestMissingImageMarkerFailsClosed:
         _companion_bin_dir(home_dir, provisioned=True)
         log_path = tmp_path / "podman.log"
         result = _run_companion(
-            verb, fake_bin_dir=fake_cli_bin_dir, state_dir=state_dir,
-            home_dir=home_dir, podman_log=log_path,
+            verb,
+            fake_bin_dir=fake_cli_bin_dir,
+            state_dir=state_dir,
+            home_dir=home_dir,
+            podman_log=log_path,
         )
         assert result.returncode != 0
         log = log_path.read_text() if log_path.exists() else ""
@@ -1604,9 +1696,7 @@ class TestCompanionRotate:
         assert persisted in log
         assert "ghcr.io/devwspito/safent-ads:latest" not in log
 
-    def test_fails_loud_when_sso_keygen_fails(
-        self, tmp_path: Path, fake_cli_bin_dir: Path
-    ) -> None:
+    def test_fails_loud_when_sso_keygen_fails(self, tmp_path: Path, fake_cli_bin_dir: Path) -> None:
         state_dir = _companion_state(tmp_path, provisioned=True)
         home_dir = tmp_path / "home"
         _companion_bin_dir(home_dir, provisioned=True)

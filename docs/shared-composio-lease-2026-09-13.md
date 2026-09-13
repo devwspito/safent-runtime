@@ -23,6 +23,12 @@ acceso a otras cuentas del proyecto Composio.
   llamante y devuelve únicamente una aceptación booleana.
 - El transporte reutiliza TLS con CA fijada y sesión SSO. La API Ads sólo
   retransmite un sobre cifrado por su socket Unix; únicamente el broker lo abre.
+- El instalador deriva la identidad pública del broker usando su clave privada
+  únicamente por stdin de un proceso aislado, sin red. Proyecta el resultado en
+  `/etc/hermes/companions/ads-composio-channel.pub`, propiedad de root y modo 0444.
+  El publicador verifica esta identidad local antes de leer el vault: la API Ads
+  no puede sustituir la clave receptora. Una proyección vacía, alterada o ausente
+  bloquea la publicación sin exponer credenciales.
 - X25519 + HKDF-SHA256 + AES-GCM protegen el sobre. Una firma Ed25519 con audiencia
   y propósito propios acredita al runtime. Sólo se proyecta al broker la clave
   PÚBLICA del emisor; nunca su clave privada.
@@ -65,6 +71,12 @@ prerrequisito del OAuth directo de Google.
 - Publicador: 226 pruebas de TLS real, cifrado, rotación, desactivación, política,
   SSO, DBus y puente. Interoperabilidad `_seal` runtime → consumidor Ads real.
 - Panel Ads: 15 pruebas focales de inicio, errores, expiración y explicación del ID.
+- Fijación de destinatario: 170 pruebas focales del runtime, 34 del broker/CLI
+  y 98 de provisionado y base de datos fría. El CLI devuelve sólo la clave pública;
+  los fallos de identidad impiden descifrar el vault y enviar la concesión.
+
+Versiones candidatas preparadas: runtime 0.9.17 y Ads 0.2.12. La publicación y
+la validación del binario instalado siguen pendientes al escribir esta nota.
 
 Estos resultados son pruebas de código, no aceptación de cuentas publicitarias.
 Antes de declarar el producto operativo debe publicarse e instalarse el binario,
