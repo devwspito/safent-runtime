@@ -11,6 +11,7 @@ fn main() {
             "open_ads_oauth",
             "open_provider_oauth",
             "show_native_updater",
+            "get_native_update_status",
             "cancel_bootstrap",
             "retry_bootstrap",
             "export_diagnostics",

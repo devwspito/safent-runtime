@@ -27,46 +27,123 @@ function resolveUpdateSignal(status: SystemUpdateStatus | null) {
     latestVersion: host?.to?.app ?? status?.latest_version ?? '' }
 }
 
+type NativeCheckResult = { status: 'available'; version: string } | { status: 'up_to_date'; version: null }
+
+function parseVersion(value: unknown): { core: string[]; prerelease: string[] } | null {
+  if (typeof value !== 'string' || value.length > 64) return null
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value)
+  if (!match) return null
+  const prerelease = match[4]?.split('.') ?? []
+  if (prerelease.some(part => /^\d+$/.test(part) && part.length > 1 && part.startsWith('0'))) return null
+  return { core: match.slice(1, 4), prerelease }
+}
+
+function compareNumeric(left: string, right: string): number {
+  return left.length !== right.length ? left.length - right.length : left === right ? 0 : left > right ? 1 : -1
+}
+
+function newerVersion(candidate: unknown, current: string): candidate is string {
+  const next = parseVersion(candidate)
+  const installed = parseVersion(current)
+  if (!next || !installed) return false
+  for (let index = 0; index < 3; index++) {
+    const order = compareNumeric(next.core[index], installed.core[index])
+    if (order) return order > 0
+  }
+  if (!next.prerelease.length || !installed.prerelease.length) return !next.prerelease.length && !!installed.prerelease.length
+  for (let index = 0; index < Math.max(next.prerelease.length, installed.prerelease.length); index++) {
+    const left = next.prerelease[index]
+    const right = installed.prerelease[index]
+    if (left === undefined || right === undefined) return right === undefined
+    if (left === right) continue
+    const leftNumeric = /^\d+$/.test(left)
+    const rightNumeric = /^\d+$/.test(right)
+    return leftNumeric && rightNumeric ? compareNumeric(left, right) > 0 : leftNumeric !== rightNumeric ? !leftNumeric : left > right
+  }
+  return false
+}
+
+function nativeCheckResult(value: unknown, appVersion: string): NativeCheckResult | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const data = value as Record<string, unknown>
+  if (Object.keys(data).some(key => !['status', 'app_version', 'version'].includes(key))
+    || data.app_version !== appVersion || !parseVersion(data.app_version)) return null
+  if (data.status === 'up_to_date' && data.version === null) return { status: 'up_to_date', version: null }
+  if (data.status === 'available' && newerVersion(data.version, appVersion)) return { status: 'available', version: data.version }
+  return null
+}
+
+function invokeNativeUpdate(command: 'get_native_update_status' | 'show_native_updater'): Promise<unknown> {
+  const invoke = (window as unknown as {
+    __TAURI__?: { core?: { invoke?: (command: string) => Promise<unknown> } };
+  }).__TAURI__?.core?.invoke
+  if (typeof invoke !== 'function') throw new Error('unavailable')
+  return invoke(command)
+}
+
 function NativeAppUpdateFooter({ appVersion, available }: { appVersion:string; available:boolean }) {
   const t = useT()
-  const [opening, setOpening] = useState(false)
-  const [error, setError] = useState(false)
+  const [action, setAction] = useState<'checking' | 'opening' | null>(null)
+  const [result, setResult] = useState<NativeCheckResult | null>(null)
+  const [error, setError] = useState<'check' | 'open' | null>(null)
   const [requested, setRequested] = useState(false)
   const pending = useRef(false)
   const alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
 
-  async function showUpdater() {
+  async function checkUpdates() {
     if (pending.current || !available) return
     pending.current = true
-    setOpening(true)
-    setError(false)
+    setAction('checking')
+    setResult(null)
+    setError(null)
     setRequested(false)
     try {
-      const invoke = (window as unknown as {
-        __TAURI__?: { core?: { invoke?: (command:string) => Promise<unknown> } };
-      }).__TAURI__?.core?.invoke
-      if (!invoke) throw new Error('unavailable')
-      await invoke('show_native_updater')
-      if (alive.current) setRequested(true)
+      const checked = nativeCheckResult(await invokeNativeUpdate('get_native_update_status'), appVersion)
+      if (!checked) throw new Error('unconfirmed')
+      if (alive.current) setResult(checked)
     } catch {
-      if (alive.current) setError(true)
+      if (alive.current) setError('check')
     } finally {
       pending.current = false
-      if (alive.current) setOpening(false)
+      if (alive.current) setAction(null)
+    }
+  }
+
+  async function showUpdater() {
+    if (pending.current || !available || result?.status !== 'available') return
+    pending.current = true
+    setAction('opening')
+    setError(null)
+    setRequested(false)
+    try {
+      // No target version, check token or artifacts cross this boundary. Native
+      // rechecks its signed source and asks for confirmation before installing.
+      await invokeNativeUpdate('show_native_updater')
+      if (alive.current) {
+        setResult(null)
+        setRequested(true)
+      }
+    } catch {
+      if (alive.current) setError('open')
+    } finally {
+      pending.current = false
+      if (alive.current) setAction(null)
     }
   }
 
   return <section className={css.footer} aria-label={t('sysupdate.section')}>
     <p className={css.native}>{t('sysupdate.native.version').replace('{v}', appVersion)}</p>
     {available ? <>
-      <button type="button" className="cv-btn cv-btn--ghost cv-btn--sm" disabled={opening}
-        aria-busy={opening} onClick={() => { void showUpdater() }}>
+      <button type="button" className="cv-btn cv-btn--ghost cv-btn--sm" disabled={action !== null}
+        aria-busy={action !== null} onClick={() => { void (result?.status === 'available' ? showUpdater() : checkUpdates()) }}>
         <RefreshCw size={13} aria-hidden="true" />
-        {t(opening ? 'sysupdate.native.opening' : 'sysupdate.native.check')}
+        {t(action === 'checking' ? 'sysupdate.native.checking' : action === 'opening' ? 'sysupdate.native.opening' : result?.status === 'available' ? 'sysupdate.action' : 'sysupdate.native.check')}
       </button>
+      {result?.status === 'available' && <p role="status" className={css.available}>{t('sysupdate.native.available').replace('{v}', result.version)}</p>}
+      {result?.status === 'up_to_date' && <p role="status">{t('sysupdate.native.up_to_date')}</p>}
       {requested && <p role="status">{t('sysupdate.native.requested')}</p>}
-      {error && <p role="alert" className={css.error}>{t('sysupdate.native.error')}</p>}
+      {error && <p role="alert" className={css.error}>{t(error === 'check' ? 'sysupdate.native.check_error' : 'sysupdate.native.error')}</p>}
     </> : <p role="status">{t('sysupdate.native.unavailable')}</p>}
   </section>
 }
@@ -81,7 +158,7 @@ export function SystemUpdateFooter() {
       && data.app_version.length <= 64 && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(data.app_version)) {
       // The native signed bundle owns app, engine and companion versions.
       // Never poll or offer the independent legacy engine updater in this mode.
-      return <NativeAppUpdateFooter appVersion={data.app_version} available={available} />
+      return <NativeAppUpdateFooter key={`${data.app_version}:${available}`} appVersion={data.app_version} available={available} />
     }
   }
   return <LegacySystemUpdateFooter />

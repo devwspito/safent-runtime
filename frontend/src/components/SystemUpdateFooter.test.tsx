@@ -21,6 +21,7 @@ vi.mock('../api/client', () => ({
 }))
 
 import { SystemUpdateFooter } from './SystemUpdateFooter'
+import { I18nProvider } from '../lib/i18n'
 
 function status(overrides: Partial<Awaited<ReturnType<typeof getSystemUpdate>>> = {}) {
   return {
@@ -42,6 +43,7 @@ describe('SystemUpdateFooter', () => {
     requestSystemUninstall.mockReset().mockResolvedValue({ ok: true })
     postInstallRequest.mockReset()
     getInstallRequests.mockReset().mockResolvedValue({ requests: [] })
+    localStorage.clear()
     delete (window as unknown as Record<string, unknown>).__safentUpdate
     delete (window as unknown as Record<string, unknown>).__safentLatestVersion
     delete (window as unknown as Record<string, unknown>).__safentNativeUpdater
@@ -54,6 +56,7 @@ describe('SystemUpdateFooter', () => {
     act(() => { root.unmount() })
     container.remove()
     vi.unstubAllGlobals()
+    localStorage.clear()
   })
 
   async function render() {
@@ -98,23 +101,32 @@ describe('SystemUpdateFooter', () => {
     expect(container.querySelector('button')).toBeNull()
   })
 
-  it('always offers the signed native app review without checking or offering an engine update', async () => {
-    const invoke = vi.fn().mockResolvedValue(undefined)
+  it('checks on demand before offering Update, then asks native to recheck and confirm without arguments', async () => {
+    const invoke = vi.fn().mockResolvedValueOnce({ status: 'available', app_version: '0.9.19', version: '0.9.20' }).mockResolvedValue(undefined)
     vi.stubGlobal('__TAURI__', { core: { invoke } })
     vi.stubGlobal('__safentNativeUpdater', { status:'available', reason:'app_only', app_version:'0.9.19' })
     getSystemUpdate.mockResolvedValue(status({ update_available:true, latest_version:'99.0.0' }))
     await render()
     expect(container.textContent).toContain('App nativa 0.9.19')
     const button = container.querySelector('button')!
-    expect(button.textContent).toContain('Buscar actualización de la app')
+    expect(button.textContent).toBe('Buscar actualizaciones')
     expect(invoke).not.toHaveBeenCalled()
     expect(getSystemUpdate).not.toHaveBeenCalled()
     expect(getInstallRequests).not.toHaveBeenCalled()
     await act(async () => { button.click() })
-    expect(invoke).toHaveBeenCalledExactlyOnceWith('show_native_updater')
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('get_native_update_status')
+    expect(button.textContent).toBe('Actualizar')
+    expect(container.querySelector('[role=status]')?.textContent).toBe('Versión 0.9.20 disponible')
+    expect(container.textContent).not.toContain('Solicitud enviada')
     expect(postInstallRequest).not.toHaveBeenCalled()
     expect(container.textContent).not.toContain('99.0.0')
-    expect(container.textContent).toContain('antes de instalar')
+    await act(async () => { button.click() })
+    expect(invoke.mock.calls).toEqual([['get_native_update_status'], ['show_native_updater']])
+    expect(container.textContent).toContain('Solicitud enviada al actualizador')
+    expect(container.textContent).toContain('la instalación requiere tu confirmación')
+    expect(button.textContent).toBe('Buscar actualizaciones')
+    expect(container.textContent).not.toContain('0.9.20 disponible')
+    expect(postInstallRequest).not.toHaveBeenCalled()
     expect(document.querySelector('[role=alertdialog]')).toBeNull()
   })
 
@@ -125,6 +137,7 @@ describe('SystemUpdateFooter', () => {
       vi.stubGlobal('__TAURI__', { core: { invoke } })
       vi.stubGlobal('__safentNativeUpdater', { status:'available', reason:'app_only', app_version:'0.9.19' })
       await render()
+      await act(async () => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')) })
       await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60_000) })
       expect(invoke).not.toHaveBeenCalled()
       expect(getSystemUpdate).not.toHaveBeenCalled()
@@ -133,9 +146,9 @@ describe('SystemUpdateFooter', () => {
     } finally { vi.useRealTimers() }
   })
 
-  it('singleflights the native dialog request and safely offers retry after IPC failure', async () => {
+  it('singleflights the native check and safely offers retry after IPC failure', async () => {
     let reject!:(error:Error) => void
-    const invoke = vi.fn().mockReturnValueOnce(new Promise((_, fail) => { reject = fail })).mockResolvedValue(undefined)
+    const invoke = vi.fn().mockReturnValueOnce(new Promise((_, fail) => { reject = fail })).mockResolvedValue({ status: 'up_to_date', app_version: '0.9.19', version: null })
     vi.stubGlobal('__TAURI__', { core: { invoke } })
     vi.stubGlobal('__safentNativeUpdater', { status:'available', reason:'app_only', app_version:'0.9.19' })
     await render()
@@ -143,12 +156,17 @@ describe('SystemUpdateFooter', () => {
     await act(async () => { button.click(); button.click() })
     expect(invoke).toHaveBeenCalledTimes(1)
     expect(button.disabled).toBe(true)
+    expect(button.getAttribute('aria-busy')).toBe('true')
+    expect(button.textContent).toBe('Buscando…')
     await act(async () => { reject(new Error('private IPC details')) })
-    expect(container.textContent).toContain('No se pudo abrir el actualizador')
+    expect(container.textContent).toContain('No se pudieron buscar actualizaciones')
     expect(container.textContent).not.toContain('private IPC details')
     expect(button.disabled).toBe(false)
     await act(async () => { button.click() })
     expect(invoke).toHaveBeenCalledTimes(2)
+    expect(invoke.mock.calls).toEqual([['get_native_update_status'], ['get_native_update_status']])
+    expect(button.textContent).toBe('Buscar actualizaciones')
+    expect(container.querySelector('[role=status]')?.textContent).toBe('Safent está actualizado')
     expect(container.querySelector('[role=alert]')).toBeNull()
     expect(postInstallRequest).not.toHaveBeenCalled()
   })
@@ -158,9 +176,135 @@ describe('SystemUpdateFooter', () => {
     vi.stubGlobal('__safentNativeUpdater', { status:'available', reason:'app_only', app_version:'0.9.19' })
     await render()
     await act(async () => { container.querySelector('button')!.click() })
-    expect(container.textContent).toContain('No se pudo abrir el actualizador')
+    expect(container.textContent).toContain('No se pudieron buscar actualizaciones')
     expect(postInstallRequest).not.toHaveBeenCalled()
     expect(getSystemUpdate).not.toHaveBeenCalled()
+  })
+
+  it('distinguishes native updater launch failure from search failure and singleflights the launch', async () => {
+    let reject!: (error: Error) => void
+    const invoke = vi.fn()
+      .mockResolvedValueOnce({ status: 'available', app_version: '0.9.19', version: '0.9.20' })
+      .mockReturnValueOnce(new Promise((_, fail) => { reject = fail }))
+      .mockResolvedValue(null)
+    vi.stubGlobal('__TAURI__', { core: { invoke } })
+    vi.stubGlobal('__safentNativeUpdater', { status: 'available', reason: 'app_only', app_version: '0.9.19' })
+    await render()
+    const button = container.querySelector('button')!
+    await act(async () => { button.click() })
+    await act(async () => { button.click(); button.click() })
+    expect(button.disabled).toBe(true)
+    expect(button.textContent).toBe('Abriendo actualizador…')
+    expect(invoke.mock.calls).toEqual([['get_native_update_status'], ['show_native_updater']])
+    await act(async () => { reject(new Error('private native details')) })
+    expect(container.querySelector('[role=alert]')?.textContent).toContain('No se pudo abrir el actualizador')
+    expect(container.textContent).not.toContain('private native details')
+    expect(container.textContent).not.toContain('Solicitud enviada')
+    expect(button.disabled).toBe(false)
+    expect(button.textContent).toBe('Actualizar')
+    await act(async () => { button.click() })
+    expect(invoke.mock.calls).toEqual([['get_native_update_status'], ['show_native_updater'], ['show_native_updater']])
+    expect(container.querySelector('[role=alert]')).toBeNull()
+    expect(container.textContent).toContain('Solicitud enviada al actualizador')
+    expect(postInstallRequest).not.toHaveBeenCalled()
+    expect(getSystemUpdate).not.toHaveBeenCalled()
+  })
+
+  it('keeps Check available after up-to-date and requires another deliberate check to discover a version', async () => {
+    const invoke = vi.fn()
+      .mockResolvedValueOnce({ status: 'up_to_date', app_version: '0.9.19', version: null })
+      .mockResolvedValueOnce({ status: 'available', app_version: '0.9.19', version: '0.9.21' })
+    vi.stubGlobal('__TAURI__', { core: { invoke } })
+    vi.stubGlobal('__safentNativeUpdater', { status: 'available', reason: 'app_only', app_version: '0.9.19' })
+    await render()
+    const button = container.querySelector('button')!
+    await act(async () => { button.click() })
+    expect(container.textContent).toContain('Safent está actualizado')
+    expect(button.textContent).toBe('Buscar actualizaciones')
+    await act(async () => { button.click() })
+    expect(container.textContent).not.toContain('Safent está actualizado')
+    expect(container.textContent).toContain('Versión 0.9.21 disponible')
+    expect(button.textContent).toBe('Actualizar')
+    expect(invoke.mock.calls).toEqual([['get_native_update_status'], ['get_native_update_status']])
+  })
+
+  it.each([
+    null, [], {}, { status: 'unknown', app_version: '0.9.19', version: null },
+    { status: 'up_to_date', app_version: '0.9.19' },
+    { status: 'up_to_date', app_version: '0.9.19', version: '0.9.20' },
+    { status: 'available', app_version: '0.9.18', version: '0.9.20' },
+    { status: 'available', version: '0.9.20' },
+    { status: 'available', app_version: '0.9.19', version: null },
+    { status: 'available', app_version: '0.9.19', version: '0.9.20', check_id: 'not-an-install-permission' },
+    { status: 'available', app_version: '0.9.19', version: '0.9.20', artifacts: ['private-artifact'] },
+  ])('fails closed on an unknown or malformed native status (case %#)', async response => {
+    const invoke = vi.fn().mockResolvedValue(response)
+    vi.stubGlobal('__TAURI__', { core: { invoke } })
+    vi.stubGlobal('__safentNativeUpdater', { status: 'available', reason: 'app_only', app_version: '0.9.19' })
+    await render()
+    await act(async () => { container.querySelector('button')!.click() })
+    expect(container.querySelector('[role=alert]')?.textContent).toContain('No se pudieron buscar actualizaciones')
+    expect(container.querySelector('button')!.textContent).toBe('Buscar actualizaciones')
+    expect(container.querySelector('button')!.disabled).toBe(false)
+    expect(container.textContent).not.toMatch(/Safent está actualizado|Versión .* disponible|private-artifact|not-an-install-permission/)
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('get_native_update_status')
+    expect(getSystemUpdate).not.toHaveBeenCalled()
+    expect(postInstallRequest).not.toHaveBeenCalled()
+  })
+
+  it.each(['', 'v0.9.20', '0.9', '0.9.20<script>', '00.9.20', '0.9.20-01', '0.9.20_bad', '0.9.20+abc..def', `0.9.20+${'a'.repeat(60)}`, '0.9.18', '0.9.19', '0.9.19+build', '0.9.19-rc.1'])(
+    'does not offer an invalid, old or equal native version: %s', async version => {
+      const invoke = vi.fn().mockResolvedValue({ status: 'available', app_version: '0.9.19', version })
+      vi.stubGlobal('__TAURI__', { core: { invoke } })
+      vi.stubGlobal('__safentNativeUpdater', { status: 'available', reason: 'app_only', app_version: '0.9.19' })
+      await render()
+      await act(async () => { container.querySelector('button')!.click() })
+      expect(container.querySelector('[role=alert]')).not.toBeNull()
+      expect(container.querySelector('button')!.textContent).toBe('Buscar actualizaciones')
+      expect(postInstallRequest).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each([
+    ['0.9.19', '0.9.20'], ['0.9.19', '0.10.0'], ['0.9.19', '1.0.0+build'],
+    ['0.9.20-rc.1', '0.9.20'], ['0.9.20-rc.9', '0.9.20-rc.10'],
+    ['0.9.20-alpha', '0.9.20-beta'], ['0.9.20-1', '0.9.20-alpha'], ['0.9.20-rc', '0.9.20-rc.1'],
+  ])('offers a confirmed newer native semver from %s to %s', async (appVersion, version) => {
+    const invoke = vi.fn().mockResolvedValue({ status: 'available', app_version: appVersion, version })
+    vi.stubGlobal('__TAURI__', { core: { invoke } })
+    vi.stubGlobal('__safentNativeUpdater', { status: 'available', reason: 'app_only', app_version: appVersion })
+    await render()
+    await act(async () => { container.querySelector('button')!.click() })
+    expect(container.querySelector('button')!.textContent).toBe('Actualizar')
+    expect(container.querySelector('[role=alert]')).toBeNull()
+    expect(container.querySelector('[role=status]')?.textContent).toBe(`Versión ${version} disponible`)
+  })
+
+  it('ignores a late status response after the native app context changes', async () => {
+    let finish!: (response: unknown) => void
+    const invoke = vi.fn().mockReturnValue(new Promise(resolve => { finish = resolve }))
+    vi.stubGlobal('__TAURI__', { core: { invoke } })
+    vi.stubGlobal('__safentNativeUpdater', { status: 'available', reason: 'app_only', app_version: '0.9.19' })
+    await render()
+    await act(async () => { container.querySelector('button')!.click() })
+    vi.stubGlobal('__safentNativeUpdater', { status: 'available', reason: 'app_only', app_version: '0.9.20' })
+    await render()
+    await act(async () => { finish({ status: 'available', app_version: '0.9.19', version: '0.9.21' }) })
+    expect(container.textContent).toContain('App nativa 0.9.20')
+    expect(container.textContent).not.toContain('0.9.21')
+    expect(container.querySelector('button')!.textContent).toBe('Buscar actualizaciones')
+    expect(invoke).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders the native check outcome in English', async () => {
+    localStorage.setItem('safent_ui_locale', 'en')
+    const invoke = vi.fn().mockResolvedValue({ status: 'up_to_date', app_version: '0.9.19', version: null })
+    vi.stubGlobal('__TAURI__', { core: { invoke } })
+    vi.stubGlobal('__safentNativeUpdater', { status: 'available', reason: 'app_only', app_version: '0.9.19' })
+    await act(async () => { root.render(<I18nProvider><SystemUpdateFooter /></I18nProvider>) })
+    expect(container.querySelector('button')!.textContent).toBe('Check for updates')
+    await act(async () => { container.querySelector('button')!.click() })
+    expect(container.querySelector('[role=status]')?.textContent).toBe('Safent is up to date')
   })
 
   it('shows an unsigned native build honestly without offering independent engine mutation', async () => {

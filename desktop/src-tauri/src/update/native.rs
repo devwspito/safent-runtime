@@ -1,5 +1,6 @@
 //! App-only updater. The engine/Ads transaction is deliberately NOT invoked.
-//! Download URLs and signatures stay host-owned; only a checked ID crosses IPC.
+//! Download URLs and signatures stay host-owned. Checked IDs only cross local
+//! loader IPC; the remote product receives a separate display-only status.
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -19,6 +20,47 @@ pub struct CheckResult {
     app_version: String,
     version: Option<String>,
     check_id: Option<u64>,
+}
+
+/// Deliberately separate from CheckResult: never serialize a host snapshot,
+/// artifact location, signature, error body, or installation capability.
+#[derive(Debug, serde::Serialize)]
+pub struct NativeUpdateStatus {
+    status: &'static str,
+    app_version: String,
+    version: Option<String>,
+}
+
+fn product_status(result: Result<CheckResult, String>, app_version: &str) -> NativeUpdateStatus {
+    let mut status = NativeUpdateStatus {
+        status: "unknown",
+        app_version: app_version.to_owned(),
+        version: None,
+    };
+    let Ok(checked) = result else { return status };
+    match checked.status {
+        "up_to_date" if checked.version.is_none() => status.status = "up_to_date",
+        "available" => {
+            if let Some(version) = checked.version.filter(|value| value.len() <= 64) {
+                if let (Ok(next), Ok(current)) = (
+                    semver::Version::parse(&version),
+                    semver::Version::parse(app_version),
+                ) {
+                    if next > current {
+                        status.status = "available";
+                        status.version = Some(next.to_string());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    status
+}
+
+pub async fn status_for_product(app: &tauri::AppHandle) -> NativeUpdateStatus {
+    let app_version = app.package_info().version.to_string();
+    product_status(check(app).await, &app_version)
 }
 
 struct Pending<T> {
@@ -297,6 +339,81 @@ fn error_message(code: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn product_status_exposes_only_public_versions_never_the_host_check_id() {
+        let available = product_status(
+            Ok(CheckResult {
+                status: "available",
+                app_version: "ignored-host-field".into(),
+                version: Some("0.9.20".into()),
+                check_id: Some(123456),
+            }),
+            "0.9.19",
+        );
+        assert_eq!(
+            serde_json::to_value(available).unwrap(),
+            serde_json::json!({
+                "status": "available", "app_version": "0.9.19", "version": "0.9.20",
+            })
+        );
+        let current = product_status(
+            Ok(CheckResult {
+                status: "up_to_date",
+                app_version: "ignored-host-field".into(),
+                version: None,
+                check_id: None,
+            }),
+            "0.9.19",
+        );
+        assert_eq!(
+            serde_json::to_value(current).unwrap(),
+            serde_json::json!({
+                "status": "up_to_date", "app_version": "0.9.19", "version": null,
+            })
+        );
+    }
+    #[test]
+    fn product_status_redacts_errors_and_rejects_invalid_or_non_newer_versions() {
+        let expected = serde_json::json!({
+            "status": "unknown", "app_version": "0.9.19", "version": null,
+        });
+        assert_eq!(
+            serde_json::to_value(product_status(
+                Err("private error https://secret.example/?token=fixture".into()),
+                "0.9.19",
+            ))
+            .unwrap(),
+            expected
+        );
+        for version in [
+            "0.9.18",
+            "0.9.19",
+            "latest",
+            "https://secret.example/fixture",
+            "0.9.20\nprivate",
+        ] {
+            let result = CheckResult {
+                status: "available",
+                app_version: "0.9.19".into(),
+                version: Some(version.into()),
+                check_id: Some(123456),
+            };
+            assert_eq!(
+                serde_json::to_value(product_status(Ok(result), "0.9.19")).unwrap(),
+                expected
+            );
+        }
+        let oversized = CheckResult {
+            status: "available",
+            app_version: "0.9.19".into(),
+            version: Some(format!("0.9.20+{}", "a".repeat(65))),
+            check_id: Some(123456),
+        };
+        assert_eq!(
+            serde_json::to_value(product_status(Ok(oversized), "0.9.19")).unwrap(),
+            expected
+        );
+    }
     #[test]
     fn snapshot_is_exact_one_shot_and_expires() {
         let mut snapshot = Snapshot::default();

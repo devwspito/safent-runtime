@@ -234,6 +234,7 @@ fn main() {
             window_policy::open_ads_oauth,
             window_policy::open_provider_oauth,
             window_policy::show_native_updater,
+            window_policy::get_native_update_status,
             boot::cancel_bootstrap,
             boot::retry_bootstrap,
             diagnostics::export_diagnostics,

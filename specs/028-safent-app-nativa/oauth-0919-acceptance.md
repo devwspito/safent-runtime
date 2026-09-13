@@ -1,4 +1,4 @@
-# OAuth usability follow-up — 0.9.19 candidate
+# OAuth usability follow-up — 0.9.19 / 0.9.20 candidates
 
 ## Problem and changes
 
@@ -22,18 +22,25 @@ step in Ads and all advertising mutations remain subject to the cage.
 The prior image-content alias fix is included. The companion CLI fixture now
 models the public recipient pin, without weakening the production check.
 
-Native builds now always show an app-update check action and app version in
-the product sidebar. `show_native_updater` only opens the existing host-owned
-review/confirmation flow, with no URL or install parameters, and requires the
-current main-window boot origin. Direct check/install permissions remain local
-to the bundled UI. Native mode does not poll or offer independent engine updates.
-This is a manual check action, not an automatic new-version notification.
+Native builds show an app-update action and app version in the product sidebar.
+The user's follow-up requires explicit stateful labels: “Buscar actualizaciones”
+before a check, “Buscando…” during it, and “Actualizar” only after a real check
+confirms a newer version. A successful check without an update reports “Safent
+está actualizado”. Failures must never claim either availability or success.
+
+`get_native_update_status` returns only public status/version information, with
+no check ID, signature or artifact URL. `show_native_updater` opens the existing
+host-owned recheck/confirmation flow, with no URL or install parameters. Both
+require the current main-window boot origin. Direct check/install permissions
+remain local to the bundled UI. Native mode does not poll or offer independent
+engine updates. Installation always requires the native confirmation.
 
 ## Verification before publication
 
-- Frontend: 470 tests passed; TypeScript passed. Production build passed before
-  the final native-footer addition; release CI must build the final version.
-- Native: 160 tests passed, including exact Meta help and updater caller checks.
+- Frontend: 506 tests passed, including 56 footer cases; TypeScript and final
+  production build passed.
+- Native: 162 tests passed, including exact Meta help, updater caller checks
+  and public update-status projection/redaction.
 - Backend Composio/configuration/lease/security: 198 tests passed.
 - CLI installation/porcelain/backup: 192 tests passed, including the previously
   failing recipient-pin fixtures.
@@ -70,9 +77,13 @@ de la app…”. Its fixed endpoint uses the GitHub latest release. At inspectio
 that release was v0.9.5: newer published builds were prereleases and therefore
 not offered by this feed. Successful candidate CI does not promote stable/latest.
 
-Publish v0.9.19 as a signed candidate first. Promotion changes the update channel
+Tag v0.9.19 was pushed before the user's stateful-label follow-up; no desktop
+workflow was dispatched for that tag. Preserve the immutable tag and use
+v0.9.20 for the combined change instead.
+
+Publish v0.9.20 as a signed candidate first. Promotion changes the update channel
 for all users; record that decision separately and do not claim GUI acceptance
 from a successful build alone. The user specifically wants to test the updater:
 do not replace /Applications/Safent.app manually or erase their data. The first
 update must be initiated by them from the existing native tray action. The new
-sidebar action becomes available after the signed 0.9.19 update is installed.
+sidebar action becomes available after the signed 0.9.20 update is installed.

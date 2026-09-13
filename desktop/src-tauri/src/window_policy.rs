@@ -222,6 +222,22 @@ pub fn show_native_updater(
     Ok(())
 }
 
+/// Explicit read-only display check. Native code owns the endpoint, validation
+/// and snapshot; this caller cannot provide input or obtain an install handle.
+#[tauri::command]
+pub async fn get_native_update_status(
+    app: AppHandle,
+    window: WebviewWindow,
+    policy: tauri::State<'_, WindowPolicy>,
+) -> Result<crate::update::native::NativeUpdateStatus, String> {
+    const DENIED: &str = "No se pudo comprobar la actualización de Safent desde esta ventana.";
+    let requester = window.url().map_err(|_| DENIED.to_string())?;
+    if !native_updater_caller_allowed(policy.authorized().as_ref(), &requester, window.label()) {
+        return Err(DENIED.into());
+    }
+    Ok(crate::update::native::status_for_product(&app).await)
+}
+
 fn validated_provider_oauth_open_request(
     authorized: Option<&Url>,
     requester: &Url,
@@ -586,7 +602,8 @@ mod tests {
                 "allow-write-host-clipboard",
                 "allow-open-ads-oauth",
                 "allow-open-provider-oauth",
-                "allow-show-native-updater"
+                "allow-show-native-updater",
+                "allow-get-native-update-status"
             ])
         );
     }
