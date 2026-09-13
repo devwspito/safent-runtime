@@ -147,6 +147,13 @@ pub fn is_external_oauth_allowed(authorized: Option<&Url>, target: &Url) -> bool
         && redirect.path() == format!("/ads/api/v1/platform-accounts/{provider}/reconnect/callback")
 }
 
+/// The one provider access-recovery link exposed by the Ads panel. It is not
+/// an OAuth endpoint and grants no permission to other Cloud paths or queries.
+fn is_external_help_allowed(authorized: Option<&Url>, target: &Url) -> bool {
+    authorized.is_some()
+        && target.as_str() == "https://console.cloud.google.com/google/ads-apis/overview"
+}
+
 fn is_meta_oauth_path(path: &str) -> bool {
     path.strip_prefix("/v")
         .and_then(|rest| rest.strip_suffix("/dialog/oauth"))
@@ -219,7 +226,10 @@ pub fn create_main_window(app: &AppHandle, policy: WindowPolicy) -> tauri::Resul
             ))
             .on_navigation(move |url| is_navigation_allowed(policy.authorized().as_ref(), url))
             .on_new_window(move |url, _features| {
-                if is_external_oauth_allowed(popup_policy.authorized().as_ref(), &url) {
+                let origin = popup_policy.authorized();
+                if is_external_oauth_allowed(origin.as_ref(), &url)
+                    || is_external_help_allowed(origin.as_ref(), &url)
+                {
                     open_oauth_in_system_browser(&oauth_app, &url);
                 } else if matches!(
                     url.host_str(),
@@ -303,6 +313,32 @@ pub fn install_tray(app: &AppHandle) -> tauri::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_exact_google_ads_access_help_may_open_outside_the_live_app() {
+        let origin = Url::parse("http://127.0.0.1:35335/").unwrap();
+        let help = Url::parse("https://console.cloud.google.com/google/ads-apis/overview").unwrap();
+        assert!(is_external_help_allowed(Some(&origin), &help));
+        assert!(!is_external_help_allowed(None, &help));
+        assert!(!is_external_oauth_allowed(Some(&origin), &help));
+        assert!(!is_navigation_allowed(Some(&origin), &help));
+        for target in [
+            "http://console.cloud.google.com/google/ads-apis/overview",
+            "https://console.cloud.google.com:444/google/ads-apis/overview",
+            "https://console.cloud.google.com.evil.example/google/ads-apis/overview",
+            "https://user@console.cloud.google.com/google/ads-apis/overview",
+            "https://console.cloud.google.com/google/ads-apis/overview/",
+            "https://console.cloud.google.com/google/ads-apis/overview?next=https://evil.example",
+            "https://console.cloud.google.com/google/ads-apis/overview#fragment",
+            "https://console.cloud.google.com/compute/instances",
+            "https://console.cloud.google.com/google/ads-apis/%6fverview",
+        ] {
+            assert!(
+                !is_external_help_allowed(Some(&origin), &Url::parse(target).unwrap()),
+                "{target}"
+            );
+        }
+    }
 
     fn oauth_url(provider: &str, redirect: &str) -> Url {
         let endpoint = if provider == "google" {

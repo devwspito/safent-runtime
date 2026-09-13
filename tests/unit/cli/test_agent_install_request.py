@@ -41,6 +41,9 @@ _FAKE_PODMAN = r"""#!/usr/bin/env bash
 set -e
 echo "$@" >> "$FAKE_PODMAN_LOG"
 case "$1" in
+  volume)
+    [ "$2" != inspect ] || echo 'local|0|ads-runtime-projection'
+    exit 0 ;;
   inspect)
     case "$*" in
       *com.docker.compose.service*)

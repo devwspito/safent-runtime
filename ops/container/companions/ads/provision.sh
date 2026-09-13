@@ -164,7 +164,7 @@ ensure_bearer() {
 
 # ── 4. companions.json (exact shape hermes.shell_server.companions validates) ─
 write_companions_json() {
-  local fingerprint fingerprint_hex
+  local fingerprint fingerprint_hex registry_tmp
   # OpenSSL is already a hard dependency for the CA and bearer.  Use it for
   # the digest too instead of GNU sha256sum: stock macOS exposes no
   # sha256sum on the GUI app's minimal PATH, which used to disable the Ads
@@ -178,7 +178,10 @@ write_companions_json() {
   # Written to a temp name first: the live file is 0444 and (when we could
   # chown it) root-owned, so `cat >` onto it would fail — rename in the
   # owner-writable $STATE dir is the only re-provision path that works.
-  cat > "$STATE/companions.json.tmp" <<JSON
+  # A previous interrupted write may leave the legacy fixed .tmp read-only.
+  # Never reopen it or follow it: stage this attempt in a fresh owned file.
+  registry_tmp="$(mktemp "$STATE/.companions.XXXXXX")"
+  cat > "$registry_tmp" <<JSON
 {"version": 1, "companions": [{
   "slug": "safent-ads",
   "url": "https://$COMPANION_HOST:$COMPANION_PORT/mcp",
@@ -195,16 +198,16 @@ JSON
   # relies on its second branch (the `:ro` bind mount), which we always
   # provide from run-safent.sh. Never fail provisioning over the chown: the
   # 0444 mode + read-only mount already carry the invariant.
-  chmod 0444 "$STATE/companions.json.tmp"
+  chmod 0444 "$registry_tmp"
   if [ "$(id -u)" -eq 0 ]; then
-    chown 0:0 "$STATE/companions.json.tmp"
+    chown 0:0 "$registry_tmp"
   elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    sudo -n chown 0:0 "$STATE/companions.json.tmp" || \
+    sudo -n chown 0:0 "$registry_tmp" || \
       log "sin privilegios para chown root:root — vale igual (bind :ro + 0444)"
   else
     log "sin sudo no interactivo — companions.json queda 0444 de tu usuario (bind :ro lo protege)"
   fi
-  mv -f "$STATE/companions.json.tmp" "$STATE/companions.json"
+  mv -f "$registry_tmp" "$STATE/companions.json"
 }
 
 # ── 5. Image — the owner's published release, pulled only if absent ─────────
@@ -379,14 +382,29 @@ ensure_sso_keypair() {
 # allowlisted projection in a Linux volume, with real root ownership. A
 # directory mount also observes atomic replacements (individual file binds
 # otherwise keep the empty scaffold SSO inode forever).
+ensure_runtime_projection_volume() {
+  local identity
+  # Podman fails `volume create` on an existing name; Docker may reuse it.
+  # Never adopt an unrelated or host-backed volume, including after a race.
+  if ! identity="$("$RUNTIME" volume inspect --format '{{.Driver}}|{{len .Options}}|{{index .Labels "com.safent.component"}}' \
+      "$COMPANION_RUNTIME_VOLUME" 2>/dev/null)"; then
+    "$RUNTIME" volume create --label com.safent.component=ads-runtime-projection \
+      "$COMPANION_RUNTIME_VOLUME" >/dev/null 2>&1 || true
+    identity="$("$RUNTIME" volume inspect --format '{{.Driver}}|{{len .Options}}|{{index .Labels "com.safent.component"}}' \
+      "$COMPANION_RUNTIME_VOLUME" 2>/dev/null)" \
+      || fail "no se pudo verificar el volumen privado de Anuncios"
+  fi
+  [ "$identity" = 'local|0|ads-runtime-projection' ] \
+    || fail "el volumen de Anuncios no pertenece a esta instalacion o tiene opciones incompatibles"
+}
+
 publish_runtime_projection() {
   local projection image
   image="${SAFENT_IMAGE:-$SAFENT_ADS_IMAGE}"
   "$RUNTIME" image inspect "$image" >/dev/null 2>&1 \
     || "$RUNTIME" pull "$image" >&2 \
     || fail "no se pudo preparar la imagen de la proyección privada"
-  "$RUNTIME" volume create --label com.safent.component=ads-runtime-projection \
-    "$COMPANION_RUNTIME_VOLUME" >/dev/null
+  ensure_runtime_projection_volume
   projection="$(mktemp -d "$STATE/.runtime.XXXXXX")"
   cp "$STATE/companions.json" "$projection/companions.json"
   cp "$STATE/tls/ca.crt" "$projection/ads-ca.crt"
@@ -401,14 +419,14 @@ publish_runtime_projection() {
         -v "$COMPANION_RUNTIME_VOLUME:/runtime" --entrypoint /bin/sh \
         "$image" -ec '
           umask 077
-          mkdir -p /runtime/.next
-          tar --no-same-owner -xf - -C /runtime/.next
-          chmod 0400 /runtime/.next/ads.bearer /runtime/.next/ads-sso.key
-          chmod 0444 /runtime/.next/companions.json /runtime/.next/ads-ca.crt
+          next="$(mktemp -d /runtime/.next.XXXXXX)"
+          trap '\''rm -f "$next/ads.bearer" "$next/ads-sso.key" "$next/ads-ca.crt" "$next/companions.json"; rmdir "$next"'\'' EXIT
+          tar --no-same-owner -xf - -C "$next"
+          chmod 0400 "$next/ads.bearer" "$next/ads-sso.key"
+          chmod 0444 "$next/companions.json" "$next/ads-ca.crt"
           for file in ads.bearer ads-sso.key ads-ca.crt companions.json; do
-            mv -f "/runtime/.next/$file" "/runtime/$file"
+            mv -f "$next/$file" "/runtime/$file"
           done
-          rmdir /runtime/.next
           chmod 0755 /runtime
         '; then
     rm -f "$projection/companions.json" "$projection/ads-ca.crt" \

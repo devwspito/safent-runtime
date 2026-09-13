@@ -37,6 +37,14 @@ _FAKE_PODMAN = """#!/usr/bin/env bash
 set -e
 echo "$@" >> "$FAKE_PODMAN_LOG"
 case "$1 $2" in
+  "volume inspect")
+    if [ "${FAKE_VOLUME_ABSENT:-0}" = 1 ] && [ ! -f "${FAKE_VOLUME_MARKER:-/nonexistent}" ]; then exit 1; fi
+    printf '%s\n' "${FAKE_VOLUME_IDENTITY-local|0|ads-runtime-projection}"
+    exit 0 ;;
+  "volume create")
+    [ "${FAKE_VOLUME_CREATE_FAIL:-0}" != 1 ] || exit 1
+    [ -z "${FAKE_VOLUME_MARKER:-}" ] || touch "$FAKE_VOLUME_MARKER"
+    exit 0 ;;
   "network inspect")
     echo "10.201.0.0/24"
     exit 0
@@ -184,6 +192,49 @@ def test_runtime_projection_contains_only_allowlisted_files(tmp_path, fake_bin_d
     commands = (tmp_path / "podman.log").read_text()
     assert "--network none --user 0:0 --read-only --cap-drop ALL" in commands
     assert "--security-opt no-new-privileges" in commands
+
+
+@pytest.mark.parametrize("identity", ["local|0|foreign", "local|0|", "local|1|ads-runtime-projection", "nfs|0|ads-runtime-projection"])
+def test_projection_refuses_foreign_or_host_backed_volume(tmp_path, fake_bin_dir, identity):
+    log = tmp_path / "podman.log"
+    result = _run_provision(tmp_path / "state", fake_bin_dir, log,
+                            extra_env={"FAKE_VOLUME_IDENTITY": identity})
+    assert result.returncode != 0
+    assert "no pertenece" in result.stderr
+    assert "safent-companion-runtime:/runtime" not in log.read_text()
+    assert "volume create" not in log.read_text()
+
+
+def test_projection_creates_once_and_reuses_owned_volume(tmp_path, fake_bin_dir):
+    log = tmp_path / "podman.log"
+    env = {"FAKE_VOLUME_ABSENT": "1", "FAKE_VOLUME_MARKER": str(tmp_path / "volume")}
+    for _ in range(2):
+        result = _run_provision(tmp_path / "state", fake_bin_dir, log, extra_env=env)
+        assert result.returncode == 0, result.stderr
+    assert log.read_text().count("volume create ") == 1
+
+
+def test_projection_creation_failure_is_not_treated_as_owned(tmp_path, fake_bin_dir):
+    log = tmp_path / "podman.log"
+    result = _run_provision(tmp_path / "state", fake_bin_dir, log, extra_env={
+        "FAKE_VOLUME_ABSENT": "1", "FAKE_VOLUME_CREATE_FAIL": "1",
+    })
+    assert result.returncode != 0
+    assert "no se pudo verificar" in result.stderr
+    assert "safent-companion-runtime:/runtime" not in log.read_text()
+
+
+def test_registry_write_ignores_legacy_readonly_temporary_file(tmp_path, fake_bin_dir):
+    state = tmp_path / "state"
+    state.mkdir()
+    residue = state / "companions.json.tmp"
+    residue.write_text("legacy-readonly")
+    residue.chmod(0o444)
+    result = _run_provision(state, fake_bin_dir, tmp_path / "podman.log")
+    assert result.returncode == 0, result.stderr
+    assert residue.read_text() == "legacy-readonly"
+    assert (state / "companions.json").is_file()
+    assert not list(state.glob(".companions.*"))
 
 
 def _hash_tree(root: Path) -> dict[str, str]:
@@ -684,6 +735,7 @@ class TestHonoursSafentPodmanOverPath:
             # it races the producer and can cause SIGPIPE under pipefail.
             'case "$*" in *"safent-companion-runtime:/runtime"*) cat >/dev/null; exit 0 ;; esac\n'
             'case "$1 $2" in\n'
+            '  "volume inspect") echo "local|0|ads-runtime-projection"; exit 0 ;;\n'
             '  "network inspect") echo "10.201.0.0/24"; exit 0 ;;\n'
             '  "network create") exit 0 ;;\n'
             "esac\n"
