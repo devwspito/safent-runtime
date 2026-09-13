@@ -208,4 +208,66 @@ describe('AdsView', () => {
     expect(container.textContent).toContain('Ads connections are set up in Integrations.')
     expect(container.querySelector('a[href="/capacidades?tab=integraciones"]')?.textContent).toBe('Configure connections')
   })
+
+  it.each(['google', 'meta'])('routes a setup request from its own iframe to the %s guide', provider => {
+    function Destination() {
+      const location = useLocation()
+      return <p>{location.pathname}{location.search}</p>
+    }
+    setAvailability('ready')
+    act(() => root.render(<MemoryRouter initialEntries={['/anuncios']}><Routes>
+      <Route path="/anuncios" element={<AdsView />} />
+      <Route path="/capacidades" element={<Destination />} />
+    </Routes></MemoryRouter>))
+    const frame = container.querySelector('iframe')!
+    expect(frame.dataset.safentSetup).toBe('true')
+    act(() => window.dispatchEvent(new MessageEvent('message', {
+      source: frame.contentWindow, origin: window.location.origin,
+      data: { type: 'safent:ads-setup', provider },
+    })))
+    expect(container.textContent).toBe(`/capacidades?tab=integraciones&ads_setup=${provider}`)
+    expect(container.querySelector('iframe')).toBeNull()
+  })
+
+  it.each(['other-origin', 'other-window', 'no-source', 'extra-field', 'unknown-provider', 'wrong-type', 'array', 'null', 'no-permission'])('rejects a setup message with %s', invalid => {
+    if (invalid === 'no-permission') useFeatures.mockReturnValue({ edition: 'community', isLoading: false, allowed: () => false })
+    setAvailability('ready')
+    render()
+    const frame = container.querySelector('iframe')!
+    const data = invalid === 'null' ? null : invalid === 'array' ? [] : {
+      type: invalid === 'wrong-type' ? 'navigate' : 'safent:ads-setup',
+      provider: invalid === 'unknown-provider' ? '../secrets' : 'meta',
+      ...(invalid === 'extra-field' ? { url: 'https://evil.test' } : {}),
+    }
+    act(() => window.dispatchEvent(new MessageEvent('message', {
+      source: invalid === 'no-source' ? null : invalid === 'other-window' ? window : frame.contentWindow,
+      origin: invalid === 'other-origin' ? 'https://evil.test' : window.location.origin,
+      data,
+    })))
+    expect(container.querySelector('iframe')).toBe(frame)
+    if (invalid === 'no-permission') expect(frame.dataset.safentSetup).toBeUndefined()
+  })
+
+  it('rejects setup messages from an iframe replaced by an explicit reload', () => {
+    setAvailability('ready')
+    render()
+    const oldWindow = container.querySelector('iframe')!.contentWindow
+    act(() => [...container.querySelectorAll('button')].find(button => button.textContent?.includes('Recargar panel'))!.click())
+    const frame = container.querySelector('iframe')!
+    act(() => window.dispatchEvent(new MessageEvent('message', { source: oldWindow, origin: window.location.origin,
+      data: { type: 'safent:ads-setup', provider: 'meta' } })))
+    expect(container.querySelector('iframe')).toBe(frame)
+  })
+
+  it.each(['google', 'meta'])('returns from the guide to account authorization for %s, without starting OAuth', provider => {
+    setAvailability('ready')
+    act(() => root.render(<MemoryRouter initialEntries={[`/anuncios?connect=${provider}`]}><AdsView /></MemoryRouter>))
+    expect(container.querySelector('iframe')?.getAttribute('src')).toBe(`/ads/conexiones?provider=${provider}`)
+  })
+
+  it('does not pass arbitrary return parameters to the embedded application', () => {
+    setAvailability('ready')
+    act(() => root.render(<MemoryRouter initialEntries={['/anuncios?connect=https://evil.test&secret=invalid']}><AdsView /></MemoryRouter>))
+    expect(container.querySelector('iframe')?.getAttribute('src')).toBe('/ads/')
+  })
 })

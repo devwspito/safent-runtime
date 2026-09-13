@@ -12,9 +12,9 @@
  * companion's own panel guides account connection, so Ads stays visible and
  * usable either way (Assumption 7 — never hidden for lack of accounts).
  */
-import { useContext, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowLeft, Loader2, Megaphone, RefreshCw, ShieldAlert, Wrench, Unplug } from 'lucide-react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useLocale, useT } from '../lib/i18n'
 import { useAdsAvailability } from '../hooks/useAdsAvailability'
 import { useFeatures } from '../hooks/useFeatures'
@@ -93,12 +93,32 @@ function AdsState({ icon, title, description, action, loading = false }: {
 
 function AdsPanel({ noAccounts }: { noAccounts: boolean }) {
   const t = useT()
+  const navigate = useNavigate()
+  const [search] = useSearchParams()
+  const requestedProvider = search.get('connect')
+  const connectProvider = requestedProvider === 'google' || requestedProvider === 'meta' ? requestedProvider : null
   const { locale } = useLocale()
   const features = useFeatures()
   const canConfigureConnections = !features.isLoading && features.edition === 'community' && features.allowed('integraciones')
   const workspace = useContext(AdsWorkspaceContext)
   const setPanelActive = workspace?.setPanelActive
   const returnButton = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLIFrameElement>(null)
+  // The companion can request this one navigation, never an arbitrary URL or
+  // a credential operation. Revalidate the actual iframe and current permission.
+  useEffect(() => {
+    if (!canConfigureConnections) return
+    const setup = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || !panelRef.current?.contentWindow || event.source !== panelRef.current.contentWindow) return
+      const data: unknown = event.data
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return
+      const request = data as Record<string, unknown>
+      if (Object.keys(request).length !== 2 || request.type !== 'safent:ads-setup' || (request.provider !== 'google' && request.provider !== 'meta')) return
+      navigate(`/capacidades?tab=integraciones&ads_setup=${request.provider}`)
+    }
+    window.addEventListener('message', setup)
+    return () => window.removeEventListener('message', setup)
+  }, [canConfigureConnections, navigate])
   useLayoutEffect(() => {
     setPanelActive?.(true)
     returnButton.current?.focus()
@@ -125,7 +145,10 @@ function AdsPanel({ noAccounts }: { noAccounts: boolean }) {
       {state !== 'loaded' && <div className={css.loading} role={state === 'error' ? 'alert' : 'status'}>
         {state === 'loading' ? t('ads.frame.loading') : t('ads.frame.error')}
       </div>}
-      <iframe key={revision} src={ADS_IFRAME_SRC} title={t('ads.iframe.title')} className={css.frame}
+      <iframe ref={panelRef} key={`${revision}:${connectProvider ?? ''}`}
+        src={connectProvider ? `/ads/conexiones?provider=${connectProvider}` : ADS_IFRAME_SRC}
+        data-safent-setup={canConfigureConnections ? 'true' : undefined}
+        title={t('ads.iframe.title')} className={css.frame}
         onLoad={() => setState('loaded')} onError={() => setState('error')} />
     </div>
   </section>
