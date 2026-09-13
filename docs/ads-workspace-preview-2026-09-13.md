@@ -48,3 +48,12 @@ fallo nuevo de producción ni justifican presentar esos módulos como verificado
 Pendiente: aceptación del instalador nuevo, proveedor autorizado, regreso real
 desde navegador externo y cuentas publicitarias reales. No se modificó la app
 firmada instalada, su motor, su base de datos ni sus conexiones.
+
+## Segunda pasada de Ads
+
+Build de revisión `/tmp/safent-ads-connect-start.eAZAZ1/panel/dist`,
+`index-I4WR7JzF.js`, tras 335 pruebas UI y comprobaciones TS/build aprobadas.
+En la fixture con los cuatro pasos reales sin configurar, se comprobó visualmente
+que Conectar aparece antes de los detalles técnicos. Enter sobre Ver configuración
+técnica muestra el progreso y Client ID; un segundo Enter vuelve a plegarlos.
+No se inició OAuth real ni se autorizó ningún proveedor externo.
