@@ -1091,6 +1091,18 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(result)
 
     @method()
+    async def PublishCompanionComposioLease(self) -> "s":  # noqa: N802,F821,UP037
+        """Fixed-purpose daemon publication. Only an acceptance boolean returns."""
+        sender_uid = await self._resolve_current_sender_uid()
+        try:
+            result = await self._wiring.publish_companion_composio_lease(sender_uid=sender_uid)
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", "Caller unauthorized") from exc
+        except Exception as exc:  # noqa: BLE001 - no upstream/credential error details
+            raise DBusError("org.hermes.Error.Unavailable", "Publication unavailable") from exc
+        return json.dumps(result)
+
+    @method()
     async def GetCompanionHealth(self, slug: "s") -> "s":  # noqa: N802,F821,UP037
         """`/mcp/health` read-only (sin authZ, igual que GetKillSwitchStatus).
 

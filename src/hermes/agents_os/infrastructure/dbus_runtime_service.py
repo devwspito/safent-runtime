@@ -1764,6 +1764,26 @@ class DbusRuntimeServiceWiring:
         assertion = authority.mint_owner_assertion(slug=slug)
         return {"assertion": assertion.assertion, "expires_at": assertion.expires_at}
 
+    async def publish_companion_composio_lease(self, *, sender_uid: int) -> dict:
+        """Publish only to the current local Ads companion; never return a credential.
+
+        The caller supplies neither destination nor recipient key nor claims.
+        Authorization happens before construction, policy, vault or network IO.
+        """
+        self._authorize_shell_server_caller(
+            sender_uid, operation="publish_companion_composio_lease"
+        )
+        if not hasattr(self, "_companion_composio_publisher_instance"):
+            from hermes.agents_os.infrastructure.companion_composio_publisher import (  # noqa: PLC0415
+                CompanionComposioPublisher,
+            )
+
+            self._companion_composio_publisher_instance = CompanionComposioPublisher(
+                db_path=self._composio_db_path(),
+                authority=self._require_companion_sso_authority(),
+            )
+        return await self._companion_composio_publisher_instance.publish()
+
     async def get_companion_health(self, *, slug: str) -> dict:
         """`/mcp/health` read-only probe (sin authZ, igual que
         `get_kill_switch_status` — metadatos, no acción). Fail-soft: any

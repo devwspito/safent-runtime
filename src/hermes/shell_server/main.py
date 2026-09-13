@@ -717,9 +717,13 @@ def create_app() -> FastAPI:
 
         audit_writer.start_background()
         _egress_boot = _asyncio.create_task(_boot_apply_egress_grants())
-        yield
-        _egress_boot.cancel()
-        audit_writer.stop()
+        application.state.composio_lease_refresh.start()
+        try:
+            yield
+        finally:
+            await application.state.composio_lease_refresh.stop()
+            _egress_boot.cancel()
+            audit_writer.stop()
 
     app = FastAPI(
         title="Hermes Shell — local backend",
@@ -1427,6 +1431,9 @@ def create_app() -> FastAPI:
     from hermes.shell_server.cowork.dbus_proxy import DbusRuntimeProxy  # noqa: PLC0415
 
     app.state.dbus_proxy = DbusRuntimeProxy()
+    from hermes.shell_server.composio_lease_refresh import ComposioLeaseRefresh  # noqa: PLC0415
+
+    app.state.composio_lease_refresh = ComposioLeaseRefresh(app.state.dbus_proxy)
 
     # ------------------------------------------------------------------
     # Ads session bridge (026, contracts/sso.md) — mint/clear the bridge

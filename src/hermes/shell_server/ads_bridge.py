@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode
 
 import aiohttp
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -87,6 +87,7 @@ _TOTAL_TIMEOUT_S = 30.0
 _EXCHANGE_TIMEOUT_S = 10.0
 _DENIED_MCP_PREFIX = "mcp"
 _DENIED_LOGIN_PATHS = frozenset({"api/v1/auth/login", "api/v1/auth/totp"})
+_DENIED_INTERNAL_PREFIX = "api/v1/internal"
 _ALLOWED_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"})
 _ALLOWED_EXACT_PATHS = frozenset({"", "favicon.ico"})
 _ALLOWED_PATH_PREFIXES = ("assets/", "api/v1/")
@@ -306,6 +307,20 @@ class _PathDecision:
 
 def _classify_path(path: str, *, method: str) -> _PathDecision:
     normalized = path.lstrip("/")
+    # Reject alternate encodings/traversal before aiohttp or the upstream
+    # router can canonicalize an apparently public path into the internal API.
+    decoded = unquote(normalized)
+    if (
+        decoded != normalized or "\\" in normalized
+        or any(segment in {".", ".."} for segment in normalized.split("/"))
+        or any(ord(char) < 32 for char in normalized)
+    ):
+        return _PathDecision(allowed=False, denial_code="PATH_NOT_BRIDGED")
+    # Reserved daemon-to-companion control channel, never a browser/model API.
+    if normalized == _DENIED_INTERNAL_PREFIX or normalized.startswith(
+        f"{_DENIED_INTERNAL_PREFIX}/"
+    ):
+        return _PathDecision(allowed=False, denial_code="INTERNAL_NOT_BRIDGED")
     if normalized == _DENIED_MCP_PREFIX or normalized.startswith(f"{_DENIED_MCP_PREFIX}/"):
         return _PathDecision(allowed=False, denial_code="MCP_NOT_BRIDGED")
     if normalized in _DENIED_LOGIN_PATHS:
@@ -553,6 +568,11 @@ async def _proxy_request(*, app_state: Any, request: Request, path: str) -> Resp
     body = await _read_bounded_body(request)
 
     try:
+        lease_refresh = getattr(app_state, "composio_lease_refresh", None)
+        if lease_refresh is not None and path.startswith("api/v1/"):
+            await lease_refresh.ensure(
+                force=request.method == "POST" and "/reconnect" in path
+            )
         session_cookie = await _ensure_session(
             dbus_proxy=app_state.dbus_proxy, endpoint=endpoint, jar=jar
         )
