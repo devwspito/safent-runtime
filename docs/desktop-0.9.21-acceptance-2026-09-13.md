@@ -53,3 +53,36 @@ aceptación del paquete instalado.
    instalador/reload, conservando datos y sin habilitar rutas de red ajenas.
 
 La aceptación del paquete instalado 0.9.21 queda **pendiente**.
+
+## Recuperación comprobada en el Mac (0.9.20, 21:10–21:12 UTC)
+
+- El diagnóstico exportado se detuvo en `companion_reload`, tras los latidos
+  de 5, 10 y 15 segundos, con `companion_unreachable` no reintentable. El core,
+  PostgreSQL y la API de Ads estaban activos; `health-ads` terminó con exit 0.
+- Reabrir únicamente la aplicación permitió entrar al chat y al onboarding de
+  Anuncios, sin reinstalar, borrar, restaurar cuentas ni recrear contenedores.
+- La causa funcional del MCP era `net.ipv4.ip_forward=0` en el namespace de red
+  del core. `mcp-remote` agotaba la conexión TCP desde su namespace aislado;
+  la salud del core seguía pasando porque no atraviesa ese encaminamiento.
+  La escritura desde dentro no funcionaba porque `/proc/sys` es de solo lectura.
+- Se verificaron identidad, PID y namespace del contenedor y se activó el
+  encaminamiento exclusivamente allí, desde el administrador de la VM. El
+  valor de la VM antes/después permaneció en 1; no se cambiaron capacidades,
+  montajes, permisos de credenciales ni reglas de aprobación.
+- Después, `verify-ads` terminó con exit 0 en 0,47 segundos. `ListMcpServers`
+  confirmó `safent-ads` sano con **64 herramientas**; el diario del runtime
+  confirmó el registro de las mismas 64 herramientas.
+- La corrección aplicada a ese namespace es temporal hasta recrear el core;
+  la versión 0.9.21 debe configurar el sysctl durante su creación y verificar
+  el valor efectivo. El proceso de empaquetado/publicación aún está pendiente.
+
+Pruebas ejecutadas antes de integrar el cambio persistente de encaminamiento:
+33 de recarga/consumidor y 63 del CLI de instalación/reparación aprobadas. La
+regresión de recarga usa un reloj virtual: reprodujo el fallo con el límite
+anterior de 15 segundos sin esperar minutos reales. El nuevo límite total
+incluye conexión e introspección D-Bus y conserva la verificación autenticada.
+
+No se conectaron cuentas externas ni se publicaron anuncios o cambiaron
+presupuestos en esta reparación. Al tratarse de una instalación limpia, las
+cuentas y el modelo aún requieren su configuración desde la UI. El respaldo
+privado de la desinstalación anterior permanece intacto.
