@@ -25,6 +25,20 @@ def test_published_image_uses_content_cache_not_commit_cachebust():
     assert "docker buildx imagetools create" in workflow
 
 
+def test_release_publishes_candidate_without_promoting_latest():
+    workflow = _read(".github/workflows/publish-image.yml")
+    merge = workflow.split("docker buildx imagetools create", 1)[1].split(
+        "docker buildx imagetools inspect", 1
+    )[0]
+    assert ':latest' not in workflow
+    assert '--tag "${IMAGE}:${RELEASE_TAG}"' in merge
+    assert '"$AMD64" "$ARM64"' in merge
+    assert "needs: build" in workflow
+    assert 'AMD64="${IMAGE}:build-${GITHUB_RUN_ID}-amd64"' in workflow
+    assert 'ARM64="${IMAGE}:build-${GITHUB_RUN_ID}-arm64"' in workflow
+    assert "GIT_SHA=${{ github.sha }}" in workflow
+
+
 def test_local_build_does_not_rebuild_wheel_twice_or_mutate_checkout():
     script = _read("ops/container/build.sh")
     assert "python3 -m pip wheel" not in script

@@ -70,6 +70,5 @@ jobs:
           ARM64="${IMAGE}:build-${GITHUB_RUN_ID}-arm64"
           docker buildx imagetools create \
             --tag "${IMAGE}:${RELEASE_TAG}" \
-            --tag "${IMAGE}:latest" \
             "$AMD64" "$ARM64"
           docker buildx imagetools inspect "${IMAGE}:${RELEASE_TAG}"
