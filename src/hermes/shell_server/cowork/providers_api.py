@@ -26,6 +26,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from hermes.shell_server.cowork.native_models_api import create_native_models_router
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
 logger = logging.getLogger("hermes.shell_server.cowork.providers_api")
@@ -102,6 +103,7 @@ class UpdateProviderRequest(BaseModel):
 
 def create_providers_router() -> APIRouter:
     router = APIRouter(prefix="/api/v1/providers", tags=["providers"])
+    router.include_router(create_native_models_router())
 
     @router.get("/native")
     async def list_native_providers(request: Request) -> list[dict]:

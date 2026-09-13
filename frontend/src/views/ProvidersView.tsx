@@ -11,6 +11,7 @@ import {
 import type { Provider } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import Badge from '../components/Badge'
+import NativeModelSelector from '../components/NativeModelSelector'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
@@ -721,6 +722,7 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
             </Badge>
           )}
         </div>
+        {isConfigured && <NativeModelSelector provider={provider} onChanged={onRefresh} />}
       </div>
 
       <div className={css.rowActions}>
