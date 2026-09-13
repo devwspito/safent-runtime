@@ -6,12 +6,16 @@ import type { ChatOutletContext } from '../components/Layout'
 import { ChatDraft } from '../lib/chatDrafts'
 import { I18nProvider } from '../lib/i18n'
 import ChatView from './ChatView'
+import { getNativeActive, listProviders } from '../api/client'
+
+const features = vi.hoisted(() => ({ providers: true }))
 
 vi.mock('../api/client', () => ({
   listProviders: vi.fn().mockResolvedValue([]), listSkills: vi.fn().mockResolvedValue([]),
+  getNativeActive: vi.fn().mockResolvedValue(null),
   getRuntimeStatus: vi.fn(), ApiError: class extends Error {},
 }))
-vi.mock('../hooks/useFeatures', () => ({ useFeatures: () => ({ allowed: () => true }) }))
+vi.mock('../hooks/useFeatures', () => ({ useFeatures: () => ({ allowed: (name: string) => name !== 'proveedores' || features.providers }) }))
 vi.mock('../components/VncView', () => ({ VncFrame: () => null }))
 vi.mock('../components/ContextPanel', () => ({ default: () => null }))
 vi.mock('../components/PendingApprovalsInChat', () => ({ default: () => null }))
@@ -27,6 +31,9 @@ async function render() {
 }
 beforeEach(() => {
   localStorage.clear(); vi.clearAllMocks()
+  features.providers = true
+  vi.mocked(listProviders).mockReset().mockResolvedValue([])
+  vi.mocked(getNativeActive).mockReset().mockResolvedValue(null)
   host = document.createElement('div'); document.body.append(host); root = createRoot(host)
   context = {
     draft: new ChatDraft('test'), convId: 'conversation', agentId: null, agentName: null,
@@ -123,4 +130,110 @@ it('uses the actual emergency-stop error code and blocks stopping before a task 
   expect(stop.getAttribute('aria-disabled')).toBe('true')
   await act(async () => { stop.click() })
   expect(context.stopStream).not.toHaveBeenCalled()
+})
+
+it('a terminal failure replaces stale reception warnings and restores Send without resending the draft', async () => {
+  context.draft.set('text', 'Next draft')
+  context.status = { phase: 'error', message: 'Task failed', code: 'task_failed' }
+  context.streamError = true; context.reconnecting = true
+  await render()
+  expect(host.textContent).not.toContain('Seguimos consultando')
+  expect(host.querySelector('[aria-label="Detener generación"]')).toBeNull()
+  expect(host.querySelector<HTMLButtonElement>('[aria-label="Enviar mensaje (Enter)"]')?.disabled).toBe(false)
+  expect(host.querySelector('textarea')?.value).toBe('Next draft')
+  expect(context.sendMessage).not.toHaveBeenCalled()
+})
+
+it('confirmed cancellation shows a quiet terminal status with no stop spinner or duplicate alert', async () => {
+  context.status = { phase: 'idle', outcome: 'cancelled' }
+  context.streamError = true; context.cancellation = 'requested'
+  await render()
+  expect(host.textContent).toContain('Tarea detenida. No se ha reenviado')
+  expect(host.textContent).not.toContain('Cancelación solicitada')
+  expect(host.textContent).not.toContain('Seguimos consultando')
+  expect(host.querySelector('[aria-label="Detener generación"]')).toBeNull()
+  expect(host.querySelector('[role="alert"]')).toBeNull()
+  expect(host.querySelector('[role="status"] svg')).toBeNull()
+})
+
+it('never labels the first stored but inactive provider as the active chat model', async () => {
+  vi.mocked(listProviders).mockResolvedValue([{ provider_id: 'inactive', alias: 'Inactive saved model', default_model: 'inactive-model', is_active: false }])
+  context.status = { phase: 'idle' }
+  await render()
+  expect(host.textContent).not.toContain('inactive-model')
+  expect(host.textContent).toContain('Sin modelo')
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain('El agente no tiene modelo de IA conectado')
+  expect(getNativeActive).toHaveBeenCalledOnce()
+  expect(listProviders).not.toHaveBeenCalled()
+})
+
+it('uses only the actually active provider for chat model metadata', async () => {
+  vi.mocked(listProviders).mockResolvedValue([
+    { provider_id: 'inactive', alias: 'Inactive', default_model: 'wrong-first-model', is_active: false },
+    { provider_id: 'native-active', alias: 'Native active', default_model: 'correct-active-model', is_active: true },
+  ])
+  vi.mocked(getNativeActive).mockResolvedValue({ provider_id: 'native-active', default_model: 'correct-active-model', is_active: true })
+  context.status = { phase: 'idle' }
+  await render()
+  expect(host.textContent).toContain('correct-active-model')
+  expect(host.textContent).not.toContain('wrong-first-model')
+  expect(host.textContent).not.toContain('El agente no tiene modelo de IA conectado')
+  expect(getNativeActive).toHaveBeenCalledOnce()
+  expect(listProviders).not.toHaveBeenCalled()
+})
+
+it('refreshes the model chip and missing-model hint together after activation without sending chat', async () => {
+  vi.useFakeTimers()
+  try {
+    vi.mocked(getNativeActive).mockResolvedValueOnce(null)
+      .mockResolvedValue({ provider_id: 'saved', default_model: 'newly-active-model', is_active: true })
+    context.status = { phase: 'idle' }
+    await render()
+    expect(host.textContent).not.toContain('newly-active-model')
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
+    expect(host.textContent).toContain('newly-active-model')
+    expect(host.textContent).not.toContain('El agente no tiene modelo de IA conectado')
+    expect(getNativeActive).toHaveBeenCalledTimes(2)
+    expect(context.sendMessage).not.toHaveBeenCalled()
+  } finally { vi.useRealTimers() }
+})
+
+it('does not turn a provider lookup error into a missing-model claim', async () => {
+  vi.mocked(getNativeActive).mockRejectedValue(new Error('private provider failure'))
+  vi.mocked(listProviders).mockResolvedValue([{ provider_id: 'stale', default_model: 'stale-active-model', is_active: true }])
+  context.status = { phase: 'idle' }
+  await render()
+  expect(host.textContent).toContain('Estado del modelo no disponible')
+  expect(host.textContent).not.toContain('El agente no tiene modelo de IA conectado')
+  expect(host.textContent).not.toContain('private provider failure')
+  expect(host.textContent).not.toContain('stale-active-model')
+})
+
+it('shows the effective Codex model even when SQL still marks Qwen active', async () => {
+  vi.mocked(listProviders).mockResolvedValue([{ provider_id: 'custom-qwen', default_model: 'qwen3.8-27b', is_active: true }])
+  vi.mocked(getNativeActive).mockResolvedValue({ provider_id: 'openai-codex', default_model: 'gpt-codex-effective', is_active: true })
+  context.status = { phase: 'idle' }
+  await render()
+  expect(host.textContent).toContain('gpt-codex-effective')
+  expect(host.textContent).not.toContain('qwen3.8-27b')
+  expect(host.textContent).not.toContain('El agente no tiene modelo de IA conectado')
+  expect(listProviders).not.toHaveBeenCalled()
+})
+
+it('does not revive a stale SQL active flag when the engine has no selection', async () => {
+  vi.mocked(listProviders).mockResolvedValue([{ provider_id: 'stale', default_model: 'stale-active-model', is_active: true }])
+  context.status = { phase: 'idle' }
+  await render()
+  expect(host.textContent).toContain('Sin modelo')
+  expect(host.textContent).not.toContain('stale-active-model')
+})
+
+it('keeps the Enterprise managed model inert without claiming missing local configuration', async () => {
+  features.providers = false
+  vi.mocked(listProviders).mockResolvedValue([{ provider_id: 'inactive', default_model: 'wrong-local-model', is_active: false }])
+  context.status = { phase: 'idle' }
+  await render()
+  expect(host.textContent).not.toContain('wrong-local-model')
+  expect(host.textContent).not.toContain('El agente no tiene modelo de IA conectado')
+  expect(host.textContent).not.toContain('Sin modelo')
 })

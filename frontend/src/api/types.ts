@@ -102,7 +102,7 @@ export interface ConversationMessage {
   tool_call?: ToolCallDescriptor
   /** task_id of the backend task that produced this assistant turn; null for user messages */
   task_id?: string | null
-  /** 'streaming' = partial (turn in-flight, persisted incrementally) | 'complete' | null */
+  /** 'streaming' = partial; 'complete', 'failed', 'cancelled' = terminal mirror rows. */
   status?: string | null
 }
 
@@ -673,7 +673,7 @@ export type StreamFrame =
   | { kind: 'thinking_delta'; thinking?: string; delta?: string; text?: string; seq?: number }
   | { kind: 'tool_call';      tool_call?: ToolCallDescriptor; tool?: string; label?: string; target?: string; seq?: number }
   | { kind: 'status';         message?: string; status?: string; seq?: number }
-  | { kind: 'done';           seq?: number }
+  | { kind: 'done';           outcome?: string; seq?: number }
   | { kind: 'error';          message?: string; seq?: number }
 
 // ── Install requests (028/029, contracts/install-request.md) ───────────────────

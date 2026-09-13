@@ -23,8 +23,9 @@ import { useNavigate, useOutletContext } from 'react-router-dom'
 import { ArrowUp, Square, GitBranch, Loader2, CheckCircle2, AlertTriangle, FileText, X, Plus, Paperclip, FolderOpen, Zap, Check, Maximize2, ChevronDown, ChevronRight, ChevronLeft } from 'lucide-react'
 import { VncFrame } from '../components/VncView'
 import type { ChatMessage, ToolStep } from '../hooks/useChat'
-import { listProviders, uploadWorkspaceFile, getRuntimeStatus, listSkills } from '../api/client'
-import type { Provider, Skill } from '../api/types'
+import { uploadWorkspaceFile, getRuntimeStatus, listSkills } from '../api/client'
+import type { Skill } from '../api/types'
+import { useActiveProvider, type ActiveProviderState } from '../hooks/useActiveProvider'
 import {
   uploadDirectoryToBridge,
   syncBridgeToHost,
@@ -409,7 +410,7 @@ interface StatusBarProps {
 }
 
 function StatusBar({ phase, text }: StatusBarProps) {
-  if (phase === 'idle') return null
+  if (phase === 'idle' && !text) return null
   const isError = phase === 'error'
 
   return (
@@ -418,7 +419,7 @@ function StatusBar({ phase, text }: StatusBarProps) {
       role={isError ? 'alert' : 'status'}
       aria-live={isError ? 'assertive' : 'polite'}
     >
-      {!isError && <SpinnerIcon />}
+      {!isError && phase !== 'idle' && <SpinnerIcon />}
       <span>{text}</span>
     </div>
   )
@@ -445,24 +446,14 @@ function NoModelBanner() {
 
 // ── Model picker ───────────────────────────────────────────────────────────
 
-function useActiveProvider() {
-  const [provider, setProvider] = useState<Provider | null>(null)
-
-  useEffect(() => {
-    listProviders()
-      .then((data) => {
-        const arr = Array.isArray(data) ? data : []
-        setProvider(arr.find((p) => p.is_active) ?? arr[0] ?? null)
-      })
-      .catch(() => setProvider(null))
-  }, [])
-
-  return provider
+function StandaloneModelPicker() {
+  const providerState = useActiveProvider()
+  return <ModelPicker providerState={providerState} />
 }
 
-function ModelPicker() {
+function ModelPicker({ providerState }: { providerState: ActiveProviderState }) {
   const navigate = useNavigate()
-  const provider = useActiveProvider()
+  const { provider, status } = providerState
   const { allowed } = useFeatures()
   const t = useT()
 
@@ -484,7 +475,9 @@ function ModelPicker() {
     )
   }
 
-  const label = provider
+  const label = status === 'loading' ? t('chat.model.checking')
+    : status === 'error' ? t('chat.model.unavailable')
+    : provider
     ? (provider.default_model ?? provider.alias ?? provider.name ?? t('chat.model.active_fallback'))
     : t('chat.model.none')
 
@@ -560,9 +553,10 @@ interface ComposerProps {
   onChange(v: string): void
   inputRef?: RefObject<HTMLTextAreaElement>
   draft?: ChatDraft
+  providerState?: ActiveProviderState
 }
 
-export function Composer({ disabled, isStreaming, onSend, onStop, stopDisabled = false, stopLabel, value, onChange, inputRef, draft: suppliedDraft }: ComposerProps) {
+export function Composer({ disabled, isStreaming, onSend, onStop, stopDisabled = false, stopLabel, value, onChange, inputRef, draft: suppliedDraft, providerState }: ComposerProps) {
   const t = useT()
   const localTextareaRef = useRef<HTMLTextAreaElement>(null)
   const textareaRef = inputRef ?? localTextareaRef
@@ -961,7 +955,7 @@ export function Composer({ disabled, isStreaming, onSend, onStop, stopDisabled =
             <Plus size={16} />
           </button>
 
-          <ModelPicker />
+          {providerState ? <ModelPicker providerState={providerState} /> : <StandaloneModelPicker />}
 
           <div className={styles.composerToolbarRight}>
             {isStreaming ? (
@@ -1125,27 +1119,13 @@ export default function ChatView() {
   const setComposerText = useCallback((text: string) => draft.set('text', text), [draft])
   const [panelOpen, setPanelOpen] = useState(false)
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
-  const [noProvider, setNoProvider] = useState(false)
+  const providerState = useActiveProvider()
+  const { allowed } = useFeatures()
+  const noProvider = providerState.status === 'ready' && !providerState.hasActive && allowed('proveedores')
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const userScrolledRef = useRef(false)
   const pinRef = useRef(true)
-
-  // Proactively surface "connect a model" alert
-  useEffect(() => {
-    let alive = true
-    listProviders()
-      .then((data) => {
-        const arr = Array.isArray(data) ? data : []
-        if (alive) setNoProvider(arr.length === 0)
-      })
-      .catch(() => {
-        /* Unknown availability must not become an empty provider list. */
-      })
-    return () => {
-      alive = false
-    }
-  }, [])
 
   const isStreaming = status.phase === 'streaming' || status.phase === 'sending'
   const showWelcome = messages.length === 0
@@ -1198,11 +1178,11 @@ export default function ChatView() {
   )
 
   const statusText =
-    cancellation === 'requesting' ? t('chat.cancel.requesting')
-      : cancellation === 'requested' ? t('chat.cancel.requested')
-      : cancellation === 'error' ? t('chat.cancel.error')
-      : streamError ? t('chat.stream.interrupted')
-      : reconnecting ? t('chat.stream.reconnecting')
+    isStreaming && cancellation === 'requesting' ? t('chat.cancel.requesting')
+      : isStreaming && cancellation === 'requested' ? t('chat.cancel.requested')
+      : isStreaming && cancellation === 'error' ? t('chat.cancel.error')
+      : isStreaming && streamError ? t('chat.stream.interrupted')
+      : isStreaming && reconnecting ? t('chat.stream.reconnecting')
       : status.phase === 'streaming'
       ? status.statusText
       : status.phase === 'sending'
@@ -1213,7 +1193,9 @@ export default function ChatView() {
               t,
               status.code,
             )
-          : undefined
+          : status.phase === 'idle' && status.outcome === 'cancelled'
+            ? t('chat.cancel.completed')
+            : undefined
 
   return (
     <>
@@ -1284,14 +1266,15 @@ export default function ChatView() {
           ><ChevronDown size={16} aria-hidden="true" />{t('chat.latest')}</button>}
           {liveBrowserActive && <LiveBrowserPanel />}
 
-          {noProvider && status.phase === 'idle' ? (
+          {noProvider && status.phase === 'idle' && !status.outcome ? (
             <NoModelBanner />
           ) : (
-            <StatusBar phase={cancellation === 'error' || streamError ? 'error' : status.phase} text={statusText} />
+            <StatusBar phase={isStreaming && (cancellation === 'error' || streamError) ? 'error' : status.phase} text={statusText} />
           )}
 
           <Composer
             key={draft.key}
+            providerState={providerState}
             draft={draft}
             inputRef={composerInputRef}
             disabled={status.phase === 'sending' || status.phase === 'streaming'}

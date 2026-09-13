@@ -8,6 +8,7 @@ import { Composer } from './ChatView'
 
 vi.mock('../api/client', () => ({
   listProviders: vi.fn().mockResolvedValue([]),
+  getNativeActive: vi.fn().mockResolvedValue(null),
   listSkills: vi.fn().mockResolvedValue([]),
   uploadWorkspaceFile: vi.fn(),
   getRuntimeStatus: vi.fn(),

@@ -28,6 +28,7 @@ vi.mock('../components/VncView', () => ({ VncFrame: () => null }))
 vi.mock('./sectionHubIds', () => ({ CAPACIDADES_VIEW_IDS: [], SISTEMA_VIEW_IDS: [] }))
 vi.mock('../api/client', () => ({
   listConversations: vi.fn().mockResolvedValue([]), listProviders: vi.fn().mockResolvedValue([]),
+  getNativeActive: vi.fn().mockResolvedValue(null),
   listSkills: vi.fn().mockResolvedValue([]), uploadWorkspaceFile: vi.fn(), ApiError: class extends Error {},
 }))
 

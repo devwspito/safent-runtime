@@ -271,6 +271,10 @@ export function addProvider(payload: Record<string, unknown>): Promise<Provider>
   return request<Provider>('/providers', { method: 'POST', body: JSON.stringify(payload) })
 }
 
+export function updateProvider(providerId: string, payload: Record<string, unknown>): Promise<Provider> {
+  return request<Provider>(`/providers/${encodeURIComponent(providerId)}`, { method: 'PATCH', body: JSON.stringify(payload) })
+}
+
 /**
  * Configure a NATIVE catalogue provider (OpenAI, Anthropic, …) by kind + api_key.
  * The native catalogue path must NOT use addProvider() → POST /providers, which
@@ -644,6 +648,28 @@ export function listRecentTasks(limit = 20): Promise<RecentTasksResponse> {
  */
 export function cancelTask(taskId: string): Promise<{ ok: boolean; requested?: boolean }> {
   return request(`/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST', body: '{}' })
+}
+
+export interface ChatTaskStatus {
+  task_id: string
+  status: 'pending' | 'in_progress' | 'pending_approval' | TaskTerminalStatus
+  attempts: number
+}
+
+/** Precise owner-scoped lifecycle read, never a scheduled-task or global-list lookup. */
+export async function getChatTaskStatus(taskId: string): Promise<ChatTaskStatus> {
+  try {
+    const result = await request<unknown>(`/tasks/${encodeURIComponent(taskId)}/status`)
+    if (!result || typeof result !== 'object' || !('task_id' in result) || result.task_id !== taskId
+      || !('status' in result) || typeof result.status !== 'string'
+      || !['pending', 'in_progress', 'pending_approval', 'completed', 'failed', 'cancelled', 'rejected'].includes(result.status)
+      || !('attempts' in result) || !Number.isSafeInteger(result.attempts) || (result.attempts as number) < 0) {
+      throw new ApiError('No se pudo confirmar el estado de la tarea.', 502, null)
+    }
+    return { task_id: taskId, status: result.status as ChatTaskStatus['status'], attempts: result.attempts as number }
+  } catch (failure) {
+    throw new ApiError('No se pudo consultar el estado de la tarea.', failure instanceof ApiError ? failure.status : 0, null)
+  }
 }
 
 export function createTask(payload: CreateTaskPayload): Promise<ConfiguredTask> {
@@ -1104,9 +1130,11 @@ export interface StreamCallbacks {
   onThinking(text: string): void
   onToolCall(frame: Extract<StreamFrame, { kind: 'tool_call' }>): void
   onStatus(message: string): void
-  onDone(): void
+  onDone(outcome?: TaskTerminalStatus): void
   onError(message: string): void
 }
+
+export type TaskTerminalStatus = 'completed' | 'failed' | 'cancelled' | 'rejected'
 
 interface StreamHandle {
   close(): void
@@ -1144,9 +1172,13 @@ export function openTaskStream(
   }
 
   es.onmessage = (event: MessageEvent) => {
+    if (closed) return
     let frame: StreamFrame
     try {
       frame = JSON.parse(event.data as string) as StreamFrame
+      if (!frame || typeof frame !== 'object') return
+      const receivedTask = (frame as unknown as Record<string, unknown>).task_id
+      if (receivedTask !== undefined && receivedTask !== taskId) return
     } catch {
       return
     }
@@ -1161,8 +1193,8 @@ export function openTaskStream(
   es.onerror = () => {
     // EventSource reconnects AUTOMATICALLY on a transient drop (it does not give up,
     // and re-sends Last-Event-ID). Do NOT close or raise a fatal error: the task keeps
-    // running server-side and the server replays on re-attach. A real terminal task
-    // error arrives as a `kind:error` FRAME (handled in dispatch → finish()), not here.
+    // running server-side and the server replays on re-attach. Terminal outcome
+    // comes from DONE or the exact durable task-status read, not transport errors.
     if (!closed) callbacks.onStatus('Reconectando con el agente…')
   }
 
@@ -1189,12 +1221,21 @@ export function openTaskStream(
       case 'status':
         callbacks.onStatus(str(f.message) ?? str(f.status) ?? str(p?.message) ?? '')
         break
-      case 'done':
+      case 'done': {
+        const outcome = str(f.outcome) ?? str(p?.outcome)
+        // An explicit nonterminal/unknown outcome must not release the composer.
+        // Old brokers omit outcome or use "done" for successful completion.
+        if (outcome !== undefined && !['completed', 'failed', 'cancelled', 'rejected', 'done'].includes(outcome)) {
+          callbacks.onError('Unconfirmed task outcome')
+          break
+        }
         finish()  // close the EventSource so it does NOT auto-reconnect after the end
-        callbacks.onDone()
+        callbacks.onDone(outcome === undefined || outcome === 'done' ? 'completed' : outcome as TaskTerminalStatus)
         break
+      }
       case 'error':
-        finish()
+        // Error frames can describe attachment failures or retryable engine
+        // attempts. Keep receiving: only DONE or durable task state is terminal.
         callbacks.onError(str(f.message) ?? str(f.error) ?? str(p?.error) ?? 'Error desconocido del agente')
         break
     }

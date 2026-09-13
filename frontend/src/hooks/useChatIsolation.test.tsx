@@ -8,6 +8,7 @@ vi.mock('../api/client', () => ({
   postChat: vi.fn(), getConversation: vi.fn(), getRuntimeStatus: vi.fn().mockResolvedValue({ activity: [] }),
   openTaskStream: vi.fn().mockReturnValue({ close: vi.fn() }),
   cancelTask: vi.fn(),
+  getChatTaskStatus: vi.fn().mockRejectedValue(new Error('legacy endpoint absent')),
 }))
 
 let current: ReturnType<typeof useChat>
