@@ -244,6 +244,7 @@ impl EmbeddedCliDriver {
         }
         let want_secret = verb == "up";
         let mut failure: Option<FailureCause> = None;
+        let mut active_stage: Option<Stage> = None;
         let mut ready = false;
 
         let outcome = self.run_porcelain(verb, &args, want_secret, cancel, |event| {
@@ -254,6 +255,7 @@ impl EmbeddedCliDriver {
                     total_bytes,
                 } => {
                     let stage = map_stage(&id)?;
+                    active_stage = Some(stage);
                     notifier.notify(&DomainEvent::StageEntered {
                         stage,
                         label,
@@ -277,6 +279,9 @@ impl EmbeddedCliDriver {
                 }
                 WireEvent::Done { id, ms } => {
                     let stage = map_stage(&id)?;
+                    if active_stage == Some(stage) {
+                        active_stage = None;
+                    }
                     notifier.notify(&DomainEvent::StageCompleted {
                         stage,
                         duration_ms: ms,
@@ -311,6 +316,7 @@ impl EmbeddedCliDriver {
             return Err(EngineError::Reported(reclassify_from_stderr(
                 cause,
                 &outcome.stderr_tail,
+                active_stage,
             )));
         }
         if ready {
@@ -330,6 +336,7 @@ impl EmbeddedCliDriver {
             return Err(EngineError::Reported(reclassify_from_stderr(
                 generic,
                 &outcome.stderr_tail,
+                active_stage,
             )));
         }
         Ok(ApplyOutcome::Progressed)
@@ -516,8 +523,45 @@ fn cli_invocation_for(action: &RepairAction) -> Result<(&'static str, Vec<String
 /// podman's own stderr instead of the CLI's generic detail, so a real cause
 /// is never hidden. A CLI that itself starts reporting the more precise code
 /// one day makes this a no-op (the `match` below simply never fires).
-fn reclassify_from_stderr(cause: FailureCause, stderr_tail: &str) -> FailureCause {
+fn reclassify_from_stderr(
+    cause: FailureCause,
+    stderr_tail: &str,
+    active_stage: Option<Stage>,
+) -> FailureCause {
     let lower = stderr_tail.to_ascii_lowercase();
+    // Podman's exact duplicate-allocation diagnostic is not a database
+    // migration failure. Require an active companion phase and a complete
+    // IP/container-shaped message; never forward those private identifiers.
+    if matches!(
+        active_stage,
+        Some(Stage::CompanionUp | Stage::CompanionScaffold)
+    ) && matches!(
+        cause.code,
+        FailureCode::CompanionMigrationFailed
+            | FailureCode::DaemonUnhealthy
+            | FailureCode::CompanionNetworkConflict
+    ) && lower.lines().any(|line| {
+        let Some((_, allocation)) = line.split_once("ipam error: requested ip address ") else {
+            return false;
+        };
+        let Some((address, container)) =
+            allocation.split_once(" is already allocated to container id ")
+        else {
+            return false;
+        };
+        let container = container.split_whitespace().next().unwrap_or("");
+        address.parse::<std::net::IpAddr>().is_ok()
+            && container.len() == 64
+            && container.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return FailureCause {
+            code: FailureCode::CompanionNetworkConflict,
+            message:
+                "Safent no pudo preparar la red de Anuncios: hay una dirección interna ocupada."
+                    .into(),
+            retryable: cause.retryable,
+        };
+    }
     let is_local_storage_conflict = (lower.contains("numerical result out of range")
         || lower.contains("erange"))
         && (lower.contains("lock") || lower.contains("libpod_rootless_lock"));
@@ -581,7 +625,7 @@ mod reclassify_from_stderr_tests {
     #[test]
     fn podmans_own_raw_seccomp_error_is_reclassified() {
         let stderr = "Error: opening seccomp profile failed: open /tmp/safent-mac-test3/state/safent-seccomp.json: no such file or directory";
-        let reclassified = reclassify_from_stderr(generic_daemon_unhealthy(), stderr);
+        let reclassified = reclassify_from_stderr(generic_daemon_unhealthy(), stderr, None);
         assert_eq!(reclassified.code, FailureCode::SeccompProfileMissing);
         assert!(reclassified.retryable);
         assert_eq!(reclassified.message, stderr);
@@ -590,15 +634,18 @@ mod reclassify_from_stderr_tests {
     #[test]
     fn the_clis_own_last_resort_seccomp_message_is_also_reclassified() {
         let stderr = "[x] Could not obtain the seccomp profile (bundle, image and https://example/safent.json all failed, no cache)";
-        let reclassified = reclassify_from_stderr(generic_daemon_unhealthy(), stderr);
+        let reclassified = reclassify_from_stderr(generic_daemon_unhealthy(), stderr, None);
         assert_eq!(reclassified.code, FailureCode::SeccompProfileMissing);
     }
 
     #[test]
     fn an_unrelated_daemon_unhealthy_stderr_is_left_alone() {
         let cause = generic_daemon_unhealthy();
-        let reclassified =
-            reclassify_from_stderr(cause.clone(), "systemd unit hermes-runtime.service failed");
+        let reclassified = reclassify_from_stderr(
+            cause.clone(),
+            "systemd unit hermes-runtime.service failed",
+            None,
+        );
         assert_eq!(reclassified, cause);
     }
 
@@ -610,10 +657,45 @@ mod reclassify_from_stderr_tests {
             retryable: true,
         };
         let stderr = "foreign helper binary in use for safent-engine: /opt/podman/bin/gvproxy";
-        let reclassified = reclassify_from_stderr(generic_machine_start_failed, stderr);
+        let reclassified = reclassify_from_stderr(generic_machine_start_failed, stderr, None);
         assert_eq!(reclassified.code, FailureCode::ForeignEngineHelper);
         assert!(!reclassified.retryable);
         assert_eq!(reclassified.message, stderr);
+    }
+
+    #[test]
+    fn ipam_does_not_reclassify_other_phases_partial_messages_or_database_errors() {
+        let cause = FailureCause {
+            code: FailureCode::CompanionMigrationFailed,
+            message: "La migración no terminó".into(),
+            retryable: false,
+        };
+        let full = "IPAM error: requested ip address 10.201.0.10 is already allocated to container ID aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for stage in [
+            None,
+            Some(Stage::Container),
+            Some(Stage::PullCompanion),
+            Some(Stage::CompanionReload),
+        ] {
+            assert_eq!(reclassify_from_stderr(cause.clone(), full, stage), cause);
+        }
+        for stderr in [
+            "database schema migration failed: duplicate key value",
+            "IPAM error: address allocation failed",
+            "requested ip address 10.201.0.10 is already allocated to container ID aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "IPAM error: requested ip address invalid is already allocated to container ID aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "IPAM error: requested ip address 10.201.0.10 is already allocated to container ID partial",
+        ] {
+            assert_eq!(reclassify_from_stderr(cause.clone(), stderr, Some(Stage::CompanionUp)), cause);
+        }
+        let specific = FailureCause {
+            code: FailureCode::CompanionUnreachable,
+            ..cause
+        };
+        assert_eq!(
+            reclassify_from_stderr(specific.clone(), full, Some(Stage::CompanionUp)),
+            specific
+        );
     }
 }
 

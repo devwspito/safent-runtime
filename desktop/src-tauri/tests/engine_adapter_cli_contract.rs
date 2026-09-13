@@ -355,6 +355,71 @@ exit 1
     }
 }
 
+#[test]
+fn companion_ipam_failure_is_network_conflict_without_exposing_address_or_container() {
+    for stage in ["companion_up", "companion_scaffold"] {
+        for reported in [false, true] {
+            let failure = if reported {
+                r#"echo '{"t":"failed","id":"companion_up","code":"companion_migration_failed","detail":"database did not start","retryable":false}'"#
+            } else {
+                ""
+            };
+            let script = fake_cli(&format!(
+                r#"
+echo '{{"t":"stage","id":"{stage}","label":"Preparando Anuncios"}}'
+echo 'Error: IPAM error: requested ip address 10.201.0.10 is already allocated to container ID aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' >&2
+{failure}
+exit 125
+"#
+            ));
+            let driver = EmbeddedCliDriver::new(config(script));
+            let err = driver
+                .apply(
+                    &RepairAction::EnsureCompanionScaffold,
+                    &RecordingNotifier::new(),
+                    &ports::CancelSignal::new(),
+                )
+                .unwrap_err();
+            match err {
+                EngineError::Reported(cause) => {
+                    assert_eq!(cause.code, FailureCode::CompanionNetworkConflict);
+                    assert_eq!(cause.message, "Safent no pudo preparar la red de Anuncios: hay una dirección interna ocupada.");
+                    assert_eq!(cause.retryable, !reported);
+                }
+                other => panic!("expected classified IPAM failure, got {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn ipam_does_not_reclassify_a_completed_companion_phase() {
+    let script = fake_cli(
+        r#"
+echo '{"t":"stage","id":"companion_up","label":"Preparando Anuncios"}'
+echo '{"t":"done","id":"companion_up","ms":1}'
+echo 'IPAM error: requested ip address 10.201.0.10 is already allocated to container ID aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' >&2
+echo '{"t":"failed","id":"companion_up","code":"companion_migration_failed","detail":"migration failed","retryable":false}'
+exit 125
+"#,
+    );
+    let err = EmbeddedCliDriver::new(config(script))
+        .apply(
+            &RepairAction::EnsureCompanionScaffold,
+            &RecordingNotifier::new(),
+            &ports::CancelSignal::new(),
+        )
+        .unwrap_err();
+    match err {
+        EngineError::Reported(cause) => {
+            assert_eq!(cause.code, FailureCode::CompanionMigrationFailed);
+            assert_eq!(cause.message, "migration failed");
+            assert!(!cause.retryable);
+        }
+        other => panic!("expected original failure, got {other:?}"),
+    }
+}
+
 /// Regression test (packaging review item 3, verificacion-paquete-linux.md
 /// §"Pasada 1"): a bundled/host podman storage-lock collision made
 /// `cmd_ensure_images` report a generic `registry_unreachable` — the CLI's
