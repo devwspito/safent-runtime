@@ -75,13 +75,19 @@ prerrequisito del OAuth directo de Google.
   y 98 de provisionado y base de datos fría. El CLI devuelve sólo la clave pública;
   los fallos de identidad impiden descifrar el vault y enviar la concesión.
 
-Versiones candidatas preparadas: runtime 0.9.17 y Ads 0.2.12. La publicación y
-la validación del binario instalado siguen pendientes al escribir esta nota.
+Versiones candidatas publicadas e instaladas: runtime 0.9.17 y Ads 0.2.12.
+Backend Ads completo: 3570 pruebas; panel Ads completo: 339 pruebas, typecheck
+y build. El DMG firmado y notarizado se ha comprobado e instalado en el Mac.
 
-Estos resultados son pruebas de código, no aceptación de cuentas publicitarias.
-Antes de declarar el producto operativo debe publicarse e instalarse el binario,
-comprobar la concesión activa sin dependencia de la antigua clave de entorno,
-completar OAuth y verificar inventario real. No se han activado campañas ni gasto.
+La aceptación instalada confirma concesión automática renovada, preparación de
+Google desde el vault, ausencia de la antigua clave en el entorno del broker,
+Gmail correctamente visible y apertura real del enlace OAuth. Evidencia detallada:
+[Comprobación del Mac](desktop-0.9.17-shared-composio-check-2026-09-13.md).
+
+Esto no acredita cuentas publicitarias conectadas: falta el identificador y
+consentimiento de Google y preparar OAuth Meta. No se han activado campañas ni
+gasto. El chat también sigue sin modelo configurado. No se declara el producto
+completo operativo ni se promueve esta prerelease al canal estable.
 
 Fuentes del proveedor:
 [Google Ads](https://docs.composio.dev/toolkits/googleads) y
