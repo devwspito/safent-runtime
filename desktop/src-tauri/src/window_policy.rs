@@ -164,11 +164,43 @@ pub fn is_external_oauth_allowed(authorized: Option<&Url>, target: &Url) -> bool
 /// endpoints and grant no permission to other destinations, paths, or queries.
 fn is_external_help_allowed(authorized: Option<&Url>, target: &Url) -> bool {
     authorized.is_some()
-        && matches!(
-            target.as_str(),
-            "https://console.cloud.google.com/google/ads-apis/overview"
-                | "https://developers.facebook.com/apps/"
-        )
+        && (target.as_str() == "https://console.cloud.google.com/google/ads-apis/overview"
+            || is_ads_setup_target_allowed(target))
+}
+
+/// Only reviewed account/app configuration pages, never arbitrary provider
+/// navigation. Used by both the explicit setup command and new-window fallback.
+fn is_ads_setup_target_allowed(target: &Url) -> bool {
+    if target.scheme() != "https"
+        || target.port_or_known_default() != Some(443)
+        || !target.username().is_empty()
+        || target.password().is_some()
+        || target.query().is_some()
+        || target.fragment().is_some()
+        || target.path().contains('%')
+    {
+        return false;
+    }
+    match target.host_str() {
+        Some("dashboard.composio.dev" | "ads.google.com") => target.path() == "/",
+        Some("business.facebook.com") => target.path() == "/settings/ad-accounts/",
+        Some("developers.facebook.com") => {
+            if target.path() == "/apps/" {
+                return true;
+            }
+            let Some((app_id, page)) = target
+                .path()
+                .strip_prefix("/apps/")
+                .and_then(|path| path.split_once('/'))
+            else {
+                return false;
+            };
+            (5..=30).contains(&app_id.len())
+                && app_id.bytes().all(|byte| byte.is_ascii_digit())
+                && matches!(page, "settings/basic/" | "fb-login/settings/")
+        }
+        _ => false,
+    }
 }
 
 fn is_meta_oauth_path(path: &str) -> bool {
@@ -190,6 +222,8 @@ fn oauth_open_failed(app: &AppHandle) {
 
 const OAUTH_OPEN_DENIED: &str = "Esta conexión no se puede abrir de forma segura desde Safent.";
 const OAUTH_OPEN_FAILED: &str = "No se pudo abrir el navegador. Vuelve a intentarlo.";
+const ADS_SETUP_OPEN_DENIED: &str =
+    "Este enlace de configuración no se puede abrir de forma segura desde Safent.";
 const CODEX_DEVICE_URL: &str = "https://auth.openai.com/codex/device";
 
 fn native_updater_caller_allowed(
@@ -310,6 +344,63 @@ pub async fn open_ads_oauth(
 ) -> Result<(), String> {
     let requester = window.url().map_err(|_| OAUTH_OPEN_DENIED.to_string())?;
     let target = validated_oauth_open_request(
+        policy.authorized().as_ref(),
+        &requester,
+        window.label(),
+        &url,
+    )?;
+    tauri::async_runtime::spawn_blocking(move || launch_system_browser(&target))
+        .await
+        .map_err(|_| OAUTH_OPEN_FAILED.to_string())?
+}
+
+fn validated_ads_setup_open_request(
+    authorized: Option<&Url>,
+    requester: &Url,
+    window_label: &str,
+    raw_url: &str,
+) -> Result<Url, String> {
+    if window_label != MAIN_WINDOW_LABEL
+        || !authorized.is_some_and(|origin| same_origin(origin, requester))
+        || !requester.username().is_empty()
+        || requester.password().is_some()
+        || raw_url.len() > 2048
+        || raw_url
+            .bytes()
+            .any(|byte| byte <= b' ' || byte == 127 || byte == b'\\' || byte == b'%')
+    {
+        return Err(ADS_SETUP_OPEN_DENIED.into());
+    }
+    let target = Url::parse(raw_url).map_err(|_| ADS_SETUP_OPEN_DENIED.to_string())?;
+    if !is_ads_setup_target_allowed(&target) {
+        return Err(ADS_SETUP_OPEN_DENIED.into());
+    }
+    // URL parsing normalizes dot segments, empty userinfo and alternate host
+    // spellings. Accept only the reviewed spelling, optionally explicit HTTPS
+    // port 443; do not silently turn a different input into an allowed page.
+    let explicit_https_port = format!(
+        "https://{}:443{}",
+        target.host_str().unwrap_or_default(),
+        target.path()
+    );
+    if raw_url != target.as_str() && raw_url != explicit_https_port {
+        return Err(ADS_SETUP_OPEN_DENIED.into());
+    }
+    Ok(target)
+}
+
+/// Separate from OAuth: no consent URL, state, app secret, arbitrary path or
+/// shell command can be supplied through this configuration-help permission.
+#[tauri::command]
+pub async fn open_ads_setup(
+    window: WebviewWindow,
+    policy: tauri::State<'_, WindowPolicy>,
+    url: String,
+) -> Result<(), String> {
+    let requester = window
+        .url()
+        .map_err(|_| ADS_SETUP_OPEN_DENIED.to_string())?;
+    let target = validated_ads_setup_open_request(
         policy.authorized().as_ref(),
         &requester,
         window.label(),
@@ -601,10 +692,181 @@ mod tests {
                 "allow-read-host-clipboard",
                 "allow-write-host-clipboard",
                 "allow-open-ads-oauth",
+                "allow-open-ads-setup",
                 "allow-open-provider-oauth",
                 "allow-show-native-updater",
                 "allow-get-native-update-status"
             ])
+        );
+        assert!(include_str!("../build.rs").contains("\"open_ads_setup\","));
+        assert!(include_str!("main.rs").contains("window_policy::open_ads_setup,"));
+    }
+
+    #[test]
+    fn ads_setup_opener_allows_only_the_reviewed_pages_and_default_https_port() {
+        let origin = url("http://127.0.0.1:35335/");
+        let current = url("http://127.0.0.1:35335/app/anuncios");
+        for raw in [
+            "https://developers.facebook.com/apps/",
+            "https://developers.facebook.com/apps/12345/settings/basic/",
+            "https://developers.facebook.com/apps/12345/fb-login/settings/",
+            "https://developers.facebook.com/apps/123456789012345678901234567890/settings/basic/",
+            "https://developers.facebook.com/apps/123456789012345678901234567890/fb-login/settings/",
+            "https://dashboard.composio.dev/",
+            "https://ads.google.com/",
+            "https://business.facebook.com/settings/ad-accounts/",
+        ] {
+            let target = url(raw);
+            assert_eq!(
+                validated_ads_setup_open_request(Some(&origin), &current, "main", raw),
+                Ok(target.clone()),
+                "{raw}"
+            );
+            let explicit_port = format!(
+                "https://{}:443{}",
+                target.host_str().unwrap(),
+                target.path()
+            );
+            assert_eq!(
+                validated_ads_setup_open_request(Some(&origin), &current, "main", &explicit_port),
+                Ok(target.clone())
+            );
+            assert!(is_external_help_allowed(Some(&origin), &target));
+            assert!(!is_external_help_allowed(None, &target));
+            assert!(!is_external_oauth_allowed(Some(&origin), &target));
+            assert!(!is_navigation_allowed(Some(&origin), &target));
+        }
+    }
+
+    #[test]
+    fn ads_setup_opener_requires_the_current_main_boot_origin() {
+        let origin = url("http://127.0.0.1:35335/");
+        let target = "https://dashboard.composio.dev/";
+        assert_eq!(
+            validated_ads_setup_open_request(None, &origin, "main", target),
+            Err(ADS_SETUP_OPEN_DENIED.into())
+        );
+        assert_eq!(
+            validated_ads_setup_open_request(Some(&origin), &origin, "other", target),
+            Err(ADS_SETUP_OPEN_DENIED.into())
+        );
+        for requester in [
+            "http://127.0.0.1:9999/app",
+            "http://localhost:35335/app",
+            "https://127.0.0.1:35335/app",
+            "http://evil.example:35335/app",
+            "http://user@127.0.0.1:35335/app",
+            "http://:fixture@127.0.0.1:35335/app",
+            "tauri://localhost/",
+            "file:///app",
+        ] {
+            assert_eq!(
+                validated_ads_setup_open_request(Some(&origin), &url(requester), "main", target),
+                Err(ADS_SETUP_OPEN_DENIED.into()),
+                "{requester}"
+            );
+        }
+    }
+
+    #[test]
+    fn ads_setup_opener_and_popup_deny_other_destinations_paths_and_url_data() {
+        let origin = url("http://127.0.0.1:35335/");
+        for raw in [
+            "http://developers.facebook.com/apps/",
+            "https://developers.facebook.com:444/apps/",
+            "https://developers.facebook.com.evil.example/apps/",
+            "https://developers.facebook.com./apps/",
+            "https://user@developers.facebook.com/apps/",
+            "https://:fixture@developers.facebook.com/apps/",
+            "https://developers.facebook.com@evil.example/apps/",
+            "https://developers.facebook.com/apps",
+            "https://developers.facebook.com/apps/?",
+            "https://developers.facebook.com/apps/#",
+            "https://developers.facebook.com/apps/?app_secret=fixture-sensitive-value",
+            "https://developers.facebook.com/apps/#fixture-sensitive-value",
+            "https://developers.facebook.com/apps/1234/settings/basic/",
+            "https://developers.facebook.com/apps/1234567890123456789012345678901/settings/basic/",
+            "https://developers.facebook.com/apps/1234x/settings/basic/",
+            "https://developers.facebook.com/apps/１２３４５/settings/basic/",
+            "https://developers.facebook.com/apps/+12345/settings/basic/",
+            "https://developers.facebook.com/apps/12345/settings/basic",
+            "https://developers.facebook.com/apps/12345/settings/basic/extra",
+            "https://developers.facebook.com/apps/12345/fb-login/settings",
+            "https://developers.facebook.com/apps/12345/fb-login/other/",
+            "https://developers.facebook.com/apps/12345/settings/advanced/",
+            "https://developers.facebook.com/apps/12345/",
+            "https://developers.facebook.com/%61pps/",
+            "https://developers.facebook.com/apps/%31%32%33%34%35/settings/basic/",
+            "https://developers.facebook.com/apps/12345%2Fsettings/basic/",
+            "https://dashboard.composio.dev/auth-configs",
+            "https://dashboard.composio.dev/?next=https://evil.example",
+            "https://dashboard.composio.dev.evil.example/",
+            "https://ads.google.com/home/",
+            "https://ads.google.com/?customer_id=1234567890",
+            "https://business.facebook.com/settings/",
+            "https://business.facebook.com/settings/ad-accounts",
+            "https://business.facebook.com/settings/ad-accounts/?business_id=12345",
+            "https://connect.composio.dev/link/lk_fixture",
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            "https://auth.openai.com/codex/device",
+            "https://localhost/",
+            "https://127.0.0.1/",
+            "file:///apps/",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(
+                validated_ads_setup_open_request(Some(&origin), &origin, "main", raw),
+                Err(ADS_SETUP_OPEN_DENIED.into()),
+                "{raw}"
+            );
+            assert!(!is_external_help_allowed(Some(&origin), &url(raw)), "{raw}");
+        }
+        // The pre-existing Google Cloud help page remains a popup-only link;
+        // its presence does not broaden the new setup command's permission.
+        assert_eq!(
+            validated_ads_setup_open_request(
+                Some(&origin),
+                &origin,
+                "main",
+                "https://console.cloud.google.com/google/ads-apis/overview"
+            ),
+            Err(ADS_SETUP_OPEN_DENIED.into())
+        );
+    }
+
+    #[test]
+    fn ads_setup_opener_rejects_raw_normalization_and_never_echoes_input() {
+        let origin = url("http://127.0.0.1:35335/");
+        for raw in [
+            "https://@developers.facebook.com/apps/",
+            "https://developers.facebook.com/apps/../apps/",
+            "https://developers.facebook.com/apps/./",
+            "https://developers.facebook.com/%2e/apps/",
+            "https://%64evelopers.facebook.com/apps/",
+            "https://developers.facebook.com\\apps/",
+            "https:\\developers.facebook.com/apps/",
+            "https://developers.facebook.com/ap\tps/",
+            "https://developers.facebook.com/apps/\n",
+            "https://developers.facebook.com/apps/\r",
+            "https://developers.facebook.com/apps/\0",
+            "https://developers.facebook.com/apps/\u{7f}",
+            " https://developers.facebook.com/apps/",
+            "https://developers.facebook.com/apps/ ",
+            "https://developers.facebook.com/apps/fixture sensitive value",
+            "not-a-url-fixture-sensitive-value",
+            "https://developers.facebook.com:0443/apps/",
+            "https://developers.facebook.com:invalid/apps/",
+            "https://dashboard.composio.dev",
+        ] {
+            assert_eq!(
+                validated_ads_setup_open_request(Some(&origin), &origin, "main", raw),
+                Err(ADS_SETUP_OPEN_DENIED.into()),
+                "{raw:?}"
+            );
+        }
+        assert_eq!(
+            validated_ads_setup_open_request(Some(&origin), &origin, "main", &"x".repeat(2049)),
+            Err(ADS_SETUP_OPEN_DENIED.into())
         );
     }
 

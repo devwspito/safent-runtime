@@ -1,11 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "remote-ui",
-  "description": "Safent web UI: host clipboard, fixed-purpose OAuth openers, display-only native update status and the native review dialog. Commands verify the live boot origin. No generic shell, navigation, window, event, host check handles or install permission.",
+  "description": "Safent web UI: host clipboard, fixed-purpose OAuth openers, reviewed Ads setup links, display-only native update status and the native review dialog. Commands verify the live boot origin. No generic shell, navigation, window, event, host check handles or install permission.",
   "local": false,
   "remote": {
     "urls": ["http://localhost:*", "http://127.0.0.1:*"]
   },
   "windows": ["main"],
-  "permissions": ["allow-read-host-clipboard", "allow-write-host-clipboard", "allow-open-ads-oauth", "allow-open-provider-oauth", "allow-show-native-updater", "allow-get-native-update-status"]
+  "permissions": ["allow-read-host-clipboard", "allow-write-host-clipboard", "allow-open-ads-oauth", "allow-open-ads-setup", "allow-open-provider-oauth", "allow-show-native-updater", "allow-get-native-update-status"]
 }

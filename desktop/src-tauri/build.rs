@@ -9,6 +9,7 @@ fn main() {
             "read_host_clipboard",
             "write_host_clipboard",
             "open_ads_oauth",
+            "open_ads_setup",
             "open_provider_oauth",
             "show_native_updater",
             "get_native_update_status",
