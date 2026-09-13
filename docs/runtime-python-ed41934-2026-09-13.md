@@ -36,8 +36,20 @@ probes. Production code is unchanged by this correction.
 
 Entire backup/restore group: **51 passed, 2.77 seconds**.
 Log: `/tmp/safent-restore-fixture-focal.log`.
-The corrected immutable full rerun is pending at this checkpoint; no green
-full result is claimed by this commit.
+Corrected immutable full rerun: **7519 passed, zero failed, 21 skipped,
+250 deselected, eight warnings, 464.47 seconds** (466.99 wall).
+
+- Snapshot commit: `62a5f657087e4ada743c7f2f03061f7e18b81e3b` (only fixture
+  and this report differ from the immutable 0.9.13 product source).
+- Scratch: `/tmp/safent-python-62a5f65.JVc95o`.
+- Log: `/tmp/safent-python-62a5f65-full.log`.
+- Same interpreter, isolated environment and Ads source commit as above;
+  private home and Ads-source paths adjusted to the new scratch.
+- Command: `/tmp/safent-python-global.gGvi7u/venv/bin/python -m pytest -q`.
+
+No product guard was relaxed, and no test set was removed to obtain green.
+This certifies the configured Python base selection, not native GUI,
+real-provider, VM or live multi-service acceptance.
 
 ## Separate diagnostic follow-up (not in native 0.9.13)
 
@@ -45,9 +57,13 @@ full result is claimed by this commit.
 An explicit fatal scaffold exit consequently bypasses restore's existing
 postcondition message. It exits nonzero after reporting that startup began;
 it does not falsely claim success or perform an additional data deletion.
-A separate authorized follow-up will isolate that command in a subshell
-and verify the existing postcondition/error message. It is not part of
-the fixture correction, the signed 0.9.13 product, or its full-suite source.
+A separate authorized follow-up now isolates that command in a subshell
+and verifies the existing postcondition/error message: commit
+`fcba3efb21cab50bf05ed15ccb0c023448139fc6`, with the entire backup/restore
+file passing 52 tests (2.94 seconds), including a new red-to-green regression.
+It is not part of the fixture correction, the signed 0.9.13 product, or
+the immutable source used for the full result above. See
+`docs/restore-start-diagnostic-2026-09-13.md`.
 
 The 21 skips retain the prior baseline categories: explicit cross-repo
 fixtures (2), absent legacy wizard contracts (2), unmigrated protocols (2),
