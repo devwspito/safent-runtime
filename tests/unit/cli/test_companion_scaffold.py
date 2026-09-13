@@ -22,6 +22,7 @@ same discipline as tests/unit/ops/test_companion_provision.py.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -56,6 +57,12 @@ case "$1" in
     exit 0
     ;;
   pull|rm)
+    exit 0
+    ;;
+  volume)
+    # The real scaffold validates private volume ownership before mounting it.
+    # Successful inspection must return identity, not a false empty success.
+    [ "$2" != inspect ] || echo 'local|0|ads-runtime-projection'
     exit 0
     ;;
   run)
@@ -146,8 +153,12 @@ class TestScaffoldAlwaysRunsOnStart:
         run_lines = [ln for ln in log_lines if ln.startswith("run -d --name")]
         assert len(run_lines) == 1, log_lines
         run_line = run_lines[0]
-        assert "--network safent-companions" in run_line
-        assert "safent-companion-runtime:/etc/hermes/companions:ro" in run_line
+        argv = shlex.split(run_line)
+        assert argv.count("--network") == 1
+        assert argv[argv.index("--network") + 1] == "safent-companions"
+        mounts = [argv[index + 1] for index, arg in enumerate(argv[:-1]) if arg == "-v"]
+        assert mounts.count("safent-companion-runtime:/etc/hermes/companions:ro") == 1
+        assert "Companion scaffolding failed" not in result.stderr
         assert "/companions/ads/bearer:" not in run_line
         assert "/companions/ads/sso/ads-sso.key:" not in run_line
 

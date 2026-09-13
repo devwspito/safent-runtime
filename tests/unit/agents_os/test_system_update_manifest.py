@@ -38,6 +38,15 @@ from hermes.shell_server.system_update import create_system_update_router
 
 pytestmark = pytest.mark.unit
 
+
+@pytest.fixture(autouse=True)
+def private_install_request_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real status/lock code operates on each test's private instance directory."""
+    from hermes.shell_server import install_requests
+
+    monkeypatch.setattr(install_requests, "_INSTANCE_DIR", tmp_path / "instance")
+
+
 _TOKEN = "test-bearer-token"  # noqa: S105 - test fixture, not a real credential
 _KEY_ID = b"\x01\x02\x03\x04\x05\x06\x07\x08"
 _OTHER_KEY_ID = b"\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8"
