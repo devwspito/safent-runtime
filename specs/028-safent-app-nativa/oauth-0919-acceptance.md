@@ -87,3 +87,43 @@ from a successful build alone. The user specifically wants to test the updater:
 do not replace /Applications/Safent.app manually or erase their data. The first
 update must be initiated by them from the existing native tray action. The new
 sidebar action becomes available after the signed 0.9.20 update is installed.
+
+### Owner authorization and pre-update checks (2026-09-13)
+
+The owner explicitly answered “SII” to promoting 0.9.20 to the general channel
+once the signed build passes. This authorizes channel promotion before their
+manual 0.9.18 → 0.9.20 updater acceptance; do not relabel that pending GUI test
+as complete.
+
+- Source/tag: `9d4c0d0a053b1a527c273ae509a2e3bb2428098f`, `v0.9.20`.
+- Motor workflow: https://github.com/devwspito/safent-runtime/actions/runs/34775193936
+  completed successfully, including amd64, arm64 and the multi-architecture index.
+- Desktop workflow: https://github.com/devwspito/agents-autonomy/actions/runs/34775723751
+  dispatched once with engine `v0.9.20` and companion `v0.2.13`; completed
+  successfully. Both Linux builds, macOS, manifest signing and final assembly
+  passed. Windows was intentionally skipped.
+- The committed public signing key is identical between v0.9.18 and v0.9.20,
+  and its exact encoded value is present in the installed 0.9.18 executable.
+- The installed bundle passes strict/deep codesign verification for
+  `com.safent.desktop`, team `JBMBA58A8X`. No app files or macOS permissions were
+  changed during these checks. A shell write-access check from Codex is not a
+  self-updater acceptance check: macOS protects cross-team app modification.
+
+### Publication verified (2026-09-13 19:03 UTC)
+
+- All 15 release assets are present. The final updater metadata has exactly
+  `darwin-aarch64`, `linux-x86_64`, and `linux-aarch64`, each pointing at 0.9.20.
+- CI verified the actual updater artifacts against the committed public key.
+  Apple notarization returned Accepted at 18:57:27 UTC; stapling and validation
+  succeeded. The signed runtime manifest was additionally verified with Minisign
+  on DGX against the committed key. Checksums match the release asset digests.
+- Following the owner's explicit authorization, the release was promoted with
+  `draft=false`, `prerelease=false`, and `latest=true`. Release notes explicitly
+  retain the pending real-app/OAuth acceptance, rather than implying it passed.
+- GitHub's latest-release API returns `v0.9.20`. An unauthenticated request to
+  `https://github.com/devwspito/safent-runtime/releases/latest/download/latest.json`
+  independently returns version `0.9.20` and the signed Apple Silicon archive.
+- Release: https://github.com/devwspito/safent-runtime/releases/tag/v0.9.20
+- A final local Info.plist check still reports installed version 0.9.18. The
+  updater has not been clicked or installed on the user's behalf. The user must
+  initiate the first check from the Safent tray menu, then confirm installation.
