@@ -30,7 +30,13 @@ from hermes.capabilities.domain.ports import (
 from hermes.domain.reasoning_failure import NativeTurnFailedError
 from hermes.tasks.application.decision_context_builder import build_decision_context
 from hermes.tasks.application.worker_wake_signal import MonoWorkerWakeSignal
-from hermes.tasks.domain.ports import AgentStatePort, WorkItem, WorkItemKind, WorkQueuePort
+from hermes.tasks.domain.ports import (
+    AgentStatePort,
+    TaskStatus,
+    WorkItem,
+    WorkItemKind,
+    WorkQueuePort,
+)
 from hermes.tasks.domain.task_cancel_registry import (
     OperationCancelled,
     get_cancel_registry,
@@ -690,31 +696,48 @@ class AgentLoopOrchestrator:
     async def _handle_engine_failure(
         self, item: WorkItem, reason: str, sink: Any, is_chat: bool, *, retryable: bool = True,
     ) -> None:
-        if is_chat:
-            await self._safe_close_stream(sink, item, "failed", error=reason)
-        # Persist an explicit error for polling/resume UI, not CHAT_REPLIED.
+        # The durable queue owns retry/backoff. A failed attempt is not a failed
+        # task: publishing DONE now would permanently close its replay stream.
+        updated = await self._do_mark_failed(item, reason, retryable=retryable)
+        if updated.status is TaskStatus.PENDING:
+            if is_chat and sink is not None:
+                try:
+                    await sink.emit_status(task_id=item.id, status="pending")
+                except Exception:  # noqa: BLE001 — committed retry must survive stream failure
+                    logger.warning("hermes.tasks.loop.stream.retry_status_failed task=%s", item.id)
+            return
+        # One terminal error row, replacing any partial answer for this task.
+        # Write before DONE so polling/re-attach observes the same final result.
         if is_chat and self._conversation_repo is not None:
             conversation_id = item.payload.get("conversation_id") or ""
             if conversation_id:
                 try:
                     from uuid import UUID  # noqa: PLC0415
-                    self._conversation_repo.append_message(
-                        conversation_id=UUID(conversation_id), role="assistant",
+                    self._conversation_repo.upsert_assistant_message(
+                        conversation_id=UUID(conversation_id),
                         content=f"⚠ No he podido completar la respuesta: {reason}", task_id=item.id,
+                        status="failed",
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("hermes.tasks.loop.chat.persist_error_failed: %s", exc)
-        await self._do_mark_failed(item, reason, retryable=retryable)
+        if is_chat:
+            await self._safe_close_stream(sink, item, "failed", error=reason)
 
-    async def _do_mark_failed(self, item: WorkItem, reason: str, *, retryable: bool = True) -> None:
-        await self._queue.mark_failed(
+    async def _do_mark_failed(
+        self, item: WorkItem, reason: str, *, retryable: bool = True,
+    ) -> WorkItem:
+        updated = await self._queue.mark_failed(
             item.id,
             claim_token=item.claim_token,  # type: ignore[arg-type]
             reason=reason,
             **({"retryable": False} if not retryable else {}),
         )
         await self._emit_failed(item, reason)
-        self._emit_notification_failed(item, reason)
+        # Keep attempt failures in the audit, but notify the operator only when
+        # retries are exhausted (or the engine explicitly forbids a retry).
+        if updated.status is TaskStatus.FAILED:
+            self._emit_notification_failed(item, reason)
+        return updated
 
     async def _handle_cancelled(
         self, item: WorkItem, reason: str, effective_sink: Any, is_chat: bool

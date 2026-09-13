@@ -46,8 +46,10 @@ async def test_engine_exception_is_not_echoed_or_stringified(tmp_path, caplog, h
     assert persisted.status is TaskStatus.PENDING  # Existing bounded backoff unchanged.
     assert persisted.attempts == 1
     assert sink.emitted == []
-    assert sink.closed and sink.closed[-1]["outcome"] == "failed"
-    assert repository.append_message.called
+    assert sink.closed == []
+    assert sink.statuses[-1]["status"] == "pending"
+    repository.append_message.assert_not_called()
+    repository.upsert_assistant_message.assert_not_called()
     assert str(item.id) in caplog.text
     assert "hermes.tasks.loop.engine_error" in caplog.text
     assert SECRET not in caplog.text + str(persisted) + str(sink.closed) + str(
