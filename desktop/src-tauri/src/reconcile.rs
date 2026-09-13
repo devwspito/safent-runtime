@@ -636,6 +636,26 @@ mod tests {
     }
 
     #[test]
+    fn downloaded_bundle_but_old_running_ads_is_not_ready() {
+        // CLI folds live role image-ID verification into authenticated health.
+        // Merely downloading the new bundle must not skip compose/re-observe.
+        let mut facts = converged_macos_facts();
+        facts.companion_scaffold = true;
+        facts.local_companion_image_digest = Some(companion_image().digest);
+        facts.companion_containers = CompanionContainers {
+            running: 4,
+            total: 4,
+        };
+        facts.companion_health = CompanionHealth::Unreachable;
+        assert_eq!(
+            reconcile(&facts, &desired_with_companion()),
+            vec![RepairAction::ComposeCompanionUp(companion_image())]
+        );
+        facts.companion_health = CompanionHealth::Reachable;
+        assert!(reconcile(&facts, &desired_with_companion()).is_empty());
+    }
+
+    #[test]
     fn companion_not_desired_is_never_touched() {
         // desired_macos() has companion_image: None — even a half-provisioned
         // scaffold must not produce a companion action nobody asked for.

@@ -22,6 +22,7 @@ tests/unit/ops/test_companion_provision.py.
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -42,6 +43,21 @@ echo "$@" >> "$FAKE_PODMAN_LOG"
 case "$1" in
   inspect)
     case "$*" in
+      *com.docker.compose.service*)
+        case "$4" in c1) role=ads-api;; c2) role=ads-db;; c3) role=ads-worker;; c4) role=ads-broker;; c5) role=ads-migrate;; *) exit 1;; esac
+        case "$*" in
+          *'{{.Image}}'*)
+            image="$FAKE_ADS_IMAGE_ID"
+            [ "$role" != ads-db ] || image="$FAKE_DB_IMAGE_ID"
+            if [ "${FAKE_STALE_ROLE:-}" = "$role" ]; then
+              if [ "${FAKE_STUCK_IMAGE:-0}" = 1 ] || [ ! -f "${FAKE_COMPOSE_APPLIED:-/nonexistent}" ]; then image="$FAKE_OLD_IMAGE_ID"; fi
+            fi
+            printf '%s|%s\n' "$role" "$image" ;;
+          *)
+            if [ "$role" = ads-migrate ]; then printf '%s|false|exited|0\n' "$role";
+            else printf '%s|true|running|0\n' "$role"; fi ;;
+        esac
+        exit 0 ;;
       *'/etc/hermes/companions'*)
         if [ "${FAKE_MISSING_PROJECTION:-0}" != 1 ] || [ -f "${FAKE_CORE_RECREATED:-/nonexistent}" ]; then
           echo 'volume|safent-companion-runtime|false'
@@ -74,6 +90,13 @@ case "$1" in
     exit 0
     ;;
   pull) exit 0 ;;
+  image)
+    case "$*" in
+      *'{{.Id}}'*)
+        # Real Podman returns an unprefixed image ID (not a manifest digest).
+        case "${!#}" in docker.io/library/postgres@sha256:*) echo "${FAKE_DB_IMAGE_ID#sha256:}";; *) echo "${FAKE_ADS_IMAGE_ID#sha256:}";; esac ;;
+    esac
+    exit 0 ;;
   port) echo "${FAKE_PUBLISHED_PORT:-127.0.0.1:35335}"; exit 0 ;;
   run)
     case "$*" in
@@ -99,9 +122,12 @@ case "$1" in
   compose)
     verb="$6"
     case "$verb" in
-      up) [ "${FAKE_COMPOSE_UP_FAIL:-0}" = "1" ] && exit 1; exit 0 ;;
+      up)
+        [ "${FAKE_COMPOSE_UP_FAIL:-0}" = "1" ] && exit 1
+        [ -z "${FAKE_COMPOSE_APPLIED:-}" ] || printf '%s' "$SAFENT_ADS_IMAGE" > "$FAKE_COMPOSE_APPLIED"
+        exit 0 ;;
       down) exit 0 ;;
-      ps) for id in c1; do echo "$id"; done; exit 0 ;;
+      ps) for id in c1 c2 c3 c4 c5; do echo "$id"; done; exit 0 ;;
       exec) printf '%s\n' "${FAKE_DB_REVISION:-}"; exit 0 ;;
     esac
     exit 0
@@ -198,10 +224,66 @@ def _base_env(
         "SAFENT_IMAGE": "ghcr.io/devwspito/safent@sha256:" + "b" * 64,
         "SAFENT_ADS_IMAGE": "ghcr.io/devwspito/safent-ads@sha256:" + "a" * 64,
         "FAKE_PODMAN_LOG": str(podman_log),
+        "FAKE_ADS_IMAGE_ID": "sha256:" + "c" * 64,
+        "FAKE_DB_IMAGE_ID": "sha256:" + "d" * 64,
+        "FAKE_OLD_IMAGE_ID": "sha256:" + "e" * 64,
     }
 
 
 class TestCompanionInstall:
+    @pytest.mark.parametrize("role,recorded", [
+        (role, "ghcr.io/devwspito/safent-ads@sha256:" + "f" * 64)
+        for role in ["ads-api", "ads-worker", "ads-broker", "ads-db", "ads-migrate"]
+    ] + [("ads-api", "ghcr.io/devwspito/safent-ads:v0.2.2"), ("ads-api", None)])
+    def test_upgrade_requires_running_bundle_images_not_just_download_and_health(
+        self, tmp_path: Path, fake_bin_dir: Path, role: str, recorded: str | None
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        state = state_home / "companions" / "ads"
+        if recorded is not None:
+            (state / "image").write_text(recorded)
+        (state / "pg_password").write_text("fake-pg")
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        applied = tmp_path / "compose-applied"
+        env.update(FAKE_STALE_ROLE=role, FAKE_COMPOSE_APPLIED=str(applied))
+
+        def invoke(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(["sh", str(_SAFENT_CLI), *args], env=env,
+                                  capture_output=True, text=True, timeout=20, check=False)
+
+        before = invoke("facts", "--json")
+        assert before.returncode == 0, before.stderr
+        facts = json.loads(before.stdout)
+        assert facts["localCompanionImageDigest"] == env["SAFENT_ADS_IMAGE"].split("@", 1)[1]
+        assert facts["companionContainers"] == {"running": 4, "total": 4}
+        assert facts["companionHealth"] == "unreachable"
+        assert "health-ads" not in log.read_text()
+        repaired = invoke("companion", "repair", "--porcelain")
+        assert repaired.returncode == 0, repaired.stdout + repaired.stderr
+        assert applied.read_text() == env["SAFENT_ADS_IMAGE"]
+        assert (state / "image").read_text() == env["SAFENT_ADS_IMAGE"]
+        for _ in range(2):
+            after = invoke("facts", "--json")
+            assert after.returncode == 0, after.stderr
+            assert json.loads(after.stdout)["companionHealth"] == "reachable"
+        assert sum(" up -d" in line for line in log.read_text().splitlines()) == 1
+
+    def test_compose_success_with_old_running_image_never_verifies_ads(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_STALE_ROLE="ads-api", FAKE_STUCK_IMAGE="1")
+        result = subprocess.run(["sh", str(_SAFENT_CLI), "companion", "repair", "--porcelain"],
+                                env=env, capture_output=True, text=True, timeout=20, check=False)
+        assert result.returncode != 0
+        assert "imagenes verificadas" in result.stdout
+        assert "verify-ads" not in log.read_text()
+
     @pytest.mark.parametrize("verb", ["install", "repair"])
     def test_missing_projection_recreates_once_before_verified_reload(
         self, tmp_path: Path, fake_bin_dir: Path, verb: str
@@ -505,6 +587,10 @@ class TestAgentTick:
 _FAKE_PODMAN_SLOW_PULL = _FAKE_PODMAN.replace(
     "  pull) exit 0 ;;\n",
     "  image)\n"
+    '    if [ "$2" = "inspect" ] && [ "$3" = "-f" ]; then\n'
+    '      case "${!#}" in docker.io/library/postgres@sha256:*) echo "${FAKE_DB_IMAGE_ID#sha256:}";; *) echo "${FAKE_ADS_IMAGE_ID#sha256:}";; esac\n'
+    '      exit 0\n'
+    '    fi\n'
     '    [ "$2" = "inspect" ] && exit 1  # never "already local" -> ensure_image must pull\n'
     "    exit 0\n"
     "    ;;\n"

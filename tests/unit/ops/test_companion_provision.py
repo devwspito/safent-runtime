@@ -680,6 +680,9 @@ class TestHonoursSafentPodmanOverPath:
         pinned_podman = pinned_dir / "podman"
         pinned_podman.write_text(
             f'#!/usr/bin/env bash\necho "$@" >> {pinned_podman_log}\n'
+            # Real projection consumes the tar stream. Exiting without reading
+            # it races the producer and can cause SIGPIPE under pipefail.
+            'case "$*" in *"safent-companion-runtime:/runtime"*) cat >/dev/null; exit 0 ;; esac\n'
             'case "$1 $2" in\n'
             '  "network inspect") echo "10.201.0.0/24"; exit 0 ;;\n'
             '  "network create") exit 0 ;;\n'

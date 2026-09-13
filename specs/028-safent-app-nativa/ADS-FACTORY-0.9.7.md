@@ -1,6 +1,17 @@
 # Safent 0.9.7 — cierre de arranque y conexión OAuth
 
-Prepublicación: código corregido y pruebas focales aprobadas; aún no constituye certificación del DMG ni de conexión a cuentas reales.
+Estado tras prueba real del 13 de septiembre: artefactos publicados y firmas verificadas, pero **0.9.7 no supera la aceptación funcional**. Se ha marcado como prerelease para no ofrecerla como actualización estable. No constituye certificación de conexión a cuentas reales.
+
+## Prueba del DMG en el Mac: resultados y defectos encontrados
+
+- Workflow de motor `34733246480`, Ads `34733247231` y desktop `34733993399` (segundo intento de publicación) completados.
+- DMG `Safent_0.9.7_aarch64.dmg`: SHA-256 `ba1632969f88bd861e1a07ad8e8ef9308532747fd7b81419646d1c69b962c53d`, 1.016.789.189 bytes. `codesign --verify --deep --strict`, `spctl` (Notarized Developer ID) y `stapler validate` pasan. Compose empaquetado tiene modo 0755.
+- Instalado desde ese DMG en `/Applications/Safent.app`, conservando copia recuperable de 0.9.5 y todos los datos de `.safent`. El arranque GUI, sin preprovisión manual, descarga el motor y Ads, entra en Chat y muestra 0.9.7. El motor real queda en el digest arm64 fijado `033caf770f49d23a3f0eee2ae3d3285ff849f9b0060868f7ed8298cefe9cd23f`, con volumen `safent-data` y proyección Ads de sólo lectura. En esta actualización el puerto cambia de 35335 a 40843; no se certifica conservación del puerto entre versiones.
+- **Fallo de convergencia**: el motor nuevo y la imagen Ads nueva descargada no bastan. Los servicios Ads existentes siguen ejecutando 0.2.2; el handshake MCP devuelve 64 herramientas pero versión 0.2.2. La comprobación de disponibilidad no comparaba las imágenes de los contenedores en ejecución con el pin del paquete. Además el inventario podía sobrescribir el pin deseado con el persistido antiguo. Corrección en curso para la siguiente versión.
+- **Fallo de panel embebido**: el proxy responde 200 a `/ads/` y `/ads/api/v1/auth/me`, pero el navegador termina en `/login`. El HTML inyecta script inline y `<base>`, ambos prohibidos por la CSP de producción. La corrección debe usar metadata no ejecutable y rutas de assets prefijadas, sin relajar `script-src` ni `base-uri`.
+- **Carrera de publicación corregida en pipeline**: la matriz creó dos borradores v0.9.7 y el gate final rechazó el inventario incompleto. Se consolidaron los cuatro archivos Linux x64 verificando sus SHA-256 antes y después, conservando respaldo, y se eliminó únicamente el duplicado. El segundo intento del gate final pasó: release única 387774699, 15 assets, 14 hashes coincidentes, manifiesto minisign válido y URLs del actualizador correctas. Commit preventivo `ff5e6d1f`: resolver un solo draft antes de la matriz, pasar `releaseId` explícito, rechazar identidades ambiguas/publicadas y serializar publicaciones del mismo tag. 82 pruebas pasan y 3 se omiten por herramientas Apple no disponibles en Linux; revisión independiente aprobada.
+
+Pendiente para cerrar: publicar la corrección siguiente, repetir arranque GUI y reapertura idempotente, comprobar Ads en la versión fijada y panel embebido sin segundo login. No repetir la limpieza del Mac ni sustituir validación GUI por una reparación manual oculta.
 
 ## Por qué no entregar 0.9.6
 

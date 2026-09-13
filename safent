@@ -1544,8 +1544,23 @@ _companion_container_counts() {
   # ads-migrate is a one-shot job, not a fifth missing service after exit 0.
   total=4
   running=0
-  _companion_env
-  ids="$("$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" ps -q -a 2>/dev/null || true)"
+  # Native inventory uses the verified bundle pin, including during recovery of
+  # legacy/missing markers. Terminal callers without that pin remain fail-closed.
+  # All compose environment changes stay in this subshell.
+  ids="$(
+    if _is_pinned_ads_image "${SAFENT_ADS_IMAGE:-}"; then
+      _companion_env_common
+      export SAFENT_STATE SAFENT_ADS_IMAGE ADS_POSTGRES_PASSWORD
+    else
+      _companion_env
+    fi
+    "$RT" compose -p safent-ads -f "$COMPANION_COMPOSE" ps -q -a 2>/dev/null || true
+  )" || {
+    _cc_rc=$?
+    # Preserve the closed porcelain failure, not a successful empty inventory.
+    [ -z "$ids" ] || printf '%s\n' "$ids"
+    exit "$_cc_rc"
+  }
   _cc_seen=" "
   _cc_invalid=0
   for id in $ids; do
@@ -1566,6 +1581,35 @@ _companion_container_counts() {
   # A running/failed migration or ambiguous inventory must never look ready.
   [ "$_cc_invalid" -eq 0 ] || running=0
 }
+
+# A downloaded image and healthy old API do not prove upgrade convergence.
+# Resolve immutable refs to local content IDs, so manifest-list/platform digest
+# differences are handled by the runtime rather than guessed from labels/tags.
+_companion_images_match() (
+  _is_pinned_ads_image "${SAFENT_ADS_IMAGE:-}" || return 1
+  _ci_ads_ref="$SAFENT_ADS_IMAGE"
+  _ci_db_ref="$(awk '$0 == "  ads-db:" {db=1; next} db && /^  [^ ]/ {exit} db && $1 == "image:" {print $2; exit}' "$COMPANION_COMPOSE")"
+  printf '%s\n' "$_ci_db_ref" | grep -Eq '^docker[.]io/library/postgres@sha256:[0-9a-f]{64}$' || return 1
+  _ci_ads="$("$RT" image inspect -f '{{.Id}}' "$_ci_ads_ref" 2>/dev/null)" || return 1
+  _ci_db="$("$RT" image inspect -f '{{.Id}}' "$_ci_db_ref" 2>/dev/null)" || return 1
+  # Podman returns bare content IDs; Docker commonly includes sha256:.
+  _ci_ads=${_ci_ads#sha256:}
+  _ci_db=${_ci_db#sha256:}
+  for _ci_id in "$_ci_ads" "$_ci_db"; do
+    printf '%s\n' "$_ci_id" | grep -Eq '^[0-9a-f]{64}$' || return 1
+  done
+  _companion_container_counts
+  [ "$running" -eq 4 ] && [ "$total" -eq 4 ] || return 1
+  for _ci_container in $ids; do
+    _ci_info="$("$RT" inspect -f '{{index .Config.Labels "com.docker.compose.service"}}|{{.Image}}' "$_ci_container" 2>/dev/null)" || return 1
+    _ci_role=${_ci_info%%|*}
+    _ci_actual=${_ci_info#*|}
+    case "$_ci_role|${_ci_actual#sha256:}" in
+      "ads-db|$_ci_db"|"ads-api|$_ci_ads"|"ads-worker|$_ci_ads"|"ads-broker|$_ci_ads"|"ads-migrate|$_ci_ads") ;;
+      *) return 1 ;;
+    esac
+  done
+)
 
 # Bearer-protected `/mcp/health` — a bare 401 IS liveness (see provision.sh's
 # own wait_for_health): we never pass a bearer on this read-only probe.
@@ -1662,6 +1706,8 @@ _companion_install_or_repair() {
   _running || _die_porcelain companion_unreachable "Safent no esta disponible para registrar el companion" false
   _run_with_heartbeat _companion_converge_core \
     || _die_porcelain companion_unreachable "No se pudo preparar la conexion segura de Anuncios sin cambiar los datos o el puerto de Safent" false
+  _companion_images_match \
+    || _die_porcelain companion_unreachable "Anuncios no esta ejecutando todas las imagenes verificadas de esta version de Safent. Reintenta la preparacion." true
   "$RT" exec -u root "$NAME" /usr/libexec/hermes/hermes-companion-bearer >&2 \
     || _die_porcelain companion_unreachable "No se pudo preparar el registro seguro del companion" false
   _run_with_heartbeat "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
@@ -1690,6 +1736,9 @@ cmd_companion_status() {
     echo "  network:      absent"
   fi
   if [ -f "$COMPANION_COMPOSE" ]; then
+    # Explicit terminal status keeps the recorded-image contract. Native facts
+    # use the separately supplied bundle intent, never this terminal selector.
+    _companion_env
     _companion_container_counts
     echo "  containers:   $running/$total running"
   else
@@ -2209,7 +2258,7 @@ cmd_facts() {
   fi
   companion_health=unknown
   if [ "$engine_running" = true ] && [ -n "$RT" ]; then
-    if "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
+    if _companion_images_match && "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
         health-ads >/dev/null 2>&1; then
       companion_health=reachable
     else
