@@ -1,15 +1,17 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { AlertCircle, ChevronDown, Download, File, Folder, Globe, RefreshCw, X, Zap } from 'lucide-react'
 import { listComposioConnected, listSkills, listWorkspaceFiles, workspaceDownloadUrl } from '../api/client'
-import type { ComposioApp, Skill, WorkspaceFile } from '../api/types'
+import type { ComposioConnectedAccount, Skill, WorkspaceFile } from '../api/types'
 import { useT } from '../lib/i18n'
+import { composioAppName } from '../lib/composio'
 import { isLiveSkill } from '../lib/skills'
 import { useContextSource } from '../hooks/useContextSource'
 import styles from './ContextPanel.module.css'
 
 const validFile = (file: WorkspaceFile) => Boolean(file && typeof file.name === 'string' && typeof file.path === 'string' && file.path)
 const validSkill = (skill: Skill) => Boolean(skill && [skill.name, skill.slug, skill.skill_name, skill.skill_id, skill.package_id].some(value => typeof value === 'string' && value) && [skill.name, skill.slug, skill.skill_name].every(value => value == null || typeof value === 'string'))
-const validConnector = (app: ComposioApp) => Boolean(app && typeof app.slug === 'string' && app.slug && (app.name == null || typeof app.name === 'string'))
+const validConnector = (account: ComposioConnectedAccount) => Boolean(account && account.id && account.toolkit_slug && account.status === 'ACTIVE')
+const listActiveConnections = async () => (await listComposioConnected()).filter(account => account.status === 'ACTIVE')
 
 function PanelSection({ title, count, loading, error, retry, children }: {
   title: string; count: number | null; loading: boolean; error: boolean; retry: () => void; children: ReactNode
@@ -40,7 +42,7 @@ export default function ContextPanel({ onClose, busy = false }: { onClose: () =>
   const t = useT()
   const files = useContextSource(listWorkspaceFiles, validFile)
   const skills = useContextSource(listSkills, validSkill)
-  const connectors = useContextSource(listComposioConnected, validConnector)
+  const connectors = useContextSource(listActiveConnections, validConnector)
   const closeButton = useRef<HTMLButtonElement>(null)
   const wasBusy = useRef(busy)
   useEffect(() => {
@@ -89,7 +91,10 @@ export default function ContextPanel({ onClose, busy = false }: { onClose: () =>
       <PanelSection title={t('ctx.section.connectors')} count={connectors.data?.length ?? null} loading={connectors.loading} error={connectors.error} retry={() => { void connectors.refresh() }}>
         {connectors.data?.length === 0 && <p className={styles.hint}>{t('ctx.source.no_connectors')}</p>}
         <ul className={styles.list} aria-label={t('ctx.connectors.aria')}>
-          {connectors.data?.map(app => <li key={app.slug} className={styles.row}><Globe size={13} aria-hidden="true" /><span className={styles.name} title={app.name ?? app.slug}>{app.name ?? app.slug}</span></li>)}
+          {connectors.data?.map(account => {
+            const name = composioAppName({ slug: account.toolkit_slug })
+            return <li key={account.id} className={styles.row}><Globe size={13} aria-hidden="true" /><span className={styles.name} title={name}>{name}</span></li>
+          })}
         </ul>
       </PanelSection>
     </div>

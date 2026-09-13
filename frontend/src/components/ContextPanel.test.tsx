@@ -67,3 +67,19 @@ it('rejects malformed connector responses without presenting them as an empty so
   expect(host.textContent).not.toContain('Sin conexiones activas')
   expect(host.textContent).toContain('Brand manual.pdf')
 })
+
+it('reads actual REST accounts and shows only active connections without merging accounts on one platform', async () => {
+  const initialFetch = vi.mocked(fetch).getMockImplementation()!
+  const accounts = [
+    { id: 'ca_one', toolkit_slug: 'gmail', entity_id: 'test', status: 'ACTIVE' },
+    { id: 'ca_two', toolkit_slug: 'gmail', entity_id: 'test', status: 'ACTIVE' },
+    { id: 'ca_pending', toolkit_slug: 'googleads', entity_id: 'test', status: 'INITIATED' },
+  ]
+  vi.mocked(fetch).mockImplementation(async (input, init) => String(input).includes('/integrations/composio/connected')
+    ? new Response(JSON.stringify(accounts)) : initialFetch(input, init))
+  await render()
+  const rows = [...host.querySelectorAll('li')].filter(row => row.textContent === 'Gmail')
+  expect(rows).toHaveLength(2)
+  expect(host.textContent).not.toContain('Google Ads')
+  expect(host.textContent).not.toContain('No se pudo consultar esta fuente')
+})

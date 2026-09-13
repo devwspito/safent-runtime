@@ -18,6 +18,7 @@ import type {
   HubOpStatus,
   ComposioStatus,
   ComposioApp,
+  ComposioConnectedAccount,
   WebSearchStatus,
   McpServer,
   McpRegistryEntry,
@@ -171,7 +172,7 @@ async function request<T>(path: string, options: RequestOptions = {}, _retried =
 
   // Mirror the vanilla api.js {ok:false} guard (mutators return 2xx with ok:false
   // on daemon-level failures — e.g. addMcpServer).
-  if (json['ok'] === false) {
+  if (json && json['ok'] === false) {
     throw new ApiError(
       (json['error'] as string | undefined) ?? 'La operación falló.',
       res.status,
@@ -387,12 +388,50 @@ export function getComposioStatus(): Promise<ComposioStatus> {
   return request<ComposioStatus>('/integrations/composio/status')
 }
 
-export function listComposioConnected(): Promise<ComposioApp[]> {
-  return request<ComposioApp[]>('/integrations/composio/connected')
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
 }
 
-export function listComposioApps(): Promise<ComposioApp[]> {
-  return request<ComposioApp[]>('/integrations/composio/toolkits')
+export async function listComposioConnected(): Promise<ComposioConnectedAccount[]> {
+  const payload = await request<unknown>('/integrations/composio/connected')
+  const invalid = () => new ApiError('No se pudieron verificar tus conexiones. Vuelve a intentarlo.', 502, null)
+  if (!Array.isArray(payload)) throw invalid()
+  const ids = new Set<string>()
+  return payload.map(account => {
+    if (!account || typeof account !== 'object'
+      || !nonEmptyString(account.id) || ids.has(account.id)
+      || !nonEmptyString(account.toolkit_slug)
+      || !nonEmptyString(account.entity_id) || !nonEmptyString(account.status)
+      || (account.auth_config_id !== undefined && typeof account.auth_config_id !== 'string')) {
+      throw invalid()
+    }
+    ids.add(account.id)
+    return {
+      id: account.id,
+      toolkit_slug: account.toolkit_slug.trim().toLowerCase(),
+      entity_id: account.entity_id,
+      status: account.status.trim().toUpperCase(),
+      auth_config_id: account.auth_config_id ?? '',
+    }
+  })
+}
+
+export async function listComposioApps(): Promise<ComposioApp[]> {
+  const payload = await request<unknown>('/integrations/composio/toolkits')
+  const invalid = () => new ApiError('No se pudo cargar el catálogo de aplicaciones. Vuelve a intentarlo.', 502, null)
+  if (!Array.isArray(payload)) throw invalid()
+  return payload.map(app => {
+    if (!app || typeof app !== 'object' || !nonEmptyString(app.slug)
+      || ['name', 'description', 'logo'].some(key => app[key] !== undefined && typeof app[key] !== 'string')) {
+      throw invalid()
+    }
+    return {
+      slug: app.slug.trim().toLowerCase(),
+      name: app.name?.trim() || undefined,
+      description: app.description?.trim() || undefined,
+      logo: app.logo?.trim() || undefined,
+    }
+  })
 }
 
 export function connectComposioApp(slug: string): Promise<{ redirect_url?: string }> {
@@ -409,8 +448,8 @@ export function setComposioApiKey(apiKey: string): Promise<unknown> {
   })
 }
 
-export function disconnectComposioApp(slug: string): Promise<unknown> {
-  return request<unknown>(`/integrations/composio/connected/${encodeURIComponent(slug)}`, {
+export function disconnectComposioApp(connectionId: string): Promise<unknown> {
+  return request<unknown>(`/integrations/composio/connected/${encodeURIComponent(connectionId)}`, {
     method: 'DELETE',
   })
 }

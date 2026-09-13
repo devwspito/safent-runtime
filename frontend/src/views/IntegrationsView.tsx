@@ -1,14 +1,16 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { sileo } from 'sileo'
 import { Check, Plug, Globe, RefreshCw, Search } from 'lucide-react'
-import { useT } from '../lib/i18n'
+import { useT, type TranslationKey } from '../lib/i18n'
+import { composioAppName } from '../lib/composio'
 import {
   getComposioStatus, listComposioConnected, listComposioApps,
   connectComposioApp, setComposioApiKey,
   getWebSearchStatus, setWebSearchKey,
   ApiError,
 } from '../api/client'
-import type { ComposioStatus, ComposioApp, WebSearchStatus } from '../api/types'
+import type { ComposioStatus, ComposioApp, ComposioConnectedAccount, WebSearchStatus } from '../api/types'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
@@ -22,13 +24,13 @@ type ComposioState =
   | { status: 'loading' }
   | { status: 'no-key' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; info: ComposioStatus; connected: ComposioApp[]; apps: ComposioApp[]; connectedError: boolean; appsError: boolean }
+  | { status: 'ready'; info: ComposioStatus; connected: ComposioConnectedAccount[]; apps: ComposioApp[]; connectedError: boolean; appsError: boolean }
 
 type ComposioAction =
   | { type: 'LOADING' }
   | { type: 'NO_KEY' }
   | { type: 'FAILED'; message: string }
-  | { type: 'READY'; info: ComposioStatus; connected: ComposioApp[]; apps: ComposioApp[]; connectedError: boolean; appsError: boolean }
+  | { type: 'READY'; info: ComposioStatus; connected: ComposioConnectedAccount[]; apps: ComposioApp[]; connectedError: boolean; appsError: boolean }
 
 function composioReducer(_s: ComposioState, a: ComposioAction): ComposioState {
   switch (a.type) {
@@ -132,9 +134,9 @@ export default function IntegrationsView() {
     dispatch({
       type: 'READY',
       info: status,
-      connected: validApps(connected) ? connected.value : [],
+      connected: connected.status === 'fulfilled' ? connected.value : [],
       apps: validApps(apps) ? apps.value : [],
-      connectedError: !validApps(connected),
+      connectedError: connected.status === 'rejected',
       appsError: !validApps(apps),
     })
   }
@@ -161,7 +163,7 @@ export default function IntegrationsView() {
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const connectedSlugs = composioState.status === 'ready'
-    ? new Set(composioState.connected.map(c => c.slug))
+    ? new Set(composioState.connected.filter(c => c.status === 'ACTIVE').map(c => c.toolkit_slug))
     : new Set<string>()
 
   return (
@@ -253,6 +255,10 @@ export default function IntegrationsView() {
                     </span>
                   </div>
               )}
+              <p className={styles.adsNote}>
+                {t('int.ads.guidance')}{' '}
+                <Link className={styles.adsLink} to="/anuncios">{t('int.ads.open')}</Link>
+              </p>
             </section>
 
           {/* ── Connected apps ────────────────────────────────────────────── */}
@@ -281,9 +287,13 @@ export default function IntegrationsView() {
                   )
                   : (
                     <ul className={styles.appGrid} role="list">
-                        {composioState.connected.map(app => (
-                          <li key={app.slug}>
-                            <AppCard app={app} isConnected />
+                        {composioState.connected.map(account => (
+                          <li key={account.id}>
+                            <AppCard
+                              app={composioState.apps.find(app => app.slug === account.toolkit_slug) ?? { slug: account.toolkit_slug }}
+                              connection={account}
+                              showConnectionId={composioState.connected.filter(other => other.toolkit_slug === account.toolkit_slug).length > 1}
+                            />
                           </li>
                         ))}
                     </ul>
@@ -326,7 +336,6 @@ export default function IntegrationsView() {
                           <li key={app.slug}>
                             <AppCard
                               app={app}
-                              isConnected={false}
                               disabled={composioState.connectedError || refreshing}
                               onConnect={async (a) => {
                                 try {
@@ -334,7 +343,7 @@ export default function IntegrationsView() {
                                   if (r?.redirect_url) {
                                     window.open(r.redirect_url, '_blank', 'noopener,noreferrer')
                                   }
-                                  show(t('int.connecting_app_toast').replace('{name}', a.name ?? a.slug), 'info')
+                                  show(t('int.connecting_app_toast').replace('{name}', composioAppName(a)), 'info')
                                   if (reloadTimerRef.current !== null) clearTimeout(reloadTimerRef.current)
                                   reloadTimerRef.current = setTimeout(loadComposio, 3000)
                                 } catch (e) {
@@ -357,7 +366,8 @@ export default function IntegrationsView() {
 
 interface AppCardProps {
   app: ComposioApp
-  isConnected: boolean
+  connection?: ComposioConnectedAccount
+  showConnectionId?: boolean
   disabled?: boolean
   onConnect?: (app: ComposioApp) => void | Promise<void>
 }
@@ -367,14 +377,23 @@ function SourceError({ message, onRetry, busy }: { message: string; onRetry: () 
   return <div role="alert" className={styles.errorRow}><p className={styles.errorText}>{message}</p><Button variant="secondary" size="sm" onClick={onRetry} disabled={busy}>{t('int.retry')}</Button></div>
 }
 
-function AppCard({ app, isConnected, onConnect, disabled }: AppCardProps) {
+function connectionStatusKey(status: string): TranslationKey {
+  switch (status) {
+    case 'ACTIVE': return 'int.connected_badge'
+    case 'INITIATED': case 'INITIALIZING': return 'int.connection.pending'
+    case 'EXPIRED': return 'int.connection.expired'
+    case 'FAILED': return 'int.connection.failed'
+    case 'INACTIVE': case 'REVOKED': return 'int.connection.inactive'
+    default: return 'int.connection.unknown'
+  }
+}
+
+function AppCard({ app, connection, showConnectionId, onConnect, disabled }: AppCardProps) {
   const t = useT()
   const [connecting, setConnecting] = useState(false)
-  const displayName =
-    app.name ??
-    (app as unknown as Record<string, unknown>).toolkit_slug as string | undefined ??
-    app.slug ??
-    '—'
+  const displayName = composioAppName(app)
+  const isConnected = connection?.status === 'ACTIVE'
+  const isAds = app.slug === 'googleads' || app.slug === 'metaads'
 
   const cardClass = [
     styles.appCard,
@@ -392,6 +411,11 @@ function AppCard({ app, isConnected, onConnect, disabled }: AppCardProps) {
 
       <div className={styles.appInfo}>
         <div className={styles.appName}>{displayName}</div>
+        {connection && showConnectionId && (
+          <div className={styles.appDesc} title={connection.id}>
+            {t('int.connection.label').replace('{id}', connection.id)}
+          </div>
+        )}
         {app.description && (
           <div className={styles.appDesc} title={app.description}>
             {app.description}
@@ -400,13 +424,14 @@ function AppCard({ app, isConnected, onConnect, disabled }: AppCardProps) {
       </div>
 
       <div className={styles.appAction}>
-        {isConnected
+        {connection
           ? (
-            <span className={styles.connectedBadge}>
-              <Check size={10} aria-hidden="true" />
-              {t('int.connected_badge')}
+            <span className={isConnected ? styles.connectedBadge : styles.connectionStatus}>
+              {isConnected && <Check size={10} aria-hidden="true" />}
+              {t(connectionStatusKey(connection.status))}
             </span>
           )
+          : isAds ? null
           : (
             <Button
               variant="ghost"
@@ -424,6 +449,11 @@ function AppCard({ app, isConnected, onConnect, disabled }: AppCardProps) {
             </Button>
           )
         }
+        {isAds && (
+          <Link className={styles.adsLink} to="/anuncios" aria-label={t('int.ads.open_aria').replace('{name}', displayName)}>
+            {t('int.ads.open')}
+          </Link>
+        )}
       </div>
     </div>
   )

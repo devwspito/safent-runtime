@@ -201,6 +201,15 @@ export interface ComposioApp {
   logo?: string
 }
 
+/** An account authorized with Composio, distinct from an available toolkit. */
+export interface ComposioConnectedAccount {
+  id: string
+  toolkit_slug: string
+  entity_id: string
+  status: string
+  auth_config_id: string
+}
+
 export interface WebSearchStatus {
   brave?: boolean
   ddgs_fallback?: boolean
