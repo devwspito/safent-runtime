@@ -19,6 +19,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from http import HTTPStatus
 from pathlib import Path
@@ -117,6 +118,16 @@ def create_integrations_router(db_path: Path) -> APIRouter:  # noqa: PLR0915 - e
     def _repo() -> SQLiteIntegrationsRepository:
         return SQLiteIntegrationsRepository(db_path=db_path, vault=SecretsVault())
 
+    async def _refresh_ads(request: Request) -> None:
+        """Push changes promptly; background renewal remains bounded/fail-closed."""
+        refresh = getattr(request.app.state, "composio_lease_refresh", None)
+        if refresh is None:
+            return
+        try:
+            await asyncio.wait_for(refresh.ensure(force=True), timeout=12)
+        except (TimeoutError, RuntimeError):
+            logger.warning("hermes.integrations.ads_refresh_pending")
+
     # ----------------------------------------------------------------
     # Store / rotate API key
     # ----------------------------------------------------------------
@@ -138,6 +149,7 @@ def create_integrations_router(db_path: Path) -> APIRouter:  # noqa: PLR0915 - e
             entity_id=previous.entity_id if previous else f"safent-{uuid4()}",
         )
         logger.info("hermes.integrations.composio.key_stored")
+        await _refresh_ads(request)
         return ComposioStatusResponse(
             has_key=integration.has_api_key,
             enabled=integration.enabled,
@@ -151,6 +163,18 @@ def create_integrations_router(db_path: Path) -> APIRouter:  # noqa: PLR0915 - e
             toolkit_slug=toolkit_slug,
             auth_config_id=_repo().auth_config_ids().get(toolkit_slug),
         )
+
+    @router.post("/composio/ads/prepare", response_model=dict[str, bool])
+    async def prepare_ads(request: Request) -> dict[str, bool]:
+        """Owner can prepare Ads using the stored key, never by copying it again."""
+        require_owner_session(request)
+        from hermes.shell_server.integrations.ads_setup import (  # noqa: PLC0415
+            prepare_composio_ads_configs,
+        )
+
+        readiness = await prepare_composio_ads_configs(db_path)
+        await _refresh_ads(request)
+        return readiness
 
     @router.put("/composio/auth-configs/{toolkit_slug}", response_model=AuthConfigResponse)
     async def select_auth_config(
@@ -168,12 +192,14 @@ def create_integrations_router(db_path: Path) -> APIRouter:  # noqa: PLR0915 - e
                 "Comprueba que pertenece a esta plataforma y que está activa.",
             ) from exc
         repo.set_auth_config(toolkit_slug=toolkit_slug, auth_config_id=body.auth_config_id)
+        await _refresh_ads(request)
         return AuthConfigResponse(toolkit_slug=toolkit_slug, auth_config_id=body.auth_config_id)
 
     @router.delete("/composio/auth-configs/{toolkit_slug}", response_model=AuthConfigResponse)
     async def clear_auth_config(toolkit_slug: AdsToolkit, request: Request) -> AuthConfigResponse:
         require_owner_session(request)
         _repo().clear_auth_config(toolkit_slug=toolkit_slug)
+        await _refresh_ads(request)
         return AuthConfigResponse(toolkit_slug=toolkit_slug, auth_config_id=None)
 
     # ----------------------------------------------------------------
@@ -245,6 +271,7 @@ def create_integrations_router(db_path: Path) -> APIRouter:  # noqa: PLR0915 - e
                 toolkit_slug=a.toolkit_slug,
                 entity_id=a.entity_id,
                 status=a.status,
+                auth_config_id=a.auth_config_id,
             )
             for a in accounts
         ]

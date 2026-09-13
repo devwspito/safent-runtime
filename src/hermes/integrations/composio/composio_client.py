@@ -363,6 +363,7 @@ class ComposioClient:
                 toolkit_slug=item.toolkit.slug if item.toolkit else "",
                 entity_id=item.user_id,
                 status=item.status,
+                auth_config_id=getattr(getattr(item, "auth_config", None), "id", ""),
             )
             for item in response.items
             if item.user_id == entity_id and item.status == "ACTIVE"
@@ -466,6 +467,25 @@ class ComposioClient:
 
     async def validate_auth_config(self, toolkit_slug: str, config_id: str) -> AuthConfigInfo:
         return await self._guarded(lambda: self._validate_auth_config(toolkit_slug, config_id))
+
+    async def resolve_ads_auth_config(self, toolkit_slug: str) -> AuthConfigInfo:
+        """Prepare the shared Ads auth config without opening a user connection.
+
+        Only a provider advertising managed OAuth may create a default. Meta's
+        custom app must be selected explicitly by the owner, never guessed from
+        unrelated project configs. The returned value contains no credentials.
+        """
+        if toolkit_slug not in ADS_TOOLKITS:
+            raise ComposioApiError(409, "La plataforma no pertenece a Anuncios.")
+
+        def resolve() -> AuthConfigInfo:
+            config_id = self._auth_config_ids.get(toolkit_slug)
+            if not config_id:
+                self._assert_managed_ads(toolkit_slug)
+                config_id = self._resolve_managed_auth_config_id(toolkit_slug)
+            return self._validate_auth_config(toolkit_slug, config_id)
+
+        return await self._guarded(resolve)
 
     def _resolve_managed_auth_config_id(self, toolkit_slug: str) -> str:
         """Return an existing enabled managed auth config ID, or create one.

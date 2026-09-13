@@ -360,7 +360,10 @@ ensure_sso_keypair() {
   # placeholder above) is a zero-byte file at this exact path — it must
   # NOT satisfy this check, or `safent companion install` would see "the
   # key already exists" and never generate the real one (T015/T016 boundary).
-  [ -s "$STATE/sso/ads-sso.key" ] && return 0
+  if [ -s "$STATE/sso/ads-sso.key" ]; then
+    _sync_sso_public_key_to_broker_env
+    return 0
+  fi
   log "generando par Ed25519 de SSO (puente de sesión, 026)…"
   local keypair seed_std pub_std pub_urlsafe
   # -- (LOW finding, CWE-88): see ensure_secrets's own identical comment.
@@ -378,6 +381,7 @@ ensure_sso_keypair() {
 
   pub_urlsafe="$(printf '%s' "$pub_std" | tr '+/' '-_')"
   _write_sso_public_key_to_api_env "$pub_urlsafe"
+  _sync_sso_public_key_to_broker_env
   log "par Ed25519 de SSO generado (0400) en $STATE/sso/ads-sso.key"
 }
 
@@ -452,6 +456,31 @@ _write_sso_public_key_to_api_env() {
   local pub="$1" api_env="$STATE/secrets/api.env"
   grep -q '^ADS_SSO_PUBLIC_KEY=' "$api_env" 2>/dev/null && return 0
   printf 'ADS_SSO_PUBLIC_KEY=%s\n' "$pub" >> "$api_env"
+}
+
+# The broker verifies the signed Integrations lease itself. Only the PUBLIC
+# issuer key crosses this boundary; the SSO private key remains in the core.
+# Also runs on upgrades: never regenerate any existing credential or volume.
+_sync_sso_public_key_to_broker_env() {
+  local pub broker_env existing
+  broker_env="$STATE/secrets/broker.env"
+  pub="$(sed -n 's/^ADS_SSO_PUBLIC_KEY=//p' "$STATE/secrets/api.env")"
+  [ -n "$pub" ] || fail "falta la clave pública de SSO; no se puede compartir Integraciones"
+  [ "$(grep -c '^ADS_SSO_PUBLIC_KEY=' "$STATE/secrets/api.env")" = 1 ] || \
+    fail "la clave pública de SSO está duplicada; se conservan los secretos"
+  if grep -q '^ADS_SSO_PUBLIC_KEY=' "$broker_env"; then
+    existing="$(sed -n 's/^ADS_SSO_PUBLIC_KEY=//p' "$broker_env")"
+    [ "$existing" = "$pub" ] || fail "la identidad pública del broker no coincide con Safent"
+  else
+    printf 'ADS_SSO_PUBLIC_KEY=%s\n' "$pub" >> "$broker_env"
+  fi
+  if grep -q '^ADS_COMPANION_MODE=' "$broker_env"; then
+    existing="$(sed -n 's/^ADS_COMPANION_MODE=//p' "$broker_env")"
+    [ "$existing" = true ] || fail "Anuncios debe consumir Integraciones en modo companion"
+  else
+    printf 'ADS_COMPANION_MODE=true\n' >> "$broker_env"
+  fi
+  chmod 0600 "$broker_env"
 }
 
 # ── 8. caps.yaml — hard caps template, installed once, owner edits by hand ──

@@ -385,6 +385,31 @@ class TestFirstRunWritesExpectedFiles:
             assert secret not in combined_output, f"secret value leaked into output: {secret!r}"
 
 
+def test_shared_composio_broker_gets_only_public_sso_key_on_upgrade(tmp_path, fake_bin_dir):
+    state, log = tmp_path / "state", tmp_path / "podman.log"
+    first = _run_provision(state, fake_bin_dir, log)
+    assert first.returncode == 0, first.stderr
+    broker = state / "secrets/broker.env"
+    original = broker.read_text()
+    assert original.count("ADS_SSO_PUBLIC_KEY=") == 1
+    assert "ADS_COMPANION_MODE=true" in original
+    assert "ADS_APPROVAL_SIGNING_KEY=" not in original
+    # Simulate an existing release before the shared-Integrations channel.
+    broker.write_text("\n".join(
+        line for line in original.splitlines()
+        if not line.startswith(("ADS_SSO_PUBLIC_KEY=", "ADS_COMPANION_MODE="))
+    ) + "\n")
+    sso_before = (state / "sso/ads-sso.key").read_bytes()
+    result = _run_provision(state, fake_bin_dir, log)
+    assert result.returncode == 0, result.stderr
+    assert (state / "sso/ads-sso.key").read_bytes() == sso_before
+    assert broker.read_text() == original
+    third = _run_provision(state, fake_bin_dir, log)
+    assert third.returncode == 0, third.stderr
+    assert broker.read_text() == original
+    assert _mode(broker) == 0o600
+
+
 class TestSsoKeypairProvisioning:
     """026, contracts/sso.md §3 — the SSO Ed25519 pair provisioned alongside
     the bearer: private half 0400 on the host, public half handed to the

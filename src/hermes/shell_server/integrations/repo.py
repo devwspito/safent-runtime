@@ -10,6 +10,7 @@ never need to check for existence first.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sqlite3
 from datetime import UTC, datetime
@@ -150,6 +151,39 @@ class SQLiteIntegrationsRepository:
                 "DELETE FROM integration_auth_configs WHERE kind='composio' AND toolkit_slug=?",
                 (toolkit_slug,),
             )
+
+    def credential_fingerprint(self, *, kind: str = "composio") -> str | None:
+        """Version marker for setup CAS; never decrypts or exports a credential."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT api_key_ciphertext, enabled FROM integrations WHERE kind=?", (kind,)
+            ).fetchone()
+        if row is None or not row["enabled"] or row["api_key_ciphertext"] is None:
+            return None
+        return hashlib.sha256(bytes(row["api_key_ciphertext"])).hexdigest()
+
+    def set_auth_config_for_credential(
+        self, *, toolkit_slug: str, auth_config_id: str, expected_fingerprint: str,
+    ) -> bool:
+        """Do not attach a slow provider result to a newly rotated project key."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT api_key_ciphertext, enabled FROM integrations WHERE kind='composio'"
+            ).fetchone()
+            if (
+                row is None or not row["enabled"] or row["api_key_ciphertext"] is None
+                or hashlib.sha256(bytes(row["api_key_ciphertext"])).hexdigest()
+                != expected_fingerprint
+            ):
+                return False
+            conn.execute(
+                "INSERT INTO integration_auth_configs(kind, toolkit_slug, auth_config_id) "
+                "VALUES ('composio', ?, ?) ON CONFLICT(kind, toolkit_slug) "
+                "DO UPDATE SET auth_config_id=excluded.auth_config_id",
+                (toolkit_slug, auth_config_id),
+            )
+        return True
 
     # ----------------------------------------------------------------
     # Secret reveal — ONLY for outbound HTTP calls to Composio
