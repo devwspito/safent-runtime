@@ -8,6 +8,9 @@ Two routes:
     the `ads_bridge` cookie itself (default-deny, GET included — this route
     lives OUTSIDE /api/v1/* on purpose: the browser loads it as a plain
     same-origin resource, an iframe navigation cannot carry a bearer).
+    The only public exception is the exact Google/Meta OAuth callback GET:
+    the companion validates its expiring one-use provider-bound state. It
+    never mints, accepts or forwards an owner session or caller headers.
 
 Trust boundary (sso.md §3): the daemon is the ONLY signer of owner
 assertions and the ONLY reader of the SSO private key (T004,
@@ -27,12 +30,14 @@ import hmac
 import json
 import logging
 import os
+import re
 import ssl
 import time
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import aiohttp
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -55,14 +60,23 @@ _CSRF_COOKIE_NAME = "ads_csrf"
 
 _FORWARDED_REQUEST_HEADERS = frozenset(
     {
-        "accept", "accept-language", "content-type", "content-length",
-        "if-none-match", "x-csrf-token", "x-action-confirmation",
+        "accept",
+        "accept-language",
+        "content-type",
+        "content-length",
+        "if-none-match",
+        "x-csrf-token",
+        "x-action-confirmation",
     }
 )
 _HOP_BY_HOP_RESPONSE_HEADERS = frozenset(
     {
-        "connection", "keep-alive", "transfer-encoding", "content-encoding",
-        "content-length", "set-cookie",
+        "connection",
+        "keep-alive",
+        "transfer-encoding",
+        "content-encoding",
+        "content-length",
+        "set-cookie",
     }
 )
 _FORWARDED_PREFIX = "/ads"
@@ -77,6 +91,93 @@ _ALLOWED_EXACT_PATHS = frozenset({"", "favicon.ico"})
 _ALLOWED_PATH_PREFIXES = ("assets/", "api/v1/")
 _HTTP_OK = 200
 _HTTP_UNAUTHORIZED = 401
+_OAUTH_CALLBACK_PATHS = frozenset(
+    f"api/v1/platform-accounts/{provider}/reconnect/callback" for provider in ("google", "meta")
+)
+_OAUTH_STATE_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,128}\Z")
+_OAUTH_MAX_QUERY_BYTES = 8192
+_OAUTH_MAX_CODE_BYTES = 4096
+_OAUTH_RESPONSE_HTML = (
+    "<!doctype html><title>Safent Ads</title><p>Vuelve a Safent para comprobar "
+    "el resultado de la conexión. Puedes cerrar esta ventana.</p>"
+)
+
+
+async def _proxy_oauth_callback(request: Request, path: str) -> Response:
+    """Only this bearer-state callback is public; never mint an owner session.
+
+    The companion's durable OAuth session/atomic broker pop authorize exactly
+    one exchange. Unknown, expired, wrong-provider and replayed states cannot
+    reach vendor exchange. No cookies, caller headers, retries or redirects.
+    """
+    from hermes.shell_server.companions import get_companion  # noqa: PLC0415
+
+    query = request.query_params
+    raw_path = request.scope.get("raw_path", b"").split(b"?", 1)[0]
+    valid = (
+        request.method == "GET"
+        and path in _OAUTH_CALLBACK_PATHS
+        and raw_path == f"/ads/{path}".encode()
+        and (
+            request.url.scheme == "https"
+            or (
+                request.url.scheme == "http"
+                and request.url.hostname in ("127.0.0.1", "localhost", "::1")
+            )
+        )
+        and len(request.scope.get("query_string", b"")) <= _OAUTH_MAX_QUERY_BYTES
+        # RFC 6749: ignore extensions, never forward them or treat them as authority.
+        and all(len(query.getlist(key)) <= 1 for key in ("state", "code", "error"))
+        and _OAUTH_STATE_PATTERN.fullmatch(query.get("state", "")) is not None
+        and bool(query.get("code")) != bool(query.get("error"))
+        and len(query.get("code", "")) <= _OAUTH_MAX_CODE_BYTES
+    )
+    # Access logs must not retain authorization codes or bearer states.
+    request.scope["query_string"] = b""
+    if not valid:
+        response = _error_response(400, "OAUTH_CALLBACK_INVALID")
+        response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+        return response
+    endpoint = get_companion(_COMPANION_SLUG)
+    if endpoint is None:
+        response = _error_response(503, "COMPANION_UNAVAILABLE")
+        response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+        return response
+    params = {"state": query["state"]}
+    if query.get("code"):
+        params["code"] = query["code"]
+    else:
+        params["error"] = "access_denied"
+    url = _companion_url(endpoint, path, urlencode(params))
+    resolver = FixedIpResolver(hostname=endpoint.host, ip=endpoint.ip)
+    try:
+        connector = aiohttp.TCPConnector(
+            resolver=resolver, ssl=_pinned_ssl_context(endpoint.ca_path)
+        )
+        async with (
+            aiohttp.ClientSession(
+                connector=connector,
+                trust_env=False,
+                auto_decompress=False,
+                timeout=aiohttp.ClientTimeout(total=_TOTAL_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S),
+            ) as session,
+            session.get(url, allow_redirects=False) as upstream,
+        ):
+            # Never render upstream/provider text or forward response cookies.
+            result = _HTTP_OK if upstream.status == _HTTP_OK else 400
+    except (TimeoutError, aiohttp.ClientError, OSError, ssl.SSLError, AdsBridgeError):
+        result = 503
+    return Response(
+        _OAUTH_RESPONSE_HTML,
+        status_code=result,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "Referrer-Policy": "no-referrer",
+            "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+        },
+    )
 
 
 class AdsBridgeError(RuntimeError):
@@ -91,9 +192,7 @@ class AdsBridgeError(RuntimeError):
 
 class AdsSessionUnavailableError(AdsBridgeError):
     def __init__(self, message: str) -> None:
-        super().__init__(
-            status_code=503, code="ADS_SESSION_UNAVAILABLE", message=message
-        )
+        super().__init__(status_code=503, code="ADS_SESSION_UNAVAILABLE", message=message)
 
 
 class CompanionUnreachableError(AdsBridgeError):
@@ -353,7 +452,12 @@ def _capture_upstream_response(response: aiohttp.ClientResponse, body: bytes) ->
 
 
 async def _proxy_once(
-    *, endpoint: Any, request: Request, path: str, session_cookie: str, body: bytes,
+    *,
+    endpoint: Any,
+    request: Request,
+    path: str,
+    session_cookie: str,
+    body: bytes,
 ) -> _UpstreamResponse:
     url = _companion_url(endpoint, path, request.url.query)
     headers = _forward_headers(request)
@@ -372,9 +476,7 @@ async def _proxy_once(
     try:
         async with (
             aiohttp.ClientSession(connector=connector, timeout=timeout) as session,
-            session.request(
-                request.method, url, headers=headers, data=body or None
-            ) as response,
+            session.request(request.method, url, headers=headers, data=body or None) as response,
         ):
             response_body = await response.read()
             return _capture_upstream_response(response, response_body)
@@ -384,9 +486,7 @@ async def _proxy_once(
         raise CompanionUnreachableError(f"companion unreachable: {type(exc).__name__}") from exc
 
 
-async def _proxy_request(
-    *, app_state: Any, request: Request, path: str
-) -> Response:
+async def _proxy_request(*, app_state: Any, request: Request, path: str) -> Response:
     from hermes.shell_server.companions import get_companion  # noqa: PLC0415
 
     decision = _classify_path(path)
@@ -408,8 +508,11 @@ async def _proxy_request(
             dbus_proxy=app_state.dbus_proxy, endpoint=endpoint, jar=jar
         )
         response = await _proxy_once(
-            endpoint=endpoint, request=request, path=path,
-            session_cookie=session_cookie, body=body,
+            endpoint=endpoint,
+            request=request,
+            path=path,
+            session_cookie=session_cookie,
+            body=body,
         )
         if response.status == _HTTP_UNAUTHORIZED:
             jar.clear()
@@ -420,8 +523,11 @@ async def _proxy_request(
                     dbus_proxy=app_state.dbus_proxy, endpoint=endpoint, jar=jar
                 )
                 response = await _proxy_once(
-                    endpoint=endpoint, request=request, path=path,
-                    session_cookie=session_cookie, body=body,
+                    endpoint=endpoint,
+                    request=request,
+                    path=path,
+                    session_cookie=session_cookie,
+                    body=body,
                 )
     except AdsBridgeError as exc:
         return _error_response(exc.status_code, exc.code)
@@ -433,9 +539,7 @@ def _translate_response(response: _UpstreamResponse, *, jar: AdsSessionJar) -> R
     cookie_headers, new_session, new_ttl = _rewrite_and_split_cookies(response)
     if new_session is not None and new_ttl is not None:
         jar.set(cookie=new_session, ttl_seconds=new_ttl)
-    out = Response(
-        content=response.body, status_code=response.status, headers=response.headers
-    )
+    out = Response(content=response.body, status_code=response.status, headers=response.headers)
     for cookie_header in cookie_headers:
         out.headers.append("set-cookie", cookie_header)
     return out
@@ -452,16 +556,16 @@ def _error_response(status_code: int, code: str) -> JSONResponse:
 
 def create_ads_bridge_router(db_path: Path | None = None, vault: Any = None) -> APIRouter:
     router = APIRouter()
-    db_path = db_path or Path(os.environ.get('HERMES_SHELL_DB', '/var/lib/hermes/shell-state.db'))
+    db_path = db_path or Path(os.environ.get("HERMES_SHELL_DB", "/var/lib/hermes/shell-state.db"))
 
     def local_allowed():
         policy = read_ads_policy(db_path)
-        return policy is None or policy.mode == 'free'
+        return policy is None or policy.mode == "free"
 
     def unavailable():
-        return _error_response(403, 'ADS_MANAGED_LOCAL_FORBIDDEN')
+        return _error_response(403, "ADS_MANAGED_LOCAL_FORBIDDEN")
 
-    @router.get('/api/v1/ads/managed')
+    @router.get("/api/v1/ads/managed")
     async def managed_configuration():
         if db_path is None:
             return unavailable()
@@ -470,11 +574,11 @@ def create_ads_bridge_router(db_path: Path | None = None, vault: Any = None) -> 
         except PermissionError:
             return unavailable()
         return JSONResponse(
-            {'policy': policy.model_dump() if policy else None},
-            headers={'Cache-Control': 'no-store'},
+            {"policy": policy.model_dump() if policy else None},
+            headers={"Cache-Control": "no-store"},
         )
 
-    @router.post('/api/v1/ads/managed/tools/{name}')
+    @router.post("/api/v1/ads/managed/tools/{name}")
     async def managed_tool(name: str, request: Request):
         if db_path is None or vault is None:
             return unavailable()
@@ -484,17 +588,20 @@ def create_ads_bridge_router(db_path: Path | None = None, vault: Any = None) -> 
                 return unavailable()
             body = json.loads(raw)
             if not isinstance(body, dict) or set(body) not in (
-                {'grant_id', 'arguments'}, {'grant_id', 'arguments', 'expected_binding'},
+                {"grant_id", "arguments"},
+                {"grant_id", "arguments", "expected_binding"},
             ):
                 return unavailable()
-            if 'expected_binding' in body and not isinstance(body['expected_binding'], dict):
+            if "expected_binding" in body and not isinstance(body["expected_binding"], dict):
                 return unavailable()
             store = SQLiteAssociationStore(db_path=db_path, vault=vault)
             result = await ManagedAdsTransport(store).call(
-                body['grant_id'], name, body['arguments'],
-                expected_binding=body.get('expected_binding'),
+                body["grant_id"],
+                name,
+                body["arguments"],
+                expected_binding=body.get("expected_binding"),
             )
-            return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except (PermissionError, ValueError, TypeError):
             return unavailable()
 
@@ -511,9 +618,12 @@ def create_ads_bridge_router(db_path: Path | None = None, vault: Any = None) -> 
         status, reason = await _companion_readiness(request.app.state.dbus_proxy)
         response = JSONResponse({"status": status, "reason": reason})
         response.set_cookie(
-            _BRIDGE_COOKIE_NAME, _bridge_cookie_value(),
-            max_age=_BRIDGE_COOKIE_MAX_AGE_S, httponly=True,
-            samesite="strict", path="/ads",
+            _BRIDGE_COOKIE_NAME,
+            _bridge_cookie_value(),
+            max_age=_BRIDGE_COOKIE_MAX_AGE_S,
+            httponly=True,
+            samesite="strict",
+            path="/ads",
         )
         return response
 
@@ -544,6 +654,8 @@ def create_ads_bridge_router(db_path: Path | None = None, vault: Any = None) -> 
                 return unavailable()
         except PermissionError:
             return unavailable()
+        if path in _OAUTH_CALLBACK_PATHS:
+            return await _proxy_oauth_callback(request, path)
         if not _bridge_cookie_is_valid(request):
             return _error_response(401, "BRIDGE_COOKIE_REQUIRED")
         return await _proxy_request(app_state=request.app.state, request=request, path=path)
@@ -581,8 +693,6 @@ async def _logout_upstream(jar: AdsSessionJar) -> None:
         timeout = aiohttp.ClientTimeout(total=_EXCHANGE_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
         url = f"https://{endpoint.host}:{endpoint.port}/api/v1/auth/logout"
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            await session.post(
-                url, headers={"Cookie": f"{_SESSION_COOKIE_NAME}={session_cookie}"}
-            )
+            await session.post(url, headers={"Cookie": f"{_SESSION_COOKIE_NAME}={session_cookie}"})
     except (TimeoutError, aiohttp.ClientError, CompanionUnreachableError) as exc:
         logger.info("hermes.ads_bridge.upstream_logout_failed reason=%s", type(exc).__name__)

@@ -130,8 +130,13 @@ class _FakeCompanion:
             return web.json_response({"error": {"code": "ASSERTION_INVALID"}}, status=401)
         resp = web.json_response({"owner_id": "o1", "business_id": "b1"})
         resp.set_cookie(
-            "ads_session", f"session-{len(self.exchange_calls)}",
-            httponly=True, secure=True, samesite="Strict", path="/api", max_age=60,
+            "ads_session",
+            f"session-{len(self.exchange_calls)}",
+            httponly=True,
+            secure=True,
+            samesite="Strict",
+            path="/api",
+            max_age=60,
         )
         return resp
 
@@ -171,6 +176,7 @@ async def fake_companion(tmp_path: Path):
     app.router.add_post("/api/v1/auth/exchange", companion.exchange)
     app.router.add_post("/api/v1/auth/logout", companion.logout)
     app.router.add_route("*", "/api/v1/probe", companion.probe)
+    app.router.add_get("/api/v1/platform-accounts/{provider}/reconnect/callback", companion.probe)
     app.router.add_get("/", companion.root)
 
     ssl_ctx = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_SERVER)
@@ -226,6 +232,73 @@ def _make_client(*, endpoint, proxy: MagicMock) -> _AppClient:  # noqa: ARG001
     app.include_router(create_ads_bridge_router())
     client = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
     return _AppClient(app, client)
+
+
+@pytest.mark.parametrize("provider", ["google", "meta"])
+@pytest.mark.parametrize("origin", ["http://127.0.0.1:35335", "https://enterprise.example"])
+async def test_external_oauth_callback_never_mints_or_forwards_owner_session(
+    fake_companion, monkeypatch, provider, origin
+):
+    companion, endpoint = fake_companion
+    monkeypatch.setattr(companions_mod, "get_companion", lambda _slug: endpoint)
+    proxy = _mint_proxy()
+    c = _make_client(endpoint=endpoint, proxy=proxy)
+    c.client.base_url = origin
+    c.app.state.ads_session_jar.set(cookie="must-not-forward", ttl_seconds=60)
+    async with c.client:
+        response = await c.client.get(
+            f"/ads/api/v1/platform-accounts/{provider}/reconnect/callback",
+            params={
+                "state": "a" * 43,
+                "code": "private-code",
+                "hd": "workspace.example",
+                "foo": "extension",
+                "error_uri": "https://evil.example/no-fetch",
+            },
+            headers={"Authorization": "Bearer ignored"},
+        )
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in response.headers
+    assert "private-code" not in response.text
+    assert companion.probe_calls[0]["cookies"] == {}
+    assert "authorization" not in companion.probe_calls[0]["headers"]
+    assert "hd=" not in companion.probe_calls[0]["query"]
+    assert "foo=" not in companion.probe_calls[0]["query"]
+    assert "error_uri=" not in companion.probe_calls[0]["query"]
+    assert companion.exchange_calls == []
+    proxy.call_dict.assert_not_called()
+    assert c.app.state.ads_session_jar.get() == "must-not-forward"
+
+
+@pytest.mark.parametrize(
+    "suffix,query,method,host",
+    [
+        ("google", "state=short&code=x", "GET", "127.0.0.1"),
+        ("google", "state=" + "a" * 43 + "&state=" + "b" * 43, "GET", "127.0.0.1"),
+        ("google", "state=" + "a" * 43 + "&code=x&error=denied", "GET", "127.0.0.1"),
+        ("google", "state=" + "a" * 43 + "&url=https://evil.test", "GET", "127.0.0.1"),
+        ("google", "state=" + "a" * 43, "POST", "127.0.0.1"),
+        ("google", "state=" + "a" * 43, "GET", "evil.test"),
+        ("unknown", "state=" + "a" * 43, "GET", "127.0.0.1"),
+        ("%67oogle", "state=" + "a" * 43, "GET", "127.0.0.1"),
+    ],
+)
+async def test_public_callback_is_not_a_generic_proxy(
+    fake_companion, monkeypatch, *, suffix, query, method, host
+):
+    companion, endpoint = fake_companion
+    monkeypatch.setattr(companions_mod, "get_companion", lambda _slug: endpoint)
+    proxy = _mint_proxy()
+    c = _make_client(endpoint=endpoint, proxy=proxy)
+    c.client.base_url = f"http://{host}:35335"
+    async with c.client:
+        response = await c.client.request(
+            method, f"/ads/api/v1/platform-accounts/{suffix}/reconnect/callback?{query}"
+        )
+    assert response.status_code in (400, 401)
+    assert companion.probe_calls == []
+    proxy.call_dict.assert_not_called()
 
 
 def _valid_bridge_cookie() -> str:
@@ -338,9 +411,7 @@ class TestDeniedPrefixes:
             assert r.status_code == 403
             assert r.json()["error"]["code"] == "MCP_NOT_BRIDGED"
 
-    @pytest.mark.parametrize(
-        "path", ["/ads/api/v1/auth/login", "/ads/api/v1/auth/totp"]
-    )
+    @pytest.mark.parametrize("path", ["/ads/api/v1/auth/login", "/ads/api/v1/auth/totp"])
     async def test_login_routes_denied(self, fake_companion, path: str) -> None:
         _companion, endpoint = fake_companion
         ac = _make_client(endpoint=endpoint, proxy=_mint_proxy())
@@ -498,9 +569,7 @@ class TestProxiedRequestCredentialHandling:
 
         async with ac.client as client:
             client.cookies.set("ads_bridge", _valid_bridge_cookie())
-            r = await client.get(
-                "/ads/api/v1/probe", headers={"X-Forwarded-Prefix": "/evil"}
-            )
+            r = await client.get("/ads/api/v1/probe", headers={"X-Forwarded-Prefix": "/evil"})
 
             assert r.status_code == 200
             assert companion.probe_calls[-1]["headers"]["x-forwarded-prefix"] == "/ads"
@@ -565,7 +634,8 @@ class TestFreshAssertionPerExchange:
 
             assert proxy.call_dict.await_count >= 2
             mint_calls = [
-                c for c in proxy.call_dict.await_args_list
+                c
+                for c in proxy.call_dict.await_args_list
                 if c.args[0] == "mint_companion_owner_assertion"
             ]
             assert len(mint_calls) >= 2
