@@ -155,6 +155,18 @@ def fake_bin_dir(tmp_path: Path) -> Path:
     podman = bin_dir / "podman"
     podman.write_text(_FAKE_PODMAN)
     podman.chmod(0o755)
+    # Restore's fresh-core path now requires the bundled companion scaffold.
+    # Keep this backup/archive fixture hermetic: no GitHub fallback, and no
+    # fake `run --entrypoint cat` may accidentally mark a core as created.
+    (bin_dir / "safent.json").write_text('{"defaultAction":"SCMP_ACT_ERRNO"}')
+    (bin_dir / "provision.sh").write_text(
+        '#!/bin/sh\n[ "${FAKE_SCAFFOLD_FAILS:-false}" != true ]\n'
+    )
+    (bin_dir / "compose.yaml").write_text("services: {}\n")
+    (bin_dir / "caps.template.yaml").write_text("accounts: {}\n")
+    curl = bin_dir / "curl"
+    curl.write_text("#!/bin/sh\nexit 97\n")
+    curl.chmod(0o755)
     return bin_dir
 
 
@@ -176,6 +188,7 @@ def _run_safent(
     env["HOME"] = str(home_dir)
     env["SAFENT_NAME"] = "safent-test"
     env["SAFENT_DATA_VOLUME"] = "safent-test-data"
+    env["SAFENT_PODMAN"] = str(fake_bin_dir / "podman")
     env["FAKE_PODMAN_LOG"] = str(podman_log)
     env["FAKE_STATE_DIR"] = str(state_dir)
     env["FAKE_CONTAINER_EXISTS"] = "true" if container_exists else "false"
@@ -520,6 +533,9 @@ class TestRestoreVerifiesTheContainerActuallyCameUp:
         combined = (result.stdout + result.stderr).lower()
         assert "no safent container is running" in combined
         assert "[ok] restored" not in combined
+        calls = _podman_calls(podman_log)
+        assert sum(call.startswith("run -d ") for call in calls) == 1
+        assert not any("--entrypoint cat" in call for call in calls)
 
     def test_container_that_comes_up_is_still_a_clean_success(
         self, tmp_path: Path, fake_bin_dir: Path
@@ -542,6 +558,12 @@ class TestRestoreVerifiesTheContainerActuallyCameUp:
 
         assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
         assert "[ok] restored" in result.stdout.lower()
+        calls = _podman_calls(podman_log)
+        runs = [call for call in calls if call.startswith("run -d ")]
+        assert len(runs) == 1
+        assert "--network safent-companions --ip 10.201.0.2" in runs[0]
+        assert "safent-test-data:/var/lib/hermes" in runs[0]
+        assert not any("--entrypoint cat" in call for call in calls)
 
 
 class TestRestoreRefusesATamperedArchive:
