@@ -1,6 +1,16 @@
 # Safent 0.9.13 — convergencia de red del motor nativo
 
-Estado: candidata en preparación; **no aceptada todavía en macOS**. Este corte no cierra el backlog global ni conecta cuentas de proveedores sin consentimiento.
+Estado: **arranque real recuperado, aceptación funcional Ads rechazada**. El DMG se verificó e instaló; llegó al chat y actualizó Ads sin reparación manual. El alta del primer negocio devolvió 403 por cookie CSRF `Secure` en HTTP loopback. No recomendar esta candidata para instalación completa. La release prerelease conserva sus assets y una advertencia. Continuación en `ADS-FACTORY-0.9.14.md`.
+
+## Aceptación ejecutada y fallo posterior
+
+Native workflow `34744774395`, DMG asset `560782831`, 1016798949 bytes, SHA256 `32fd72ae3c76d325ca56c8e73b0959d33fdcc54083c3db34fb80e198149401a6`. Firma/notarización/28 recursos/pins aprobados en el Mac; manifiestos/minisign/checksums de las tres plataformas revisados independientemente. Source/tag `ed41934f486860b3cf0e4e4496d2cf42ad94c46a`. Stable sigue v0.9.5.
+
+La app actualizó por sí misma core `.14` → `.2`, manteniendo puerto `127.0.0.1:33015`, volumen de datos y contenedor DB `66ea8cf…`. Core `3225d483…`; roles Ads API/worker/broker y migración coinciden por contenido con Ads 0.2.7. DB sana, migración exited 0, proyección RO y cuatro archivos privados inaccesibles para UID 886. Handshake MCP 200, 64 herramientas incluidas propuestas de presupuesto/campaña e informes. Prueba sintética HTTP sobre el journal real del shell: canarios ausentes y metadatos presentes; el primer intento buscó en `podman logs` y no acreditó metadatos hasta corregir la fuente a journald.
+
+Primera UI muestra `Tu negocio, primero`, EUR/Europe/Madrid y foco correcto. Un único envío de Friendog Center devuelve POST `/ads/api/v1/onboarding/business` 403; GET `/auth/me` sigue 200 con cero negocios. Lectura de atributos confirma `ads_csrf; Secure; SameSite=Strict; Path=/ads` sobre HTTP local y ausencia de `ads_session` en la respuesta al navegador. No se repite el POST ni se crea negocio con SQL. Además GET directo `/ads/cockpit` devuelve `PATH_NOT_BRIDGED`: navegación cliente existe pero su recarga HTTP no estaba admitida. Nuevas correcciones se prueban en 0.9.14, sin parchear la instalación a mano.
+
+La full del producto exacto ed41934 dio primero 7517 PASS/2 FAIL/21 SKIP/250 exclusiones: dos fixtures de restore no simulaban scaffold. Tras corregir sólo la fixture (`62a5f65`), **7519 PASS, 0 FAIL, 21 SKIP, 250 exclusiones y 8 warnings**, 464.47 s. No atribuir esa full al fix posterior de diagnóstico CLI restore (`fcba3ef`, 52 focales PASS) ni al fix CSRF (`4a6d966`, 50 bridge PASS + 7 cross-repo PASS). Estos últimos no están en el DMG 0.9.13.
 
 ## Defecto reproducido y alcance
 
