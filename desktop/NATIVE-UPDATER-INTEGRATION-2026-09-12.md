@@ -71,10 +71,12 @@ No se usaron releases live, secretos ni llamadas de instalación/reinicio real.
 
 ## Límites explícitos
 
-Este corte **no actualiza motor ni Ads**, no llama `safent update` y no activa
-`UpdatePorts` del orquestador conjunto. Éste sigue necesitando continuación
-durable, backup/rollback y aplicación por digest propios. No se promete
-atomicidad conjunta ni rollback del wrapper tras un fallo del instalador.
+El instalador actualiza la **app y su bundle de componentes**. Tras reiniciar,
+el bootstrap nativo prepara el motor y Ads con las versiones verificadas de ese
+bundle y sólo declara listo el producto cuando convergen sus comprobaciones.
+No llama `safent update` ni activa `UpdatePorts` del orquestador conjunto.
+No se promete atomicidad conjunta entre la sustitución de la app y esa
+preparación posterior, ni rollback del wrapper tras un fallo del instalador.
 
 El comportamiento de instalación macOS/Windows/Linux pertenece al plugin y
 requiere smoke de actualización entre dos builds firmadas en cada plataforma

@@ -26,7 +26,7 @@ export function renderNativeUpdater(element: HTMLElement, value: unknown, comman
   const status = document.createElement('span')
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
-  status.textContent = `App nativa ${data.app_version} · El motor y Ads se actualizan por separado.`
+  status.textContent = `App nativa ${data.app_version} · La actualización incluye su paquete de componentes. Tras reiniciar, Safent preparará el motor y Ads con las versiones verificadas de ese paquete.`
   const button = document.createElement('button')
   button.type = 'button'
   button.className = 'btn btn-secondary'

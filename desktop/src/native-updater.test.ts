@@ -35,6 +35,9 @@ describe('app-only native update flow', () => {
     const el = element()
     const invoke = vi.fn().mockResolvedValueOnce(available).mockResolvedValueOnce('cancelled')
     renderNativeUpdater(el, capability, { invoke })
+    expect(el.textContent).toContain('La actualización incluye su paquete de componentes.')
+    expect(el.textContent).toContain('Tras reiniciar, Safent preparará el motor y Ads con las versiones verificadas de ese paquete.')
+    expect(el.textContent).not.toContain('se actualizan por separado')
     const button = el.querySelector('button')!
     expect(invoke).not.toHaveBeenCalled()
     button.click()
