@@ -12,6 +12,10 @@
   gap: var(--space-6);
 }
 
+.adsGuides { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-5); font-size: var(--text-base); }
+.adsGuides a { color: var(--color-accent-text); }
+.adsGuides a:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
+
 /* ── Section shell ───────────────────────────────────────────────────────── */
 
 .section {

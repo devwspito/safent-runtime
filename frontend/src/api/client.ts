@@ -441,11 +441,48 @@ export function connectComposioApp(slug: string): Promise<{ redirect_url?: strin
   })
 }
 
-export function setComposioApiKey(apiKey: string): Promise<unknown> {
-  return request<unknown>('/integrations/composio/key', {
-    method: 'POST',
-    body: JSON.stringify({ api_key: apiKey }),
-  })
+export async function setComposioApiKey(apiKey: string): Promise<{ has_key: true }> {
+  try {
+    const result = await request<unknown>('/integrations/composio/key', {
+      method: 'POST', body: JSON.stringify({ api_key: apiKey }),
+    })
+    if (!result || typeof result !== 'object' || !('has_key' in result) || result.has_key !== true) {
+      throw new ApiError('No se pudo confirmar Composio.', 502, null)
+    }
+    return { has_key: true }
+  } catch (failure) {
+    throw new ApiError('No se pudo guardar la clave de Composio.', failure instanceof ApiError ? failure.status : 0, null)
+  }
+}
+
+export type ComposioAdsToolkit = 'googleads' | 'metaads'
+
+/** Saved app configuration only: this does not authorize an advertising account. */
+export async function getComposioAdsConfig(toolkit: ComposioAdsToolkit): Promise<{ ready: boolean }> {
+  try {
+    if (toolkit !== 'googleads' && toolkit !== 'metaads') throw new ApiError('Plataforma no válida.', 400, null)
+    const result = await request<unknown>(`/integrations/composio/auth-configs/${toolkit}`)
+    if (!result || typeof result !== 'object' || !('toolkit_slug' in result) || result.toolkit_slug !== toolkit
+      || !('auth_config_id' in result) || (result.auth_config_id !== null && !nonEmptyString(result.auth_config_id))) {
+      throw new ApiError('No se pudo confirmar la configuración.', 502, null)
+    }
+    return { ready: result.auth_config_id !== null }
+  } catch (failure) {
+    throw new ApiError('No se pudo comprobar la configuración de Anuncios.', failure instanceof ApiError ? failure.status : 0, null)
+  }
+}
+
+export async function prepareComposioAds(): Promise<{ googleads: boolean; metaads: boolean }> {
+  try {
+    const result = await request<unknown>('/integrations/composio/ads/prepare', { method: 'POST', timeoutMs: 60_000 })
+    if (!result || typeof result !== 'object' || !('googleads' in result) || typeof result.googleads !== 'boolean'
+      || !('metaads' in result) || typeof result.metaads !== 'boolean') {
+      throw new ApiError('No se pudo confirmar la preparación.', 502, null)
+    }
+    return { googleads: result.googleads, metaads: result.metaads }
+  } catch (failure) {
+    throw new ApiError('No se pudo preparar Anuncios.', failure instanceof ApiError ? failure.status : 0, null)
+  }
 }
 
 export interface ComposioMetaSetupInput {
@@ -462,6 +499,7 @@ export async function setupComposioMeta(input: ComposioMetaSetupInput): Promise<
   try {
     const result = await request<unknown>('/integrations/composio/meta/setup', {
       method: 'POST',
+      timeoutMs: 60_000,
       body: JSON.stringify({ client_id: input.client_id, client_secret: input.client_secret }),
     })
     if (!result || typeof result !== 'object' || !('ready' in result) || result.ready !== true) {

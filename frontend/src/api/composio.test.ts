@@ -70,6 +70,73 @@ it('revokes only the supplied real connection ID, safely encoded', async () => {
 
 const metaCredentials = { client_id: '1234567890', client_secret: 'synthetic-meta-secret-only' }
 
+it.each(['googleads', 'metaads'] as const)('reads saved %s configuration as readiness without retaining IDs or extra fields', async toolkit => {
+  const fetch = respond({ toolkit_slug: toolkit, auth_config_id: 'ac_test', secret: 'do-not-retain' })
+  expect(await (await import('./client')).getComposioAdsConfig(toolkit)).toEqual({ ready: true })
+  expect(fetch).toHaveBeenCalledWith(`/api/v1/integrations/composio/auth-configs/${toolkit}`, expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer fictitious-test-session' }) }))
+})
+
+it('only an explicit null config ID means preparation is absent', async () => {
+  respond({ toolkit_slug: 'metaads', auth_config_id: null })
+  expect(await (await import('./client')).getComposioAdsConfig('metaads')).toEqual({ ready: false })
+})
+
+it.each([null, {}, [], { toolkit_slug: 'googleads', auth_config_id: 'ac_test' }, { toolkit_slug: 'metaads' }, { toolkit_slug: 'metaads', auth_config_id: '' }, { toolkit_slug: 'metaads', auth_config_id: false }])('rejects malformed saved configuration %# instead of claiming absence', async payload => {
+  respond(payload)
+  await expect((await import('./client')).getComposioAdsConfig('metaads')).rejects.toMatchObject({ status: 502, body: null })
+})
+
+it('refuses other toolkit paths before calling fetch', async () => {
+  const fetch = respond({})
+  await expect((await import('./client')).getComposioAdsConfig('../other' as 'metaads')).rejects.toMatchObject({ status: 400, body: null })
+  expect(fetch).not.toHaveBeenCalled()
+})
+
+it('prepares Ads with no request body and returns only strict readiness booleans', async () => {
+  const fetch = respond({ googleads: true, metaads: false, secret: 'do-not-retain' })
+  expect(await (await import('./client')).prepareComposioAds()).toEqual({ googleads: true, metaads: false })
+  expect(fetch).toHaveBeenCalledWith('/api/v1/integrations/composio/ads/prepare', expect.objectContaining({ method: 'POST' }))
+  expect(fetch.mock.calls[0][1]).not.toHaveProperty('body')
+})
+
+it.each(['meta', 'google'] as const)('allows the backend preparation and companion refresh time for %s', async provider => {
+  const timeout = vi.spyOn(globalThis, 'setTimeout')
+  respond(provider === 'meta' ? { ready: true } : { googleads: true, metaads: false })
+  const client = await import('./client')
+  if (provider === 'meta') await client.setupComposioMeta(metaCredentials)
+  else await client.prepareComposioAds()
+  expect(timeout).toHaveBeenCalledWith(expect.any(Function), 60_000)
+  timeout.mockRestore()
+})
+
+it.each([null, {}, { googleads: true }, { googleads: 'true', metaads: false }, { googleads: false, metaads: null }])('rejects malformed preparation readiness %#', async payload => {
+  respond(payload)
+  await expect((await import('./client')).prepareComposioAds()).rejects.toMatchObject({ status: 502, body: null })
+})
+
+it('sends the Composio key explicitly and retains only confirmed readiness', async () => {
+  const fetch = respond({ has_key: true, api_key: 'synthetic-key-only' })
+  expect(await (await import('./client')).setComposioApiKey('synthetic-key-only')).toEqual({ has_key: true })
+  expect(fetch).toHaveBeenCalledWith('/api/v1/integrations/composio/key', expect.objectContaining({ method: 'POST', body: JSON.stringify({ api_key: 'synthetic-key-only' }) }))
+  expect(localStorage.length).toBe(1)
+})
+
+it.each([null, {}, { has_key: false }, { has_key: 'true' }])('rejects unconfirmed key readiness %#', async payload => {
+  respond(payload)
+  await expect((await import('./client')).setComposioApiKey('synthetic-key-only')).rejects.toMatchObject({ status: 502, body: null })
+})
+
+it.each([403, 409, 429, 503])('redacts all setup wrapper errors from HTTP %s', async status => {
+  respond({ detail: 'synthetic-key-only', credentials: 'synthetic-key-only' }, status)
+  const client = await import('./client')
+  for (const operation of [() => client.setComposioApiKey('synthetic-key-only'), () => client.getComposioAdsConfig('metaads'), () => client.prepareComposioAds()]) {
+    const failure = await operation().catch(error => error)
+    expect(failure).toMatchObject({ status, body: null })
+    expect(failure.message).not.toContain('synthetic-key-only')
+    expect(failure.cause).toBeUndefined()
+  }
+})
+
 it('prepares Meta through the owner endpoint and exposes only readiness', async () => {
   const fetch = respond({ ready: true, client_secret: metaCredentials.client_secret, account: 'not-authorized' })
   expect(await (await import('./client')).setupComposioMeta(metaCredentials)).toEqual({ ready: true })
