@@ -117,6 +117,7 @@ case "$1" in
         [ "$FAKE_HEALTH_ACTIVE" = "true" ] && echo active || echo failed
         exit 0 ;;
       cat)
+        [ "$2" != /proc/sys/net/ipv4/ip_forward ] || { echo "${FAKE_CORE_FORWARDING:-1}"; exit 0; }
         [ "$FAKE_HEALTH_ACTIVE" = "true" ] && printf '%s' "$FAKE_SECRET"
         exit 0 ;;
       python3)

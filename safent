@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=15
+_CLI_REV=16
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -618,7 +618,11 @@ _run() {
   if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || true)" = "Y" ]; then
     apparmor_arg="--security-opt=apparmor=unconfined"
   fi
+  # Apply before /proc/sys becomes read-only. This changes ONLY the new core
+  # network namespace, never the host/VM; both nft forward chains still DROP
+  # by default and retain the exact MCP-to-companion destination exception.
   "$RT" run -d --name "$NAME" --systemd=always \
+    --sysctl net.ipv4.ip_forward=1 \
     -p "$publish" \
     --stop-signal="$STOP_SIGNAL" --stop-timeout="$STOP_TIMEOUT_S" \
     ${CLOUD_ENDPOINT:+-e SAFENT_CLOUD_ENDPOINT=$CLOUD_ENDPOINT} \
@@ -1739,7 +1743,7 @@ _companion_install_or_repair() {
     || _die_porcelain companion_unreachable "No se pudo preparar el registro seguro del companion" false
   _run_with_heartbeat "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
     verify-ads \
-    || _die_porcelain companion_unreachable "El companion no ha superado el registro y la comprobacion autenticada de salud" false
+    || _die_porcelain companion_unreachable "Anuncios no ha terminado de conectarse. Puedes reintentar sin borrar tus datos." true
   _stage_done
 
   [ "$PORCELAIN" -eq 1 ] || return 0
@@ -2699,13 +2703,32 @@ _core_recorded_network_matches() {
 _resume_verified_core() {
   # _prepare_core_recreation already verified the exact reference, local
   # image content, data volume and one loopback-only published port. Recheck
-  # by immutable ID immediately before start; no stop/rm/recreate fallback.
+  # by immutable ID immediately before start. Only an explicitly absent legacy
+  # creation flag permits guarded replacement; failed starts never fall back.
   _core_stopped="$("$RT" inspect --type container -f '{{.State.Running}}' "$_core_replace_id" 2>/dev/null)" || return 1
   [ "$_core_stopped" = false ] || return 1
   _core_projection="$("$RT" inspect --type container --format '{{range .Mounts}}{{if eq .Destination "/etc/hermes/companions"}}{{.Type}}|{{.Name}}|{{.RW}}{{end}}{{end}}' "$_core_replace_id" 2>/dev/null)" || return 1
   [ "$_core_projection" = 'volume|safent-companion-runtime|false' ] || return 1
   _core_recorded_network_matches && _core_address_available || return 1
   [ "$(_core_identity_snapshot "$_core_replace_id")" = "$_core_replace_snapshot" ] || return 1
+  # Podman 6.1.1 exposes no HostConfig.Sysctls field. Reuse its already-verified
+  # creation argv without executing/printing it. An explicit conflicting or
+  # duplicate forwarding value is not an adoptable legacy container.
+  _core_forwarding_creation="$(printf '%s\n' "$_core_creation" | LC_ALL=C awk '
+    previous == "\"--sysctl\"" && /^"net[.]ipv4[.]ip_forward=/ {
+      count++; if ($0 != "\"net.ipv4.ip_forward=1\"") bad=1
+    }
+    /^"--sysctl=net[.]ipv4[.]ip_forward=/ {
+      count++; if ($0 != "\"--sysctl=net.ipv4.ip_forward=1\"") bad=1
+    }
+    { previous=$0 }
+    END { if (bad || count > 1) print "unknown"; else if (count == 1) print "current"; else print "legacy" }
+  ')"
+  case "$_core_forwarding_creation" in
+    current) ;;
+    legacy) _run; _container_matches_desired; return $? ;;
+    *) return 1 ;;
+  esac
   "$RT" start "$_core_replace_id" >/dev/null || return 1
   # Active evidence, never only the recorded command, establishes readiness.
   _container_matches_desired
@@ -2727,6 +2750,10 @@ _core_address_available() {
 
 _container_matches_desired() {
   _exists && _running || return 1
+  # A listening API does not prove MCP routing. Read the actual kernel value:
+  # procps sysctl -w may exit 0 even when /proc/sys rejected a write as read-only.
+  _core_forwarding="$("$RT" exec "$NAME" cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" || return 1
+  [ "$_core_forwarding" = 1 ] || return 1
   if [ "$NO_COMPANION" -eq 0 ]; then
     _projection_mount="$("$RT" inspect --format '{{range .Mounts}}{{if eq .Destination "/etc/hermes/companions"}}{{.Type}}|{{.Name}}|{{.RW}}{{end}}{{end}}' "$NAME" 2>/dev/null || true)"
     [ "$_projection_mount" = 'volume|safent-companion-runtime|false' ] || return 1

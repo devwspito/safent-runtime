@@ -52,6 +52,8 @@ case "$1" in
         echo "${FAKE_NETWORK_MEMBERSHIP:-1|safent-companions}"; exit 0 ;;
       *Config.CreateCommand*)
         printf '"%s"\n' podman run --network safent-companions --ip "${FAKE_RECORDED_IP:-10.201.0.2}"
+        [ "${FAKE_FORWARDING_CREATION:-1}" = absent ] || printf '"%s"\n' --sysctl "net.ipv4.ip_forward=${FAKE_FORWARDING_CREATION:-1}"
+        [ "${FAKE_DUPLICATE_FORWARDING:-0}" != 1 ] || printf '"%s"\n' --sysctl net.ipv4.ip_forward=1
         [ "${FAKE_DUPLICATE_NETWORK:-0}" != 1 ] || printf '"%s"\n' --network foreign
         exit 0 ;;
       *'{{.Config.Image}}'*)
@@ -90,7 +92,7 @@ case "$1" in
       *'{{.ImageDigest}}'*) echo "${SAFENT_IMAGE#*@}"; exit 0 ;;
       *"-f "*)
         # `_running`: --type container -f {{.State.Running}} NAME
-        if [ -f "${FAKE_CORE_STARTED:-/nonexistent}" ]; then echo true; else echo "${FAKE_RUNNING:-true}"; fi
+        if [ -f "${FAKE_CORE_STARTED:-/nonexistent}" ] || [ -f "${FAKE_CORE_RECREATED:-/nonexistent}" ]; then echo true; else echo "${FAKE_RUNNING:-true}"; fi
         exit 0
         ;;
       *)
@@ -181,6 +183,10 @@ case "$1" in
       "test -f") exit 1 ;;  # legacy .update-requested/.uninstall-requested: never present here
     esac
     case "$*" in
+      'cat /proc/sys/net/ipv4/ip_forward')
+        if [ -f "${FAKE_CORE_RECREATED:-/nonexistent}" ]; then echo "${FAKE_RECREATED_FORWARDING:-1}";
+        else echo "${FAKE_CORE_FORWARDING-1}"; fi
+        exit 0 ;;
       'systemctl is-active hermes-runtime') echo active; exit 0 ;;
       'cat /var/lib/hermes-bootstrap/bootstrap/webui-bootstrap') echo private-regression-ticket; exit 0 ;;
       *install_request_agent_cli\ claim-ads*)
@@ -329,8 +335,11 @@ class TestCompanionInstall:
         {"FAKE_MISSING_PROJECTION": "1"},
         {"FAKE_NETWORK_MEMBERSHIP": "2|safent-companionsforeign"},
         {"FAKE_NETWORK_MEMBERSHIP": "1|foreign"},
+        {"FAKE_NETWORK_MEMBERSHIP": "1|host", "FAKE_FORWARDING_CREATION": "absent"},
         {"FAKE_RECORDED_IP": "10.201.0.14"},
         {"FAKE_DUPLICATE_NETWORK": "1"},
+        {"FAKE_FORWARDING_CREATION": "0"},
+        {"FAKE_DUPLICATE_FORWARDING": "1"},
         {"FAKE_FOREIGN_CORE_IP": "1"},
         {"FAKE_CHANGED_CORE_IDENTITY": "1"},
         {"FAKE_EXPECTED_CORE_IMAGE_ID": "4" * 64},
@@ -503,6 +512,76 @@ class TestCompanionInstall:
         assert "imagenes verificadas" in result.stdout
         assert "verify-ads" not in log.read_text()
 
+    @pytest.mark.parametrize("forwarding", ["0", "", "garbled"])
+    @pytest.mark.parametrize("verb", ["install", "repair"])
+    def test_forwarding_not_enabled_recreates_once_before_verified_reload(
+        self, tmp_path: Path, fake_bin_dir: Path, verb: str, forwarding: str
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_CORE_FORWARDING=forwarding,
+                   FAKE_CORE_RECREATED=str(tmp_path / "recreated"))
+        for _ in range(2):
+            result = subprocess.run(
+                ["sh", str(_SAFENT_CLI), "companion", verb, "--porcelain"],
+                env=env, capture_output=True, text=True, timeout=20, check=False,
+            )
+            assert result.returncode == 0, result.stderr + result.stdout
+        lines = log.read_text().splitlines()
+        runs = [line for line in lines if line.startswith("run -d --name agent-test ")]
+        assert len(runs) == 1
+        assert "--sysctl net.ipv4.ip_forward=1" in runs[0]
+        assert "-p 127.0.0.1:35335:7517" in runs[0]
+        assert "-v agent-test-data:/var/lib/hermes" in runs[0]
+        assert lines.index(runs[0]) < next(i for i, line in enumerate(lines) if "verify-ads" in line)
+        assert any("cat /proc/sys/net/ipv4/ip_forward" in line for line in lines)
+        assert not any("sysctl -w" in line or "--network host" in line or "--privileged" in line for line in lines)
+        assert sum(line == "rm -f " + env["FAKE_CORE_ID"] for line in lines) == 1
+
+    @pytest.mark.parametrize("argv", [["up"], ["companion", "repair"]])
+    def test_stopped_legacy_forwarding_recreates_only_verified_core(
+        self, tmp_path: Path, fake_bin_dir: Path, argv: list[str]
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_RUNNING="false", FAKE_STOPPED_NO_PORT="1",
+                   FAKE_FORWARDING_CREATION="absent", FAKE_CORE_FORWARDING="0",
+                   FAKE_CORE_RECREATED=str(tmp_path / "recreated"))
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), *argv, "--porcelain"], env=env,
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        lines = log.read_text().splitlines()
+        assert not any(line.startswith("start ") for line in lines)
+        runs = [line for line in lines if line.startswith("run -d --name agent-test ")]
+        assert len(runs) == 1
+        assert "--sysctl net.ipv4.ip_forward=1" in runs[0]
+        assert "-p 127.0.0.1:35335:7517" in runs[0]
+        assert "-v agent-test-data:/var/lib/hermes" in runs[0]
+        assert sum(line == "rm -f " + env["FAKE_CORE_ID"] for line in lines) == 1
+        assert not any(line.startswith(("volume rm ", "network rm ")) for line in lines)
+
+    def test_forwarding_still_disabled_after_create_never_verifies_ads(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_CORE_FORWARDING="0", FAKE_RECREATED_FORWARDING="0",
+                   FAKE_CORE_RECREATED=str(tmp_path / "recreated"))
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", "repair", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=20, check=False,
+        )
+        assert result.returncode != 0
+        assert "verify-ads" not in log.read_text()
+
     @pytest.mark.parametrize("verb", ["install", "repair"])
     def test_missing_projection_recreates_once_before_verified_reload(
         self, tmp_path: Path, fake_bin_dir: Path, verb: str
@@ -636,9 +715,14 @@ class TestCompanionInstall:
         for line in result.stdout.splitlines():
             _json.loads(line)
 
-    def test_hot_reload_failure_fails_the_install(self, tmp_path: Path, fake_bin_dir: Path) -> None:
-        """CL-002: 'Instalar' prefers hot-reload but may fall back to a
-        restart — a reload failure must never fail the install itself."""
+    def test_hot_reload_failure_is_retryable_without_reporting_success(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """A late connection failure stays closed, but allows safe reconciliation.
+
+        Startup used to declare this permanently blocked even when the health
+        probe passed immediately afterwards, leaving no retry action in the app.
+        """
         state_home = tmp_path / "state-home"
         _seed_state_home(state_home)
         podman_log = tmp_path / "podman.log"
@@ -646,7 +730,7 @@ class TestCompanionInstall:
         env["FAKE_RELOAD_FAIL"] = "1"
 
         result = subprocess.run(
-            ["sh", str(_SAFENT_CLI), "companion", "install"],
+            ["sh", str(_SAFENT_CLI), "companion", "install", "--porcelain"],
             env=env,
             capture_output=True,
             text=True,
@@ -654,6 +738,15 @@ class TestCompanionInstall:
         )
         assert result.returncode != 0
         assert "[ok] Companion instalado." not in result.stdout
+        import json  # noqa: PLC0415
+
+        events = [json.loads(line) for line in result.stdout.splitlines()]
+        failed = events[-1]
+        assert failed["t"] == "failed"
+        assert failed["code"] == "companion_unreachable"
+        assert failed["retryable"] is True
+        assert not any(event["t"] == "ready" for event in events)
+        assert not any(line.startswith("rm ") for line in podman_log.read_text().splitlines())
 
     def test_installing_twice_converges_without_duplicating_the_network(
         self, tmp_path: Path, fake_bin_dir: Path

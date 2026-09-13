@@ -241,7 +241,11 @@ SAFENT_TZ_VALUE="$(host_tz)"
 # NOTE: NoNewPrivileges is set PER-UNIT (the hardened units), NOT container-wide —
 # a container-level no-new-privileges breaks dbus/login setuid and the boot fails.
 STOP_TIMEOUT_S="${SAFENT_STOP_TIMEOUT_S:-30}"
+# Set ONLY the created core netns before the runtime mounts /proc/sys read-only.
+# Host/VM forwarding is untouched; the existing nft forward default-DROP cage
+# still restricts the MCP-to-companion path to its exact destination and port.
 exec "$RUNTIME" run -d --name "$NAME" --systemd=always \
+  --sysctl net.ipv4.ip_forward=1 \
   -p "127.0.0.1:${HOST_PORT}:7517" \
   --stop-signal=SIGRTMIN+3 --stop-timeout="${STOP_TIMEOUT_S}" \
   -e "TZ=${SAFENT_TZ_VALUE}" -e "HERMES_TZ=${SAFENT_TZ_VALUE}" \
