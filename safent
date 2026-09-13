@@ -1698,8 +1698,14 @@ _companion_install_or_repair() {
   _stage_done
 
   _stage companion_up "Instalando el companion"
-  _run_with_heartbeat env SAFENT_PODMAN="$RT" "$COMPANION_BIN_DIR/provision.sh" \
-    || _die_porcelain companion_migration_failed "El companion no arranco" true
+  if _run_with_heartbeat env SAFENT_PODMAN="$RT" "$COMPANION_BIN_DIR/provision.sh"; then
+    :
+  else
+    _companion_failure=$?
+    [ "$_companion_failure" -ne 78 ] \
+      || _die_porcelain companion_network_conflict "Una reserva de red de Anuncios esta ocupada o no se pudo verificar su propietario. No se ha detenido ningun recurso ajeno. Revisa el conflicto antes de reparar." false
+    _die_porcelain companion_migration_failed "El companion no arranco" true
+  fi
   _stage_done
 
   _stage companion_reload "Registrando el companion en Safent"

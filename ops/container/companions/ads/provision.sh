@@ -64,6 +64,9 @@ set -euo pipefail
 
 readonly COMPANION_SUBNET="10.201.0.0/24"
 readonly COMPANION_GATEWAY="10.201.0.1"
+# Keep dynamically attached cores (including custom names) out of the fixed
+# product addresses. Existing networks are never removed or silently migrated.
+readonly COMPANION_DYNAMIC_RANGE="10.201.0.128/25"
 readonly COMPANION_IP="10.201.0.10"
 readonly COMPANION_PORT="8443"
 readonly COMPANION_HOST="ads.safent.internal"
@@ -115,7 +118,8 @@ ensure_network() {
     return 0
   fi
   if ! "$RUNTIME" network create "$COMPANION_NETWORK" \
-        --subnet "$COMPANION_SUBNET" --gateway "$COMPANION_GATEWAY" >/dev/null 2>&1; then
+        --subnet "$COMPANION_SUBNET" --gateway "$COMPANION_GATEWAY" \
+        --ip-range "$COMPANION_DYNAMIC_RANGE" >/dev/null 2>&1; then
     fail "'$COMPANION_SUBNET' ya está en uso por otra red de este host — libérala o el companion no se instala (nunca elegimos otra)"
   fi
   log "red '$COMPANION_NETWORK' creada ($COMPANION_SUBNET)"
@@ -497,12 +501,77 @@ _refuse_if_image_predates_the_database() {
   fail "'$SAFENT_ADS_IMAGE' no conoce la revisión '$db_rev' (ya aplicada en la base de datos) — imagen MÁS ANTIGUA que la BD, no se arranca el companion con ella (usa 'safent companion update' con la imagen correcta; Safent arranca igual, sin companion — FR-3)"
 }
 
+# Old networks allocated every service dynamically except the API. A broker
+# could therefore acquire .10 before the API started. Only crossed reservations
+# belonging to THIS exact compose installation may be released automatically.
+# No network, core, volume, credential or foreign container is removed here.
+reconcile_reserved_addresses() {
+  local ids cid row seen ip project service config extra expected separators crossed="" index=0
+  local -a crossed_rows=()
+  local template='{{.Id}}|{{with index .NetworkSettings.Networks "safent-companions"}}{{.IPAddress}}{{end}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}'
+  template="${template//safent-companions/$COMPANION_NETWORK}"
+  ids="$("$RUNTIME" ps -a --no-trunc --format '{{.ID}}')" \
+    || fail "no se pudo verificar el inventario de red de Anuncios; no se modifica ningún contenedor"
+  for cid in $ids; do
+    [[ "$cid" =~ ^[0-9a-f]{64}$ ]] || fail "inventario de red inválido; no se modifica ningún contenedor"
+    row="$("$RUNTIME" inspect --type container --format "$template" "$cid")" \
+      || fail "no se pudo verificar un contenedor de la red; vuelve a intentar la reparación"
+    IFS='|' read -r seen ip project service config extra <<< "$row"
+    separators="${row//[^|]/}"
+    [ "$seen" = "$cid" ] && [ "${#separators}" -eq 4 ] \
+      && [ -z "$extra" ] && [[ "$row" != *$'\n'* ]] \
+      || fail "identidad de red inválida; no se modifica ningún contenedor"
+    case "$ip" in
+      10.201.0.10) expected=ads-api ;;
+      10.201.0.11) expected=ads-db ;;
+      10.201.0.12) expected=ads-broker ;;
+      10.201.0.13) expected=ads-worker ;;
+      10.201.0.14) expected=ads-migrate ;;
+      *) continue ;;
+    esac
+    [ "$project" = safent-ads ] && [ "$config" = "$HERE/compose.yaml" ] \
+      || fail "la dirección reservada $ip está ocupada por otro contenedor o núcleo; no se detiene ni se migra. Libera esa reserva antes de reparar Anuncios"
+    case "$service" in ads-api|ads-db|ads-broker|ads-worker|ads-migrate) ;;
+      *) fail "la dirección reservada $ip no pertenece a un servicio de Anuncios reconocido" ;;
+    esac
+    if [ "$service" != "$expected" ]; then
+      crossed="$crossed $cid"
+      crossed_rows+=("$row")
+    fi
+  done
+  # Complete the read-only preflight before touching any reservation. Recheck
+  # immutable IDs and exact installation ownership immediately before stop/rm.
+  for cid in $crossed; do
+    row="$("$RUNTIME" inspect --type container --format "$template" "$cid")" \
+      || fail "cambió el inventario de Anuncios; vuelve a intentar la reparación"
+    [ "$row" = "${crossed_rows[$index]}" ] \
+      || fail "cambió la reserva de red; no se modifica el contenedor"
+    index=$((index + 1))
+    IFS='|' read -r seen ip project service config extra <<< "$row"
+    [ "$seen" = "$cid" ] && [ "$project" = safent-ads ] \
+      && [ "$config" = "$HERE/compose.yaml" ] && [ -z "$extra" ] \
+      && [[ "$row" != *$'\n'* ]] \
+      || fail "cambió la identidad del contenedor; no se modifica"
+    case "$service" in ads-api|ads-db|ads-broker|ads-worker|ads-migrate) ;;
+      *) fail "cambió el servicio del contenedor; no se modifica" ;;
+    esac
+    "$RUNTIME" stop --time 30 "$cid" >/dev/null \
+      || fail "no se pudo detener el servicio con una IP cruzada; no se fuerza su eliminación"
+    "$RUNTIME" rm "$cid" >/dev/null \
+      || fail "no se pudo retirar el contenedor detenido; se conservan sus volúmenes"
+  done
+  [ -z "$crossed" ] || log "reservas de red propias reparadas; volúmenes y núcleo conservados"
+}
+
 start_companion() {
   export SAFENT_STATE="$STATE"
   export SAFENT_ADS_IMAGE
   export ADS_POSTGRES_PASSWORD
   ADS_POSTGRES_PASSWORD="$(cat "$STATE/pg_password")"
   _refuse_if_image_predates_the_database
+  # EX_CONFIG distinguishes a protected network conflict from migrations or
+  # download failures. The desktop must not retry this as a transient DB error.
+  ( reconcile_reserved_addresses ) || exit 78
   "$RUNTIME" compose -p safent-ads -f "$HERE/compose.yaml" up -d
 }
 
