@@ -54,6 +54,10 @@ from hermes.shell_server.security import secrets as secrets_mod
 pytestmark = pytest.mark.unit
 
 _HOSTNAME = "ads.safent.internal"
+_PANEL_ROUTES = (
+    "cockpit", "cartera", "campanas", "senales", "propuestas",
+    "creatividades", "reglas", "registro", "conexiones", "ajustes",
+)
 
 
 # ============================================================================
@@ -124,6 +128,7 @@ class _FakeCompanion:
         self.exchange_should_fail = False
         self.probe_status = 200
         self.enforce_csrf = False
+        self.panel_calls: list[tuple[str, str]] = []
 
     async def exchange(self, request: web.Request) -> web.Response:
         body = await request.json()
@@ -172,8 +177,12 @@ class _FakeCompanion:
         )
         return resp
 
-    async def root(self, request: web.Request) -> web.Response:  # noqa: ARG002
-        return web.Response(text="<html>root</html>", content_type="text/html")
+    async def root(self, request: web.Request) -> web.Response:
+        self.panel_calls.append((request.method, request.path))
+        return web.Response(
+            text="<html>root</html>", content_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
 
 
 @pytest.fixture()
@@ -186,6 +195,8 @@ async def fake_companion(tmp_path: Path):
     app.router.add_route("*", "/api/v1/probe", companion.probe)
     app.router.add_get("/api/v1/platform-accounts/{provider}/reconnect/callback", companion.probe)
     app.router.add_get("/", companion.root)
+    for path in _PANEL_ROUTES:
+        app.router.add_get(f"/{path}", companion.root)
 
     ssl_ctx = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_SERVER)
     ssl_ctx.load_cert_chain(str(leaf_crt), str(leaf_key))
@@ -379,7 +390,10 @@ class TestMintBridgeSession:
 
 
 class TestBridgeCookieRequired:
-    @pytest.mark.parametrize("path", ["/ads", "/ads/", "/ads/api/v1/probe", "/ads/assets/x.js"])
+    @pytest.mark.parametrize("path", [
+        "/ads", "/ads/", "/ads/api/v1/probe", "/ads/assets/x.js",
+        "/ads/cockpit", "/ads/conexiones",
+    ])
     async def test_missing_cookie_denied(self, fake_companion, path: str) -> None:
         _companion, endpoint = fake_companion
         ac = _make_client(endpoint=endpoint, proxy=_mint_proxy())
@@ -440,6 +454,56 @@ class TestDeniedPrefixes:
             r = await client.get("/ads/something-not-allowlisted")
 
             assert r.status_code == 403
+
+
+class TestCanonicalPanelReloads:
+    @pytest.mark.parametrize("path", _PANEL_ROUTES)
+    @pytest.mark.parametrize("method", ["GET", "HEAD"])
+    async def test_exact_panel_routes_forward_the_upstream_response(
+        self, fake_companion, monkeypatch, path, method
+    ) -> None:
+        companion, endpoint = fake_companion
+        _patch_companion(monkeypatch, endpoint)
+        ac = _make_client(endpoint=endpoint, proxy=_mint_proxy())
+        async with ac.client as client:
+            client.cookies.set("ads_bridge", _valid_bridge_cookie())
+            response = await client.request(method, f"/ads/{path}?business_id=fixture")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+        assert response.headers["cache-control"] == "no-store"
+        assert response.text == ("<html>root</html>" if method == "GET" else "")
+        assert companion.panel_calls == [(method, f"/{path}")]
+
+    @pytest.mark.parametrize("path", (*_PANEL_ROUTES, ""))
+    async def test_post_to_panel_never_reaches_upstream(
+        self, fake_companion, monkeypatch, path
+    ) -> None:
+        companion, endpoint = fake_companion
+        _patch_companion(monkeypatch, endpoint)
+        ac = _make_client(endpoint=endpoint, proxy=_mint_proxy())
+        async with ac.client as client:
+            client.cookies.set("ads_bridge", _valid_bridge_cookie())
+            response = await client.post(f"/ads/{path}", json={"not": "an API"})
+        assert response.status_code == 403
+        assert not companion.panel_calls and not companion.exchange_calls
+
+    @pytest.mark.parametrize("method,path", [
+        ("GET", "login"), ("GET", "cockpit/extra"), ("GET", "conexiones/"),
+        ("GET", "campanas/google:campaign:123"), ("GET", "unknown"),
+        ("GET", "mcp"), ("GET", "api/v1/auth/login"),
+        ("PUT", "cockpit"), ("PATCH", "conexiones"), ("DELETE", "ajustes"),
+    ])
+    async def test_no_wildcards_login_or_mutation_permissions(
+        self, fake_companion, monkeypatch, method, path
+    ) -> None:
+        companion, endpoint = fake_companion
+        _patch_companion(monkeypatch, endpoint)
+        ac = _make_client(endpoint=endpoint, proxy=_mint_proxy())
+        async with ac.client as client:
+            client.cookies.set("ads_bridge", _valid_bridge_cookie())
+            response = await client.request(method, f"/ads/{path}")
+        assert response.status_code == 403
+        assert not companion.panel_calls and not companion.exchange_calls
 
 
 # ============================================================================

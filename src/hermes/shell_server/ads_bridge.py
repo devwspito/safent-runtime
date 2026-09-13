@@ -89,6 +89,12 @@ _DENIED_LOGIN_PATHS = frozenset({"api/v1/auth/login", "api/v1/auth/totp"})
 _ALLOWED_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"})
 _ALLOWED_EXACT_PATHS = frozenset({"", "favicon.ico"})
 _ALLOWED_PATH_PREFIXES = ("assets/", "api/v1/")
+# Canonical browser routes in the companion's panel/src/App.tsx. No wildcard:
+# EntityRef drill-down segments need their own bounded contract before adding.
+_PANEL_EXACT_PATHS = frozenset({
+    "", "cockpit", "cartera", "campanas", "senales", "propuestas",
+    "creatividades", "reglas", "registro", "conexiones", "ajustes",
+})
 _HTTP_OK = 200
 _HTTP_UNAUTHORIZED = 401
 _OAUTH_CALLBACK_PATHS = frozenset(
@@ -265,12 +271,16 @@ class _PathDecision:
     denial_code: str | None = None
 
 
-def _classify_path(path: str) -> _PathDecision:
+def _classify_path(path: str, *, method: str) -> _PathDecision:
     normalized = path.lstrip("/")
     if normalized == _DENIED_MCP_PREFIX or normalized.startswith(f"{_DENIED_MCP_PREFIX}/"):
         return _PathDecision(allowed=False, denial_code="MCP_NOT_BRIDGED")
     if normalized in _DENIED_LOGIN_PATHS:
         return _PathDecision(allowed=False, denial_code="LOGIN_NOT_BRIDGED")
+    if normalized in _PANEL_EXACT_PATHS:
+        if path == normalized and method in {"GET", "HEAD"}:
+            return _PathDecision(allowed=True)
+        return _PathDecision(allowed=False, denial_code="PATH_NOT_BRIDGED")
     if normalized in _ALLOWED_EXACT_PATHS or normalized.startswith(_ALLOWED_PATH_PREFIXES):
         return _PathDecision(allowed=True)
     return _PathDecision(allowed=False, denial_code="PATH_NOT_BRIDGED")
@@ -495,7 +505,7 @@ async def _proxy_once(
 async def _proxy_request(*, app_state: Any, request: Request, path: str) -> Response:
     from hermes.shell_server.companions import get_companion  # noqa: PLC0415
 
-    decision = _classify_path(path)
+    decision = _classify_path(path, method=request.method)
     if not decision.allowed:
         return _error_response(403, decision.denial_code or "PATH_NOT_BRIDGED")
 
