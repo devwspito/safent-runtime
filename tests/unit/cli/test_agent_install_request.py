@@ -42,6 +42,13 @@ echo "$@" >> "$FAKE_PODMAN_LOG"
 case "$1" in
   inspect)
     case "$*" in
+      *'/etc/hermes/companions'*)
+        if [ "${FAKE_MISSING_PROJECTION:-0}" != 1 ] || [ -f "${FAKE_CORE_RECREATED:-/nonexistent}" ]; then
+          echo 'volume|safent-companion-runtime|false'
+        fi
+        exit 0 ;;
+      *'/var/lib/hermes'*) echo "${FAKE_DATA_MOUNT:-volume|agent-test-data}"; exit 0 ;;
+      *'{{.ImageDigest}}'*) echo "${SAFENT_IMAGE#*@}"; exit 0 ;;
       *"-f "*)
         # `_running`: --type container -f {{.State.Running}} NAME
         echo "${FAKE_RUNNING:-true}"
@@ -67,9 +74,13 @@ case "$1" in
     exit 0
     ;;
   pull) exit 0 ;;
+  port) echo "${FAKE_PUBLISHED_PORT:-127.0.0.1:35335}"; exit 0 ;;
   run)
     case "$*" in
       *"safent-companion-runtime:/runtime"*) cat >/dev/null; exit 0 ;;
+      *'--name agent-test '*)
+        [ -n "${FAKE_CORE_RECREATED:-}" ] && touch "$FAKE_CORE_RECREATED"
+        exit 0 ;;
     esac
     # `run --rm --entrypoint cat <image> ...` (T015 scaffold's image-baked-
     # file probe, _fetch_companion_file) always misses -> forces the cache
@@ -103,6 +114,8 @@ case "$1" in
       "test -f") exit 1 ;;  # legacy .update-requested/.uninstall-requested: never present here
     esac
     case "$*" in
+      'systemctl is-active hermes-runtime') echo active; exit 0 ;;
+      'cat /var/lib/hermes-bootstrap/bootstrap/webui-bootstrap') echo private-regression-ticket; exit 0 ;;
       *install_request_agent_cli\ claim-ads*)
         if [ -n "${FAKE_CLAIM_install_companion:-}" ]; then verb=install_companion;
         elif [ -n "${FAKE_CLAIM_repair_companion:-}" ]; then verb=repair_companion;
@@ -126,6 +139,9 @@ case "$1" in
         exit 0
         ;;
       *install_request_agent_cli\ verify-ads*)
+        if [ "${FAKE_MISSING_PROJECTION:-0}" = 1 ]; then
+          [ -f "${FAKE_CORE_RECREATED:-/nonexistent}" ] || exit 1
+        fi
         [ "${FAKE_RELOAD_FAIL:-0}" = "1" ] && exit 1
         exit 0
         ;;
@@ -139,6 +155,7 @@ exit 0
 _FAKE_CURL = r"""#!/usr/bin/env bash
 case "$*" in
   *raw.githubusercontent.com*) exit 1 ;;  # force the cache tier, never real network
+  */healthz*) printf '200' ;;
   *) printf '401' ;;                       # /mcp/health bearer-protected probe
 esac
 exit 0
@@ -178,12 +195,61 @@ def _base_env(
         "HOME": str(tmp_path / "home"),
         "SAFENT_STATE_HOME": str(state_home),
         "SAFENT_NAME": "agent-test",
+        "SAFENT_IMAGE": "ghcr.io/devwspito/safent@sha256:" + "b" * 64,
         "SAFENT_ADS_IMAGE": "ghcr.io/devwspito/safent-ads@sha256:" + "a" * 64,
         "FAKE_PODMAN_LOG": str(podman_log),
     }
 
 
 class TestCompanionInstall:
+    @pytest.mark.parametrize("verb", ["install", "repair"])
+    def test_missing_projection_recreates_once_before_verified_reload(
+        self, tmp_path: Path, fake_bin_dir: Path, verb: str
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_MISSING_PROJECTION="1", FAKE_CORE_RECREATED=str(tmp_path / "recreated"))
+        for _ in range(2):
+            result = subprocess.run(
+                ["sh", str(_SAFENT_CLI), "companion", verb, "--porcelain"],
+                env=env, capture_output=True, text=True, timeout=20, check=False,
+            )
+            assert result.returncode == 0, result.stderr + result.stdout
+            assert '"t":"ready"' not in result.stdout
+            assert "private-regression-ticket" not in result.stdout + result.stderr
+        lines = log.read_text().splitlines()
+        runs = [line for line in lines if line.startswith("run -d --name agent-test ")]
+        assert len(runs) == 1
+        assert "-p 127.0.0.1:35335:7517" in runs[0]
+        assert "-v agent-test-data:/var/lib/hermes" in runs[0]
+        assert "safent-companion-runtime:/etc/hermes/companions:ro" in runs[0]
+        assert env["SAFENT_IMAGE"] in runs[0]
+        assert lines.index(runs[0]) < next(i for i, line in enumerate(lines) if "verify-ads" in line)
+        assert sum(line.startswith("rm -f agent-test") for line in lines) == 1
+
+    @pytest.mark.parametrize("override", [
+        {"FAKE_DATA_MOUNT": "volume|other-data"},
+        {"FAKE_PUBLISHED_PORT": "0.0.0.0:35335"},
+        {"SAFENT_IMAGE": "ghcr.io/devwspito/safent:latest"},
+    ])
+    def test_projection_repair_rejects_unknown_core_identity(
+        self, tmp_path: Path, fake_bin_dir: Path, override: dict[str, str]
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_MISSING_PROJECTION="1", **override)
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", "repair", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=20, check=False,
+        )
+        assert result.returncode != 0
+        assert "rm -f agent-test" not in log.read_text()
+        assert "verify-ads" not in log.read_text()
+
     @pytest.mark.parametrize("verb", ["install", "repair"])
     @pytest.mark.parametrize(
         "image",

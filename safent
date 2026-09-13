@@ -1622,6 +1622,23 @@ _run_with_heartbeat() {
   wait "$_hb_pid"
 }
 
+# Legacy/engine-only containers can be healthy without the private projection.
+# Reuse the normal hardened launch, preserving the observed port and data volume.
+# Its bootstrap ticket is deliberately discarded: only the outer boot may Ready.
+_companion_converge_core() (
+  NO_COMPANION=0
+  _container_matches_desired && return 0
+  printf '%s\n' "$IMAGE" | grep -Eq '^ghcr[.]io/devwspito/safent@sha256:[0-9a-f]{64}$' || return 1
+  _core_data="$("$RT" inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/hermes"}}{{.Type}}|{{.Name}}{{end}}{{end}}' "$NAME" 2>/dev/null)" || return 1
+  [ "$_core_data" = "volume|$DATA_VOLUME" ] || return 1
+  PORT_PIN="$("$RT" port "$NAME" 7517 2>/dev/null | sed -n 's/^127[.]0[.]0[.]1:\([0-9][0-9]*\)$/\1/p')"
+  case "$PORT_PIN" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$PORT_PIN" -ge 1 ] && [ "$PORT_PIN" -le 65535 ] || return 1
+  PORCELAIN=1
+  cmd_up --secret-fd 3 >/dev/null 3>/dev/null || return 1
+  _container_matches_desired
+)
+
 _companion_install_or_repair() {
   _is_pinned_ads_image "${SAFENT_ADS_IMAGE:-}" \
     || _die_porcelain companion_network_conflict "Instalar o reparar Anuncios requiere el digest exacto del bootstrap de Safent. No se aceptan etiquetas ni latest." false
@@ -1643,6 +1660,8 @@ _companion_install_or_repair() {
 
   _stage companion_reload "Registrando el companion en Safent"
   _running || _die_porcelain companion_unreachable "Safent no esta disponible para registrar el companion" false
+  _run_with_heartbeat _companion_converge_core \
+    || _die_porcelain companion_unreachable "No se pudo preparar la conexion segura de Anuncios sin cambiar los datos o el puerto de Safent" false
   "$RT" exec -u root "$NAME" /usr/libexec/hermes/hermes-companion-bearer >&2 \
     || _die_porcelain companion_unreachable "No se pudo preparar el registro seguro del companion" false
   _run_with_heartbeat "$RT" exec -u hermes "$NAME" python3 -m hermes.shell_server.install_request_agent_cli \
