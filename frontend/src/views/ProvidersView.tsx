@@ -5,7 +5,7 @@ import { useT } from '../lib/i18n'
 import { hasNativeProviderOAuthOpener, openProviderOAuthUrl } from '../lib/providerOAuth'
 import {
   listProviders, listNativeProviders, getNativeActive, addProvider, configureNativeProvider, setActiveProvider,
-  testProvider, deleteProvider, startProviderOAuth, getProviderOAuthStatus,
+  testProvider, updateProvider, deleteProvider, startProviderOAuth, getProviderOAuthStatus,
   ApiError,
 } from '../api/client'
 import type { Provider } from '../api/types'
@@ -327,7 +327,17 @@ export default function ProvidersView() {
       .then(([configured, native, nativeActive]) => {
         if (request !== loadGeneration.current) return
         if (!Array.isArray(configured) || !Array.isArray(native)) throw new Error('invalid provider catalog')
-        const cfg = configured
+        const sameEndpoint = (u?: string) => (u ?? '').trim().replace(/\/+$/, '')
+        const matchesNative = (p: Provider) => !!nativeActive && (
+          (p.provider_id === nativeActive.provider_id && p.default_model === nativeActive.default_model) ||
+          (p.is_active === true && sameEndpoint(p.base_url) !== '' &&
+            sameEndpoint(p.base_url) === sameEndpoint(nativeActive.base_url) &&
+            p.default_model === nativeActive.default_model)
+        )
+        // SQL flags remember past selections; only Hermes' effective native
+        // selection can identify the provider currently used by the chat.
+        const activeMatch = configured.findIndex(matchesNative)
+        const cfg = configured.map((p, index) => ({ ...p, is_active: index === activeMatch && !!nativeActive }))
         // Native-configured providers live in a separate store from the repo;
         // surface the active one in the configured list so a just-added native
         // catalogue provider is actually visible + marked active. But when a
@@ -335,14 +345,7 @@ export default function ProvidersView() {
         // store under a generic id (e.g. "openai-api") that points at the SAME
         // base_url — that mirror is not a distinct provider, so skip it (else
         // the one provider renders as two "Activo" cards).
-        const sameEndpoint = (u?: string) => (u ?? '').trim().replace(/\/+$/, '')
-        const nativeAlreadyShown = !!nativeActive && cfg.some(p =>
-          p.provider_id === nativeActive.provider_id ||
-          (p.is_active === true &&
-            sameEndpoint(p.base_url) !== '' &&
-            sameEndpoint(p.base_url) === sameEndpoint(nativeActive.base_url) &&
-            (!nativeActive.default_model || !p.default_model ||
-              nativeActive.default_model === p.default_model)))
+        const nativeAlreadyShown = activeMatch >= 0
         const merged = nativeActive && !nativeAlreadyShown
           ? [nativeActive, ...cfg]
           : cfg
@@ -578,11 +581,12 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
     try {
       const r = await testProvider(id)
       if (!alive.current) return
-      // PROV-03: r.error is the provider's own honest reason (invalid key,
-      // wrong endpoint...) once ok is false — show it instead of a generic
-      // "failed" toast so the owner knows whether to fix the key or the URL.
-      const message = r?.ok ? t('providers.test.ok') : t('providers.test.fail')
+      // Only application-owned copy: raw provider errors may contain secrets.
+      const message = r?.ok ? t('providers.test.ok')
+        : t(r?.code === 'invalid_key' ? 'providers.test.invalid_key'
+          : r?.code === 'endpoint_error' ? 'providers.test.endpoint_error' : 'providers.test.unreachable')
       onToast(message, r?.ok ? 'ok' : 'warn')
+      onRefresh()
     } catch { if (alive.current) onToast(t('providers.err.generic'), 'error') }
     finally { inFlight.current = false; if (alive.current) { setTesting(false); setBusy(false) } }
   }
@@ -702,6 +706,9 @@ export function ProviderRow({ provider, isConfigured, onRefresh, onToast, onConf
 
           {isActive && (
             <Badge variant="ok">{t('providers.active')}</Badge>
+          )}
+          {isConfigured && !isActive && !isCloudManaged && (
+            <Badge variant="neutral">{t('providers.saved_inactive')}</Badge>
           )}
 
           {isCloudManaged && (
@@ -828,11 +835,13 @@ interface CustomProviderCardProps {
   onToast: (msg: string, kind: 'ok' | 'warn' | 'error') => void
 }
 
-function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
+export function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [connFailed, setConnFailed] = useState(false)
+  const [failureCode, setFailureCode] = useState<string | null>(null)
+  const savedId = useRef<string | null>(null)
   const reduced = useReducedMotion()
   const aliasRef = useRef<HTMLInputElement>(null)
   const urlRef = useRef<HTMLInputElement>(null)
@@ -856,14 +865,23 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
 
     pending.current = true; setSaving(true)
     try {
-      const added = await addProvider({ kind: 'openai_compatible', alias, default_model, base_url, api_key, set_active:false })
+      // A failed probe has already saved the credentials. Retry that same row;
+      // a second POST would conflict with the unique alias and never reconnect.
+      const added = savedId.current
+        ? await updateProvider(savedId.current, { alias, default_model, base_url, ...(api_key ? { api_key } : {}) })
+        : await addProvider({ kind: 'openai_compatible', alias, default_model, base_url, api_key, set_active:false })
+      if (typeof added.provider_id !== 'string' || !added.provider_id) throw new Error('missing_provider_id')
+      savedId.current = added.provider_id
+      if (keyRef.current) keyRef.current.value = ''
       if (!alive.current) return
-      const newId = (added as { provider_id?: string }).provider_id ?? alias
+      const newId = added.provider_id
 
       let testPassed = false
+      let code: string | null = null
       try {
         const r = await testProvider(newId)
         testPassed = r?.ok === true
+        code = r?.code ?? null
       } catch {
         testPassed = false
       }
@@ -878,11 +896,15 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
         if (urlRef.current) urlRef.current.value = ''
         if (modelRef.current) modelRef.current.value = ''
         if (keyRef.current) keyRef.current.value = ''
+        savedId.current = null
+        setFailureCode(null)
         onToast(t('providers.custom.toast.added'), 'ok')
         onAdded()
       } else {
         setConnFailed(true)
-        onAdded()
+        setFailureCode(code)
+        // A full parent reload unmounts this card and loses savedId, turning
+        // the next retry back into a duplicate POST. Keep recovery in place.
       }
     } catch { if (alive.current) onToast(t('providers.err.generic'), 'error') }
     finally { pending.current = false; if (alive.current) setSaving(false) }
@@ -974,6 +996,7 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
               <AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1 }} aria-hidden="true" />
               <span>
                 {t('providers.custom.conn_failed')}
+                {' '}{t(failureCode === 'invalid_key' ? 'providers.test.invalid_key' : failureCode === 'endpoint_error' ? 'providers.test.endpoint_error' : 'providers.test.unreachable')}
               </span>
             </motion.div>
           )}
@@ -991,7 +1014,7 @@ function CustomProviderCard({ onAdded, onToast }: CustomProviderCardProps) {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => { setOpen(false); setConnFailed(false) }}
+              onClick={() => { setOpen(false); if (keyRef.current) keyRef.current.value = '' }}
               disabled={saving}
             >
               {t('providers.cancel')}
@@ -1079,6 +1102,7 @@ function CodexProviderCard({ onAdded, onToast }: CodexProviderCardProps) {
     <motion.div className={css.customCard} layout>
       <div className={css.customCardHeader}>
         <p className={css.customCardIntro}>{t('providers.codex.explain')}</p>
+        <p className={css.formHint}>{t('providers.codex.device_help')}</p>
       </div>
       <OAuthNotice notice={notice} onOpen={openOAuthPage} openingBrowser={openingBrowser} />
 

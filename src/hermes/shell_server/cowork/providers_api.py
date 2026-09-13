@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import logging
 import os
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
@@ -39,8 +40,8 @@ async def _reject_if_cloud_managed(
     Enforced HERE because this REST layer is the operator's only entry point; the
     config-sync applier mutates managed_by="cloud" rows via D-Bus directly (never
     through REST), so it is unaffected and stays the sole owner of these rows.
-    Fail-open on a daemon lookup error: the mutator call right after will surface
-    the 503 itself, and the next sync reconciles regardless.
+    Fail closed when ownership cannot be checked; a later sync is not an
+    authorization check for the current write.
     """
     try:
         providers = await proxy.call_list("list_providers")
@@ -83,6 +84,15 @@ class ConfigureNativeProviderRequest(BaseModel):
     model: str | None = None
     base_url: str | None = None
     set_active: bool = False
+
+
+class UpdateProviderRequest(BaseModel):
+    """Editable custom connection details; governance and activation are separate."""
+    model_config = ConfigDict(extra="forbid")
+    alias: str | None = Field(default=None, min_length=1, max_length=120)
+    default_model: str | None = Field(default=None, min_length=1)
+    base_url: str | None = None
+    api_key: str | None = None
 
 
 # ------------------------------------------------------------------
@@ -147,10 +157,7 @@ def create_providers_router() -> APIRouter:
         try:
             return await proxy.call_dict("get_native_active")
         except AgentUnavailable as exc:
-            logger.warning(
-                "hermes.providers.native_active_unavailable", extra={"reason": str(exc)}
-            )
-            return {}
+            _raise_503(exc, "get_native_active")
 
     @router.get("/oauth/{session_id}")
     async def get_provider_oauth_status(request: Request, session_id: str) -> dict:
@@ -189,6 +196,21 @@ def create_providers_router() -> APIRouter:
             return {}  # unreachable; _raise_503 raises
 
         return result
+
+    @router.patch("/{provider_id}")
+    async def update_provider(
+        request: Request, provider_id: UUID, body: UpdateProviderRequest
+    ) -> dict:
+        """Repair a saved connection without duplicating its alias or activating it."""
+        import json  # noqa: PLC0415
+
+        proxy = request.app.state.dbus_proxy
+        await _reject_if_cloud_managed(proxy, provider_id=str(provider_id), alias=body.alias)
+        draft = body.model_dump(exclude_unset=True, exclude_none=True)
+        try:
+            return await proxy.call_mutator("update_provider", str(provider_id), json.dumps(draft))
+        except AgentUnavailable as exc:
+            _raise_503(exc, "update_provider")
 
     @router.post("/{provider_id}/activate")
     async def activate_provider(request: Request, provider_id: str) -> dict:

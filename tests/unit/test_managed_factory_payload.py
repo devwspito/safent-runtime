@@ -13,7 +13,9 @@ from tests.unit.test_nous_engine_hermes021_compat import _persona
 pytestmark = pytest.mark.unit
 
 
-def build(monkeypatch, config, *, substitute_gate=False):
+def build(
+    monkeypatch, config, *, substitute_gate=False, provider="custom", api_mode="chat_completions"
+):
     captured = {}
     from hermes.runtime import managed_llm_bootstrap
 
@@ -28,11 +30,11 @@ def build(monkeypatch, config, *, substitute_gate=False):
             {
                 "api_key": config.api_key,
                 "base_url": config.base_url,
-                "provider": "custom",
-                "api_mode": "chat_completions",
+                "provider": provider,
+                "api_mode": api_mode,
                 "credential_pool": None,
             },
-            "company",
+            config.model.split("/", 1)[-1],
         ),
     )
 
@@ -105,3 +107,52 @@ def test_local_qwen_body_behavior_is_preserved(monkeypatch, thinking):
     assert kwargs["request_overrides"]["extra_body"]["chat_template_kwargs"] == {
         "enable_thinking": False if thinking is None else thinking
     }
+
+
+@pytest.mark.parametrize(
+    "provider,mode,model",
+    [
+        ("openai-codex", "codex_responses", "gpt-6-astra"),
+        ("openai-codex", "codex_responses", "gpt-5.6-terra"),
+        ("openai-api", "codex_responses", "gpt-6-astra"),
+        ("anthropic", "anthropic_messages", "claude-sonnet"),
+        ("openrouter", "chat_completions", "qwen/qwen3"),
+        ("custom", "codex_responses", "qwen3"),
+        ("custom", "chat_completions", "llama"),
+    ],
+)
+def test_factory_does_not_inject_qwen_parameters_into_other_transports(
+    monkeypatch, provider, mode, model
+):
+    kwargs = build(
+        monkeypatch, ModelConfig(model=f"{provider}/{model}"), provider=provider, api_mode=mode
+    )
+    assert "request_overrides" not in kwargs
+
+
+def test_switching_to_codex_drops_stale_local_template_without_mutating_configuration(monkeypatch):
+    body = {"chat_template_kwargs": {"enable_thinking": True}}
+    config = ModelConfig(model="openai-codex/gpt-6-astra", extra={"extra_body": body})
+    kwargs = build(monkeypatch, config, provider="openai-codex", api_mode="codex_responses")
+    assert "request_overrides" not in kwargs
+    assert body == {"chat_template_kwargs": {"enable_thinking": True}}
+
+
+def test_qwen_defaults_do_not_mutate_shared_profile_overrides(monkeypatch):
+    body = {"chat_template_kwargs": {"custom_setting": "preserved"}}
+    kwargs = build(monkeypatch, ModelConfig(model="custom/qwen", extra={"extra_body": body}))
+    assert body == {"chat_template_kwargs": {"custom_setting": "preserved"}}
+    assert (
+        kwargs["request_overrides"]["extra_body"]["chat_template_kwargs"]["enable_thinking"]
+        is False
+    )
+
+
+@pytest.mark.parametrize("mode", ["chat_completions", "codex_responses", "anthropic_messages"])
+def test_temperature_never_becomes_an_unsupported_agent_constructor_argument(monkeypatch, mode):
+    kwargs = build(monkeypatch, ModelConfig(model="custom/qwen", temperature=0.4), api_mode=mode)
+    assert "temperature" not in kwargs
+    if mode == "chat_completions":
+        assert kwargs["request_overrides"]["temperature"] == 0.4
+    else:
+        assert "temperature" not in kwargs.get("request_overrides", {})

@@ -2993,8 +2993,6 @@ class NousReasoningEngine:
         _extra_knobs: dict[str, Any] = {}
         if model_config.max_tokens is not None:
             _extra_knobs["max_tokens"] = model_config.max_tokens
-        if model_config.temperature != 0.0:
-            _extra_knobs["temperature"] = model_config.temperature
         # AIAgent (Nous 0.15.1 through 0.21.1) does NOT accept a `timeout_seconds` constructor
         # kwarg — passing it raises TypeError and kills the turn. Per-request LLM
         # timeouts are ENV-driven (HERMES_API_TIMEOUT / HERMES_STREAM_STALE_TIMEOUT
@@ -3014,25 +3012,37 @@ class NousReasoningEngine:
             if model_config.max_iterations != 8
             else _NOUS_LEGACY_MAX_ITERATIONS
         )
-        # Reasoning models served WITHOUT a vLLM reasoning parser (Qwen3.x,
-        # DeepSeek-R1, GLM Thinking on a plain OpenAI-compat endpoint) emit CoT
-        # as BARE prose in message.content with no <think> tags, which neither
-        # Nous strip_think_blocks nor StreamingThinkScrubber can catch. Tell the
-        # chat template not to think. chat_template_kwargs only shapes the
-        # rendered prompt; the OpenAI tools/tool_calls schema is untouched, so
-        # tool-calling is unaffected. Mirrors skill_synthesis.py.
+        # Qwen's local chat-template extension is NOT an OpenAI parameter.
+        # In particular Codex Responses rejects it with HTTP 400. Only apply
+        # that default to the native custom Chat Completions route for Qwen.
         # Enterprise owns a closed request schema. Neither profile/tool fields
         # nor local Qwen extensions can select a route or override its grant.
         if not model_config.managed:
+            from copy import deepcopy  # noqa: PLC0415
+
             _extra_body: dict[str, Any] = {}
             _op_extra = model_config.extra.get("extra_body") if model_config.extra else None
             if isinstance(_op_extra, dict):
-                _extra_body.update(_op_extra)
-            _ctk = _extra_body.setdefault("chat_template_kwargs", {})
-            if isinstance(_ctk, dict) and "enable_thinking" not in _ctk:
-                _ctk["enable_thinking"] = False
+                _extra_body = deepcopy(_op_extra)
+            _custom_chat = (
+                str(rt.get("provider", "")).split(":", 1)[0] == "custom"
+                and rt.get("api_mode") == "chat_completions"
+            )
+            if _custom_chat and "qwen" in bare_model.lower():
+                _ctk = _extra_body.setdefault("chat_template_kwargs", {})
+                if isinstance(_ctk, dict):
+                    _ctk.setdefault("enable_thinking", False)
+            elif not _custom_chat:
+                # Discard local-only overrides retained from a previous model.
+                # Do not change credentials, provider routing or native reasoning.
+                _extra_body.pop("chat_template_kwargs", None)
             if _extra_body:
                 _extra_knobs["request_overrides"] = {"extra_body": _extra_body}
+            # Temperature is a wire override, not an AIAgent constructor arg.
+            # Subscription Responses routes reject it; leave their native
+            # reasoning/sampling policy untouched.
+            if model_config.temperature != 0.0 and rt.get("api_mode") == "chat_completions":
+                _extra_knobs.setdefault("request_overrides", {})["temperature"] = model_config.temperature
         agent = GovernedAIAgent(
             model=bare_model,
             api_key=rt.get("api_key"),
