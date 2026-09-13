@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 import json
 import os
 import sqlite3
@@ -45,6 +46,8 @@ _HTTP_OK = 200
 _HTTP_UNAUTHORIZED = 401
 _X25519_KEY_BYTES = 32
 _VAULT_AAD = "integration:composio"  # Authenticated data, not a password.
+_RECIPIENT_PIN_PATH = Path("/etc/hermes/companions/ads-composio-channel.pub")
+_MAX_PIN_FILE_BYTES = 128
 
 
 class _PublicationUnavailable(RuntimeError):
@@ -53,6 +56,28 @@ class _PublicationUnavailable(RuntimeError):
 
 def _canonical(value: dict) -> bytes:
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+
+
+def _load_recipient_pin() -> bytes:
+    """Installer-owned broker identity; never supplied by the API or caller."""
+    from hermes.shell_server.companions import (  # noqa: PLC0415
+        is_companion_secret_file_trustworthy,
+    )
+
+    if not is_companion_secret_file_trustworthy(_RECIPIENT_PIN_PATH):
+        raise _PublicationUnavailable()
+    if _RECIPIENT_PIN_PATH.stat().st_size > _MAX_PIN_FILE_BYTES:
+        raise _PublicationUnavailable()
+    encoded = _RECIPIENT_PIN_PATH.read_text(encoding="ascii").strip()
+    recipient = base64.b64decode(encoded, validate=True)
+    if (
+        len(recipient) != _X25519_KEY_BYTES
+        or base64.b64encode(recipient).decode("ascii") != encoded
+    ):
+        raise _PublicationUnavailable()
+    # Reject low-order points before any vault read, as well as malformed encoding.
+    X25519PrivateKey.generate().exchange(X25519PublicKey.from_public_bytes(recipient))
+    return recipient
 
 
 def _seal(*, claims: dict, private_key, recipient: bytes) -> str:
@@ -123,7 +148,14 @@ class CompanionComposioPublisher:
                 if endpoint is None:
                     self._clear_session()
                     return {"accepted": False}
-                identity = (endpoint.host, endpoint.ip, endpoint.port, endpoint.ca_fingerprint)
+                recipient_pin = _load_recipient_pin()
+                identity = (
+                    endpoint.host,
+                    endpoint.ip,
+                    endpoint.port,
+                    endpoint.ca_fingerprint,
+                    recipient_pin,
+                )
                 if identity != self._endpoint_identity:
                     self._clear_session()
                     self._endpoint_identity = identity
@@ -139,7 +171,7 @@ class CompanionComposioPublisher:
                     timeout=aiohttp.ClientTimeout(total=8, connect=3),
                 ) as session:
                     base = f"https://{endpoint.host}:{endpoint.port}"
-                    return await self._publish_to_channel(session, base)
+                    return await self._publish_to_channel(session, base, recipient_pin)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - never relay secret-bearing exceptions
@@ -166,7 +198,7 @@ class CompanionComposioPublisher:
             self._session_expires = time.monotonic() + max(0, ttl - 5)
         return self._session_cookie
 
-    async def _channel(self, session, base: str) -> tuple[bytes, str, str]:
+    async def _channel(self, session, base: str, recipient_pin: bytes) -> tuple[bytes, str, str]:
         # A stale owner session gets exactly one fresh assertion/exchange.
         for attempt in range(2):
             cookie = await self._session(session, base)
@@ -188,7 +220,9 @@ class CompanionComposioPublisher:
                 ):
                     raise _PublicationUnavailable()
                 recipient = base64.b64decode(body["public_key"], validate=True)
-                if len(recipient) != _X25519_KEY_BYTES:
+                if len(recipient) != _X25519_KEY_BYTES or not hmac.compare_digest(
+                    recipient, recipient_pin
+                ):
                     raise _PublicationUnavailable()
                 return recipient, cookie, response.cookies["ads_csrf"].value
         raise _PublicationUnavailable()
@@ -242,15 +276,17 @@ class CompanionComposioPublisher:
             "auth_config_ids": configs if enabled else {},
         }
 
-    async def _publish_to_channel(self, session, base: str) -> dict[str, bool]:
-        recipient, cookie, csrf = await self._channel(session, base)
-        if not self._local_allowed():
+    async def _publish_to_channel(
+        self, session, base: str, recipient_pin: bytes
+    ) -> dict[str, bool]:
+        recipient, cookie, csrf = await self._channel(session, base, recipient_pin)
+        if not self._local_allowed() or not hmac.compare_digest(_load_recipient_pin(), recipient):
             raise _PublicationUnavailable()
         vault = SecretsVault()
         repo = SQLiteIntegrationsRepository(db_path=self._db_path, vault=vault)
         await self._prepare(repo)
         # Recheck after every external await before revealing the vault.
-        if not self._local_allowed():
+        if not self._local_allowed() or not hmac.compare_digest(_load_recipient_pin(), recipient):
             raise _PublicationUnavailable()
         config = self._configuration(vault)
         now = int(time.time())

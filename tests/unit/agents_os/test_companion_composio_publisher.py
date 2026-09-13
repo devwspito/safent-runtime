@@ -9,7 +9,7 @@ import ssl
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -108,6 +108,11 @@ async def channel(tmp_path, monkeypatch):  # noqa: PLR0915 - one real TLS compan
         reject_session_once=False,
         redirect=False,
     )
+    state.pin_path = tmp_path / "ads-composio-channel.pub"
+    state.pin_path.write_text(
+        base64.b64encode(state.recipient.public_key().public_bytes_raw()).decode() + "\n"
+    )
+    monkeypatch.setattr(mod, "_RECIPIENT_PIN_PATH", state.pin_path)
 
     async def exchange(request):
         state.exchange_count += 1
@@ -231,6 +236,9 @@ async def test_pinned_tls_encrypted_delivery_session_reuse_and_durable_revision(
 async def test_credentials_auth_config_and_recipient_rotation_are_read_fresh(channel):
     assert await channel.publisher.publish() == {"accepted": True}
     channel.recipient = X25519PrivateKey.generate()
+    channel.pin_path.write_text(
+        base64.b64encode(channel.recipient.public_key().public_bytes_raw()).decode() + "\n"
+    )
     channel.repo.set_credential(
         kind="composio", api_key="rotated-fixture", entity_id="rotated-owner"
     )
@@ -340,6 +348,60 @@ async def test_companion_identity_change_reauthenticates(channel):
     channel.endpoint.ca_fingerprint = "rotated-test-ca"
     assert await channel.publisher.publish() == {"accepted": True}
     assert channel.exchange_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["wrong", "missing", "unsafe", "malformed", "empty", "short", "low_order"]
+)
+async def test_untrusted_recipient_pin_never_reads_vault_or_posts_lease(
+    channel, monkeypatch, failure
+):
+    decrypt = Mock(side_effect=AssertionError("must not decrypt"))
+    monkeypatch.setattr(secrets.SecretsVault, "decrypt", decrypt)
+    if failure == "wrong":
+        channel.pin_path.write_text(
+            base64.b64encode(X25519PrivateKey.generate().public_key().public_bytes_raw()).decode()
+        )
+    elif failure == "missing":
+        channel.pin_path.unlink()
+    elif failure == "unsafe":
+        monkeypatch.setattr(companions, "is_companion_secret_file_trustworthy", lambda _: False)
+    else:
+        values = {
+            "malformed": "not a public key!",
+            "empty": "",
+            "short": "YQ==",
+            "low_order": base64.b64encode(bytes(32)).decode(),
+        }
+        channel.pin_path.write_text(values[failure])
+    assert await channel.publisher.publish() == {"accepted": False}
+    decrypt.assert_not_called()
+    assert channel.envelopes == []
+
+
+@pytest.mark.asyncio
+async def test_pin_rotation_reauthenticates_and_substitution_after_valid_lease_denies(
+    channel, monkeypatch
+):
+    assert await channel.publisher.publish() == {"accepted": True}
+    channel.recipient = X25519PrivateKey.generate()
+    decrypt = Mock(side_effect=AssertionError("must not decrypt"))
+    original_decrypt = secrets.SecretsVault.decrypt
+    monkeypatch.setattr(secrets.SecretsVault, "decrypt", decrypt)
+    assert await channel.publisher.publish() == {"accepted": False}
+    decrypt.assert_not_called()
+    assert len(channel.envelopes) == 1
+    monkeypatch.setattr(secrets.SecretsVault, "decrypt", original_decrypt)
+    channel.pin_path.write_text(
+        base64.b64encode(channel.recipient.public_key().public_bytes_raw()).decode() + "\n"
+    )
+    assert await channel.publisher.publish() == {"accepted": True}
+    assert channel.exchange_count == 2
+
+
+def test_recipient_pin_location_is_fixed():
+    assert Path("/etc/hermes/companions/ads-composio-channel.pub") == mod._RECIPIENT_PIN_PATH
 
 
 @pytest.mark.asyncio
