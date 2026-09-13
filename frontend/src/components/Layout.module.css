@@ -10,6 +10,7 @@
 }
 .reopen { position: absolute; top: 10px; left: 10px; z-index: 3; background: var(--color-surface); }
 .shell[data-sidebar-open="false"] { --shell-header-inset: 54px; }
+.shell[data-ads-workspace="true"] { --shell-header-inset: 0px; }
 .sidebar :global(.sidebar-new-chat) {
   width: calc(100% - 16px); margin: 6px 8px 8px; height: 36px;
   border: 0; background: transparent; color: var(--color-text); font-size: 13px;

@@ -16,6 +16,7 @@ import { useT, useLocale } from '../lib/i18n'
 import { CAPACIDADES_VIEW_IDS, SISTEMA_VIEW_IDS } from '../views/sectionHubIds'
 import styles from './Layout.module.css'
 import { ChatDrafts, type ChatDraft } from '../lib/chatDrafts'
+import { AdsWorkspaceContext } from './AdsWorkspaceContext'
 
 // activeProviderReload lets child views (ProvidersView) trigger a re-check after
 // connecting a model. The "Falta conectar un modelo" nudge was removed — the chat
@@ -329,6 +330,31 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(() => !window.matchMedia?.('(max-width: 700px)').matches)
   const sidebarToggle = useRef<HTMLButtonElement>(null)
   const sidebarReopen = useRef<HTMLButtonElement>(null)
+  const [adsPanelActive, setAdsPanelActive] = useState(false)
+  const isAdsRoute = location.pathname.replace(/\/+$/, '') === '/anuncios'
+  const adsWorkspace = isAdsRoute && adsPanelActive
+  const previousSafentRoute = useRef('/chat')
+  const wasAdsWorkspace = useRef(false)
+
+  useLayoutEffect(() => {
+    if (!isAdsRoute) previousSafentRoute.current = location.pathname + location.search + location.hash
+    if (wasAdsWorkspace.current && !adsWorkspace) {
+      // The old iframe/return control is gone. Restore a visible shell target,
+      // including browser Back and availability changes, without opening a drawer.
+      const target = sidebarOpen
+        ? document.querySelector<HTMLAnchorElement>('#community-sidebar a[href$="/anuncios"]')
+        : sidebarReopen.current
+      const visibleTarget = target ?? document.getElementById('main-content')
+      visibleTarget?.focus()
+    }
+    wasAdsWorkspace.current = adsWorkspace
+  }, [adsWorkspace, isAdsRoute, location.pathname, location.search, location.hash, sidebarOpen])
+
+  const returnToSafent = useCallback(() => {
+    // Do not history.back(): the iframe has its own history and direct entry
+    // may otherwise leave Safent entirely. Never reset the retained chat draft.
+    navigate(previousSafentRoute.current)
+  }, [navigate])
 
   useEffect(() => {
     const media = window.matchMedia?.('(max-width: 700px)')
@@ -341,7 +367,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
     if (window.matchMedia?.('(max-width: 700px)').matches) setSidebarOpen(false)
   }, [location.key])
   useEffect(() => {
-    if (!sidebarOpen) return
+    if (!sidebarOpen || adsWorkspace) return
     const onEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || !window.matchMedia?.('(max-width: 700px)').matches) return
       setSidebarOpen(false)
@@ -349,7 +375,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
     }
     window.addEventListener('keydown', onEscape)
     return () => window.removeEventListener('keydown', onEscape)
-  }, [sidebarOpen])
+  }, [sidebarOpen, adsWorkspace])
 
   function toggleSidebar() {
     setSidebarOpen(open => !open)
@@ -402,12 +428,13 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
   }
 
   return (
-    <div className={`app-shell ${styles.shell}`} data-sidebar-open={sidebarOpen}>
+    <div className={`app-shell ${styles.shell}`} data-sidebar-open={sidebarOpen && !adsWorkspace}
+      data-ads-workspace={adsWorkspace}>
       <a className={styles.skipLink} href="#main-content">{t('layout.skip')}</a>
-      {!sidebarOpen && <button ref={sidebarReopen} className={styles.reopen} type="button"
+      {!sidebarOpen && !adsWorkspace && <button ref={sidebarReopen} className={styles.reopen} type="button"
         aria-label={t('layout.sidebar.open')} aria-expanded={false} aria-controls="community-sidebar"
         onClick={toggleSidebar}><PanelLeft size={18} aria-hidden="true" /></button>}
-      <nav id="community-sidebar" className={`sidebar ${styles.sidebar}`} hidden={!sidebarOpen} aria-label={t('layout.nav.aria')}>
+      <nav id="community-sidebar" className={`sidebar ${styles.sidebar}`} hidden={!sidebarOpen || adsWorkspace} aria-label={t('layout.nav.aria')}>
         {/* Wordmark */}
         <div className="sidebar-wordmark">
           <div className="sidebar-wordmark-inner">
@@ -523,6 +550,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
         {/* Freno de emergencia (025 Top-KILL) — visible on EVERY view, not just Seguridad. */}
         <KillSwitchBanner />
         {/* Pass the shared chat state down to ChatView via outlet context */}
+        <AdsWorkspaceContext.Provider value={{ setPanelActive: setAdsPanelActive, returnToSafent }}>
         <Outlet context={{
           draft,
           convId: chat.convId,
@@ -543,6 +571,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
           cancellation: chat.cancellation,
           liveBrowserActive: chat.liveBrowserActive,
         } satisfies ChatOutletContext} />
+        </AdsWorkspaceContext.Provider>
       </main>
     </div>
   )

@@ -12,16 +12,17 @@
  * companion's own panel guides account connection, so Ads stays visible and
  * usable either way (Assumption 7 — never hidden for lack of accounts).
  */
-import { useState, type ReactNode } from 'react'
-import { Loader2, Megaphone, RefreshCw, ShieldAlert, Wrench, Unplug } from 'lucide-react'
+import { useContext, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { ArrowLeft, Loader2, Megaphone, RefreshCw, ShieldAlert, Wrench, Unplug } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { useT } from '../lib/i18n'
+import { useLocale, useT } from '../lib/i18n'
 import { useAdsAvailability } from '../hooks/useAdsAvailability'
 import { Button } from '../components/ui/Button'
 import type { AdsAvailabilityReason } from '../api/types'
 import css from './AdsView.module.css'
 import { ManagedAdsView } from './ManagedAdsView'
 import { adsPolicyKey } from '../api/managedAds'
+import { AdsWorkspaceContext } from '../components/AdsWorkspaceContext'
 
 const ADS_IFRAME_SRC = '/ads/'
 
@@ -91,11 +92,23 @@ function AdsState({ icon, title, description, action, loading = false }: {
 
 function AdsPanel({ noAccounts }: { noAccounts: boolean }) {
   const t = useT()
+  const { locale } = useLocale()
+  const workspace = useContext(AdsWorkspaceContext)
+  const setPanelActive = workspace?.setPanelActive
+  const returnButton = useRef<HTMLButtonElement>(null)
+  useLayoutEffect(() => {
+    setPanelActive?.(true)
+    returnButton.current?.focus()
+    return () => setPanelActive?.(false)
+  }, [setPanelActive])
   const [revision, setRevision] = useState(0)
   const [state, setState] = useState<'loading' | 'loaded' | 'error'>('loading')
   return <section className={css.workspace} aria-label={t('nav.ads')}>
     <header className={css.toolbar}>
-      <h1><Megaphone size={16} aria-hidden />{t('nav.ads')}</h1>
+      {workspace ? <Button ref={returnButton} size="sm" variant="ghost" className={css.returnButton}
+        onClick={workspace.returnToSafent}>
+        <ArrowLeft size={15} aria-hidden />{locale === 'en' ? 'Back to Safent' : 'Volver a Safent'}
+      </Button> : <h1><Megaphone size={16} aria-hidden />{t('nav.ads')}</h1>}
       <Button size="sm" variant="ghost" onClick={() => { setState('loading'); setRevision(value => value + 1) }}>
         <RefreshCw size={13} aria-hidden />{t('ads.frame.reload')}
       </Button>
