@@ -166,3 +166,38 @@ se puede operar, comprobar: conexión real, inventario de cuentas, permisos,
 estado del anunciante, modelo y flujo propuesta/aprobación/ejecución. La cuenta
 Google había mostrado una pausa por verificación del anunciante en una captura
 anterior; revisar su estado actual después de conectar, sin darlo por resuelto.
+
+## Imagen construida y corrección adicional del resultado OAuth
+
+El workflow de runtime `34783576034` terminó correctamente para ambas
+arquitecturas. Se verificó que sus imágenes corresponden al commit del tag
+`60c4c8468ad6ed15a77ce98c9b16c2543c6ea55d`:
+
+- amd64: `sha256:396e52c4ab2f7e3b2ecd6f822bc25ca17ea2570b001fc3bfbd88a0ce588a7d38`
+- arm64: `sha256:17457b58b76b3af10b20db7481d64636d434358baea303f8f3fd44c3a3ed4b7b`
+
+La auditoría de Ads reprodujo además un falso positivo: Meta `ACTIVE`, permiso
+`ads_management` concedido e inventario `/me/adaccounts` vacío terminaban con
+sesión `ok`, cero cuentas y cero credenciales. El commit de companion `46b7048`
+rechaza ese inventario con `OAUTH_NO_ACCESSIBLE_ACCOUNTS` y un mensaje que pide
+autorizar una cuenta publicitaria. No reutiliza estados OAuth consumidos ni
+relaja identidad, aislamiento, caducidad o aprobaciones. Se probó también el
+retorno HTTP, la persistencia del error y un nuevo intento desde el panel.
+
+Se prepara Ads **0.2.14** en `7634bb5672f9f1cc2bcc41f903b1a53502fda1a4`, con
+metadatos alineados y dos correcciones de lint sin cambio de validación. Estado
+de pruebas al autorizar su publicación como imagen:
+
+- 3.721 pruebas backend aprobadas, 3 omitidas y 854 de integración excluidas
+  en esa ejecución; las 72 pruebas focalizadas sí incluyen callback/SQL/bróker.
+- 404 pruebas del panel aprobadas con Node 22.22.2; lint, TypeScript y build
+  aprobados. Node 18 del sistema no es el entorno de CI y no sirve para ejecutar
+  la versión instalada de Undici; no se cambian dependencias por ese motivo.
+- Ruff y mypy aprobados; 3 pruebas de consistencia de versión aprobadas.
+
+Se autorizó construir el candidato nativo 0.9.21 **con companion_tag=v0.2.14**,
+sólo después de que finalice y se verifique esa imagen. No se mueve el tag del
+runtime: el pipeline resuelve y firma el digest de companion por arquitectura.
+Publicar la imagen o el candidato no equivale a promover a estable ni a instalar
+el paquete en el Mac. La aceptación nativa y las conexiones reales siguen siendo
+puertas separadas y pendientes.
