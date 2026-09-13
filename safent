@@ -16,7 +16,7 @@ set -e
 # Monotonic CLI revision. `safent update` self-updates this script from CLI_URL
 # when the published revision is HIGHER (never downgrades). Bump on every CLI
 # change or the fix will not reach installed machines.
-_CLI_REV=14
+_CLI_REV=15
 
 # ONE runtime image for both community and associate (paired) operation. The
 # image carries no edition-specific code: pairing state (the .enterprise marker +
@@ -1693,11 +1693,7 @@ _companion_converge_core() (
   NO_COMPANION=0
   _container_matches_desired && return 0
   printf '%s\n' "$IMAGE" | grep -Eq '^ghcr[.]io/devwspito/safent@sha256:[0-9a-f]{64}$' || return 1
-  _core_data="$("$RT" inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/hermes"}}{{.Type}}|{{.Name}}{{end}}{{end}}' "$NAME" 2>/dev/null)" || return 1
-  [ "$_core_data" = "volume|$DATA_VOLUME" ] || return 1
-  PORT_PIN="$("$RT" port "$NAME" 7517 2>/dev/null | sed -n 's/^127[.]0[.]0[.]1:\([0-9][0-9]*\)$/\1/p')"
-  case "$PORT_PIN" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$PORT_PIN" -ge 1 ] && [ "$PORT_PIN" -le 65535 ] || return 1
+  _prepare_core_recreation || return 1
   PORCELAIN=1
   cmd_up --secret-fd 3 >/dev/null 3>/dev/null || return 1
   _container_matches_desired
@@ -2646,12 +2642,50 @@ _prepare_core_recreation() {
   printf '%s\n' "$_core_expected_id" | grep -Eq '^[0-9a-f]{64}$' || return 1
   [ "$_core_image_id" = "$_core_expected_id" ] || return 1
   _core_port_binding="$("$RT" port "$_core_replace_id" 7517 2>/dev/null)" || return 1
+  # Podman 6.1.1 returns success with NO output for `port` after a machine
+  # stop. The immutable creation configuration still owns the binding. Do
+  # not mistake absence of an active forwarding socket for a foreign core.
+  if [ -z "$_core_port_binding" ]; then
+    _core_port_binding="$("$RT" inspect --type container --format '{{range index .HostConfig.PortBindings "7517/tcp"}}{{.HostIp}}:{{.HostPort}}{{println}}{{end}}' "$_core_replace_id" 2>/dev/null)" || return 1
+  fi
   case "$_core_port_binding" in 127.0.0.1:*) ;; *) return 1 ;; esac
   _core_port="${_core_port_binding#127.0.0.1:}"
   case "$_core_port" in ''|*[!0-9]*) return 1 ;; esac
   [ "$_core_port" -ge 1 ] && [ "$_core_port" -le 65535 ] || return 1
   [ -z "$PORT_PIN" ] || [ "$PORT_PIN" = "$_core_port" ] || return 1
   PORT_PIN="$_core_port"
+}
+
+# A stopped native core keeps its static address internally, but Podman clears
+# NetworkSettings.IPAddress AND IPAMConfig until start. Validate the recorded
+# creation arguments as well as the actual network membership before adoption.
+# Never execute those arguments or print them (they may contain configuration).
+_core_recorded_network_matches() {
+  _core_membership="$("$RT" inspect --type container --format '{{len .NetworkSettings.Networks}}|{{range $name, $network := .NetworkSettings.Networks}}{{$name}}{{end}}' "$_core_replace_id" 2>/dev/null)" || return 1
+  [ "$_core_membership" = '1|safent-companions' ] || return 1
+  _core_creation="$("$RT" inspect --type container --format '{{range .Config.CreateCommand}}{{printf "%q\n" .}}{{end}}' "$_core_replace_id" 2>/dev/null)" || return 1
+  printf '%s\n' "$_core_creation" | LC_ALL=C awk -v address="$CORE_COMPANION_IP" '
+    previous == "\"--network\"" { networks++; if ($0 != "\"safent-companions\"") bad=1 }
+    previous == "\"--ip\"" { addresses++; if ($0 != "\"" address "\"") bad=1 }
+    /^"--(network|ip)=/ { bad=1 }
+    { previous=$0 }
+    END { exit (bad || networks != 1 || addresses != 1 || previous == "\"--network\"" || previous == "\"--ip\"") }
+  '
+}
+
+_resume_verified_core() {
+  # _prepare_core_recreation already verified the exact reference, local
+  # image content, data volume and one loopback-only published port. Recheck
+  # by immutable ID immediately before start; no stop/rm/recreate fallback.
+  _core_stopped="$("$RT" inspect --type container -f '{{.State.Running}}' "$_core_replace_id" 2>/dev/null)" || return 1
+  [ "$_core_stopped" = false ] || return 1
+  _core_projection="$("$RT" inspect --type container --format '{{range .Mounts}}{{if eq .Destination "/etc/hermes/companions"}}{{.Type}}|{{.Name}}|{{.RW}}{{end}}{{end}}' "$_core_replace_id" 2>/dev/null)" || return 1
+  [ "$_core_projection" = 'volume|safent-companion-runtime|false' ] || return 1
+  _core_recorded_network_matches && _core_address_available || return 1
+  [ "$(_core_identity_snapshot "$_core_replace_id")" = "$_core_replace_snapshot" ] || return 1
+  "$RT" start "$_core_replace_id" >/dev/null || return 1
+  # Active evidence, never only the recorded command, establishes readiness.
+  _container_matches_desired
 }
 
 _core_address_available() {
@@ -2692,6 +2726,15 @@ cmd_up() {
   _stage container "Creando el contenedor"
   if _container_matches_desired; then
     : # already converged on the desired digest — never destroy a healthy engine
+  elif [ "$NO_COMPANION" -eq 0 ] && _exists && ! _running; then
+    _prepare_core_recreation \
+      || _die_porcelain companion_network_conflict "No se pudo verificar la identidad y el puerto guardados de Safent. No se ha modificado ningun contenedor." false
+    if [ "$_core_ref" = "$IMAGE" ]; then
+      _resume_verified_core \
+        || _die_porcelain companion_network_conflict "No se pudo reanudar el motor verificado de Safent. Se conservan sus datos y contenedores; no se ha recreado la instalacion." false
+    else
+      _run # a real image upgrade still uses the guarded replacement path
+    fi
   else
     _run
   fi

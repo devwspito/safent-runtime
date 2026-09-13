@@ -46,6 +46,14 @@ case "$1" in
     exit 0 ;;
   inspect)
     case "$*" in
+      *HostConfig.PortBindings*)
+        echo "${FAKE_SAVED_PORT:-127.0.0.1:35335}"; exit 0 ;;
+      *'{{len .NetworkSettings.Networks}}'*)
+        echo "${FAKE_NETWORK_MEMBERSHIP:-1|safent-companions}"; exit 0 ;;
+      *Config.CreateCommand*)
+        printf '"%s"\n' podman run --network safent-companions --ip "${FAKE_RECORDED_IP:-10.201.0.2}"
+        [ "${FAKE_DUPLICATE_NETWORK:-0}" != 1 ] || printf '"%s"\n' --network foreign
+        exit 0 ;;
       *'{{.Config.Image}}'*)
         mount="${FAKE_DATA_MOUNT:-volume|agent-test-data}"
         if [ "${FAKE_CHANGED_CORE_IDENTITY:-0}" = 1 ] && [ "${!#}" = "$FAKE_CORE_ID" ]; then mount='volume|foreign-data'; fi
@@ -53,6 +61,7 @@ case "$1" in
         exit 0 ;;
       *NetworkSettings.Networks*)
         ip="${FAKE_CORE_IP:-10.201.0.2}"
+        if [ "${FAKE_STOPPED_NO_PORT:-0}" = 1 ] && [ ! -f "${FAKE_CORE_STARTED:-/nonexistent}" ]; then ip=""; fi
         [ ! -f "${FAKE_CORE_RECREATED:-/nonexistent}" ] || ip=10.201.0.2
         if [ "${!#}" = "$FAKE_FOREIGN_ID" ]; then ip=10.201.0.2; fi
         case "$*" in *'{{.Id}}|'*) printf '%s|%s\n' "${!#}" "$ip";; *) echo "$ip";; esac
@@ -81,7 +90,7 @@ case "$1" in
       *'{{.ImageDigest}}'*) echo "${SAFENT_IMAGE#*@}"; exit 0 ;;
       *"-f "*)
         # `_running`: --type container -f {{.State.Running}} NAME
-        echo "${FAKE_RUNNING:-true}"
+        if [ -f "${FAKE_CORE_STARTED:-/nonexistent}" ]; then echo true; else echo "${FAKE_RUNNING:-true}"; fi
         exit 0
         ;;
       *)
@@ -114,10 +123,16 @@ case "$1" in
     case "$*" in
       *'{{.Id}}'*)
         # Real Podman returns an unprefixed image ID (not a manifest digest).
-        case "${!#}" in docker.io/library/postgres@sha256:*) echo "${FAKE_DB_IMAGE_ID#sha256:}";; ghcr.io/devwspito/safent@sha256:*) echo "$FAKE_CORE_IMAGE_ID";; *) echo "${FAKE_ADS_IMAGE_ID#sha256:}";; esac ;;
+        case "${!#}" in docker.io/library/postgres@sha256:*) echo "${FAKE_DB_IMAGE_ID#sha256:}";; ghcr.io/devwspito/safent@sha256:*) echo "${FAKE_EXPECTED_CORE_IMAGE_ID:-$FAKE_CORE_IMAGE_ID}";; *) echo "${FAKE_ADS_IMAGE_ID#sha256:}";; esac ;;
     esac
     exit 0 ;;
-  port) echo "${FAKE_PUBLISHED_PORT:-127.0.0.1:35335}"; exit 0 ;;
+  port)
+    if [ "${FAKE_STOPPED_NO_PORT:-0}" = 1 ] && [ ! -f "${FAKE_CORE_STARTED:-/nonexistent}" ]; then exit 0; fi
+    echo "${FAKE_PUBLISHED_PORT:-127.0.0.1:35335}"; exit 0 ;;
+  start)
+    [ "${FAKE_START_FAIL:-0}" != 1 ] || exit 1
+    [ -z "${FAKE_CORE_STARTED:-}" ] || touch "$FAKE_CORE_STARTED"
+    exit 0 ;;
   run)
     case "$*" in
       *"safent-companion-runtime:/runtime"*) cat >/dev/null; exit 0 ;;
@@ -254,6 +269,83 @@ def _base_env(
 
 
 class TestCompanionInstall:
+    @pytest.mark.parametrize("argv", [["up"], ["companion", "repair"]])
+    def test_cold_resume_uses_persisted_loopback_port_and_preserves_container(
+        self, tmp_path: Path, fake_bin_dir: Path, argv: list[str]
+    ) -> None:
+        """Real Podman 6.1.1: port/IP are empty after the managed VM stops."""
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_RUNNING="false", FAKE_STOPPED_NO_PORT="1",
+                   FAKE_CORE_STARTED=str(tmp_path / "started"))
+        for _ in range(2):
+            result = subprocess.run(
+                ["sh", str(_SAFENT_CLI), *argv, "--porcelain"], env=env,
+                capture_output=True, text=True, timeout=20, check=False,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert "private-regression-ticket" not in result.stdout + result.stderr
+        lines = log.read_text().splitlines()
+        assert [line for line in lines if line.startswith("start ")] == [
+            "start " + env["FAKE_CORE_ID"]
+        ]
+        assert not any(line.startswith(("rm ", "stop ", "run -d ", "volume rm ", "network rm ")) for line in lines)
+        assert any("HostConfig.PortBindings" in line for line in lines)
+
+    @pytest.mark.parametrize("override", [
+        {"FAKE_SAVED_PORT": "0.0.0.0:35335"},
+        {"FAKE_SAVED_PORT": "127.0.0.1:35335\n0.0.0.0:35335"},
+        {"FAKE_SAVED_PORT": "127.0.0.1:65536"},
+        {"FAKE_SAVED_PORT": "127.0.0.1:invalid"},
+        {"SAFENT_PORT": "41234"},
+        {"FAKE_DATA_MOUNT": "volume|foreign-data"},
+        {"FAKE_MISSING_PROJECTION": "1"},
+        {"FAKE_NETWORK_MEMBERSHIP": "2|safent-companionsforeign"},
+        {"FAKE_NETWORK_MEMBERSHIP": "1|foreign"},
+        {"FAKE_RECORDED_IP": "10.201.0.14"},
+        {"FAKE_DUPLICATE_NETWORK": "1"},
+        {"FAKE_FOREIGN_CORE_IP": "1"},
+        {"FAKE_CHANGED_CORE_IDENTITY": "1"},
+        {"FAKE_EXPECTED_CORE_IMAGE_ID": "4" * 64},
+    ])
+    def test_cold_resume_unknown_identity_never_starts_or_recreates(
+        self, tmp_path: Path, fake_bin_dir: Path, override: dict[str, str]
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_RUNNING="false", FAKE_STOPPED_NO_PORT="1",
+                   FAKE_CORE_STARTED=str(tmp_path / "started"), **override)
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "up", "--porcelain"], env=env,
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        assert result.returncode == 25, result.stdout + result.stderr
+        lines = log.read_text().splitlines()
+        assert not any(line.startswith(("start ", "rm ", "stop ", "run -d ", "volume rm ", "network rm ")) for line in lines)
+        assert "private-regression-ticket" not in result.stdout + result.stderr
+
+    def test_cold_resume_start_failure_never_falls_back_to_recreating(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_RUNNING="false", FAKE_STOPPED_NO_PORT="1", FAKE_START_FAIL="1",
+                   FAKE_CORE_STARTED=str(tmp_path / "started"))
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "up", "--porcelain"], env=env,
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        assert result.returncode == 25, result.stdout + result.stderr
+        lines = log.read_text().splitlines()
+        assert "start " + env["FAKE_CORE_ID"] in lines
+        assert not any(line.startswith(("rm ", "stop ", "run -d ")) for line in lines)
+
     @pytest.mark.parametrize("explicit_engine_only", [False, True])
     def test_failed_scaffold_preserves_existing_core_unless_companion_disabled(
         self, tmp_path: Path, fake_bin_dir: Path, explicit_engine_only: bool
@@ -368,7 +460,9 @@ class TestCompanionInstall:
             after = invoke("facts", "--json")
             assert after.returncode == 0, after.stderr
             assert json.loads(after.stdout)["companionHealth"] == "reachable"
-        assert sum(" up -d" in line for line in log.read_text().splitlines()) == 1
+        calls = log.read_text().splitlines()
+        assert sum(line.endswith(" up -d") for line in calls) == 1
+        assert sum(line.endswith(" up -d --no-recreate ads-db") for line in calls) == 1
 
     def test_compose_success_with_old_running_image_never_verifies_ads(
         self, tmp_path: Path, fake_bin_dir: Path

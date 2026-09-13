@@ -468,37 +468,51 @@ ensure_caps() {
   log "caps.yaml creado desde la plantilla — sin cuentas autorizadas todavía (fail-closed)"
 }
 
-# Security review 2026-09-10 (MEDIUM finding, CWE-754): the SAME
-# migration-head guard `safent companion update`/`rotate` apply (see that
-# script's own comment for the full rationale) — this is the "repair"/
-# start path the review's own fix bullet calls out: provision.sh runs on
-# EVERY `run-safent.sh`/`safent start`, so a stale SAFENT_ADS_IMAGE could
-# otherwise bring up an image older than the database through THIS path
-# without ever going through `update`. Fail-SOFT here on purpose, unlike
-# the CLI verbs: this whole script's posture is FR-3 (a provisioning
-# problem never blocks Safent's OWN boot, only the companion) — an
-# unreachable DB/image means we cannot yet tell, and blocking the owner's
-# entire container boot over an availability-only risk (the review's own
-# rating: "no confidentiality or integrity loss") would be strictly worse
-# than the bug it guards against. Only fires when ads-db already exists (a
-# re-provision/restart) — nothing to compare on a brand-new database.
+# Database readiness precedes the revision guard, never the other way round.
+# A cold VM restart leaves an existing DB stopped; `exec psql` cannot read it.
+# Start ONLY that dependency without recreating it or touching its volumes.
+# API/worker/broker/migrations remain stopped until the guard passes.
+ensure_database_running() {
+  "$RUNTIME" compose -p safent-ads -f "$HERE/compose.yaml" up -d --no-recreate ads-db \
+    || fail "no se pudo reanudar la base de datos de Anuncios; sus datos se conservan"
+  local attempt=0
+  while [ "$attempt" -lt 45 ]; do
+    if "$RUNTIME" compose -p safent-ads -f "$HERE/compose.yaml" exec -T ads-db \
+      pg_isready -U ads -d ads >/dev/null 2>&1; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  fail "la base de datos de Anuncios no responde todavía; no se inician las migraciones"
+}
+
+# Startup/repair obey the same downgrade protection as update/rotate. A known
+# database revision requires a verifiable image history; an unreadable database
+# is NOT evidence of a fresh database. Only an explicitly absent version table
+# (or an empty one) is the first-install path.
 _refuse_if_image_predates_the_database() {
   "$RUNTIME" container exists safent-ads-ads-db-1 2>/dev/null || return 0
-  local db_rev history
+  local db_rev history version_table
+  version_table="$("$RUNTIME" exec safent-ads-ads-db-1 \
+    psql -U ads -d ads -tAc "SELECT to_regclass('public.alembic_version');" 2>/dev/null \
+    | tr -d '[:space:]')" \
+    || fail "no se pudo verificar la base de datos de Anuncios; no se inician las migraciones"
+  [ -n "$version_table" ] || return 0
   db_rev="$("$RUNTIME" exec safent-ads-ads-db-1 \
     psql -U ads -d ads -tAc 'SELECT version_num FROM alembic_version;' 2>/dev/null \
-    | tr -d '[:space:]')"
+    | tr -d '[:space:]')" \
+    || fail "no se pudo leer la revisión de Anuncios; no se inician las migraciones"
   [ -n "$db_rev" ] || return 0
   # -- (LOW finding, CWE-88): see ensure_secrets's own identical comment.
   history="$("$RUNTIME" run --rm --network none -- "$SAFENT_ADS_IMAGE" alembic history 2>/dev/null || true)"
   if [ -z "$history" ]; then
-    log "no se pudo leer el historial de alembic de '$SAFENT_ADS_IMAGE' — se continúa (FR-3, no bloquea el arranque)"
-    return 0
+    fail "no se pudo comprobar la compatibilidad de la imagen de Anuncios; no se inician las migraciones"
   fi
   if printf '%s\n' "$history" | grep -qw -- "$db_rev"; then
     return 0
   fi
-  fail "'$SAFENT_ADS_IMAGE' no conoce la revisión '$db_rev' (ya aplicada en la base de datos) — imagen MÁS ANTIGUA que la BD, no se arranca el companion con ella (usa 'safent companion update' con la imagen correcta; Safent arranca igual, sin companion — FR-3)"
+  fail "la imagen de Anuncios no conoce la revisión '$db_rev' ya aplicada; no se inician las migraciones ni los servicios. Se conservan los datos para usar una versión compatible"
 }
 
 # Old networks allocated every service dynamically except the API. A broker
@@ -568,10 +582,11 @@ start_companion() {
   export SAFENT_ADS_IMAGE
   export ADS_POSTGRES_PASSWORD
   ADS_POSTGRES_PASSWORD="$(cat "$STATE/pg_password")"
-  _refuse_if_image_predates_the_database
   # EX_CONFIG distinguishes a protected network conflict from migrations or
   # download failures. The desktop must not retry this as a transient DB error.
   ( reconcile_reserved_addresses ) || exit 78
+  ensure_database_running
+  _refuse_if_image_predates_the_database
   "$RUNTIME" compose -p safent-ads -f "$HERE/compose.yaml" up -d
 }
 
