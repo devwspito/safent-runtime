@@ -117,3 +117,52 @@ retiró automáticamente al terminar; el sysctl de la VM no cambió.
 
 Estos resultados comprueban la reparación y el aislamiento en el Mac, pero
 no sustituyen una aceptación de instalación limpia del paquete firmado 0.9.21.
+
+## Candidato integrado y regresiones (13 de septiembre, después de las 21:20 UTC)
+
+El tag `v0.9.21` fija el código integrado en
+`60c4c8468ad6ed15a77ce98c9b16c2543c6ea55d`. No se debe mover ese tag por
+actualizaciones posteriores de este documento. El workflow de imagen es
+`34783576034`; al registrar esta sección sigue en construcción. La versión
+estable continúa siendo 0.9.20. El paquete nuevo debe permanecer como
+candidato hasta completar su aceptación; no instalarlo automáticamente en
+el Mac del propietario, que quiere comprobar él mismo el actualizador.
+
+Regresiones completadas sobre los cambios integrados:
+
+- 160 pruebas del CLI de instalación, convergencia y encaminamiento aprobadas.
+- 17 negativos adicionales de adopción/convergencia aprobados, incluido el
+  rechazo de configuración de red del host.
+- 33 pruebas de recarga/consumidor y 43 de reglas de red relacionadas aprobadas.
+- 514 pruebas del frontend, TypeScript y compilación Vite aprobados.
+
+La UI de Community añade un acceso directo «Configurar conexiones» desde
+Anuncios a Integraciones, sólo con los permisos correspondientes. No modifica
+las autorizaciones Enterprise ni convierte una plataforma sin configurar en
+una plataforma disponible.
+
+## Conexiones: recuperación limitada y estado verificable
+
+La instalación limpia no contenía la clave de Composio ni conexiones OAuth.
+Se recuperó exclusivamente la clave previamente autorizada desde el respaldo
+privado, se descifró en memoria y se guardó mediante la API de propietario de
+Safent. No se restauraron la base de datos, la clave maestra ni cuentas antiguas.
+La clave se cifra con la instalación actual. No incluirla en código, artefactos,
+capturas ni registros.
+
+- La API de Integraciones confirma Composio habilitado y Google Ads preparado.
+- Desde la UI de Safent se inició Google OAuth para la cuenta `167-779-1325`.
+  La aplicación muestra «Esperando a la plataforma» y el enlace de continuación.
+  Esto **no** demuestra conexión terminada: falta el consentimiento, el retorno
+  y la aparición de la cuenta en Safent.
+- Meta sigue sin configuración OAuth personalizada. El App ID conocido es
+  `1063816289878236`; todavía falta obtener de forma segura el App Secret y
+  guardarlo mediante el formulario de Integraciones. El identificador de la
+  cuenta publicitaria no sustituye esa configuración.
+- El modelo de lenguaje tampoco está validado en esta instalación nueva.
+
+No se han publicado campañas ni cambiado presupuestos. Antes de afirmar que
+se puede operar, comprobar: conexión real, inventario de cuentas, permisos,
+estado del anunciante, modelo y flujo propuesta/aprobación/ejecución. La cuenta
+Google había mostrado una pausa por verificación del anunciante en una captura
+anterior; revisar su estado actual después de conectar, sin darlo por resuelto.
