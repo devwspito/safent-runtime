@@ -1,6 +1,10 @@
 # Safent 0.9.12 — revisión nativa y seguridad OAuth
 
-Estado: candidata en preparación. No declarar aceptada hasta comprobar el DMG firmado y su arranque real. No equivale al cierre del backlog completo de Safent.
+Estado: **RECHAZADA en aceptación nativa real**. CI, firma y notarización aprobaron, pero el arranque en el Mac se detuvo con `companion_network_conflict`. No usar esta candidata como instalador recomendado. La release sigue prerelease con advertencia visible; no se movieron tags ni se borraron assets. Corrección y nueva aceptación en `ADS-FACTORY-0.9.13.md`.
+
+## Resultado del DMG real
+
+Workflow `34743212818` aprobado. DMG `Safent_0.9.12_aarch64.dmg`, asset `560732978`, 1016797801 bytes, SHA256 `fd31ba86cc3d894bee1208fc135cca532593190c349636e53bfcd3f8ccba0016`; verificados firma Apple, notarización, 28 recursos y pins. La GUI actualizó el core a 0.9.12 conservando los datos, pero el asignador dinámico de la red legacy le dio `10.201.0.14`, dirección reservada para la migración Ads. Provision rechazó el conflicto correctamente: Ads quedó en 0.2.5, no alcanzó Ready y no se completó onboarding. No se reparó manualmente la red ni se borraron volúmenes para ocultar este fallo. Las pruebas anteriores de red no cubrían esta asignación tras recrear el core.
 
 ## Por qué se detuvo 0.9.11
 

@@ -28,7 +28,7 @@ Cambios de infraestructura de pruebas: Enterprise `5965a51bda43301a2db61d1e08a4e
 - La auditoría OAuth encontró fuga de canarios en HTTPX/Meta, Uvicorn/Community y callback de login Enterprise. Ningún secreto real se usó. Ads `998ff6c` cierra la emisión de transporte/errores; 3446 unitarias y 56 focales PASS. Se publicó 0.2.7 por digest, no `latest`.
 - Runtime `f608025` conserva trazas HTTP sin query/fragmento ni datos opacos de transporte. Snapshot de primera versión del parche: 7502 PASS, 21 SKIP, 250 exclusiones, 439.04 s. Refuerzos finales de stack/excepción y reason phrase remota: 15 focales PASS, separados de esa full. Mypy detecta una anotación genérica preexistente y no se declara globalmente verde por ese comando.
 - Enterprise `c0a2b5a` protege todos los callbacks, incluido `/auth/callback`, y no guarda texto del proveedor en el error. Reproducción 5 FAIL/1 PASS antes; 19 focales PASS después; revisión independiente con configuración e importación reales de Uvicorn. Sin despliegue cloud. Typecheck según comando de CI: 89 módulos aprobados; sin ese flag faltan stubs externos.
-- Native 0.9.12/core 0.9.12 (`e6cd08e`) + Ads 0.2.7 es la siguiente candidata. La prueba de actualización real aún no se sustituye por estas suites.
+- Native 0.9.12/core 0.9.12 (`e6cd08e`) + Ads 0.2.7 superó CI y firma, pero **falló aceptación GUI**: el core recreado recibió la reserva `.14` de migración en la red legacy. Se conserva como prerelease advertida, no recomendada. Native 0.9.13 corrige la topología desde el CLI empaquetado y reutiliza core 0.9.12/Ads 0.2.7 por digest. Falta aceptación real de este nuevo artefacto; véase `ADS-FACTORY-0.9.13.md`.
 
 ## Fuentes principales
 
