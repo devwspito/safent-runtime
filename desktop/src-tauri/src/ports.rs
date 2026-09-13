@@ -74,10 +74,7 @@ pub enum ApplyOutcome {
 /// Time abstraction so the boot loop's backoff/stall detection is
 /// deterministic in tests — no real sleeping, no wall-clock flakiness.
 pub trait Clock: Send + Sync {
-    /// Not read by `boot.rs`'s loop today (only `sleep` drives backoff) —
-    /// kept as the natural pairing for a future elapsed-time diagnostic
-    /// (e.g. "still degraded after N minutes") without widening this trait.
-    #[allow(dead_code)]
+    /// Monotonic time for the initial preflight's actual elapsed duration.
     fn now(&self) -> Instant;
     fn sleep(&self, duration: Duration);
 }

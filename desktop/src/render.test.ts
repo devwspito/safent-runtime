@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url'
 import { JSDOM } from 'jsdom'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { manageFocusOnTransition, render, renderCancellation, type ScreenElements } from './render.js'
-import type { UiState } from './lifecycle.js'
+import { initialState, type UiState } from './lifecycle.js'
+import { reduceBootstrapSnapshot, type BootstrapSnapshot } from './bootstrap-state.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const html = readFileSync(join(here, 'index.html'), 'utf-8')
@@ -52,6 +53,31 @@ describe('render — index.html fixture starts with only the preparing screen vi
 })
 
 describe('render(preparing)', () => {
+  it('closes the successful native preflight while preserving independent active downloads', () => {
+    const events: BootstrapSnapshot['event'][] = [
+      { kind: 'stage', stage: 'preflight' },
+      { kind: 'done', stage: 'preflight', duration_ms: 120 },
+      { kind: 'stage', stage: 'runtime_staging' },
+      { kind: 'done', stage: 'runtime_staging', duration_ms: 240 },
+      { kind: 'stage', stage: 'pull_engine' },
+      { kind: 'progress', stage: 'pull_engine', done: 4, total: null, unit: 'steps' },
+      { kind: 'stage', stage: 'pull_companion' },
+    ]
+    let state: UiState = initialState
+    for (const [sequence, event] of events.entries()) {
+      state = reduceBootstrapSnapshot(state, {
+        sequence: sequence + 1, attempt_id: 1, last_stage: 'stage' in event ? event.stage : null,
+        point_of_no_return: false, event,
+      })
+    }
+    render(state, els)
+    const rows = els.preparingStages.querySelectorAll('li')
+    expect(rows[0].textContent).toContain('Hecho: Comprobando este equipo')
+    expect(rows[1].textContent).toContain('Hecho: Preparando la aplicación')
+    expect(rows[2].textContent).toContain('En curso: Descargando Safent — 4 pasos')
+    expect(rows[3].textContent).toContain('En curso: Descargando Anuncios')
+    expect(els.ready.hasAttribute('hidden')).toBe(true)
+  })
   it('describes a requested cancellation without claiming it is complete', () => {
     const state: UiState = { kind: 'preparing', stages: [], cancelable: true }
     render(state, els)

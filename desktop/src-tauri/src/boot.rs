@@ -140,6 +140,7 @@ impl BootService {
     /// cancel is honored the moment `apply_gated` hands the driver a live
     /// signal and the driver reports back `EngineError::Cancelled`.
     pub fn run(&self, notifier: &dyn Notifier, cancel: &CancelSignal) -> LoopOutcome {
+        let mut preflight_started = Some(self.clock.now());
         let mut lifecycle = EngineLifecycle::fresh();
         lifecycle
             .enter(EnginePhase::Preflight)
@@ -180,6 +181,22 @@ impl BootService {
                     Some(outcome) => return outcome,
                     None => continue,
                 }
+            }
+
+            // The worker announced preflight before observation. Close only
+            // that phase after its first successful check; subsequent facts
+            // still enforce the same gates, without completing other stages.
+            if let Some(started) = preflight_started.take() {
+                notifier.notify(&DomainEvent::StageCompleted {
+                    stage: Stage::Preflight,
+                    duration_ms: self
+                        .clock
+                        .now()
+                        .saturating_duration_since(started)
+                        .as_millis()
+                        .try_into()
+                        .unwrap_or(u64::MAX),
+                });
             }
 
             let Some(action) = reconcile::reconcile(&facts, &self.desired)
@@ -1284,6 +1301,147 @@ mod tests {
 
     fn ticket() -> BootstrapTicket {
         BootstrapTicket::new("http://127.0.0.1:37013/?k=test-ticket".to_string())
+    }
+
+    #[test]
+    fn preflight_completes_once_before_repairs_after_successful_observation() {
+        struct StageDriver;
+        impl EngineDriver for StageDriver {
+            fn apply(
+                &self,
+                action: &RepairAction,
+                notifier: &dyn Notifier,
+                _cancel: &CancelSignal,
+            ) -> Result<ApplyOutcome, EngineError> {
+                match action {
+                    RepairAction::StageRuntime => {
+                        notifier.notify(&DomainEvent::StageEntered {
+                            stage: Stage::RuntimeStaging,
+                            label: "Preparando la aplicación".into(),
+                            total_bytes: None,
+                        });
+                        Ok(ApplyOutcome::Progressed)
+                    }
+                    RepairAction::StartContainer => Ok(ApplyOutcome::Ready(ticket())),
+                    other => panic!("unexpected repair: {other:?}"),
+                }
+            }
+            fn stop(&self) -> Result<(), EngineError> {
+                Ok(())
+            }
+        }
+        let mut unstaged = converged_facts();
+        unstaged.runtime_staged = false;
+        let service = BootService::new(
+            Arc::new(ScriptedProbe::new(vec![
+                Err(EngineError::Io("temporary observation failure".into())),
+                Ok(unstaged),
+                Ok(converged_facts()),
+            ])),
+            Arc::new(StageDriver),
+            Arc::new(FakeClock::new()),
+            desired(),
+            SemVer::parse("0.9.10").unwrap(),
+        );
+        let notifier = RecordingNotifier::new();
+        assert!(matches!(
+            service.run(&notifier, &CancelSignal::new()),
+            LoopOutcome::Ready { .. }
+        ));
+        let events = notifier.events();
+        let completions: Vec<_> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                matches!(
+                    event,
+                    DomainEvent::StageCompleted {
+                        stage: Stage::Preflight,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(completions.len(), 1);
+        let staging = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    DomainEvent::StageEntered {
+                        stage: Stage::RuntimeStaging,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert!(completions[0].0 < staging);
+    }
+
+    #[test]
+    fn preflight_does_not_complete_when_observation_or_validation_fails() {
+        let mut invalid = converged_facts();
+        invalid.free_disk_bytes = Bytes(0);
+        for observation in [
+            Err(EngineError::Io("observation unavailable".into())),
+            Ok(invalid),
+        ] {
+            let (service, _) = service(
+                ScriptedProbe::new(vec![observation]),
+                ScriptedDriver::new(vec![]),
+            );
+            let notifier = RecordingNotifier::new();
+            assert!(matches!(
+                service.run(&notifier, &CancelSignal::new()),
+                LoopOutcome::Degraded { .. }
+            ));
+            assert!(!notifier.events().iter().any(|event| matches!(
+                event,
+                DomainEvent::StageCompleted {
+                    stage: Stage::Preflight,
+                    ..
+                }
+            )));
+        }
+    }
+
+    #[test]
+    fn native_app_version_can_differ_from_the_content_pinned_engine() {
+        let mut facts = converged_facts();
+        facts.app_version = SemVer::parse("0.9.9").unwrap();
+        let service = BootService::new(
+            Arc::new(ScriptedProbe::new(vec![Ok(facts)])),
+            Arc::new(ScriptedDriver::new(vec![(
+                RepairAction::StartContainer,
+                Ok(ApplyOutcome::Ready(ticket())),
+            )])),
+            Arc::new(FakeClock::new()),
+            desired(),
+            SemVer::parse("0.9.10").unwrap(),
+        );
+        let notifier = RecordingNotifier::new();
+        assert!(matches!(
+            service.run(&notifier, &CancelSignal::new()),
+            LoopOutcome::Ready { .. }
+        ));
+        assert!(notifier.events().iter().any(|event| matches!(
+            event, DomainEvent::EngineReady { version_set }
+                if version_set.app.as_str() == "0.9.10" && version_set.engine == engine_image()
+        )));
+        assert_eq!(
+            notifier
+                .events()
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    DomainEvent::StageCompleted {
+                        stage: Stage::Preflight,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
     }
 
     #[test]
