@@ -1,6 +1,6 @@
 # Safent Desktop 0.9.10 — red de Ads y progreso real
 
-Estado: en preparación. No es una versión aceptada hasta completar la prueba GUI del artefacto final. Las versiones anteriores 0.9.7–0.9.9 permanecen candidatas por fallos funcionales reales, aunque su CI y firmas aprobaran.
+Estado: recuperación del instalador y reapertura **aprobadas en GUI real**. Sigue candidata: la primera entrada a Ads con base vacía ha revelado que falta el alta del negocio en el producto. No se declara aceptado el recorrido funcional completo de Anuncios. Las versiones anteriores 0.9.7–0.9.9 permanecen candidatas por fallos funcionales reales, aunque su CI y firmas aprobaran.
 
 ## Corrección de red implementada
 
@@ -31,6 +31,28 @@ Está probado que Desktop 0.9.10 puede usar core 0.9.9 por digest: `BootService`
 
 Tags/core y Ads previos se mantienen inmutables. Workflows OCI ahora no actualizan `latest` automáticamente: Runtime `a20b9d1` (8 tests), Ads `6f1ca9c` (4 tests). La corrección de workflow no alteró imágenes ya publicadas ni sus tags.
 
-## Aceptación final — pendiente
+## Paquete candidato
 
-Registrar fuente exacta, workflow, DMG postnotarización y hashes; instalación preservando datos; recuperación automática de la colisión; imágenes por contenido, salud/PostgreSQL/MCP, panel integrado sin login extra y reapertura estable. Google y Meta requieren login/consentimiento de Friendog, que siguen pendientes. No declarar operación de campañas reales ni cierre global de Enterprise/CRM/conocimiento.
+Fuente/tag inmutable: `a6a407d9bcbccaa994b0280c6ff2f4f0a2fc6b73`, `v0.9.10`. Workflow Desktop `34739742481`, pipeline `1f87bf34a580e9138f5574a7816d5f20cffc017e`; `engine_tag=v0.9.9`, `companion_tag=v0.2.5`, DMG Apple Silicon y paquetes Linux, sin PKG ni Windows. Candidata prerelease; no promoción automática a stable/latest.
+
+La limpieza de QA independiente terminó: 21 contenedores, seis redes y un volumen exclusivamente de pruebas, verificados por IDs/etiqueta propios. Ningún recurso real afectado.
+
+## Aceptación real del paquete
+
+Workflow `34739742481` SUCCESS, release `387799193` prerelease, 15 assets. DMG final postnotarización `560626723`, 1.016.797.756 bytes, SHA256 `35aeeb73c3ea2bc2d1e2b62b4ce98b3132e4e18229da97199200eb4e82123054`. SHA de los bytes descargados comprobado en el Mac; `stapler validate`, `codesign --verify --deep --strict`, `spctl` (Notarized Developer ID), 28 recursos y pins verificados. Los ocho Mach-O firmados se verifican mediante el sello Apple, no contra sus hashes anteriores a la firma. Manifiesto minisign, checksums de publicación y tres plataformas de actualización también comprobados independientemente en DGX. No se promovió stable/latest.
+
+Se reemplazó sólo `/Applications/Safent.app`, conservando la app 0.9.9 en `/Users/luiscorrea/.codex/tmp/safent-0910-release.P69Kui/Safent-0.9.9-original.app`. No se limpiaron datos, volúmenes ni VM, ni se ejecutó reparación manual previa. El arranque GUI retiró el broker propio cruzado, arrancó API/broker/worker/DB, aplicó la migración con salida 0 y llegó a `/app/chat`. «Comprobando este equipo» ya se marca como terminado.
+
+Verificación posterior: core `aa1515e29e94f2a9d96a4e06ed11ab06e1417eccce1d67423c80b9dba0ae6009` conservado; puerto `127.0.0.1:43337` conservado; todos los contenedores ejecutan el contenido fijado por el bundle; DB saludable; reservas `.10–.13` correctas. Los volúmenes `safent-data` y `safent-companion-runtime` siguen montados y la proyección es de sólo lectura; UID agente 886 no puede leer los cuatro secretos de Ads comprobados. Compose recreó sus servicios cuando cambió su configuración, conservando volúmenes; no se confunde esto con la retirada selectiva inicial del broker.
+
+MCP real: `initialize` y `tools/list` HTTP 200, servidor `ads-control` 0.2.5, **64 herramientas**, incluidas propuestas de campaña/presupuesto e informes. No se ejecutaron operaciones publicitarias. Bridge `/ads/` y `/ads/api/v1/auth/me` HTTP 200, sin login adicional ni scripts inline de prefijo. Cierre y reapertura GUI llegaron otra vez al chat; **todos los IDs y el puerto quedaron idénticos**, sin reinstalación.
+
+## Defecto funcional encontrado al abrir Ads
+
+La base recién instalada carece de negocio. SSO crea el propietario, pero no existe ruta de alta de negocios; `/auth/me` devuelve una lista vacía. La UI monta rutas con filtro vacío y presenta como error una consulta deshabilitada. Cockpit muestra «No se ha podido cargar», selector de negocio vacío y estado de freno/frescura sin verificar; Conexiones sí muestra la configuración OAuth, pero tampoco puede operar cuentas sin negocio. Esto no es otro fallo de red ni de salud del servicio.
+
+Se está preparando una alta inicial humana desde UI/API, limitada al modelo de propietario único existente; sin SQL manual, negocio Friendog sembrado implícitamente, cuentas OAuth inventadas ni ampliación de permisos. Requiere nueva versión Ads y paquete con su digest verificado antes de cerrar aceptación funcional.
+
+Google y Meta requieren login/consentimiento de Friendog, que siguen pendientes. No hay cliente Google ni app Meta configurados en esta instalación; tampoco modelo LLM conectado. No declarar operación de campañas reales ni cierre global de Enterprise/CRM/conocimiento.
+
+Comprobación adicional real del actualizador antes del reemplazo: app instalada 0.9.9, botón «Buscar actualización de la app», pasó por «Buscando…» y devolvió «No hay una versión más reciente», sin instalar nada ni cambiar el estado de Ads. Es coherente con el canal estable aún en 0.9.5 y candidatas excluidas. Se acredita integración y consulta real, no descarga/instalación completa entre versiones.
