@@ -1144,7 +1144,9 @@ cmd_restore() {
   }
 
   echo "[*] Starting Safent..."
-  cmd_start >/dev/null 2>&1 || true
+  # A fatal startup guard may exit the shell. Isolate it so restore still
+  # reports the verified postcondition after importing the data volume.
+  (cmd_start) >/dev/null 2>&1 || true
 
   # BKP-01: cmd_start's own result was never checked — a silent `podman
   # start` failure against a nonexistent container (see _exists's own note)

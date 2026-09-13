@@ -537,6 +537,30 @@ class TestRestoreVerifiesTheContainerActuallyCameUp:
         assert sum(call.startswith("run -d ") for call in calls) == 1
         assert not any("--entrypoint cat" in call for call in calls)
 
+    def test_fatal_scaffold_exit_reports_imported_data_and_no_running_core(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        archive = _make_backup(tmp_path, fake_bin_dir, tmp_path / "backups")
+        podman_log = tmp_path / "podman-restore.log"
+        result = _run_safent(
+            "restore", str(archive), "--force",
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home-for-restore",
+            podman_log=podman_log,
+            container_exists=False,
+            container_running=False,
+            volume_exists=False,
+            extra_env={"FAKE_SCAFFOLD_FAILS": "true"},
+        )
+        combined = (result.stdout + result.stderr).lower()
+        assert result.returncode != 0
+        assert "data was imported, but no safent container is running" in combined
+        assert "[ok] restored" not in combined
+        calls = _podman_calls(podman_log)
+        assert sum(call.startswith("volume import ") for call in calls) == 1
+        assert not any(call.startswith("volume rm ") for call in calls)
+        assert not any(call.startswith("run -d ") for call in calls)
+
     def test_container_that_comes_up_is_still_a_clean_success(
         self, tmp_path: Path, fake_bin_dir: Path
     ) -> None:
