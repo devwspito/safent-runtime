@@ -398,6 +398,7 @@ class _UpstreamResponse:
 
 def _rewrite_and_split_cookies(
     response: _UpstreamResponse,
+    *, request: Request,
 ) -> tuple[list[str], str | None, float | None]:
     """Split upstream Set-Cookie headers: `ads_csrf` is rewritten (Path=/ads)
     and forwarded to the browser; `ads_session` is retained for the jar and
@@ -410,7 +411,7 @@ def _rewrite_and_split_cookies(
         raw.load(header_value)
     for name, morsel in raw.items():
         if name == _CSRF_COOKIE_NAME:
-            forward_headers.append(_rewritten_csrf_cookie(morsel))
+            forward_headers.append(_rewritten_csrf_cookie(morsel, request=request))
         elif name == _SESSION_COOKIE_NAME:
             new_session_cookie = morsel.value
             max_age = morsel.get("max-age") or ""
@@ -418,7 +419,7 @@ def _rewrite_and_split_cookies(
     return forward_headers, new_session_cookie, new_session_ttl
 
 
-def _rewritten_csrf_cookie(morsel: Any) -> str:
+def _rewritten_csrf_cookie(morsel: Any, *, request: Request) -> str:
     attrs = [f"{_CSRF_COOKIE_NAME}={morsel.value}", "Path=/ads"]
     if morsel.get("max-age"):
         attrs.append(f"Max-Age={morsel['max-age']}")
@@ -428,7 +429,12 @@ def _rewritten_csrf_cookie(morsel: Any) -> str:
     # companion always issues Secure; a loopback shell-server may not be
     # TLS — same W3C "potentially trustworthy origin" carve-out sso.md §2
     # documents for this exact cookie).
-    if morsel.get("secure"):
+    # Only the actual ASGI origin matters. Never use caller-supplied
+    # Forwarded/X-Forwarded-* headers to lower this cookie's protection.
+    plain_http_loopback = request.scope.get("scheme") == "http" and request.url.hostname in (
+        "127.0.0.1", "localhost", "::1"
+    )
+    if morsel.get("secure") and not plain_http_loopback:
         attrs.append("Secure")
     return "; ".join(attrs)
 
@@ -532,11 +538,13 @@ async def _proxy_request(*, app_state: Any, request: Request, path: str) -> Resp
     except AdsBridgeError as exc:
         return _error_response(exc.status_code, exc.code)
 
-    return _translate_response(response, jar=jar)
+    return _translate_response(response, jar=jar, request=request)
 
 
-def _translate_response(response: _UpstreamResponse, *, jar: AdsSessionJar) -> Response:
-    cookie_headers, new_session, new_ttl = _rewrite_and_split_cookies(response)
+def _translate_response(
+    response: _UpstreamResponse, *, jar: AdsSessionJar, request: Request
+) -> Response:
+    cookie_headers, new_session, new_ttl = _rewrite_and_split_cookies(response, request=request)
     if new_session is not None and new_ttl is not None:
         jar.set(cookie=new_session, ttl_seconds=new_ttl)
     out = Response(content=response.body, status_code=response.status, headers=response.headers)

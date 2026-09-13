@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import ssl as ssl_mod
 from datetime import UTC, datetime, timedelta
+from http.cookies import SimpleCookie
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -122,6 +123,7 @@ class _FakeCompanion:
         self.probe_calls: list[dict] = []
         self.exchange_should_fail = False
         self.probe_status = 200
+        self.enforce_csrf = False
 
     async def exchange(self, request: web.Request) -> web.Response:
         body = await request.json()
@@ -158,10 +160,16 @@ class _FakeCompanion:
             return web.json_response({"error": "session expired"}, status=401)
         if self.probe_status != 200:
             return web.json_response({"error": "boom"}, status=self.probe_status)
+        if self.enforce_csrf and request.method == "POST":
+            csrf = request.cookies.get("ads_csrf")
+            if not csrf or request.headers.get("X-Csrf-Token") != csrf:
+                return web.json_response({"error": "CSRF validation failed"}, status=403)
         resp = web.json_response({"ok": True})
         resp.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
         resp.headers["X-Frame-Options"] = "SAMEORIGIN"
-        resp.set_cookie("ads_csrf", "csrf-from-companion", path="/api", samesite="Strict")
+        resp.set_cookie(
+            "ads_csrf", "csrf-from-companion", path="/api", samesite="Strict", secure=True
+        )
         return resp
 
     async def root(self, request: web.Request) -> web.Response:  # noqa: ARG002
@@ -440,6 +448,56 @@ class TestDeniedPrefixes:
 
 
 class TestProxiedRequestCredentialHandling:
+    @pytest.mark.parametrize("origin,secure", [
+        ("http://127.0.0.1:35335", False),
+        ("http://localhost:35335", False),
+        ("http://[::1]:35335", False),
+        ("https://127.0.0.1:35335", True),
+        ("https://enterprise.example", True),
+        ("http://enterprise.example", True),
+        ("http://127.0.0.1.evil.example", True),
+        ("http://127.1:35335", True),
+        ("http://0.0.0.0:35335", True),
+    ])
+    async def test_secure_upstream_csrf_cookie_uses_only_actual_loopback_origin(
+        self, fake_companion, monkeypatch, origin, secure
+    ) -> None:
+        companion, endpoint = fake_companion
+        companion.enforce_csrf = True
+        _patch_companion(monkeypatch, endpoint)
+        ac = _make_client(endpoint=endpoint, proxy=_mint_proxy())
+        ac.client.base_url = origin
+        # Caller-supplied forwarding metadata never grants the HTTP exception.
+        spoofed = {
+            "X-Forwarded-Proto": "http", "X-Forwarded-Host": "127.0.0.1:35335",
+            "Forwarded": 'proto=http;host="127.0.0.1:35335"',
+        }
+        async with ac.client as client:
+            client.cookies.set("ads_bridge", _valid_bridge_cookie())
+            response = await client.get("/ads/api/v1/probe", headers=spoofed)
+            assert response.status_code == 200
+            cookies = SimpleCookie()
+            for header in response.headers.get_list("set-cookie"):
+                cookies.load(header)
+            assert set(cookies) == {"ads_csrf"}
+            assert bool(cookies["ads_csrf"]["secure"]) is secure
+            assert cookies["ads_csrf"]["path"] == "/ads"
+            assert cookies["ads_csrf"]["samesite"] == "Strict"
+            assert not cookies["ads_csrf"]["domain"]
+            # No manually planted CSRF cookie: use the returned cookie jar.
+            csrf = client.cookies.get("ads_csrf")
+            valid = await client.post(
+                "/ads/api/v1/probe", headers={**spoofed, "X-Csrf-Token": csrf}
+            )
+            assert valid.status_code == (403 if secure and origin.startswith("http:") else 200)
+            missing = await client.post("/ads/api/v1/probe", headers=spoofed)
+            assert missing.status_code == 403
+            mismatch = await client.post(
+                "/ads/api/v1/probe", headers={**spoofed, "X-Csrf-Token": "wrong-token"}
+            )
+            assert mismatch.status_code == 403
+            assert "ads_session" not in client.cookies
+
     async def test_ads_session_never_reaches_the_browser(
         self, fake_companion, monkeypatch: pytest.MonkeyPatch
     ) -> None:
