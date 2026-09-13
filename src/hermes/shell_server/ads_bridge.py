@@ -42,6 +42,7 @@ from urllib.parse import urlencode
 import aiohttp
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from starlette.datastructures import QueryParams
 
 from hermes.instance.association_store import SQLiteAssociationStore
 from hermes.runtime.managed_ads_policy import read_ads_policy
@@ -101,12 +102,53 @@ _OAUTH_CALLBACK_PATHS = frozenset(
     f"api/v1/platform-accounts/{provider}/reconnect/callback" for provider in ("google", "meta")
 )
 _OAUTH_STATE_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,128}\Z")
+_COMPOSIO_ACCOUNT_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,200}\Z")
 _OAUTH_MAX_QUERY_BYTES = 8192
 _OAUTH_MAX_CODE_BYTES = 4096
 _OAUTH_RESPONSE_HTML = (
     "<!doctype html><title>Safent Ads</title><p>Vuelve a Safent para comprobar "
     "el resultado de la conexión. Puedes cerrar esta ventana.</p>"
 )
+
+
+def _oauth_callback_parameters(query: QueryParams) -> dict[str, str] | None:
+    """Reduce a callback to the exact public contract; no caller authority."""
+    if len(query.getlist("state")) != 1 or not _OAUTH_STATE_PATTERN.fullmatch(
+        query.get("state", "")
+    ):
+        return None
+    params = {"state": query["state"]}
+    if "managed" in query:
+        # An invalid managed marker cannot fall back to direct provider OAuth.
+        if (
+            any(len(query.getlist(key)) > 1 for key in (
+                "managed", "status", "connected_account_id", "code", "error",
+            ))
+            or query.get("managed") != "1"
+            or query.get("status") not in {"success", "failed"}
+            or "code" in query or "error" in query
+        ):
+            return None
+        account_id = query.get("connected_account_id", "")
+        if (
+            "connected_account_id" in query
+            and _COMPOSIO_ACCOUNT_PATTERN.fullmatch(account_id) is None
+        ) or (query["status"] == "success" and not account_id):
+            return None
+        params.update(managed="1", status=query["status"])
+        if query["status"] == "success":
+            params["connected_account_id"] = account_id
+        # Cancellation ignores a valid account ID, never treating it as success.
+        return params
+    # RFC 6749: ignore extensions, preserving the direct OAuth contract.
+    if (
+        any(len(query.getlist(key)) > 1 for key in ("code", "error"))
+        or bool(query.get("code")) == bool(query.get("error"))
+        or len(query.get("code", "")) > _OAUTH_MAX_CODE_BYTES
+    ):
+        return None
+    params.update({"code": query["code"]} if query.get("code") else {"error": "access_denied"})
+    return params
 
 
 async def _proxy_oauth_callback(request: Request, path: str) -> Response:
@@ -132,15 +174,11 @@ async def _proxy_oauth_callback(request: Request, path: str) -> Response:
             )
         )
         and len(request.scope.get("query_string", b"")) <= _OAUTH_MAX_QUERY_BYTES
-        # RFC 6749: ignore extensions, never forward them or treat them as authority.
-        and all(len(query.getlist(key)) <= 1 for key in ("state", "code", "error"))
-        and _OAUTH_STATE_PATTERN.fullmatch(query.get("state", "")) is not None
-        and bool(query.get("code")) != bool(query.get("error"))
-        and len(query.get("code", "")) <= _OAUTH_MAX_CODE_BYTES
     )
+    params = _oauth_callback_parameters(query) if valid else None
     # Access logs must not retain authorization codes or bearer states.
     request.scope["query_string"] = b""
-    if not valid:
+    if params is None:
         response = _error_response(400, "OAUTH_CALLBACK_INVALID")
         response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
         return response
@@ -149,11 +187,6 @@ async def _proxy_oauth_callback(request: Request, path: str) -> Response:
         response = _error_response(503, "COMPANION_UNAVAILABLE")
         response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
         return response
-    params = {"state": query["state"]}
-    if query.get("code"):
-        params["code"] = query["code"]
-    else:
-        params["error"] = "access_denied"
     url = _companion_url(endpoint, path, urlencode(params))
     resolver = FixedIpResolver(hostname=endpoint.host, ip=endpoint.ip)
     try:

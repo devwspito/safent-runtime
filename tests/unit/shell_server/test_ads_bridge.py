@@ -324,6 +324,106 @@ def _valid_bridge_cookie() -> str:
     return bridge_mod._bridge_cookie_value()  # noqa: SLF001
 
 
+@pytest.mark.parametrize("provider", ["google", "meta"])
+@pytest.mark.parametrize("status,account_id", [
+    ("success", "ca_owned-123"), ("failed", None), ("failed", "ca_ignored"),
+])
+async def test_managed_oauth_callback_projects_only_status_and_scoped_reference(
+    fake_companion, monkeypatch, provider, status, account_id,
+):
+    from urllib.parse import parse_qs
+
+    companion, endpoint = fake_companion
+    monkeypatch.setattr(companions_mod, "get_companion", lambda _slug: endpoint)
+    proxy = _mint_proxy()
+    c = _make_client(endpoint=endpoint, proxy=proxy)
+    c.client.base_url = "http://127.0.0.1:35335"
+    c.app.state.ads_session_jar.set(cookie="owner-must-not-travel", ttl_seconds=60)
+    params = {"state": "a" * 43, "managed": "1", "status": status, "next": "https://evil.test"}
+    if account_id is not None:
+        params["connected_account_id"] = account_id
+    async with c.client:
+        response = await c.client.get(
+            f"/ads/api/v1/platform-accounts/{provider}/reconnect/callback", params=params,
+            headers={"Authorization": "Bearer must-not-travel", "Cookie": "ads_session=secret"},
+        )
+    assert response.status_code == 200
+    assert len(companion.probe_calls) == 1
+    expected = {"state": ["a" * 43], "managed": ["1"], "status": [status]}
+    if status == "success":
+        expected["connected_account_id"] = [account_id]
+    assert parse_qs(companion.probe_calls[0]["query"]) == expected
+    assert companion.probe_calls[0]["cookies"] == {}
+    assert "authorization" not in companion.probe_calls[0]["headers"]
+    assert "set-cookie" not in response.headers
+    assert response.headers["cache-control"] == "no-store"
+    assert account_id is None or account_id not in response.text
+    assert companion.exchange_calls == []
+    proxy.call_dict.assert_not_called()
+    assert c.app.state.ads_session_jar.get() == "owner-must-not-travel"
+
+
+@pytest.mark.parametrize("tail", [
+    "managed=1&status=success", "managed=0&status=success&connected_account_id=ca_1",
+    "managed=1&managed=1&status=success&connected_account_id=ca_1",
+    "managed=1&status=success&status=failed&connected_account_id=ca_1",
+    "managed=1&status=success&connected_account_id=ca_1&connected_account_id=ca_2",
+    "managed=1&status=success&connected_account_id=ca_1&code=",
+    "managed=1&status=success&connected_account_id=ca_1&error=",
+    "managed=1&status=success&connected_account_id=ca_1&code=x&code=y",
+    "managed=1&status=failed&error=x&error=y",
+    "managed=1&status=unknown&connected_account_id=ca_1",
+    "managed=1&status=success&connected_account_id=",
+    "managed=1&status=success&connected_account_id=ca%2F1",
+    "managed=1&status=success&connected_account_id=" + "x" * 201,
+    "managed=1&status=failed&connected_account_id=bad%0Avalue",
+    "managed=1&status=success&connected_account_id=ca_1&state=" + "b" * 43,
+    "managed=1&status=success&connected_account_id=ca_1&extension=" + "x" * 8192,
+])
+async def test_managed_oauth_callback_rejects_ambiguous_or_malformed_fields(
+    fake_companion, monkeypatch, tail,
+):
+    companion, endpoint = fake_companion
+    monkeypatch.setattr(companions_mod, "get_companion", lambda _slug: endpoint)
+    proxy = _mint_proxy()
+    c = _make_client(endpoint=endpoint, proxy=proxy)
+    c.client.base_url = "http://127.0.0.1:35335"
+    async with c.client:
+        response = await c.client.get(
+            "/ads/api/v1/platform-accounts/google/reconnect/callback?state="
+            + "a" * 43 + "&" + tail,
+        )
+    assert response.status_code == 400
+    assert response.headers["cache-control"] == "no-store"
+    assert companion.probe_calls == []
+    proxy.call_dict.assert_not_called()
+
+
+async def test_managed_callback_replay_denial_never_mints_session_or_retries(
+    fake_companion, monkeypatch,
+):
+    companion, endpoint = fake_companion
+    monkeypatch.setattr(companions_mod, "get_companion", lambda _slug: endpoint)
+    proxy = _mint_proxy()
+    c = _make_client(endpoint=endpoint, proxy=proxy)
+    c.client.base_url = "https://enterprise.example"
+    callback = "/ads/api/v1/platform-accounts/meta/reconnect/callback"
+    params = {
+        "state": "a" * 43, "managed": "1", "status": "success", "connected_account_id": "ca_1",
+    }
+    async with c.client:
+        assert (await c.client.get(callback, params=params)).status_code == 200
+        # The companion owns the durable state. Simulate its rejection of a
+        # consumed state; this proxy must not retry with owner credentials.
+        companion.probe_status = 401
+        assert (await c.client.get(callback, params=params)).status_code == 400
+    assert len(companion.probe_calls) == 2
+    assert all(call["cookies"] == {} for call in companion.probe_calls)
+    assert companion.exchange_calls == []
+    proxy.call_dict.assert_not_called()
+    assert c.app.state.ads_session_jar.get() is None
+
+
 def _patch_companion(monkeypatch: pytest.MonkeyPatch, endpoint) -> None:
     monkeypatch.setattr(companions_mod, "get_companion", lambda _slug: endpoint)
 
