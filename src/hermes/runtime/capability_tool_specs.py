@@ -776,8 +776,10 @@ _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "description": (
                     "Composio toolkit slug for the OAuth-simple integration to connect "
                     "(e.g. 'github', 'gmail', 'slack', 'notion'). "
-                    "Only OAuth2/OAuth1 apps are supported; API-key apps use "
-                    "configure_native_provider instead."
+                    "Only OAuth2/OAuth1 simple-link apps are supported. This is "
+                    "not LLM sign-in or Ads onboarding. Configure language models "
+                    "in Sistema → Modelo de IA (/sistema?tab=proveedores), and "
+                    "Google/Meta advertising accounts in Anuncios → Conexiones."
                 ),
             },
         },
@@ -1047,7 +1049,11 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "Only OAuth2/OAuth1 (simple-link) apps are supported. "
         "Returns a redirect_url / connect_url that the user must open in a browser "
         "to authorise the connection. "
-        "For API-key providers (OpenAI, Anthropic…) use configure_native_provider instead."
+        "This does not configure language models or advertising accounts. "
+        "For LLM credentials/sign-in use the Safent UI: Sistema → Modelo de IA "
+        "(/sistema?tab=proveedores); never ask the user to paste secrets into chat. "
+        "For Google/Meta Ads use Anuncios → Conexiones, which preserves account "
+        "scope and the advertising consent flow. Do not invent unavailable tools."
     ),
     "tailnet_ssh": (
         "Run a command over SSH on a host in the owner's tailnet (spec 022 v2). "
