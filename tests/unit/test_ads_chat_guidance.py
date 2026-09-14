@@ -68,3 +68,5 @@ def test_optional_official_connector_is_not_a_requirement_for_connected_ads() ->
     text = append_ads_chat_guidance("base", (_spec("mcp__safent-ads__list_businesses"),))
     assert "get_native_ads_tools es un conector oficial OPCIONAL" in text
     assert "no lo repitas" in text
+    assert "funciones visibles, invócala" in text
+    assert "not a deferrable tool" in text

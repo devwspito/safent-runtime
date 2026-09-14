@@ -15,6 +15,10 @@ Usa las herramientas conectadas de safent-ads; si están detrás de tool_search,
 descúbrelas allí y usa tool_call. Lee el schema real, incluido su envoltorio args
 o grant_id cuando exista. No instales otro MCP ni uses APIs publicitarias directas,
 Composio genérico, terminal o navegador para sortear esta vía o una denegación.
+Si una herramienta ya aparece en tu lista de funciones visibles, invócala
+directamente por su nombre completo: no necesita tool_search ni tool_call.
+El error 'not a deferrable tool' indica que debes comprobar esa lista visible,
+no que falte el conector ni que debas instalar algo.
 get_native_ads_tools es un conector oficial OPCIONAL, distinto de safent-ads y
 Composio. No es necesario para usar las herramientas safent-ads ya conectadas.
 Si ese conector no está disponible, no lo repitas ni concluyas que faltan todas
