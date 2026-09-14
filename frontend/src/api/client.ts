@@ -772,10 +772,34 @@ export function getConversation(id: string): Promise<ConversationDetail> {
   return request<ConversationDetail>(`/chat/conversations/${encodeURIComponent(id)}`)
 }
 
-/** List conversation summaries. */
-export function listConversations(agentId?: string): Promise<ConversationSummary[]> {
-  const qs = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ''
-  return request<ConversationSummary[]>(`/chat/conversations${qs}`)
+/**
+ * List conversation summaries. Archived ones are excluded unless `includeArchived`
+ * is set — in that case the response carries both, each flagged via `archived`.
+ */
+export function listConversations(
+  agentId?: string,
+  opts: { includeArchived?: boolean } = {},
+): Promise<ConversationSummary[]> {
+  const params = new URLSearchParams()
+  if (agentId) params.set('agent_id', agentId)
+  if (opts.includeArchived) params.set('include_archived', '1')
+  const qs = params.toString()
+  return request<ConversationSummary[]>(`/chat/conversations${qs ? `?${qs}` : ''}`)
+}
+
+/** Hide a conversation from the default list without deleting it. */
+export function archiveConversation(id: string): Promise<unknown> {
+  return request<unknown>(`/chat/conversations/${encodeURIComponent(id)}/archive`, { method: 'POST' })
+}
+
+/** Restore a previously archived conversation to the default list. */
+export function unarchiveConversation(id: string): Promise<unknown> {
+  return request<unknown>(`/chat/conversations/${encodeURIComponent(id)}/unarchive`, { method: 'POST' })
+}
+
+/** Permanently delete a conversation. */
+export function deleteConversation(id: string): Promise<unknown> {
+  return request<unknown>(`/chat/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 // ── Security ──────────────────────────────────────────────────────────────────

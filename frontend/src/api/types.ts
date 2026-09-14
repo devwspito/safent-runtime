@@ -117,6 +117,8 @@ export interface ConversationSummary {
   title?: string
   created_at?: string
   updated_at?: string
+  /** Hidden from the default (non-archived) list; absent/false means active. */
+  archived?: boolean
 }
 
 export interface ToolCallDescriptor {

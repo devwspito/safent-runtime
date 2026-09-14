@@ -1,7 +1,13 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { PanelLeft, Search, MessageSquare, RefreshCw, ListTodo } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import {
+  PanelLeft, Search, MessageSquare, RefreshCw, ListTodo,
+  MoreHorizontal, Archive, ArchiveRestore, Trash2,
+} from 'lucide-react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { listConversations } from '../api/client'
+import { sileo } from 'sileo'
+import {
+  listConversations, archiveConversation, unarchiveConversation, deleteConversation,
+} from '../api/client'
 import { useChat } from '../hooks/useChat'
 import { useFeatures } from '../hooks/useFeatures'
 import { usePendingApprovals } from '../hooks/usePendingApprovals'
@@ -99,6 +105,12 @@ function useNavItems(): HubNavItem[] {
 // ── Recientes ─────────────────────────────────────────────────────────────────
 
 const PREVIEW_COUNT = 8
+const UNDO_TIMEOUT_MS = 6_000
+
+/** Conversation summaries from older backends key the id as `conversation_id`. */
+function conversationId(c: ConversationSummary): string | undefined {
+  return (c as ConversationSummary & { conversation_id?: string }).conversation_id ?? c.id
+}
 
 function relativeTime(iso: string | undefined, t: ReturnType<typeof useT>): string {
   if (!iso) return ''
@@ -146,9 +158,11 @@ interface RecentsSectionProps {
   activeConvId: string | null
   conversationsTick: number
   loadConversation(id: string): Promise<void>
+  /** Called when the open conversation is archived or deleted, so the chat never shows a dead thread. */
+  startNew(): void
 }
 
-export function RecentsSection({ activeConvId, conversationsTick, loadConversation }: RecentsSectionProps) {
+export function RecentsSection({ activeConvId, conversationsTick, loadConversation, startNew }: RecentsSectionProps) {
   const t = useT()
   const navigate = useNavigate()
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
@@ -157,14 +171,24 @@ export function RecentsSection({ activeConvId, conversationsTick, loadConversati
   const [error, setError] = useState(false)
   const [query, setQuery] = useState('')
   const [opening, setOpening] = useState<string | null>(null)
+  const [showArchived, setShowArchived] = useState(false)
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [deleteErrorId, setDeleteErrorId] = useState<string | null>(null)
+  const [pendingId, setPendingId] = useState<string | null>(null)
+  const [undo, setUndo] = useState<{ id: string; title: string } | null>(null)
   const request = useRef(0)
   const selecting = useRef(false)
+  const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const menuBtnRefs = useRef(new Map<string, HTMLButtonElement>())
+  const cancelBtnRef = useRef<HTMLButtonElement>(null)
 
   const load = useCallback(() => {
     const version = ++request.current
     setLoading(true)
     setError(false)
-    listConversations()
+    listConversations(undefined, { includeArchived: true })
       .then(data => {
         if (version !== request.current) return
         setConversations(Array.isArray(data) ? data : [])
@@ -182,6 +206,9 @@ export function RecentsSection({ activeConvId, conversationsTick, loadConversati
     return () => { request.current += 1 }
   }, [activeConvId, conversationsTick, load])
 
+  // The undo notice is 6 s of retained intent — never leak the timer past unmount.
+  useEffect(() => () => { if (undoTimer.current) clearTimeout(undoTimer.current) }, [])
+
   async function handleSelect(id: string) {
     if (selecting.current) return
     selecting.current = true
@@ -197,9 +224,155 @@ export function RecentsSection({ activeConvId, conversationsTick, loadConversati
     }
   }
 
-  const filtered = conversations.filter(c => (c.title ?? t('layout.recents.untitled')).toLocaleLowerCase().includes(query.toLocaleLowerCase()))
+  // ── Row menu ("⋯") — one at a time; outside click / Escape close it and
+  // return focus to its trigger, mirroring Composer's context menu (ChatView.tsx).
+  function closeMenu() {
+    setOpenMenuId(null)
+  }
+
+  function toggleMenu(id: string) {
+    setOpenMenuId(current => (current === id ? null : id))
+  }
+
+  useEffect(() => {
+    if (!openMenuId) return
+    const onDoc = (e: MouseEvent) => {
+      const tgt = e.target as Node
+      if (menuRef.current?.contains(tgt) || menuBtnRefs.current.get(openMenuId)?.contains(tgt)) return
+      setOpenMenuId(null)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [openMenuId])
+
+  useEffect(() => {
+    if (openMenuId) menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
+  }, [openMenuId])
+
+  // Cancelling/exiting confirm mode unmounts its Cancelar button and remounts the
+  // row's "⋯" trigger in the SAME commit — the trigger's ref is only populated
+  // once that render lands, so the id to refocus is queued in a ref, not read
+  // from the (already-detached) menuBtnRefs entry at cancel-time.
+  const refocusTriggerId = useRef<string | null>(null)
+  useEffect(() => {
+    if (confirmDeleteId) {
+      cancelBtnRef.current?.focus()
+    } else if (refocusTriggerId.current) {
+      menuBtnRefs.current.get(refocusTriggerId.current)?.focus()
+      refocusTriggerId.current = null
+    }
+  }, [confirmDeleteId])
+
+  function handleMenuKeyDown(e: ReactKeyboardEvent<HTMLDivElement>, id: string) {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      setOpenMenuId(null)
+      menuBtnRefs.current.get(id)?.focus()
+      return
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
+    e.preventDefault()
+    const items = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
+    const current = items.indexOf(document.activeElement as HTMLButtonElement)
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1
+      : (current + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
+    items[next]?.focus()
+  }
+
+  function handleConfirmKeyDown(e: ReactKeyboardEvent<HTMLDivElement>, id: string) {
+    if (e.key !== 'Escape') return
+    e.preventDefault()
+    cancelDeleteConfirm(id)
+  }
+
+  // ── Archive (immediate) + undo ───────────────────────────────────────────
+  function scheduleUndoDismiss() {
+    if (undoTimer.current) clearTimeout(undoTimer.current)
+    undoTimer.current = setTimeout(() => setUndo(null), UNDO_TIMEOUT_MS)
+  }
+
+  async function handleArchive(id: string, title: string) {
+    closeMenu()
+    setPendingId(id)
+    try {
+      await archiveConversation(id)
+      setConversations(prev => prev.map(c => conversationId(c) === id ? { ...c, archived: true } : c))
+      if (id === activeConvId) startNew()
+      setUndo({ id, title })
+      scheduleUndoDismiss()
+    } catch {
+      sileo.error({ title: t('layout.recents.archive_err') })
+    } finally {
+      setPendingId(null)
+    }
+  }
+
+  async function handleUndoArchive() {
+    const target = undo
+    if (!target) return
+    if (undoTimer.current) { clearTimeout(undoTimer.current); undoTimer.current = null }
+    setUndo(null)
+    try {
+      await unarchiveConversation(target.id)
+      setConversations(prev => prev.map(c => conversationId(c) === target.id ? { ...c, archived: false } : c))
+    } catch {
+      sileo.error({ title: t('layout.recents.unarchive_err') })
+    }
+  }
+
+  async function handleRestore(id: string) {
+    closeMenu()
+    setPendingId(id)
+    try {
+      await unarchiveConversation(id)
+      setConversations(prev => prev.map(c => conversationId(c) === id ? { ...c, archived: false } : c))
+    } catch {
+      sileo.error({ title: t('layout.recents.unarchive_err') })
+    } finally {
+      setPendingId(null)
+    }
+  }
+
+  // ── Delete (inline confirm) ──────────────────────────────────────────────
+  function startDeleteConfirm(id: string) {
+    closeMenu()
+    setDeleteErrorId(null)
+    setConfirmDeleteId(id)
+  }
+
+  function cancelDeleteConfirm(id: string) {
+    refocusTriggerId.current = id
+    setConfirmDeleteId(null)
+    setDeleteErrorId(null)
+  }
+
+  async function confirmDelete(id: string) {
+    setPendingId(id)
+    setDeleteErrorId(null)
+    try {
+      await deleteConversation(id)
+      setConversations(prev => prev.filter(c => conversationId(c) !== id))
+      setConfirmDeleteId(null)
+      if (id === activeConvId) startNew()
+    } catch {
+      setDeleteErrorId(id)
+    } finally {
+      setPendingId(null)
+    }
+  }
+
+  function toggleArchivedView() {
+    setShowArchived(v => !v)
+    setExpanded(false)
+    closeMenu()
+    setConfirmDeleteId(null)
+  }
+
+  const archivedList = conversations.filter(c => c.archived)
+  const baseList = showArchived ? archivedList : conversations.filter(c => !c.archived)
+  const filtered = baseList.filter(c => (c.title ?? t('layout.recents.untitled')).toLocaleLowerCase().includes(query.toLocaleLowerCase()))
   const visible = query || expanded ? filtered : filtered.slice(0, PREVIEW_COUNT)
-  const overflow = conversations.length - PREVIEW_COUNT
+  const overflow = baseList.length - PREVIEW_COUNT
 
   if (loading && conversations.length === 0) {
     return (
@@ -220,15 +393,6 @@ export function RecentsSection({ activeConvId, conversationsTick, loadConversati
     )
   }
 
-  if (conversations.length === 0 && !error) {
-    return (
-      <div className="sidebar-recents" aria-label={t('layout.recents.aria')}>
-        <div className="sidebar-section-label">{t('layout.recents.label')}</div>
-        <p className="recent-empty">{t('layout.recents.empty')}</p>
-      </div>
-    )
-  }
-
   return (
     <div className="sidebar-recents" aria-label={t('layout.recents.aria')}>
       <div className="sidebar-section-label">{t('layout.recents.label')}</div>
@@ -244,9 +408,12 @@ export function RecentsSection({ activeConvId, conversationsTick, loadConversati
         </button>
       </div>}
       {query && visible.length === 0 && <p className="recent-empty">{t('layout.recents.no_results')}</p>}
+      {!query && !error && visible.length === 0 && (
+        <p className="recent-empty">{showArchived ? t('layout.recents.empty_archived') : t('layout.recents.empty')}</p>
+      )}
       <ul aria-label={t('layout.recents.aria')} aria-busy={loading}>
         {visible.map(c => {
-          const id = (c as ConversationSummary & { conversation_id?: string }).conversation_id ?? c.id
+          const id = conversationId(c)
           if (!id) return null
           const title = c.title ?? t('layout.recents.untitled')
           const time = relativeTime(
@@ -256,22 +423,94 @@ export function RecentsSection({ activeConvId, conversationsTick, loadConversati
             t,
           )
           const isActive = id === activeConvId
+          const menuOpen = openMenuId === id
+          const confirming = confirmDeleteId === id
+          const hasDeleteError = deleteErrorId === id
+          const busy = pendingId === id
 
           return (
-            <li key={id}>
-              <button
-                className={`recent-item${isActive ? ' recent-item--active' : ''}`}
-                onClick={() => handleSelect(id)}
-                type="button"
-                title={title}
-                aria-current={isActive ? 'page' : undefined}
-                aria-busy={opening === id}
-                disabled={opening !== null}
-              >
-                <MessageSquare size={14} aria-hidden="true" />
-                <span className="recent-title">{title}</span>
-                {time && <span className="recent-time">{time}</span>}
-              </button>
+            <li key={id} className={styles.recentRow}>
+              {confirming ? (
+                <div className={styles.confirmRow} onKeyDown={e => handleConfirmKeyDown(e, id)}>
+                  {hasDeleteError ? (
+                    <>
+                      <span className={styles.confirmText}>{t('layout.recents.delete_err')}</span>
+                      <div className={styles.confirmActions}>
+                        <button type="button" className={styles.confirmBtnGhost} disabled={busy}
+                          onClick={() => void confirmDelete(id)}>
+                          {t('approval.err.retry')}
+                        </button>
+                        <button type="button" ref={cancelBtnRef} className={styles.confirmBtnGhost} disabled={busy}
+                          onClick={() => cancelDeleteConfirm(id)}>
+                          {t('layout.recents.cancel')}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <span className={styles.confirmText}>{t('layout.recents.confirm_delete')}</span>
+                      <div className={styles.confirmActions}>
+                        <button type="button" className={styles.confirmBtnDanger} disabled={busy} aria-busy={busy}
+                          onClick={() => void confirmDelete(id)}>
+                          {t('layout.recents.delete')}
+                        </button>
+                        <button type="button" ref={cancelBtnRef} className={styles.confirmBtnGhost} disabled={busy}
+                          onClick={() => cancelDeleteConfirm(id)}>
+                          {t('layout.recents.cancel')}
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <button
+                    className={`recent-item${isActive ? ' recent-item--active' : ''}`}
+                    onClick={() => handleSelect(id)}
+                    type="button"
+                    title={title}
+                    aria-current={isActive ? 'page' : undefined}
+                    aria-busy={opening === id}
+                    disabled={opening !== null}
+                  >
+                    <MessageSquare size={14} aria-hidden="true" />
+                    <span className="recent-title">{title}</span>
+                    {c.archived && <span className={styles.archivedTag}>{t('layout.recents.archived_tag')}</span>}
+                    {time && <span className="recent-time">{time}</span>}
+                  </button>
+                  <button
+                    ref={el => { if (el) menuBtnRefs.current.set(id, el); else menuBtnRefs.current.delete(id) }}
+                    type="button"
+                    className={styles.rowMenuBtn}
+                    onClick={() => toggleMenu(id)}
+                    aria-haspopup="menu"
+                    aria-expanded={menuOpen}
+                    aria-label={t('layout.recents.menu_aria')}
+                  >
+                    <MoreHorizontal size={14} aria-hidden="true" />
+                  </button>
+                  {menuOpen && (
+                    <div ref={menuRef} className={styles.rowMenu} role="menu" aria-label={t('layout.recents.menu_aria')}
+                      onKeyDown={e => handleMenuKeyDown(e, id)}>
+                      {showArchived ? (
+                        <button type="button" role="menuitem" className={styles.rowMenuItem}
+                          onClick={() => void handleRestore(id)}>
+                          <ArchiveRestore size={14} aria-hidden="true" /> {t('layout.recents.restore')}
+                        </button>
+                      ) : (
+                        <button type="button" role="menuitem" className={styles.rowMenuItem}
+                          onClick={() => void handleArchive(id, title)}>
+                          <Archive size={14} aria-hidden="true" /> {t('layout.recents.archive')}
+                        </button>
+                      )}
+                      <button type="button" role="menuitem" className={`${styles.rowMenuItem} ${styles.rowMenuItemDanger}`}
+                        onClick={() => startDeleteConfirm(id)}>
+                        <Trash2 size={14} aria-hidden="true" /> {t('layout.recents.delete')}
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
             </li>
           )
         })}
@@ -287,7 +526,27 @@ export function RecentsSection({ activeConvId, conversationsTick, loadConversati
             </button>
           </li>
         )}
+        {!query && (archivedList.length > 0 || showArchived) && (
+          <li>
+            <button
+              className="recent-item text-accent"
+              onClick={toggleArchivedView}
+              type="button"
+              aria-expanded={showArchived}
+            >
+              {showArchived ? t('layout.recents.hide_archived') : t('layout.recents.show_archived').replace('{n}', String(archivedList.length))}
+            </button>
+          </li>
+        )}
       </ul>
+      {undo && (
+        <div className={styles.undoNotice} role="status">
+          <span>{t('layout.recents.archived_notice')}</span>
+          <button type="button" className={styles.undoNoticeBtn} onClick={() => void handleUndoArchive()}>
+            {t('layout.recents.undo')}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -514,7 +773,7 @@ export default function Layout({ activeProviderReload }: LayoutProps) {
             )}
           </div>
           <RecentsSection activeConvId={chat.convId} conversationsTick={chat.conversationsTick}
-            loadConversation={handleLoadConversation} />
+            loadConversation={handleLoadConversation} startNew={handleNewChat} />
         </div>
 
         {/* Language selector + user chip */}
