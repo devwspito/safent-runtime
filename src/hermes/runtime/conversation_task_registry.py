@@ -123,6 +123,26 @@ def clear_current_message() -> None:
     _current_message.set("")
 
 
+# Which external (Composio/MCP) tools this turn's intent retrieval chose to show the
+# model DIRECTLY. None = no narrowing happened (everything visible). The full catalog is
+# always registered in the Nous registry regardless, so the rest stays reachable through
+# Hermes's own tool_search/tool_describe/tool_call bridge — a tool the model cannot see
+# must still be discoverable and callable, never silently absent.
+_visible_external_names: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
+    "hermes_visible_external_names", default=None
+)
+
+
+def set_visible_external_names(names: frozenset[str] | None) -> None:
+    """Stamp the names of the externals the model sees directly this turn (None = all)."""
+    _visible_external_names.set(frozenset(names) if names is not None else None)
+
+
+def get_visible_external_names() -> frozenset[str] | None:
+    """Visible external tool names for THIS cycle, or None when nothing was narrowed."""
+    return _visible_external_names.get()
+
+
 def resolve_conversation(effective_task_id: str) -> str:
     """Conversation for a write proposal: by its own task_id, else the ambient cycle.
 

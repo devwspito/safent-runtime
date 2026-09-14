@@ -2405,7 +2405,10 @@ class NousReasoningEngine:
         # cycle warms the registry. Sync the just-registered specs into THIS agent so
         # the tools reach the model on the same cycle they were resolved. Idempotent:
         # warm cycles already have them and skip.
-        _sync_agent_tools_with_external(agent, external_specs)
+        visible_specs = _visible_external_specs(external_specs)
+        _sync_agent_tools_with_external(
+            agent, visible_specs, deferred_count=len(external_specs) - len(visible_specs),
+        )
 
         # FIX "Hermes se presenta cada mensaje": el orchestrator inyecta el
         # historial de la conversación en metadata; lo pasamos a run_conversation
@@ -4191,9 +4194,45 @@ def _register_external_specs_in_nous(
         _make_external_sequential_wrapper(agent, spec, nous_registry)
 
 
+def _visible_external_specs(specs: tuple[ToolSpec, ...]) -> tuple[ToolSpec, ...]:
+    """The subset of ``specs`` the model sees DIRECTLY this turn.
+
+    Intent retrieval (runtime ``_stamp_visible_integration``) stamps the top-K names;
+    None means nothing was narrowed. The full ``specs`` tuple is always registered and
+    gate-classified — only visibility is narrowed.
+    """
+    from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+        get_visible_external_names,
+    )
+    visible = get_visible_external_names()
+    if visible is None:
+        return specs
+    return tuple(s for s in specs if s.name in visible)
+
+
+def _ensure_bridge_tools(kept: list, deferred_count: int) -> int:
+    """Append Hermes's tool_search/tool_describe/tool_call bridge schemas when this
+    cycle has registered externals the model cannot see directly and the bridge is
+    not already present (cold daemon: agent_init assembled against an empty registry,
+    so Hermes never activated the bridge). Returns how many schemas were added."""
+    try:
+        from tools.tool_search import BRIDGE_TOOL_NAMES, bridge_tool_schemas  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 — hermes-agent absent (unit tests) → nothing to bridge
+        return 0
+    present = {
+        (t.get("function") or {}).get("name") for t in kept if isinstance(t, dict)
+    }
+    if present & set(BRIDGE_TOOL_NAMES):
+        return 0
+    schemas = bridge_tool_schemas(deferred_count)
+    kept.extend(schemas)
+    return len(schemas)
+
+
 def _sync_agent_tools_with_external(
     agent: "GovernedAIAgent",
     specs: tuple[ToolSpec, ...],
+    deferred_count: int = 0,
 ) -> None:
     """Make THIS cycle's agent expose the just-registered external ToolSpecs.
 
@@ -4277,6 +4316,7 @@ def _sync_agent_tools_with_external(
             )
             present.add(spec.name)
             added += 1
+        bridged = _ensure_bridge_tools(kept, deferred_count) if deferred_count > 0 else 0
         inner.tools = kept
         # Keep the call-time allow-list exactly in sync with what the model can see.
         inner.valid_tool_names = {
@@ -4284,11 +4324,11 @@ def _sync_agent_tools_with_external(
             for t in kept
             if isinstance(t, dict) and (t.get("function") or {}).get("name")
         }
-        if added or pruned:
+        if added or pruned or bridged:
             logger.info(
-                "hermes.nous_engine.synced_external_tools added=%d pruned=%d total=%d "
-                "(cold-start visibility + per-turn narrowing)",
-                added, pruned, len(kept),
+                "hermes.nous_engine.synced_external_tools added=%d pruned=%d bridged=%d "
+                "deferred=%d total=%d (cold-start visibility + per-turn narrowing)",
+                added, pruned, bridged, deferred_count, len(kept),
             )
     except Exception as exc:  # noqa: BLE001 — never break the cycle over tool sync
         logger.warning("hermes.nous_engine.sync_external_tools_failed: %s", exc)

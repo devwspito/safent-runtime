@@ -37,6 +37,36 @@ _LEASE_SECONDS = int(os.environ.get("HERMES_LEASE_SECONDS", "60"))
 # Semantic tool retrieval: present only the top-K integration tools relevant to the
 # turn's intent (see _tools_source). Process-global index, lazily loaded.
 _TOOL_RETRIEVAL_TOPK = int(os.environ.get("HERMES_TOOL_RETRIEVAL_TOPK", "12"))
+
+
+def _stamp_visible_integration(integration: list) -> None:
+    """Rank this turn's integration tools by intent and stamp the top-K as VISIBLE.
+
+    Never narrows ``integration`` itself: every connected tool must be registered
+    and gate-classified, or the model can neither see it nor reach it through
+    tool_search/tool_call ("not a deferrable tool"). Fail-soft: no message, no
+    embedder or a retrieval error → nothing stamped → everything visible.
+    """
+    from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+        get_current_message,
+        set_visible_external_names,
+    )
+    set_visible_external_names(None)
+    try:
+        _msg = get_current_message()
+        picked = _tool_index().retrieve(_msg, integration, k=_TOOL_RETRIEVAL_TOPK) if _msg else None
+        if picked is not None and len(picked) < len(integration):
+            logger.info(
+                "hermes.runtime.tools_source.retrieved %d/%d integration tools by intent",
+                len(picked), len(integration),
+            )
+            logger.debug(
+                "hermes.runtime.tools_source.retrieved names=%s",
+                [getattr(s, "name", "?") for s in picked],
+            )
+            set_visible_external_names(frozenset(getattr(s, "name", "") for s in picked))
+    except Exception as _ret_exc:  # noqa: BLE001
+        logger.debug("hermes.runtime.tool_retrieval_skipped: %s", _ret_exc)
 _TOOL_INDEX_SINGLETON = None
 
 
@@ -1694,24 +1724,7 @@ async def _run(*, systemd_notify: bool, bootstrap=None) -> None:
         # integration (composio + mcp) tools — the agent sees a handful of RELEVANT
         # tools directly. Fail-soft: no message / embedder unavailable → full set.
         integration = list(composio) + list(mcp_specs)
-        try:
-            from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
-                get_current_message,
-            )
-            _msg = get_current_message()
-            picked = _tool_index().retrieve(_msg, integration, k=_TOOL_RETRIEVAL_TOPK) if _msg else None
-            if picked is not None and len(picked) < len(integration):
-                logger.info(
-                    "hermes.runtime.tools_source.retrieved %d/%d integration tools by intent",
-                    len(picked), len(integration),
-                )
-                logger.debug(
-                    "hermes.runtime.tools_source.retrieved names=%s",
-                    [getattr(s, "name", "?") for s in picked],
-                )
-                integration = picked
-        except Exception as _ret_exc:  # noqa: BLE001
-            logger.debug("hermes.runtime.tool_retrieval_skipped: %s", _ret_exc)
+        _stamp_visible_integration(integration)
         # spec 014 inc. 3: capability_specs are static (built once, always
         # present).  Included BEFORE composio + mcp so they appear first in
         # the LLM schema. Their names are NOT in the Nous native catalog, so
