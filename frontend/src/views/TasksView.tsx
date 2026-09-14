@@ -103,7 +103,7 @@ function TaskActivity() {
     catch { if (alive.current) setChatError(true) }
     finally { openingRef.current = false; if (alive.current) setOpening(false) }
   }
-  return <>
+  return <div className={styles.body}>
     <div className={styles.toolbar}>
       <label className={styles.search}><Search size={15} aria-hidden /><span className={styles.srOnly}>Buscar tareas</span><input placeholder="Buscar tareas o remitente…" value={query} onChange={event => setQuery(event.target.value)} /></label>
       <Button variant="ghost" size="sm" disabled={loading} onClick={refresh} aria-label="Actualizar tareas"><RefreshCw size={15} aria-hidden /></Button>
@@ -140,5 +140,5 @@ function TaskActivity() {
       <fieldset disabled={approvals.error || approvals.isLoading || error} className={styles.inboxItems}>{pending.map(item => <ApprovalCard key={item.proposal_id} approval={item} onResolved={refresh} />)}</fieldset>
       {selected && <Button variant="ghost" size="sm" onClick={() => setSelectedId(null)}>Ver todas las aprobaciones</Button>}
     </section>
-  </>
+  </div>
 }
