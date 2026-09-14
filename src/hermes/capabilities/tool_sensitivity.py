@@ -87,6 +87,12 @@ _SAFENT_ADS_WRITE_TOOLS: frozenset[str] = frozenset({
     "propose_meta_image_upload",
     "propose_targeting_change",
     "propose_creative_publication",
+    "propose_resume",
+    "propose_bid_target",
+    "propose_negative_keywords",
+    "propose_creative_rotation",
+    "propose_delete",
+    "propose_native_write",
     "withdraw_proposal",
     "apply_defensive_action",
     # ToolClass.PROPOSAL fuera de `_WRITE_CATALOG` del companion: crean una
