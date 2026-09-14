@@ -20,6 +20,9 @@ mod domain;
 #[path = "../src/engine_adapter.rs"]
 mod engine_adapter;
 #[allow(dead_code)]
+#[path = "../src/image_prune.rs"]
+mod image_prune;
+#[allow(dead_code)]
 #[path = "../src/ports.rs"]
 mod ports;
 

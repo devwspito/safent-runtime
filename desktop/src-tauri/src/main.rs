@@ -37,6 +37,7 @@ mod diagnostics;
 mod domain;
 mod engine_adapter;
 mod folder_bridge;
+mod image_prune;
 mod ports;
 mod reconcile;
 mod selftest;

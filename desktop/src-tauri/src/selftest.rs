@@ -69,7 +69,9 @@ impl Notifier for NdjsonNotifier {
             }
             DomainEvent::RepairApplied { .. }
             | DomainEvent::NoProgressDetected { .. }
-            | DomainEvent::WindowNavigated => None,
+            | DomainEvent::WindowNavigated
+            | DomainEvent::HostDiskObserved { .. }
+            | DomainEvent::ImagesPruned { .. } => None,
         };
         if let Some(payload) = payload {
             print_ndjson(&payload);

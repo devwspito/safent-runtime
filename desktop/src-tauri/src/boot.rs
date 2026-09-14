@@ -197,6 +197,9 @@ impl BootService {
                         .try_into()
                         .unwrap_or(u64::MAX),
                 });
+                notifier.notify(&DomainEvent::HostDiskObserved {
+                    free_bytes: facts.free_disk_bytes.0,
+                });
             }
 
             let Some(action) = reconcile::reconcile(&facts, &self.desired)
@@ -557,9 +560,10 @@ pub(crate) struct ReconnectingPayload {
 }
 
 /// Emits `DomainEvent`s to the window. `RepairApplied`/`NoProgressDetected`/
-/// `WindowNavigated` are internal bookkeeping, not part of the UI's 6-kind
-/// `engine-event` contract, and are not forwarded — best-effort emit (a
-/// closed/gone window is not this loop's problem to recover from).
+/// `WindowNavigated`/`HostDiskObserved`/`ImagesPruned` are internal
+/// bookkeeping, not part of the UI's 6-kind `engine-event` contract, and are
+/// not forwarded — best-effort emit (a closed/gone window is not this
+/// loop's problem to recover from).
 struct TauriNotifier {
     app: AppHandle,
 }
@@ -667,7 +671,9 @@ impl TauriNotifier {
             }
             DomainEvent::RepairApplied { .. }
             | DomainEvent::NoProgressDetected { .. }
-            | DomainEvent::WindowNavigated => {}
+            | DomainEvent::WindowNavigated
+            | DomainEvent::HostDiskObserved { .. }
+            | DomainEvent::ImagesPruned { .. } => {}
         }
     }
 }
@@ -841,6 +847,20 @@ fn run_once(app: AppHandle, cancel: CancelSignal) {
         LoopOutcome::Ready { ticket, .. } => {
             app.state::<crate::ads_caps::AdsCapsState>()
                 .configure(config.clone());
+            // Cloned before `config` moves into the companion-request closure
+            // below. Runs off the calling thread and after the fact — never
+            // delays `navigate_to_ticket`, and a listing/removal failure here
+            // must never turn an already-successful boot into a failed one.
+            let prune_app = app.clone();
+            let prune_config = config.clone();
+            std::thread::spawn(move || {
+                let report = EmbeddedCliDriver::new(prune_config).prune_superseded_images();
+                if report.removed > 0 {
+                    TauriNotifier { app: prune_app }.notify(&DomainEvent::ImagesPruned {
+                        removed: report.removed,
+                    });
+                }
+            });
             let request_app = app.clone();
             let control = app
                 .state::<crate::bootstrap_control::BootstrapControl>()

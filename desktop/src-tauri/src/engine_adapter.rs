@@ -28,6 +28,7 @@ use crate::domain::{
     LocalStateFact, MachineFact, MachineName, MachineProvider, Port, ProgressUnit, RepairAction,
     SemVer, Stage,
 };
+use crate::image_prune;
 use crate::ports::{ApplyOutcome, CancelSignal, EngineDriver, EngineError, EngineProbe, Notifier};
 
 /// Everything the adapter needs to talk to ONE bundled CLI. Built once at
@@ -400,6 +401,142 @@ impl EmbeddedCliDriver {
         }
         Ok(ApplyOutcome::Progressed)
     }
+
+    /// The digests this run currently pins — the ONLY set `prune_superseded_
+    /// images` ever protects. `companion_image` is `None` for a caller that
+    /// never wants Ads at all (matches `apply_command`'s own `--no-companion`
+    /// handling), not "protect nothing" — its absence here means "there is
+    /// no companion image to keep", never "keep every companion image".
+    fn pinned_images(&self) -> Vec<ImageRef> {
+        std::iter::once(self.config.engine_image.clone())
+            .chain(self.config.companion_image.clone())
+            .collect()
+    }
+
+    /// `podman image ls --format json`, bounded the same way `stop()` bounds
+    /// its own direct podman invocation — this is housekeeping, not a
+    /// porcelain verb, so it bypasses `run_porcelain` entirely.
+    fn local_images(&self) -> Result<Vec<image_prune::LocalImage>, EngineError> {
+        let stdout = self.run_podman(&["image", "ls", "--format", "json"])?;
+        let wire: Vec<WireLocalImage> = serde_json::from_slice(&stdout).map_err(|e| {
+            EngineError::Io(format!(
+                "podman image ls --format json: salida inválida: {e}"
+            ))
+        })?;
+        Ok(wire
+            .into_iter()
+            .flat_map(WireLocalImage::into_local_images)
+            .collect())
+    }
+
+    fn remove_image(&self, image: &image_prune::LocalImage) -> Result<(), EngineError> {
+        let reference = format!("{}@{}", image.repository, image.digest);
+        // No `--force`: a container this adapter does not know about yet
+        // (its own `Containers` field already filters most, imperfectly)
+        // still gets podman's own refusal as a second, independent guard —
+        // never a build-your-own-force removal of something still running.
+        self.run_podman(&["rmi", &reference]).map(|_| ())
+    }
+
+    fn run_podman(&self, args: &[&str]) -> Result<Vec<u8>, EngineError> {
+        let mut cmd = Command::new(&self.config.podman_path);
+        cmd.args(args);
+        cmd.env("PATH", augmented_path());
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        new_process_group(&mut cmd);
+        let mut child = spawn_with_etxtbsy_retry(&mut cmd)
+            .map_err(|e| EngineError::Io(format!("no pude ejecutar podman: {e}")))?;
+        let stdout = child.stdout.take().map(|mut s| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = s.read_to_end(&mut buf);
+                buf
+            })
+        });
+        let stderr = child.stderr.take();
+        wait_bounded(&mut child, PRUNE_TIMEOUT, stderr)?;
+        Ok(stdout.and_then(|h| h.join().ok()).unwrap_or_default())
+    }
+
+    /// Removes every locally-cached Safent image this run does not need
+    /// (`image_prune::images_to_remove`'s pure selection), keeping at most
+    /// one rollback survivor per repository. Best-effort end to end: a
+    /// listing failure or an individual `rmi` failure never becomes an
+    /// `EngineError` — this must never fail a boot that has already
+    /// succeeded, or a retry already in flight (contract: this fix's own
+    /// requirement).
+    pub(crate) fn prune_superseded_images(&self) -> PruneReport {
+        let Ok(local) = self.local_images() else {
+            return PruneReport::default();
+        };
+        let pinned = self.pinned_images();
+        let our_repositories: Vec<&str> = pinned
+            .iter()
+            .map(|image| image.repository.as_str())
+            .collect();
+        let mut report = PruneReport::default();
+        for image in image_prune::images_to_remove(&local, &our_repositories, &pinned, 1) {
+            match self.remove_image(&image) {
+                Ok(()) => report.removed += 1,
+                Err(_) => report.failed += 1,
+            }
+        }
+        report
+    }
+}
+
+/// 60 s is generous for listing/removing a handful of local images — nowhere
+/// near the 20-minute `hard_timeout` a first-run image PULL is allowed
+/// (NFR-001); housekeeping that itself stalls is a bug to surface via
+/// `EngineError::Timeout`, not a reason to block the caller indefinitely.
+const PRUNE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How many images `prune_superseded_images` actually removed — `boot.rs`/
+/// `run_once` notify `DomainEvent::ImagesPruned` from this, never a bare
+/// count threaded through by hand.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PruneReport {
+    pub removed: u32,
+    pub failed: u32,
+}
+
+/// `podman image ls --format json`'s own shape — `RepoDigests` (never the
+/// single, version-dependent `Digest` field) and `Containers` are the two
+/// stable-across-versions fields this needs; everything else podman reports
+/// is irrelevant to pruning.
+#[derive(Deserialize)]
+struct WireLocalImage {
+    #[serde(default, rename = "RepoDigests")]
+    repo_digests: Vec<String>,
+    #[serde(rename = "Created")]
+    created: i64,
+    #[serde(default, rename = "Containers")]
+    containers: Option<i64>,
+}
+
+impl WireLocalImage {
+    /// One `LocalImage` per `RepoDigests` entry — our own images are always
+    /// pulled under exactly one reference, so this is normally a single
+    /// element; never assumes that, so a multi-tagged image is still
+    /// handled correctly instead of silently dropped.
+    fn into_local_images(self) -> Vec<image_prune::LocalImage> {
+        let created_unix = self.created.max(0) as u64;
+        let in_use = self.containers.unwrap_or(0) > 0;
+        self.repo_digests
+            .into_iter()
+            .filter_map(|reference| {
+                let (repository, digest) = reference.split_once('@')?;
+                Some(image_prune::LocalImage {
+                    repository: repository.to_string(),
+                    digest: digest.to_string(),
+                    created_unix,
+                    in_use,
+                })
+            })
+            .collect()
+    }
 }
 
 impl EngineDriver for EmbeddedCliDriver {
@@ -410,6 +547,23 @@ impl EngineDriver for EmbeddedCliDriver {
         cancel: &CancelSignal,
     ) -> Result<ApplyOutcome, EngineError> {
         let (verb, args) = cli_invocation_for(action)?;
+        let outcome = self.apply_command(verb, args.clone(), notifier, cancel);
+        if !is_storage_full_pull(action, &outcome) {
+            return outcome;
+        }
+        // Real incident, 16-sep: the SAME pull fails again with the SAME
+        // code without this — accumulated superseded images are the actual
+        // cause, and nothing else on this host changes between attempts.
+        // One retry only: if freeing space did not help, a real registry
+        // outage (or a disk still full after pruning) surfaces honestly
+        // through the ordinary backoff/no-progress path `boot.rs` already
+        // owns, not a second silent retry here.
+        let report = self.prune_superseded_images();
+        if report.removed > 0 {
+            notifier.notify(&DomainEvent::ImagesPruned {
+                removed: report.removed,
+            });
+        }
         self.apply_command(verb, args, notifier, cancel)
     }
 
@@ -567,6 +721,24 @@ fn cli_invocation_for(action: &RepairAction) -> Result<(&'static str, Vec<String
     }
 }
 
+/// `EngineDriver::apply`'s own one-shot retry gate: only a pull action, and
+/// only when the classifier above already turned its failure into
+/// `FailureCode::StorageFull`. Never re-fires on a `StorageFull` `apply()`
+/// itself does not own (there is none today, but a future `Reported` cause
+/// arriving through a different action must not be silently retried here).
+fn is_storage_full_pull(
+    action: &RepairAction,
+    outcome: &Result<ApplyOutcome, EngineError>,
+) -> bool {
+    matches!(
+        action,
+        RepairAction::PullEngine(_) | RepairAction::PullCompanion(_)
+    ) && matches!(
+        outcome,
+        Err(EngineError::Reported(cause)) if cause.code == FailureCode::StorageFull
+    )
+}
+
 /// A `failed` event's own `code` can be a poor diagnosis of what actually
 /// happened: the CLI maps ANY `podman pull` failure to `registry_unreachable`
 /// (`cmd_ensure_images`), regardless of WHY podman actually failed — verified
@@ -661,6 +833,24 @@ fn reclassify_from_stderr(
             retryable: false,
         };
     }
+    // Real incident (owner's Mac, 16-sep): `cmd_ensure_images` reported this
+    // pull failure as the generic `registry_unreachable` (the CLI maps ANY
+    // `podman pull` failure that way) — the owner read "no pude conectarme
+    // para descargar" for a purely local storage problem. Podman's own
+    // "unpacking failed ... no space left on device" is unambiguous:
+    // never a network symptom, regardless of which reported code carried
+    // it. Retryable — `apply()` prunes superseded images and retries the
+    // SAME pull once automatically on this code (a real registry outage
+    // would still fail that retry and surface honestly).
+    if lower.contains("no space left on device") {
+        return FailureCause {
+            code: FailureCode::StorageFull,
+            message: "Sin espacio en el disco del motor: la app va a liberar imágenes \
+                      antiguas y reintentar."
+                .to_string(),
+            retryable: true,
+        };
+    }
     cause
 }
 
@@ -720,6 +910,66 @@ mod reclassify_from_stderr_tests {
         assert_eq!(reclassified.code, FailureCode::ForeignEngineHelper);
         assert!(!reclassified.retryable);
         assert_eq!(reclassified.message, stderr);
+    }
+
+    #[test]
+    fn a_pull_reported_as_registry_unreachable_with_no_disk_space_is_reclassified_to_storage_full()
+    {
+        // The real incident text, verbatim (owner's Mac, 16-sep, `pull_engine`).
+        let generic_registry_unreachable = FailureCause {
+            code: FailureCode::RegistryUnreachable,
+            message: "no pude conectarme para descargar".to_string(),
+            retryable: true,
+        };
+        let stderr = "Error: writing blob: adding layer with blob \"sha256:abc\": \
+                      processing tar file(potentially insufficient UIDs or GIDs available \
+                      in user namespace (requested 0:0 for /usr): unpacking failed: \
+                      no space left on device";
+        let reclassified = reclassify_from_stderr(
+            generic_registry_unreachable,
+            stderr,
+            Some(Stage::PullEngine),
+        );
+        assert_eq!(reclassified.code, FailureCode::StorageFull);
+        assert!(reclassified.retryable);
+        assert_eq!(
+            reclassified.message,
+            "Sin espacio en el disco del motor: la app va a liberar imágenes \
+             antiguas y reintentar."
+        );
+    }
+
+    #[test]
+    fn a_raw_process_exit_with_no_disk_space_is_also_reclassified_to_storage_full() {
+        // The other real origin (mirrors the seccomp/foreign-helper precedent
+        // above): `apply_command`'s generic `daemon_unhealthy` fallback for a
+        // non-zero exit with no structured `failed` event.
+        let generic_daemon_unhealthy = FailureCause {
+            code: FailureCode::DaemonUnhealthy,
+            message: "process exited non-zero".to_string(),
+            retryable: true,
+        };
+        let stderr = "Error: unpacking failed: no space left on device";
+        let reclassified =
+            reclassify_from_stderr(generic_daemon_unhealthy, stderr, Some(Stage::PullCompanion));
+        assert_eq!(reclassified.code, FailureCode::StorageFull);
+        assert!(reclassified.retryable);
+    }
+
+    #[test]
+    fn a_genuine_registry_unreachable_with_no_disk_mention_is_left_alone() {
+        let cause = FailureCause {
+            code: FailureCode::RegistryUnreachable,
+            message: "no pude conectarme para descargar".to_string(),
+            retryable: true,
+        };
+        let reclassified = reclassify_from_stderr(
+            cause.clone(),
+            "Error: initializing source docker://ghcr.io/devwspito/safent: \
+             dial tcp: lookup ghcr.io: no such host",
+            Some(Stage::PullEngine),
+        );
+        assert_eq!(reclassified, cause);
     }
 
     #[test]

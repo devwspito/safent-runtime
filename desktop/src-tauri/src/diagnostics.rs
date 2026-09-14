@@ -42,6 +42,9 @@ pub(crate) enum SafeEvent {
     Reconnecting {
         reason: &'static str,
     },
+    HostDisk {
+        free_bytes: u64,
+    },
 }
 
 impl SafeEvent {
@@ -76,7 +79,12 @@ impl SafeEvent {
             DomainEvent::Reconnecting { reason } => Self::Reconnecting {
                 reason: reason.wire_name(),
             },
-            DomainEvent::RepairApplied { .. } | DomainEvent::WindowNavigated => return None,
+            DomainEvent::HostDiskObserved { free_bytes } => Self::HostDisk {
+                free_bytes: *free_bytes,
+            },
+            DomainEvent::RepairApplied { .. }
+            | DomainEvent::WindowNavigated
+            | DomainEvent::ImagesPruned { .. } => return None,
         })
     }
 }
@@ -90,6 +98,12 @@ struct History {
     last_stage: Option<&'static str>,
     point_of_no_return: bool,
     attempt_id: u64,
+    /// The podman machine's own free space, from the most recent
+    /// `HostDiskObserved` event (`boot.rs`, once per attempt right after
+    /// preflight) — kept outside the bounded ring buffer, like `last_stage`,
+    /// so an old attempt's events being evicted never loses the CURRENT
+    /// figure the next export should show.
+    free_disk_bytes: Option<u64>,
 }
 
 /// Minimal replay, shared by the live channel and getter. Free-text event
@@ -127,6 +141,9 @@ impl DiagnosticsState {
                 history.dropped_events += 1;
             }
             history.events.push_back(safe.clone());
+            if let SafeEvent::HostDisk { free_bytes } = &safe {
+                history.free_disk_bytes = Some(*free_bytes);
+            }
             if matches!(event, DomainEvent::NoProgressDetected { .. }) {
                 return None;
             }
@@ -163,16 +180,24 @@ impl DiagnosticsState {
             app_version: &'static str,
             os: &'static str,
             arch: &'static str,
+            /// The podman machine's own free space at the last preflight
+            /// (`HostFacts.free_disk_bytes`, `boot.rs`'s `HostDiskObserved`)
+            /// — `None` only when no attempt has reached preflight yet.
+            /// schema_version 2 (16-sep, real incident: a support report had
+            /// no way to confirm "no space left on device" without asking
+            /// the owner to run podman commands themselves).
+            free_disk_bytes: Option<u64>,
             dropped_events: u64,
             events: &'a VecDeque<SafeEvent>,
         }
         let history = self.history.lock().map_err(|_| "history_unavailable")?;
         serde_json::to_vec_pretty(&Report {
-            schema_version: 1,
+            schema_version: 2,
             report_kind: "startup_only",
             app_version: env!("CARGO_PKG_VERSION"),
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
+            free_disk_bytes: history.free_disk_bytes,
             dropped_events: history.dropped_events,
             events: &history.events,
         })
@@ -319,6 +344,35 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&state.snapshot().unwrap()).unwrap();
         assert_eq!(value["events"].as_array().unwrap().len(), MAX_EVENTS);
         assert_eq!(value["dropped_events"], 12);
+    }
+
+    #[test]
+    fn free_disk_bytes_is_absent_until_observed_then_survives_ring_buffer_eviction() {
+        let state = DiagnosticsState::default();
+        let before: serde_json::Value = serde_json::from_slice(&state.snapshot().unwrap()).unwrap();
+        assert!(before["free_disk_bytes"].is_null());
+
+        state.record(&DomainEvent::HostDiskObserved {
+            free_bytes: 4_000_000_000,
+        });
+        for _ in 0..MAX_EVENTS {
+            state.record(&DomainEvent::StageCompleted {
+                stage: Stage::Health,
+                duration_ms: 1,
+            });
+        }
+        let after: serde_json::Value = serde_json::from_slice(&state.snapshot().unwrap()).unwrap();
+        assert_eq!(after["free_disk_bytes"], 4_000_000_000_u64);
+    }
+
+    #[test]
+    fn images_pruned_is_internal_bookkeeping_never_exported() {
+        let state = DiagnosticsState::default();
+        assert!(state
+            .record(&DomainEvent::ImagesPruned { removed: 3 })
+            .is_none());
+        let value: serde_json::Value = serde_json::from_slice(&state.snapshot().unwrap()).unwrap();
+        assert!(value["events"].as_array().unwrap().is_empty());
     }
 
     #[test]

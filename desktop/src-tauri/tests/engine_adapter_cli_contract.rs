@@ -11,6 +11,9 @@ mod domain;
 #[allow(dead_code)]
 #[path = "../src/engine_adapter.rs"]
 mod engine_adapter;
+#[allow(dead_code)]
+#[path = "../src/image_prune.rs"]
+mod image_prune;
 // This binary only exercises the REAL adapter — `ports::fakes` (ScriptedDriver,
 // FakeClock, ScriptedProbe) exist for reconcile/boot tests, not this file.
 #[allow(dead_code)]
@@ -322,6 +325,132 @@ exit 1
         }
         other => panic!("expected Reported, got {other:?}"),
     }
+}
+
+/// The real incident end to end (owner's Mac, 16-sep): a pull reported as
+/// `registry_unreachable` with "no space left on device" in stderr is
+/// reclassified to `StorageFull`, `apply()` prunes the superseded image via
+/// the (fake, per this file's own convention) `podman_path`, and retries the
+/// SAME pull exactly once — which this script scripts to succeed on its
+/// second invocation, via a marker file standing in for "the CLI observed
+/// the disk is no longer full".
+#[test]
+fn apply_prunes_and_retries_once_when_a_pull_reports_storage_full_then_succeeds() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let marker = std::env::temp_dir().join(format!("safent-storage-full-marker-{nanos}"));
+    let rmi_log = std::env::temp_dir().join(format!("safent-storage-full-rmilog-{nanos}"));
+
+    // Two superseded images on purpose: `prune_superseded_images` keeps ONE
+    // rollback survivor per repository (`keep_rollback = 1`) — a single
+    // superseded image would be that very survivor and nothing would ever
+    // reach `rmi`, proving nothing about the retry path this test targets.
+    let podman = fake_cli(&format!(
+        r#"
+if [ "$1" = "image" ] && [ "$2" = "ls" ]; then
+  echo '[{{"RepoDigests":["ghcr.io/devwspito/safent@sha256:ancient"],"Created":1,"Containers":0}},{{"RepoDigests":["ghcr.io/devwspito/safent@sha256:rollback"],"Created":2,"Containers":0}}]'
+  exit 0
+fi
+if [ "$1" = "rmi" ]; then
+  echo "$2" >> "{rmi_log}"
+  exit 0
+fi
+exit 0
+"#,
+        rmi_log = rmi_log.display(),
+    ));
+    let safent = fake_cli(&format!(
+        r#"
+if [ "$1" = "ensure-images" ]; then
+  if [ -f "{marker}" ]; then
+    echo '{{"t":"stage","id":"pull_engine","label":"Descargando Safent"}}'
+    echo '{{"t":"done","id":"pull_engine","ms":5}}'
+    exit 0
+  fi
+  : > "{marker}"
+  echo '{{"t":"stage","id":"pull_engine","label":"Descargando Safent"}}'
+  echo '{{"t":"failed","id":"pull_engine","code":"registry_unreachable","detail":"no pude conectarme","retryable":true}}'
+  echo 'Error: unpacking failed: no space left on device' >&2
+  exit 12
+fi
+exit 1
+"#,
+        marker = marker.display(),
+    ));
+
+    let mut cfg = config(safent);
+    cfg.podman_path = podman;
+    let notifier = RecordingNotifier::new();
+    let image = ImageRef::new("ghcr.io/devwspito/safent", "sha256:engine-good").unwrap();
+    let outcome = EmbeddedCliDriver::new(cfg).apply(
+        &RepairAction::PullEngine(image),
+        &notifier,
+        &ports::CancelSignal::new(),
+    );
+
+    assert!(
+        matches!(outcome, Ok(ApplyOutcome::Progressed)),
+        "expected the retried pull to succeed, got {outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&rmi_log).unwrap().trim(),
+        "ghcr.io/devwspito/safent@sha256:ancient",
+        "only the OLDER superseded image is removed — the newer one survives as rollback"
+    );
+    assert!(notifier
+        .events()
+        .iter()
+        .any(|e| matches!(e, DomainEvent::ImagesPruned { removed: 1 })));
+
+    let _ = std::fs::remove_file(&marker);
+    let _ = std::fs::remove_file(&rmi_log);
+}
+
+/// A failure NOT classified as `StorageFull` must never trigger the prune
+/// retry — the CLI is invoked exactly once, and the original failure
+/// surfaces unchanged.
+#[test]
+fn apply_never_retries_a_pull_failure_that_is_not_storage_full() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let call_log = std::env::temp_dir().join(format!("safent-no-retry-calllog-{nanos}"));
+
+    let safent = fake_cli(&format!(
+        r#"
+if [ "$1" = "ensure-images" ]; then
+  echo x >> "{call_log}"
+  echo '{{"t":"failed","id":"pull_engine","code":"registry_unreachable","detail":"no hay red","retryable":true}}'
+  exit 12
+fi
+exit 1
+"#,
+        call_log = call_log.display(),
+    ));
+
+    let notifier = RecordingNotifier::new();
+    let image = ImageRef::new("ghcr.io/devwspito/safent", "sha256:engine-good").unwrap();
+    let err = EmbeddedCliDriver::new(config(safent))
+        .apply(
+            &RepairAction::PullEngine(image),
+            &notifier,
+            &ports::CancelSignal::new(),
+        )
+        .unwrap_err();
+
+    match err {
+        EngineError::Reported(cause) => assert_eq!(cause.code, FailureCode::RegistryUnreachable),
+        other => panic!("expected Reported(RegistryUnreachable), got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(&call_log).unwrap().lines().count(),
+        1,
+        "a genuine registry failure must not trigger the prune-and-retry path"
+    );
+    let _ = std::fs::remove_file(&call_log);
 }
 
 #[test]

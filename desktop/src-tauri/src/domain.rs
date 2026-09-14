@@ -384,6 +384,18 @@ pub enum FailureCode {
     /// says exactly what is wrong instead of leaving it as an
     /// undifferentiated start failure.
     ForeignEngineHelper,
+    /// NOT part of the CLI's vocabulary — synthesized by `engine_adapter.rs`
+    /// when a pull's own stderr shows the bundled podman machine ran out of
+    /// disk in its container storage. Real incident (owner's Mac, 16-sep):
+    /// `cmd_ensure_images` reported this as the generic `registry_unreachable`
+    /// (the CLI maps ANY `podman pull` failure that way) — the owner read
+    /// "no pude conectarme para descargar" for a purely local storage
+    /// problem, because 8 superseded engine images and 6 superseded
+    /// companion images had accumulated with nothing ever pruning them.
+    /// Retryable: `engine_adapter.rs` prunes superseded images and retries
+    /// the SAME pull once automatically on this code — a real network
+    /// outage would still fail the retry and surface honestly.
+    StorageFull,
 }
 
 impl FailureCode {
@@ -421,6 +433,7 @@ impl FailureCode {
             FailureCode::EngineDigestMissing => "engine_digest_missing",
             FailureCode::SeccompProfileMissing => "seccomp_profile_missing",
             FailureCode::ForeignEngineHelper => "foreign_engine_helper",
+            FailureCode::StorageFull => "storage_full",
         }
     }
 }
@@ -764,6 +777,23 @@ pub enum DomainEvent {
     /// another stage.
     Reconnecting {
         reason: ReconnectReason,
+    },
+    /// `boot.rs` fires this exactly once per attempt, right after preflight
+    /// passes — reuses the SAME `HostFacts.free_disk_bytes` the preflight
+    /// gate itself already trusts (`reconcile::preflight_violation`), never
+    /// a second, independent measurement. `diagnostics.rs` surfaces it in
+    /// the exported report (real incident, 16-sep: the owner's only clue
+    /// was a misleading `registry_unreachable` — the actual free space
+    /// would have pointed straight at the disk).
+    HostDiskObserved {
+        free_bytes: u64,
+    },
+    /// `engine_adapter.rs` fires this after a successful `prune_superseded_
+    /// images` removes at least one image — internal housekeeping
+    /// telemetry, not part of the UI's `engine-event` contract (like
+    /// `RepairApplied`), counts only: never a repository name or digest.
+    ImagesPruned {
+        removed: u32,
     },
 }
 
