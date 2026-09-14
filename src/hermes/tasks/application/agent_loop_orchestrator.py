@@ -411,6 +411,13 @@ class AgentLoopOrchestrator:
                 await self._safe_close_stream(effective_sink, item, "completed")
                 await self._do_mark_completed(item, None)
                 return
+            # Ejecución programada o autónoma que ya actuó (herramientas en
+            # línea) o respondió: es un ciclo terminado, no «sin acciones».
+            # Sin esto cada revisión programada acababa FAILED, se reintentaba
+            # y su resultado no llegaba a ninguna notificación.
+            if not is_chat and (output.narrative.strip() or output.tool_steps):
+                await self._do_mark_completed(item, None, summary=output.narrative)
+                return
             logger.info(
                 "hermes.tasks.loop.no_actions",
                 extra={"task_id": str(item.id)},
@@ -776,7 +783,12 @@ class AgentLoopOrchestrator:
             get_cancel_registry().clear(item.id)
 
     async def _do_mark_completed(
-        self, item: WorkItem, audit_entry_id: Any, head_hash: str | None = None
+        self,
+        item: WorkItem,
+        audit_entry_id: Any,
+        head_hash: str | None = None,
+        *,
+        summary: str = "",
     ) -> None:
         await self._queue.mark_completed(
             item.id,
@@ -785,7 +797,7 @@ class AgentLoopOrchestrator:
             execution_head_hash=head_hash,
         )
         await self._emit_completed(item, audit_entry_id)
-        self._emit_notification_completed(item)
+        self._emit_notification_completed(item, summary)
 
     # ------------------------------------------------------------------
     # Private: audit emission (T026)
@@ -897,7 +909,7 @@ class AgentLoopOrchestrator:
     # Fail-soft: a notification failure NEVER breaks the task/chat path.
     # ------------------------------------------------------------------
 
-    def _emit_notification_completed(self, item: WorkItem) -> None:
+    def _emit_notification_completed(self, item: WorkItem, summary: str = "") -> None:
         """Emit a task-completed notification. Fail-soft."""
         if self._notification_store is None:
             return
@@ -909,7 +921,7 @@ class AgentLoopOrchestrator:
         else:
             label = _item_label(item)
             title = f"Tarea '{label}' completada"
-            body = "La tarea ha terminado con éxito."
+            body = _summary_line(summary) or "La tarea ha terminado con éxito."
         try:
             self._notification_store.add(
                 kind=kind,
@@ -1283,6 +1295,12 @@ def _record_chat_activity(task_id: str, agent_id: str) -> None:
         live_activity.record(task_id, agent_id, "chat_responding")
     except Exception:  # noqa: BLE001 — never interrupt the chat path
         pass
+
+
+def _summary_line(text: str, limit: int = 300) -> str:
+    """Primera línea legible del resultado de una tarea, para la notificación."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
 def _item_label(item: "WorkItem") -> str:
