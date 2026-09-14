@@ -83,3 +83,56 @@ Por verificar antes de la tarea que lo use: valores exactos de `approval_policy`
 - Hasta cerrar ADS-02, Safent Cloud sirve a una organización por despliegue: Friendog primero.
 - Los hooks gobiernan pero no aíslan; aislar el propio harness es posterior a la fase 2.
 - La app propia con Hermes y este camino comparten companion, políticas y auditoría; ninguna corrección se duplica.
+
+---
+
+## 5. Diseño de módulos y capas (Fase 1) — aporte de `software-architect`, 14-sep tarde
+
+Detalle en `data-model.md`, `research.md` y `contracts/{oauth,mcp-gateway,panel}.md`.
+
+### `lumen-control-enterprise` — pasarela MCP (`src/safent_control/mcp_gateway/`)
+- **Dominio**: `GatewayPolicy` (allow/panel/deny), `ToolClass`, `action_digest`, `Installation`
+  (en `domain/entities.py`, junto a las demás). Sin framework, sin SQL.
+- **Aplicación**: `ListTools`, `CallTool`, `PendingApproval`, `ResolveApproval`,
+  `InstallationService`. Puertos declarados aquí: `CompanionPort`, `PolicySnapshotPort`,
+  `ApprovalPort`, `CallLogPort`, `RateLimiterPort`.
+- **Infraestructura**: `HttpCompanionClient` (capa anticorrupción hacia `safent-ads`),
+  `PublishedPolicySnapshotAdapter`, `RemoteApprovalAdapter`, `SqlCallLog`, `TokenBucket`.
+- **Presentación**: `api/mcp_gateway.py` (transporte streamable HTTP), `api/oauth.py`,
+  `api/well_known.py`, rutas de instalaciones en `api/console.py`.
+
+### Transversales — dónde vive cada cosa
+Autorización: en el borde de aplicación (`CallTool` paso 2 y 5), nunca en infraestructura ·
+Auditoría: `AuditService` (encadenada) + `CallLogPort` (no encadenada) · Trazas: `structlog`
+con `installation_id` y `call_id`, jamás argumentos · Validación: el esquema del companion es
+la verdad, la pasarela no revalida · Errores: mapa único en `mcp_gateway/domain/errors.py` ·
+Transacciones: `repo.provisioning_transaction(org_id)`, ya existente.
+
+### Decisiones y contrapartidas
+1. **La instalación materializa una `instance` (`kind='harness'`, sin `instance_secret`)**.
+   Alternativas: principal aislado · reutilizar `service_account_token`. Se elige ésta porque
+   `ads_grant`, `remote_approval`, `delegation_message`, `published_policy` y `license` están
+   claveados por `instance_id`. Se cede: una instalación consume un asiento.
+2. **La superficie MCP del Cerebro se mueve a `/mcp/cerebro`**. Alternativas: reescritura en el
+   proxy inverso · host aparte. Se elige mover porque `Mount("/mcp")` no casa el path pelado y
+   la reescritura reproduce ese mismo fallo. Se cede: un valor de configuración del Cerebro y
+   republicar las plantillas que lo apunten.
+3. **Se conservan los nombres del companion**. Se cede: colisión si algún día hay un segundo
+   companion (se resolverá con prefijo por companion, no ahora).
+4. **Dos clases de auditoría** (`audit_log` encadenada para escrituras/denegaciones/pendientes,
+   `mcp_call_log` sin encadenar para todo lo demás). Se cede: dos tablas que unir en el panel.
+5. **La pasarela vive en Enterprise, no en el runtime** — el Principio 0 de la constitución
+   prohíbe alojar gobierno y firma en el shell-server. **No hay violación que registrar en
+   Complexity Tracking.**
+
+### Preguntas abiertas para el dueño
+1. **Asientos**: ¿una persona con Claude Code + Codex + la app propia consume tres asientos de
+   empresa? Por defecto, sí (la organización personal nace con `seat_limit=3`). Si la respuesta
+   es «no», hay que romper el 1:1 `license.assigned_instance_id`↔`instance`, y eso es caro.
+2. **Dominios**: se asume `mcp.safent.app` (recurso y emisor OAuth) y `app.safent.app` (panel).
+   ¿Confirmados?
+3. **Alcance de la Fase 1**: ¿una sola organización (Friendog) hasta cerrar ADS-02, con el
+   aislamiento apoyado en «un despliegue de companion por organización»?
+4. **Aprobación de panel por defecto**: para una organización personal sin aprobación remota
+   activada, la confirmación nativa del arnés es la única barrera. ¿Se acepta, o toda escritura
+   pasa además por el panel?
