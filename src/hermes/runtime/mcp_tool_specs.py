@@ -50,6 +50,51 @@ def _mcp_risk_to_tool_risk(auto_executable: bool) -> ToolRisk:
     return ToolRisk.READ_ONLY if auto_executable else ToolRisk.WRITE_PROPOSAL
 
 
+_REF_DEPTH_LIMIT = 12
+
+
+def inline_local_refs(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return ``schema`` with local ``$ref``s (``#/$defs/X``, ``#/definitions/X``)
+    expanded in place and the definition tables dropped.
+
+    Pydantic/FastMCP publish nested argument models through ``$defs`` + ``$ref``.
+    LLM function-calling surfaces do not reliably render those, so the model sees
+    a nested field as a bare ``object`` and guesses its keys — observed 2026-09-14
+    with safent-ads ``propose_campaign_draft`` (``changes`` is a strict, closed
+    model): nine "extra inputs are not permitted" errors and an invented
+    ``platform`` value. Recursive refs stop at a depth limit and stay as-is.
+    """
+    defs: dict[str, Any] = {}
+    for table in ("$defs", "definitions"):
+        found = schema.get(table)
+        if isinstance(found, dict):
+            defs.update(found)
+    if not defs:
+        return schema
+
+    def _resolve(node: Any, depth: int) -> Any:
+        if isinstance(node, list):
+            return [_resolve(item, depth) for item in node]
+        if not isinstance(node, dict):
+            return node
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/"):
+            name = ref.rsplit("/", 1)[-1]
+            target = defs.get(name)
+            if isinstance(target, dict) and depth < _REF_DEPTH_LIMIT:
+                merged = {k: v for k, v in node.items() if k != "$ref"}
+                merged.update(_resolve(target, depth + 1))
+                return merged
+            return node
+        return {
+            key: _resolve(value, depth)
+            for key, value in node.items()
+            if key not in ("$defs", "definitions")
+        }
+
+    return _resolve(schema, 0)
+
+
 async def build_mcp_tool_specs(
     server_manager: "McpServerManager",
     *,
@@ -146,7 +191,7 @@ def _mcp_tool_to_spec(
     GovernedAIAgent._dispatch_external_write → broker.dispatch.
     """
     risk = _mcp_risk_to_tool_risk(auto_executable)
-    schema = input_schema or {"type": "object", "properties": {}}
+    schema = inline_local_refs(input_schema or {"type": "object", "properties": {}})
 
     handler = None
     if risk == ToolRisk.READ_ONLY:

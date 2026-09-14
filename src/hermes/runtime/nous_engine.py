@@ -107,9 +107,11 @@ from hermes.runtime.conversation_task_registry import (
 
 # Circuit breaker for broker-routed gated tools (install_mcp/skill_manage/...): after
 # this many failures of the SAME tool in one cycle, refuse to re-propose it (each
-# retry would otherwise mint a fresh HITL card). Stops the "retry-spam" and lets the
-# turn end so the chat message finalizes instead of streaming forever.
-_MAX_WRITE_TOOL_FAILURES = 5
+# retry would otherwise mint a fresh HITL card). ONE: every retry costs the owner a
+# fresh approval, and the observed loop (2026-09-14: skill_manage approved five times
+# in a row, each call malformed and failing) is exactly what the breaker must stop —
+# the model gets one owner-approved attempt per turn, then must report and stop.
+_MAX_WRITE_TOOL_FAILURES = 1
 
 
 def _write_result_is_failure(result: str) -> bool:
@@ -117,6 +119,10 @@ def _write_result_is_failure(result: str) -> bool:
     if not result:
         return False
     low = result[:600].lower()
+    # Waiting for the owner is not a failure: the proposal is parked, not rejected.
+    # Counting it would trip the one-strike breaker on the very first approval card.
+    if "pendiente de aprobación" in low or "pending_approval" in low:
+        return False
     return (
         '"error"' in low
         or '"success": false' in low
@@ -130,9 +136,11 @@ def _write_circuit_broken_msg(tool_name: str, count: int) -> str:
     return json.dumps(
         {
             "error": (
-                f"BLOQUEADO: '{tool_name}' ya falló {count} veces en este turno. "
-                "NO lo reintentes (ni con los mismos ni con otros argumentos): "
-                "explícale al usuario con honestidad qué falla y qué necesitas, o propón otra vía."
+                f"BLOQUEADO: '{tool_name}' ya falló {count} vez/veces en este turno tras "
+                "la aprobación del dueño. NO lo reintentes (ni con los mismos ni con otros "
+                "argumentos) y NO busques rodeos (crear habilidades, instalar conectores): "
+                "explícale al usuario con honestidad qué falló y qué necesitas, y sigue con "
+                "las herramientas ya conectadas."
             )
         },
         ensure_ascii=False,
