@@ -1,6 +1,6 @@
 # 032 — Safent para Claude Code y Codex
 
-Fecha: 14 de septiembre de 2026. Decisión del dueño: «la versión instalable que de verdad funcione perfecto en Claude Code o Codex» es la prioridad. La app propia con Hermes se mantiene y se pule aparte; no se toca en esta especificación.
+Fecha: 14 de septiembre de 2026 (v2, tarde: el vínculo con el panel web y con Enterprise se hace en la instalación, por OAuth; Anuncios alojado en Safent Cloud). Decisión del dueño: «la versión instalable que de verdad funcione perfecto en Claude Code o Codex» es la prioridad. La app propia con Hermes se mantiene y se pule aparte; no se toca en esta especificación.
 
 ## Qué es
 
@@ -18,14 +18,14 @@ Community es el puesto de una persona. Enterprise sigue siendo la web en la nube
 
 ### P1 — Instalar y operar Anuncios desde Claude Code (el primer recorrido)
 
-1. En Claude Code, `/plugin marketplace add devwspito/safent-plugins` y `/plugin install safent@safent-plugins`. En Codex, `codex mcp add safent -- safent mcp`.
-2. Al primer uso, Safent prepara su runtime en segundo plano (podman propio, imágenes del motor y del companion fijadas por digest, máquina virtual en macOS) y avisa cuando está listo. Nada que instalar a mano.
-3. El usuario escribe «conecta mi cuenta de Google Ads»; la herramienta devuelve el enlace de consentimiento; tras el OAuth, las cuentas aparecen en el chat.
+1. En Claude Code, `/plugin install safent@safent-plugins` (o `claude mcp add --transport http safent https://mcp.safent.app/mcp`). En Codex, `safent codex install` (o `[mcp_servers.safent]` con `auth = "oauth"`).
+2. `claude mcp login safent` / `codex mcp login safent` abre el navegador contra Safent Cloud; la persona entra con su cuenta y **la instalación queda vinculada** con un identificador único: aparece en el panel web como «Claude Code en el MacBook de Luis». Si la invitó una empresa, queda ligada a su puesto con las cuentas y políticas de la organización. Nada que instalar en la máquina: Anuncios corre en Safent Cloud.
+3. El usuario escribe «conecta mi cuenta de Google Ads»; la herramienta devuelve el enlace de consentimiento; tras el OAuth, las cuentas aparecen en el chat y en el panel web.
 4. «Guarda dos borradores de campaña para Friendog»: los borradores se guardan con `propose_campaign_draft` a la primera; el esquema completo es visible para el modelo.
 5. «Aprueba la propuesta 3 con 20 € al día»: la herramienta está marcada como acción con dinero; Claude Code muestra la tarjeta de confirmación de forma nativa; con la confirmación, el companion aplica la propuesta dentro de sus límites y freno.
-6. `/safent:panel` abre la ventana de Safent con el cuadro de mando de Anuncios.
+6. `/safent:panel` abre el panel web de Safent en el cuadro de mando de Anuncios; desde el panel (web o móvil) se aprueban las acciones que la política de la organización reserve al panel.
 
-**Aceptación P1**: un usuario nuevo, en un Mac limpio, completa 1→6 sin abrir un terminal aparte ni tocar ficheros de configuración, con Claude Code y con Codex. Cada acción con dinero deja rastro en la auditoría y respeta los límites del companion.
+**Aceptación P1**: un usuario nuevo, en un Mac limpio y sin runtime local, completa 1→6 sin abrir un terminal aparte ni tocar ficheros de configuración, con Claude Code y con Codex; su instalación aparece en el panel web con nombre y se puede revocar desde allí. Cada acción con dinero deja rastro en la auditoría y respeta los límites del companion.
 
 ### P2 — Gobierno de las herramientas nativas del harness
 
@@ -49,7 +49,9 @@ Community es el puesto de una persona. Enterprise sigue siendo la web en la nube
 
 ## Reglas
 
-- Un solo servidor MCP visible para el harness (`safent`), que agrega motor y companion y aplica políticas antes de reenviar. Nunca se exponen los servidores internos directamente.
+- Un solo servidor MCP visible para el harness (`safent`), remoto en Safent Cloud, que expone las herramientas de la organización y aplica políticas antes de reenviar. Los servidores internos nunca se exponen directamente.
+- El vínculo con el panel web y con Enterprise es el login OAuth del harness: cada login crea o reanuda una **instalación** con identificador único, persona, organización, equipo y harness; revocable desde el panel. Los códigos de emparejamiento quedan para el runtime local y los servidores sin navegador (`safent pair`).
+- El usuario conversa con Claude Code o Codex; Safent no se interpone en el chat. Safent recibe llamadas de herramientas y devuelve resultados o «pendiente de aprobación»; el panel resuelve lo pendiente por el relé.
 - Toda herramienta con efecto sobre dinero o publicación lleva `_meta["anthropic/requiresUserInteraction"]` (Claude Code) y `approval_mode = "approve"` (Codex): la confirmación es nativa y no se puede autoaprobar por reglas.
 - El freno de gasto, los límites por cuenta, la firma de propuestas y la reconciliación siguen en el companion; el harness no los toca.
 - Sin credenciales en texto claro en ficheros de configuración del harness: el lanzador entrega tokens de sesión cortos por variable de entorno o cabecera generada en el momento.
@@ -61,6 +63,7 @@ Community es el puesto de una persona. Enterprise sigue siendo la web en la nube
 - Sustituir Hermes en la app propia (se decide aparte, en su momento).
 - Windows.
 - Paneles dentro de las apps de escritorio de Claude Code y Codex (no existe punto de extensión documentado).
+- Un chat propio en el panel web (el chat es el del harness; la app con Hermes cubre el caso «todo en Safent»).
 
 ## Criterios de éxito
 
