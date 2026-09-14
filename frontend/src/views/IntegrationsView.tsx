@@ -8,9 +8,10 @@ import {
   getComposioStatus, listComposioConnected, listComposioApps,
   connectComposioApp, setComposioApiKey,
   getWebSearchStatus, setWebSearchKey,
+  getImageGenerationStatus, setImageGenerationKey, deleteImageGenerationKey,
   ApiError,
 } from '../api/client'
-import type { ComposioStatus, ComposioApp, ComposioConnectedAccount, WebSearchStatus } from '../api/types'
+import type { ComposioStatus, ComposioApp, ComposioConnectedAccount, WebSearchStatus, ImageGenerationStatus } from '../api/types'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
@@ -46,6 +47,12 @@ function composioReducer(_s: ComposioState, a: ComposioAction): ComposioState {
 type WsState =
   | { status: 'loading' }
   | { status: 'ready'; data: WebSearchStatus }
+  | { status: 'error'; message: string }
+
+// Image generation (FAL.ai) — same shape as web-search's state machine.
+type ImgState =
+  | { status: 'loading' }
+  | { status: 'ready'; data: ImageGenerationStatus }
   | { status: 'error'; message: string }
 
 function show(message: string, kind: 'ok' | 'warn' | 'error' | 'info' = 'ok') {
@@ -84,9 +91,11 @@ function IntegrationsCatalog() {
   const { locale } = useLocale()
   const [composioState, dispatch] = useReducer(composioReducer, { status: 'loading' })
   const [wsState, setWsState] = useState<WsState>({ status: 'loading' })
+  const [imgState, setImgState] = useState<ImgState>({ status: 'loading' })
   const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const composioRevision = useRef(0)
   const webRevision = useRef(0)
+  const imgRevision = useRef(0)
   const [refreshing, setRefreshing] = useState(false)
   const [query, setQuery] = useState('')
 
@@ -95,6 +104,7 @@ function IntegrationsCatalog() {
     return () => {
       composioRevision.current++
       webRevision.current++
+      imgRevision.current++
       if (reloadTimerRef.current !== null) clearTimeout(reloadTimerRef.current)
     }
   }, [])
@@ -166,9 +176,26 @@ function IntegrationsCatalog() {
     }
   }
 
+  async function loadImageGeneration() {
+    const revision = ++imgRevision.current
+    setImgState({ status: 'loading' })
+    try {
+      const st = await getImageGenerationStatus()
+      if (revision !== imgRevision.current) return
+      setImgState({ status: 'ready', data: st })
+    } catch (e) {
+      if (revision !== imgRevision.current) return
+      setImgState({
+        status: 'error',
+        message: e instanceof ApiError ? e.message : t('int.err.imagegen'),
+      })
+    }
+  }
+
   useEffect(() => {
     loadComposio()
     loadWebSearch()
+    loadImageGeneration()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const connectedSlugs = composioState.status === 'ready'
@@ -212,6 +239,38 @@ function IntegrationsCatalog() {
                 <WebSearchCard
                   status={wsState.data}
                   onSaved={() => { loadWebSearch(); show(t('int.brave.activated_toast'), 'ok') }}
+                  onToast={show}
+                />
+              )}
+            </section>
+
+          {/* ── Image generation (FAL.ai) ─────────────────────────────────── */}
+            <section className={styles.section} aria-label={t('int.imagegen.label')}>
+              <h2 className={styles.sectionLabel}>{t('int.imagegen.label')}</h2>
+
+              {imgState.status === 'loading' && (
+                <div
+                  className="skeleton skeleton--block"
+                  style={{ height: 56, borderRadius: 'var(--radius-md)' }}
+                  aria-busy="true"
+                  aria-label={t('int.imagegen.loading_aria')}
+                />
+              )}
+
+              {imgState.status === 'error' && (
+                  <div role="alert" className={styles.errorRow}>
+                    <p className={styles.errorText}>{imgState.message}</p>
+                    <Button variant="secondary" size="sm" onClick={loadImageGeneration}>
+                      {t('int.retry')}
+                    </Button>
+                  </div>
+              )}
+
+              {imgState.status === 'ready' && (
+                <ImageGenerationCard
+                  status={imgState.data}
+                  onSaved={() => { loadImageGeneration(); show(t('int.imagegen.saved_toast'), 'ok') }}
+                  onRemoved={() => { loadImageGeneration(); show(t('int.imagegen.removed_toast'), 'ok') }}
                   onToast={show}
                 />
               )}
@@ -614,6 +673,95 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
         >
           {saving ? t('int.brave.activating') : t('int.brave.activate_btn')}
         </Button>
+      </div>
+    </div>
+  )
+}
+
+// ── Image generation (FAL.ai) card ──────────────────────────────────────────────
+
+interface ImageGenerationCardProps {
+  status: ImageGenerationStatus
+  onSaved: () => void
+  onRemoved: () => void
+  onToast: (msg: string, kind: 'ok' | 'warn' | 'error') => void
+}
+
+function ImageGenerationCard({ status, onSaved, onRemoved, onToast }: ImageGenerationCardProps) {
+  const t = useT()
+  const [saving, setSaving] = useState(false)
+  const [removing, setRemoving] = useState(false)
+  const keyRef = useRef<HTMLInputElement>(null)
+  const busy = saving || removing
+
+  async function handleSave() {
+    if (busy) return
+    const key = keyRef.current?.value.trim() ?? ''
+    if (!key) { onToast(t('int.imagegen.err.enter_key'), 'warn'); return }
+    setSaving(true)
+    try {
+      await setImageGenerationKey(key)
+      if (keyRef.current) keyRef.current.value = ''
+      onSaved()
+    } catch (e) {
+      onToast(t('int.imagegen.err.save').replace('{reason}', e instanceof Error ? e.message : t('int.err.generic')), 'error')
+    } finally { setSaving(false) }
+  }
+
+  async function handleRemove() {
+    if (busy) return
+    setRemoving(true)
+    try {
+      await deleteImageGenerationKey()
+      onRemoved()
+    } catch (e) {
+      onToast(t('int.imagegen.err.remove').replace('{reason}', e instanceof Error ? e.message : t('int.err.generic')), 'error')
+    } finally { setRemoving(false) }
+  }
+
+  return (
+    <div className={styles.setupCard}>
+      <p className={styles.setupCardBody}>{t('int.imagegen.help')}</p>
+
+      <div
+        className={[styles.wsStatus, status.has_key ? styles.wsStatusActive : ''].filter(Boolean).join(' ')}
+        aria-live="polite"
+      >
+        {status.has_key && <Check size={12} aria-hidden="true" />}
+        <span>{t(status.has_key ? 'int.imagegen.status.active' : 'int.imagegen.status.inactive')}</span>
+      </div>
+
+      <div className={styles.formInline}>
+        <label className="sr-only" htmlFor="imagegen-key">{t('int.imagegen.key.label')}</label>
+        <input
+          id="imagegen-key"
+          ref={keyRef}
+          className={styles.keyInput}
+          type="password"
+          placeholder={t('int.imagegen.key.label')}
+          autoComplete="new-password"
+          onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) void handleSave() }}
+        />
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={handleSave}
+          disabled={busy}
+          loading={saving}
+        >
+          {saving ? t('int.imagegen.saving') : t('int.imagegen.save_btn')}
+        </Button>
+        {status.has_key && (
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={handleRemove}
+            disabled={busy}
+            loading={removing}
+          >
+            {removing ? t('int.imagegen.removing') : t('int.imagegen.remove_btn')}
+          </Button>
+        )}
       </div>
     </div>
   )

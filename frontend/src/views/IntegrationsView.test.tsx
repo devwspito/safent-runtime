@@ -3,7 +3,10 @@ import { createRoot, type Root } from 'react-dom/client'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
-const api = vi.hoisted(() => ({ getComposioStatus: vi.fn(), listComposioConnected: vi.fn(), listComposioApps: vi.fn(), getWebSearchStatus: vi.fn() }))
+const api = vi.hoisted(() => ({
+  getComposioStatus: vi.fn(), listComposioConnected: vi.fn(), listComposioApps: vi.fn(), getWebSearchStatus: vi.fn(),
+  getImageGenerationStatus: vi.fn(), setImageGenerationKey: vi.fn(), deleteImageGenerationKey: vi.fn(),
+}))
 const session = vi.hoisted(() => ({
   current: { kind: 'authenticated' } as { kind: 'authenticated' } | { kind: 'unauthenticated'; reason: 'no_token' },
   listeners: new Set<() => void>(),
@@ -26,6 +29,9 @@ beforeEach(() => {
   api.listComposioConnected.mockReset().mockResolvedValue([])
   api.listComposioApps.mockReset().mockResolvedValue([{ slug: 'drive', name: 'Drive' }])
   api.getWebSearchStatus.mockReset().mockResolvedValue({ brave: true })
+  api.getImageGenerationStatus.mockReset().mockResolvedValue({ provider: 'fal', has_key: false, model: null })
+  api.setImageGenerationKey.mockReset().mockResolvedValue({ has_key: true })
+  api.deleteImageGenerationKey.mockReset().mockResolvedValue({ has_key: false })
   session.current = { kind: 'authenticated' }
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
 })
@@ -34,6 +40,31 @@ async function render(entry = '/') { await act(async () => { root.render(<Memory
 
 function account(id: string, toolkit_slug: string, status = 'ACTIVE') {
   return { id, toolkit_slug, entity_id: 'test', status, auth_config_id: '' }
+}
+
+function clickButton(root: ParentNode, matcher: (text: string) => boolean) {
+  const button = Array.from(root.querySelectorAll('button')).find(b => matcher(b.textContent ?? ''))
+  if (!button) throw new Error('button not found')
+  act(() => { button.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+}
+
+function typeInto(input: HTMLInputElement, value: string) {
+  const nativeSetter = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype,
+    'value',
+  )!.set!
+  act(() => {
+    nativeSetter.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
+
+async function flush() {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+  })
 }
 
 it.each(['google', 'meta'])('opens only the selected %s guide without fetching the unrelated catalog', async provider => {
@@ -174,4 +205,60 @@ it('keeps the Ads entry navigable when connections cannot be verified', async ()
   const link = container.querySelector('a[aria-label="Gestionar Meta Ads en Anuncios"]')!
   expect(link.getAttribute('href')).toBe('/anuncios')
   expect(link.hasAttribute('aria-disabled')).toBe(false)
+})
+
+// ── Image generation (FAL.ai) card ──────────────────────────────────────────────
+
+it('shows "Sin configurar" and no remove button when no FAL.ai key is stored', async () => {
+  await render()
+  const section = container.querySelector('section[aria-label="Generación de imágenes"]')!
+  expect(section.textContent).toContain('Sin configurar')
+  expect(Array.from(section.querySelectorAll('button')).some(b => b.textContent?.includes('Quitar'))).toBe(false)
+})
+
+it('shows "Configurada" and a remove button when a FAL.ai key is stored', async () => {
+  api.getImageGenerationStatus.mockResolvedValue({ provider: 'fal', has_key: true, model: 'fal-ai/flux-2/klein/9b' })
+  await render()
+  const section = container.querySelector('section[aria-label="Generación de imágenes"]')!
+  expect(section.textContent).toContain('Configurada')
+  expect(Array.from(section.querySelectorAll('button')).some(b => b.textContent?.includes('Quitar'))).toBe(true)
+})
+
+it('saving a FAL.ai key calls the API and refreshes to the configured state', async () => {
+  await render()
+  const section = container.querySelector('section[aria-label="Generación de imágenes"]')!
+  const input = section.querySelector('input[type="password"]') as HTMLInputElement
+  typeInto(input, 'fal-secret-key')
+  api.getImageGenerationStatus.mockResolvedValue({ provider: 'fal', has_key: true, model: null })
+  clickButton(section, text => text.includes('Guardar'))
+  await flush()
+  expect(api.setImageGenerationKey).toHaveBeenCalledWith('fal-secret-key')
+  expect(container.querySelector('section[aria-label="Generación de imágenes"]')!.textContent).toContain('Configurada')
+})
+
+it('does not call the API when saving an empty FAL.ai key', async () => {
+  await render()
+  const section = container.querySelector('section[aria-label="Generación de imágenes"]')!
+  clickButton(section, text => text.includes('Guardar'))
+  await flush()
+  expect(api.setImageGenerationKey).not.toHaveBeenCalled()
+})
+
+it('removing the FAL.ai key calls the API and refreshes to the unconfigured state', async () => {
+  api.getImageGenerationStatus.mockResolvedValue({ provider: 'fal', has_key: true, model: null })
+  await render()
+  const section = container.querySelector('section[aria-label="Generación de imágenes"]')!
+  api.getImageGenerationStatus.mockResolvedValue({ provider: 'fal', has_key: false, model: null })
+  clickButton(section, text => text.includes('Quitar'))
+  await flush()
+  expect(api.deleteImageGenerationKey).toHaveBeenCalled()
+  expect(container.querySelector('section[aria-label="Generación de imágenes"]')!.textContent).toContain('Sin configurar')
+})
+
+it('labels the image generation card in English', async () => {
+  localStorage.setItem('safent_ui_locale', 'en')
+  await act(async () => { root.render(<I18nProvider><MemoryRouter><IntegrationsView /></MemoryRouter></I18nProvider>) })
+  await flush()
+  expect(container.textContent).toContain('Image generation')
+  expect(container.textContent).toContain('Not configured')
 })

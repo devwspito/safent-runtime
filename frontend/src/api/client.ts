@@ -20,6 +20,7 @@ import type {
   ComposioApp,
   ComposioConnectedAccount,
   WebSearchStatus,
+  ImageGenerationStatus,
   McpServer,
   McpRegistryEntry,
   McpAddResponse,
@@ -577,6 +578,25 @@ export function setWebSearchKey(provider: string, apiKey: string): Promise<{ ok?
   return request<{ ok?: boolean; error?: string }>('/web-search/key', {
     method: 'POST',
     body: JSON.stringify({ provider, api_key: apiKey }),
+  })
+}
+
+// ── Image generation (FAL.ai) ───────────────────────────────────────────────────
+
+export function getImageGenerationStatus(): Promise<ImageGenerationStatus> {
+  return request<ImageGenerationStatus>('/integrations/image-generation')
+}
+
+export function setImageGenerationKey(apiKey: string): Promise<{ has_key: boolean }> {
+  return request<{ has_key: boolean }>('/integrations/image-generation/key', {
+    method: 'POST',
+    body: JSON.stringify({ api_key: apiKey }),
+  })
+}
+
+export function deleteImageGenerationKey(): Promise<{ has_key: boolean }> {
+  return request<{ has_key: boolean }>('/integrations/image-generation/key', {
+    method: 'DELETE',
   })
 }
 

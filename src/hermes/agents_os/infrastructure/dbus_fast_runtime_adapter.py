@@ -1205,6 +1205,29 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(self._wiring.get_web_search_status())
 
     @method()
+    async def SetImageGenerationApiKey(self, api_key: "s") -> "s":  # noqa: N802,F821,UP037
+        """Configura FAL_KEY para generación de imágenes (FAL.ai). {ok,error}."""
+        sender_uid = await self._resolve_current_sender_uid()
+        return json.dumps(
+            await self._wiring.set_image_generation_api_key(
+                api_key=api_key, sender_uid=sender_uid
+            )
+        )
+
+    @method()
+    async def DeleteImageGenerationApiKey(self) -> "s":  # noqa: N802,F821,UP037
+        """Elimina FAL_KEY. {ok,error}."""
+        sender_uid = await self._resolve_current_sender_uid()
+        return json.dumps(
+            await self._wiring.delete_image_generation_api_key(sender_uid=sender_uid)
+        )
+
+    @method()
+    async def GetImageGenerationStatus(self) -> "s":  # noqa: N802,F821,UP037
+        """Proveedor + key configurada + modelo de generación de imágenes (read-only)."""
+        return json.dumps(self._wiring.get_image_generation_status())
+
+    @method()
     async def ListComposioApps(self) -> "s":  # noqa: N802,F821,UP037
         """Catálogo dinámico de toolkits desde Composio Cloud (read-only)."""
         return json.dumps(await self._wiring.list_composio_apps())

@@ -217,6 +217,12 @@ export interface WebSearchStatus {
   ddgs_fallback?: boolean
 }
 
+export interface ImageGenerationStatus {
+  provider: string
+  has_key: boolean
+  model: string | null
+}
+
 // ── MCP ───────────────────────────────────────────────────────────────────────
 
 export interface McpServer {

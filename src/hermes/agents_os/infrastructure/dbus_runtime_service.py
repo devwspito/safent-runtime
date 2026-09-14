@@ -2951,6 +2951,59 @@ class DbusRuntimeServiceWiring:
             "ddgs_fallback": True,
         }
 
+    # ------------------------------------------------------------------
+    # Image generation key (FAL.ai) — mismo patrón que web search: env var
+    # real en HERMES_HOME/.env + os.environ del proceso vivo. El motor Hermes
+    # (tools/image_generation_tool.py: check_image_generation_requirements)
+    # lee FAL_KEY con os.getenv, sin abstracción intermedia.
+    # ------------------------------------------------------------------
+    _IMAGE_GENERATION_PROVIDER = "fal"
+    _IMAGE_GENERATION_ENV_VAR = "FAL_KEY"
+
+    async def set_image_generation_api_key(self, *, api_key: str, sender_uid: int) -> dict:
+        """Configura FAL_KEY para generación de imágenes (FAL.ai).
+
+        Mismo patrón que set_web_search_api_key: escribe la env var en
+        HERMES_HOME/.env (persistente — la carga env_loader al arrancar) Y la
+        inyecta en os.environ del proceso vivo, para que
+        check_image_generation_requirements() la vea sin reiniciar.
+        """
+        self._authorize_and_resolve(sender_uid, operation="set_image_generation_api_key")
+        key = (api_key or "").strip()
+        if not key:
+            return {"ok": False, "error": "api_key vacía"}
+        try:
+            import os as _os  # noqa: PLC0415
+            _write_hermes_env(self._IMAGE_GENERATION_ENV_VAR, key)
+            _os.environ[self._IMAGE_GENERATION_ENV_VAR] = key
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.image_generation_key_write_failed: %s", exc)
+            return {"ok": False, "error": f"no se pudo escribir: {exc}"}
+        logger.info("hermes.dbus.image_generation_key_set")
+        return {"ok": True, "provider": self._IMAGE_GENERATION_PROVIDER, "configured": True}
+
+    async def delete_image_generation_api_key(self, *, sender_uid: int) -> dict:
+        """Elimina FAL_KEY (mismo mecanismo que set, con valor vacío = no configurada)."""
+        self._authorize_and_resolve(sender_uid, operation="delete_image_generation_api_key")
+        try:
+            import os as _os  # noqa: PLC0415
+            _write_hermes_env(self._IMAGE_GENERATION_ENV_VAR, "")
+            _os.environ.pop(self._IMAGE_GENERATION_ENV_VAR, None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.image_generation_key_delete_failed: %s", exc)
+            return {"ok": False, "error": f"no se pudo eliminar: {exc}"}
+        logger.info("hermes.dbus.image_generation_key_deleted")
+        return {"ok": True, "provider": self._IMAGE_GENERATION_PROVIDER, "configured": False}
+
+    def get_image_generation_status(self) -> dict:
+        """Proveedor + key configurada + modelo de generación de imágenes (read-only)."""
+        import os as _os  # noqa: PLC0415
+        return {
+            "provider": self._IMAGE_GENERATION_PROVIDER,
+            "has_key": bool(_os.getenv(self._IMAGE_GENERATION_ENV_VAR, "").strip()),
+            "model": _read_image_gen_model(),
+        }
+
     def list_native_providers(self) -> list[dict]:
         """Catálogo NATIVO de providers de Hermes (hermes_cli.auth.PROVIDER_REGISTRY).
 
@@ -6979,6 +7032,20 @@ def _recall_native_provider_model(provider_id: str) -> "tuple[str, str]":
     except Exception as exc:  # noqa: BLE001
         logger.debug("hermes.dbus.native_model_memory_read_failed: %s", exc)
         return "", ""
+
+
+def _read_image_gen_model() -> str | None:
+    """``image_gen.model`` de config.yaml, o None si no está fijado.
+
+    Hermes aplica su propio valor por defecto (FLUX) cuando la clave está
+    ausente — no lo replicamos aquí para no acoplarnos a su catálogo interno.
+    """
+    try:
+        from hermes_cli.config import load_config  # noqa: PLC0415
+        model = ((load_config() or {}).get("image_gen") or {}).get("model")
+        return str(model).strip() or None if model else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _read_native_active() -> dict:

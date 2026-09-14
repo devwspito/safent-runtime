@@ -1501,6 +1501,9 @@ def create_app() -> FastAPI:
     from hermes.shell_server.cowork.web_search_api import (  # noqa: PLC0415
         create_web_search_router,
     )
+    from hermes.shell_server.integrations.image_generation_api import (  # noqa: PLC0415
+        create_image_generation_router,
+    )
     from hermes.shell_server.cowork.notifications_api import (  # noqa: PLC0415
         create_notifications_router,
     )
@@ -1524,6 +1527,7 @@ def create_app() -> FastAPI:
     app.include_router(create_security_router())
     app.include_router(create_memory_router())
     app.include_router(create_web_search_router())
+    app.include_router(create_image_generation_router())
     # Notifications bell — /read-all must be registered BEFORE /{id}/read to
     # avoid FastAPI resolving POST /read-all as /{notification_id}/read with
     # notification_id="read-all".  The router factory registers them in this
