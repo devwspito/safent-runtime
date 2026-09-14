@@ -7,8 +7,7 @@ remain the only execution gates. Never insert upstream tool descriptions here.
 from collections.abc import Iterable
 
 from hermes.domain.tool_spec import ToolSpec
-
-_ADS_PREFIX = "mcp__safent-ads__"
+from hermes.runtime.companion_tools import ADS_COMPANION_TOOL_PREFIX as _ADS_PREFIX
 
 _GUIDANCE = """ANUNCIOS — acompaña al usuario de principio a fin cuando pida campañas.
 Usa las herramientas conectadas de safent-ads; si están detrás de tool_search,
@@ -76,7 +75,13 @@ humana. La confirmación de guardado exige una respuesta real con ID y revisión
 
 
 def append_ads_chat_guidance(prompt: str, specs: Iterable[ToolSpec]) -> str:
-    """Append only when this agent's filtered catalog exposes a real Ads tool."""
+    """Append only when the ads companion exposes a real Ads tool.
+
+    Callers MUST pass the FULL registered catalog (every connected tool, before
+    per-turn visibility narrowing) — the companion stays registered even on
+    turns where intent retrieval hides it from the model's direct tool list
+    (parity fix 2.5), so guidance must key off registration, not visibility.
+    """
     names = {
         spec.name
         for spec in specs

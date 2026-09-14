@@ -2376,10 +2376,9 @@ class NousReasoningEngine:
         external_specs = await self._resolve_external_specs(active_agent_id)
         external_catalog = _ExternalToolCatalog(external_specs)
 
-        if "chat_message" in (safe_context.trigger or ""):
-            from hermes.runtime.ads_chat_guidance import append_ads_chat_guidance  # noqa: PLC0415
-
-            system_prompt = append_ads_chat_guidance(system_prompt, external_specs)
+        system_prompt = _apply_ads_chat_guidance(
+            system_prompt, safe_context.trigger, external_specs
+        )
 
         agent = await asyncio.to_thread(
             self._build_governed_agent,
@@ -4200,6 +4199,24 @@ def _register_external_specs_in_nous(
 
     for spec in specs:
         _make_external_sequential_wrapper(agent, spec, nous_registry)
+
+
+def _apply_ads_chat_guidance(
+    system_prompt: str, trigger: str | None, external_specs: tuple[ToolSpec, ...]
+) -> str:
+    """Attach Ads chat guidance keyed on the FULL registered catalog (parity 2.5).
+
+    Must receive ``external_specs`` — every connected tool, BEFORE the per-turn
+    visibility narrowing (``_visible_external_specs``) — so the companion keeps
+    getting guidance every turn once installed, even when intent retrieval hides
+    it from the model's direct tool list this turn (it stays reachable via
+    tool_search/tool_call).
+    """
+    if "chat_message" not in (trigger or ""):
+        return system_prompt
+    from hermes.runtime.ads_chat_guidance import append_ads_chat_guidance  # noqa: PLC0415
+
+    return append_ads_chat_guidance(system_prompt, external_specs)
 
 
 def _visible_external_specs(specs: tuple[ToolSpec, ...]) -> tuple[ToolSpec, ...]:

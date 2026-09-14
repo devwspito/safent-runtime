@@ -1,7 +1,9 @@
-"""Ads guidance follows the filtered catalog and never widens tool authority."""
+"""Ads guidance follows the registered catalog and never widens tool authority."""
 
 from hermes.domain.tool_spec import ToolRisk, ToolSpec
 from hermes.runtime.ads_chat_guidance import append_ads_chat_guidance
+from hermes.runtime.conversation_task_registry import set_visible_external_names
+from hermes.runtime.nous_engine import _apply_ads_chat_guidance, _visible_external_specs
 
 
 def _spec(name: str, entity_type: str = "mcp") -> ToolSpec:
@@ -115,3 +117,37 @@ def test_optional_official_connector_is_not_a_requirement_for_connected_ads() ->
     assert "no lo repitas" in text
     assert "funciones\nvisibles, invócalas directo" in text
     assert "not a deferrable tool" in text
+
+
+class TestGuidanceKeysOffRegistrationNotThisTurnsVisibility:
+    """Parity fix 2.5 regression: `_apply_ads_chat_guidance` (nous_engine's call
+    site) must be fed the FULL registered catalog, never the per-turn visible
+    subset — otherwise a turn where top-K narrowing hides the ads companion
+    would silently drop the mandatory pre-campaign-review guidance.
+    """
+
+    def test_guidance_survives_a_turn_that_narrows_the_ads_tool_out_of_visibility(
+        self,
+    ) -> None:
+        full_catalog = (
+            _spec("mcp__safent-ads__list_businesses"),
+            _spec("mcp__gmail__fetch"),
+        )
+        set_visible_external_names(frozenset({"mcp__gmail__fetch"}))
+        try:
+            visible_this_turn = _visible_external_specs(full_catalog)
+            assert visible_this_turn == (full_catalog[1],), (
+                "sanity: this turn's narrowing hides the ads tool"
+            )
+
+            text = _apply_ads_chat_guidance("base", "chat_message", full_catalog)
+        finally:
+            set_visible_external_names(None)
+
+        assert text.startswith("base\n\nANUNCIOS")
+
+    def test_non_chat_trigger_never_attaches_guidance(self) -> None:
+        full_catalog = (_spec("mcp__safent-ads__list_businesses"),)
+
+        assert _apply_ads_chat_guidance("base", "autonomous_cycle", full_catalog) == "base"
+        assert _apply_ads_chat_guidance("base", None, full_catalog) == "base"

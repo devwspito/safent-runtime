@@ -38,25 +38,40 @@ def _mcp(tool: str) -> ToolSpec:
     )
 
 
+def _other(tool: str, server: str = "gmail") -> ToolSpec:
+    """A connected integration tool from a NON-companion server — still subject
+    to top-K narrowing, unlike the always-visible `safent-ads` companion."""
+    return ToolSpec(
+        name=f"mcp__{server}__{tool}",
+        description=f"{server} {tool}",
+        parameters_schema={"type": "object", "properties": {}},
+        risk=ToolRisk.READ_ONLY,
+        entity_type="mcp",
+        handler=MagicMock(),
+    )
+
+
 class _FakeIndex:
     def __init__(self, picked):
         self._picked = picked
+        self.seen_specs: list | None = None
 
     def retrieve(self, _msg, integration, k):  # noqa: ARG002
+        self.seen_specs = list(integration)
         return self._picked
 
 
 class TestRetrievalNarrowsVisibilityNotTheCatalog:
     def test_top_k_is_stamped_and_the_list_keeps_every_tool(self, monkeypatch) -> None:
-        specs = [_mcp("list_businesses"), _mcp("get_brand_kit"), _mcp("list_campaign_drafts")]
+        specs = [_other("a"), _other("b"), _other("c")]
         monkeypatch.setattr(runtime_main, "_tool_index", lambda: _FakeIndex(specs[:2]))
-        set_current_message("crea dos borradores de campaña")
+        set_current_message("lee mi correo")
 
         runtime_main._stamp_visible_integration(specs)
 
         assert len(specs) == 3, "the catalog handed to the engine must stay complete"
         assert get_visible_external_names() == frozenset(
-            {"mcp__safent-ads__list_businesses", "mcp__safent-ads__get_brand_kit"}
+            {"mcp__gmail__a", "mcp__gmail__b"}
         )
 
     def test_no_message_means_everything_visible(self, monkeypatch) -> None:
@@ -81,6 +96,40 @@ class TestRetrievalNarrowsVisibilityNotTheCatalog:
 
         assert get_visible_external_names() is None
         assert len(specs) == 1
+
+
+class TestCompanionToolsAlwaysVisible:
+    """Parity fix 2.1: the `safent-ads` companion (~100 tools) must never be
+    narrowed by top-K intent retrieval — Claude Code/Codex see it in full."""
+
+    def test_all_companion_tools_stay_visible_alongside_the_narrowed_top_k(
+        self, monkeypatch
+    ) -> None:
+        companion = [_mcp(f"tool_{i}") for i in range(100)]
+        others = [_other(f"tool_{i}") for i in range(30)]
+        fake_index = _FakeIndex(others[:12])
+        monkeypatch.setattr(runtime_main, "_tool_index", lambda: fake_index)
+        set_current_message("crea una campaña")
+
+        runtime_main._stamp_visible_integration(companion + others)
+
+        assert fake_index.seen_specs == others, (
+            "the companion's own tools must never reach the narrowing index"
+        )
+        visible = get_visible_external_names()
+        assert visible is not None
+        assert {s.name for s in companion} <= visible
+        assert visible == {s.name for s in companion} | {s.name for s in others[:12]}
+        assert len(visible) == 112
+
+    def test_companion_only_catalog_needs_no_narrowing(self, monkeypatch) -> None:
+        companion = [_mcp(f"tool_{i}") for i in range(20)]
+        monkeypatch.setattr(runtime_main, "_tool_index", lambda: _FakeIndex(None))
+        set_current_message("crea una campaña")
+
+        runtime_main._stamp_visible_integration(companion)
+
+        assert get_visible_external_names() is None
 
 
 class TestVisibleSubset:

@@ -46,7 +46,14 @@ def _stamp_visible_integration(integration: list) -> None:
     and gate-classified, or the model can neither see it nor reach it through
     tool_search/tool_call ("not a deferrable tool"). Fail-soft: no message, no
     embedder or a retrieval error → nothing stamped → everything visible.
+
+    Companion-server tools (``mcp__safent-ads__*``) are ALWAYS stamped visible,
+    exempt from the top-K narrowing: the companion is the owner's only path to
+    those ~100 tools, unlike Claude Code/Codex which see their full catalog
+    directly (parity fix 2.1). Narrowing keeps applying to every other
+    integration.
     """
+    from hermes.runtime.companion_tools import is_companion_tool  # noqa: PLC0415
     from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
         get_current_message,
         set_visible_external_names,
@@ -54,17 +61,27 @@ def _stamp_visible_integration(integration: list) -> None:
     set_visible_external_names(None)
     try:
         _msg = get_current_message()
-        picked = _tool_index().retrieve(_msg, integration, k=_TOOL_RETRIEVAL_TOPK) if _msg else None
-        if picked is not None and len(picked) < len(integration):
-            logger.info(
-                "hermes.runtime.tools_source.retrieved %d/%d integration tools by intent",
-                len(picked), len(integration),
-            )
-            logger.debug(
-                "hermes.runtime.tools_source.retrieved names=%s",
-                [getattr(s, "name", "?") for s in picked],
-            )
-            set_visible_external_names(frozenset(getattr(s, "name", "") for s in picked))
+        if not _msg:
+            return
+        pinned: list = []
+        narrowable: list = []
+        for spec in integration:
+            bucket = pinned if is_companion_tool(getattr(spec, "name", "")) else narrowable
+            bucket.append(spec)
+        picked = _tool_index().retrieve(_msg, narrowable, k=_TOOL_RETRIEVAL_TOPK)
+        if picked is None or len(picked) >= len(narrowable):
+            return
+        visible = pinned + list(picked)
+        logger.info(
+            "hermes.runtime.tools_source.retrieved %d/%d integration tools by intent "
+            "(+%d always-visible companion tools)",
+            len(picked), len(narrowable), len(pinned),
+        )
+        logger.debug(
+            "hermes.runtime.tools_source.retrieved names=%s",
+            [getattr(s, "name", "?") for s in visible],
+        )
+        set_visible_external_names(frozenset(getattr(s, "name", "") for s in visible))
     except Exception as _ret_exc:  # noqa: BLE001
         logger.debug("hermes.runtime.tool_retrieval_skipped: %s", _ret_exc)
 _TOOL_INDEX_SINGLETON = None
