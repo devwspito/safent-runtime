@@ -3,7 +3,7 @@ import { Dialog } from '@base-ui/react/dialog'
 import { sileo } from 'sileo'
 import { Calendar, ChevronLeft, ChevronRight, Trash2, X } from 'lucide-react'
 import { useT, useLocale } from '../lib/i18n'
-import { listConfiguredTasks, listRecentTasks, createTask, deleteTask, toggleTask, listAgents, ApiError } from '../api/client'
+import { listConfiguredTasks, listRecentTasks, createTask, updateTask, deleteTask, toggleTask, listAgents, ApiError } from '../api/client'
 import type { ConfiguredTask, RecentTask, Agent, CreateTaskPayload } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import { PageHeader } from '../components/ui/PageHeader'
@@ -52,15 +52,18 @@ function expandCronField(field: string | undefined, lo: number, hi: number): Set
   return out
 }
 
-interface CronInfo { days: Set<number>; time: string; daily: boolean; valid: boolean }
+interface CronInfo { days: Set<number>; time: string; hourly: boolean; daily: boolean; valid: boolean }
 
 function parseCron(cron: string | undefined): CronInfo {
-  if (!cron) return { days: new Set(), time: '', daily: true, valid: false }
+  if (!cron) return { days: new Set(), time: '', hourly: false, daily: true, valid: false }
   const parts = cron.trim().split(/\s+/)
-  if (parts.length < 5) return { days: new Set(), time: '', daily: true, valid: false }
+  if (parts.length < 5) return { days: new Set(), time: '', hourly: false, daily: true, valid: false }
   const [min, hour, , , dow] = parts
+  // Wildcard hour (e.g. "0 * * * *") means "every hour" — distinct from a
+  // fixed-hour daily/weekly schedule, and orthogonal to the day-of-week field.
+  const hourly = !/^\d+$/.test(hour)
   let time = ''
-  if (/^\d+$/.test(hour)) {
+  if (!hourly) {
     time = `${String(hour).padStart(2, '0')}:${/^\d+$/.test(min) ? String(min).padStart(2, '0') : '00'}`
   }
   const dowAny = dow === '*' || dow === '?'
@@ -71,27 +74,31 @@ function parseCron(cron: string | undefined): CronInfo {
       days.add((sun + 6) % 7)  // Mon=0..Sun=6
     })
   }
-  return { days, time, daily: dowAny, valid: true }
+  return { days, time, hourly, daily: !hourly && dowAny, valid: true }
 }
 
 function taskCron(task: ConfiguredTask): string {
   return task.recurrence ?? task.cron ?? task.schedule ?? task.trigger?.cron ?? ''
 }
 
-function buildCron({ mode, days, date, time }: {
-  mode: 'recurrent' | 'once'; days: number[]; date: string; time: string
+/** The four schedules the "Nueva tarea" form offers, in the order the select presents them. */
+type Frequency = 'hourly' | 'daily' | 'weekly' | 'once'
+
+function buildCron({ frequency, days, date, time }: {
+  frequency: Frequency; days: number[]; date: string; time: string
 }): string {
+  if (frequency === 'hourly') return '0 * * * *'
   const [hh, mm] = (time || '09:00').split(':')
   const min = parseInt(mm, 10) || 0
   const hour = parseInt(hh, 10) || 0
-  if (mode === 'once') {
+  if (frequency === 'once') {
     // Emit standard 5-field cron "min hour dd mo *" — the backend uses
     // next_run_at for the actual scheduling date; the year is NOT encoded here.
     // one_shot:true in the payload tells the backend not to repeat.
     const [, mo, dd] = (date || '').split('-')
     return `${min} ${hour} ${parseInt(dd, 10)} ${parseInt(mo, 10)} *`
   }
-  if (days.length === 0 || days.length === 7) return `${min} ${hour} * * *`
+  if (frequency === 'daily' || days.length === 0 || days.length === 7) return `${min} ${hour} * * *`
   const dow = days.map(d => (d === 6 ? 0 : d + 1)).sort((a, b) => a - b).join(',')
   return `${min} ${hour} * * ${dow}`
 }
@@ -99,8 +106,37 @@ function buildCron({ mode, days, date, time }: {
 const pad2 = (n: number) => String(n).padStart(2, '0')
 const ymd = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
 
-function tasksForDate(date: Date, tasks: ConfiguredTask[]): Array<{ task: ConfiguredTask; time: string }> {
-  const out: Array<{ task: ConfiguredTask; time: string }> = []
+/** Preset a "Nueva tarea" form would need to reproduce an existing task's schedule. */
+interface FrequencyPreset { frequency: Frequency; days: Set<number>; time: string; date: string }
+
+function oneShotDateFromTask(task: ConfiguredTask): string {
+  if (task.next_run_at) {
+    const d = new Date(task.next_run_at)
+    if (!Number.isNaN(d.getTime())) return ymd(d)
+  }
+  // Fallback: the 5-field cron carries day/month but never a year (see buildCron).
+  const parts = taskCron(task).trim().split(/\s+/)
+  const dd = parseInt(parts[2] ?? '', 10)
+  const mo = parseInt(parts[3] ?? '', 10)
+  if (!Number.isFinite(dd) || !Number.isFinite(mo)) return ''
+  const now = new Date()
+  return ymd(new Date(now.getFullYear(), mo - 1, dd))
+}
+
+function frequencyFromTask(task: ConfiguredTask): FrequencyPreset {
+  const cron = taskCron(task)
+  if (task.one_shot) {
+    const { time } = parseCron(cron)
+    return { frequency: 'once', days: new Set(), time: time || '09:00', date: oneShotDateFromTask(task) }
+  }
+  const { hourly, daily, days, time } = parseCron(cron)
+  if (hourly) return { frequency: 'hourly', days: new Set(), time: '09:00', date: '' }
+  if (daily) return { frequency: 'daily', days: new Set(), time: time || '09:00', date: '' }
+  return { frequency: 'weekly', days, time: time || '09:00', date: '' }
+}
+
+function tasksForDate(date: Date, tasks: ConfiguredTask[]): Array<{ task: ConfiguredTask; time: string; hourly: boolean }> {
+  const out: Array<{ task: ConfiguredTask; time: string; hourly: boolean }> = []
   const monIdx = (date.getDay() + 6) % 7
   const dd = date.getDate(), mo = date.getMonth() + 1, yyyy = date.getFullYear()
   for (const tk of tasks) {
@@ -110,7 +146,7 @@ function tasksForDate(date: Date, tasks: ConfiguredTask[]): Array<{ task: Config
       if (tk.next_run_at) {
         const nr = new Date(tk.next_run_at)
         if (nr.getDate() === dd && nr.getMonth() + 1 === mo && nr.getFullYear() === yyyy) {
-          out.push({ task: tk, time: `${String(nr.getHours()).padStart(2,'0')}:${String(nr.getMinutes()).padStart(2,'0')}` })
+          out.push({ task: tk, time: `${String(nr.getHours()).padStart(2,'0')}:${String(nr.getMinutes()).padStart(2,'0')}`, hourly: false })
         }
         continue
       }
@@ -121,11 +157,11 @@ function tasksForDate(date: Date, tasks: ConfiguredTask[]): Array<{ task: Config
       const cronYyyy = p.length >= 6 ? parseInt(p[5] ?? '', 10) : NaN
       const yearMatches = isNaN(cronYyyy) || cronYyyy === yyyy
       if (cronDd === dd && cronMo === mo && yearMatches) {
-        out.push({ task: tk, time: parseCron(cron).time })
+        out.push({ task: tk, time: parseCron(cron).time, hourly: false })
       }
     } else {
-      const { days, time, daily, valid } = parseCron(cron)
-      if (valid && (daily || days.has(monIdx))) out.push({ task: tk, time })
+      const { days, time, hourly, daily, valid } = parseCron(cron)
+      if (valid && (daily || hourly || days.has(monIdx))) out.push({ task: tk, time, hourly })
     }
   }
   return out
@@ -184,8 +220,9 @@ function recurrenceLabel(task: ConfiguredTask, t: ReturnType<typeof useT>): stri
   if (task.one_shot) return t('cal.once')
   const cron = taskCron(task)
   if (!cron) return ''
-  const { days, time, daily, valid } = parseCron(cron)
+  const { hourly, days, time, daily, valid } = parseCron(cron)
   if (!valid) return cron
+  if (hourly) return t('cal.every_hour')
   const timeStr = time ? t('cal.at_time').replace('{time}', time) : ''
   if (daily) return `${t('cal.every_day')}${timeStr}`
   const dayNames = dowLabels(t)
@@ -270,6 +307,7 @@ export default function CalendarView() {
   const [modalOpen, setModalOpen] = useState(false)
   const modalTrigger = useRef<HTMLElement | null>(null)
   const [modalPresetDate, setModalPresetDate] = useState<string | null>(null)
+  const [editingTask, setEditingTask] = useState<ConfiguredTask | null>(null)
   const [detailTask, setDetailTask] = useState<ConfiguredTask | null>(null)
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
 
@@ -313,7 +351,15 @@ export default function CalendarView() {
     // Safari clicks need not focus buttons: retain the actual opener, not
     // whichever unrelated control happened to be document.activeElement.
     modalTrigger.current = trigger
+    setEditingTask(null)
     setModalPresetDate(presetDate)
+    setModalOpen(true)
+  }
+
+  function openEditModal(task: ConfiguredTask, trigger: HTMLElement) {
+    modalTrigger.current = trigger
+    setModalPresetDate(null)
+    setEditingTask(task)
     setModalOpen(true)
   }
 
@@ -460,6 +506,7 @@ export default function CalendarView() {
                                   onViewDetail={setDetailTask}
                                   onToggle={handleToggle}
                                   onDelete={handleDelete}
+                                  onEdit={openEditModal}
                                 />
                               </AnimatedListItem>
                             ))}
@@ -506,17 +553,24 @@ export default function CalendarView() {
         </Stagger>
       </div>
 
-      {/* ── Create task modal ─────────────────────────────────────────────────── */}
+      {/* ── Create/edit task modal ────────────────────────────────────────────── */}
       {modalOpen && (
         <TaskModal
           agents={state.agents}
           returnFocus={modalTrigger}
           presetDate={modalPresetDate}
+          initialTask={editingTask}
           onClose={() => setModalOpen(false)}
-          onCreate={async (payload) => {
+          onSubmit={async (payload) => {
             try {
-              await createTask(payload)
-              show(t('cal.toast.created'), 'ok')
+              if (editingTask) {
+                const id = editingTask.trigger_id ?? editingTask.task_id ?? editingTask.id ?? ''
+                await updateTask(id, payload)
+                show(t('cal.toast.updated'), 'ok')
+              } else {
+                await createTask(payload)
+                show(t('cal.toast.created'), 'ok')
+              }
               setModalOpen(false)
               reloadTasks()
             } catch (e) {
@@ -649,7 +703,9 @@ function MonthCalendar({ tasks, calRef, onChangeMonth, agentLabel, onDayClick, o
                         }
                       }}
                     >
-                      {c.time && <span className={styles.taskChipTime}>{c.time}</span>}
+                      {c.hourly
+                        ? <span className={styles.taskChipTime}>{t('cal.every_hour')}</span>
+                        : c.time && <span className={styles.taskChipTime}>{c.time}</span>}
                       <span className={styles.taskChipName}>{c.task.label ?? c.task.name ?? c.task.task_id ?? t('cal.task_fallback')}</span>
                       <span
                         className={styles.taskChipAgent}
@@ -676,9 +732,10 @@ interface ConfiguredTaskRowProps {
   onViewDetail: (task: ConfiguredTask) => void
   onToggle: (task: ConfiguredTask) => void
   onDelete: (task: ConfiguredTask) => void
+  onEdit: (task: ConfiguredTask, trigger: HTMLElement) => void
 }
 
-function ConfiguredTaskRow({ task, onViewDetail, onToggle, onDelete }: ConfiguredTaskRowProps) {
+function ConfiguredTaskRow({ task, onViewDetail, onToggle, onDelete, onEdit }: ConfiguredTaskRowProps) {
   const t = useT()
   const isEnabled = task.enabled !== false
   const recurrence = recurrenceLabel(task, t)
@@ -715,6 +772,13 @@ function ConfiguredTaskRow({ task, onViewDetail, onToggle, onDelete }: Configure
           aria-label={t('cal.view.aria')}
         >
           {t('cal.view')}
+        </button>
+        <button
+          className="cv-btn cv-btn--ghost cv-btn--sm"
+          onClick={(e) => onEdit(task, e.currentTarget)}
+          aria-label={t('cal.edit.aria')}
+        >
+          {t('cal.edit')}
         </button>
         <button
           className="cv-btn cv-btn--ghost cv-btn--sm"
@@ -827,30 +891,63 @@ function TaskDetailDrawer({ task, agentLabel, onClose }: TaskDetailDrawerProps) 
 
 // ── Task creation modal ───────────────────────────────────────────────────────
 
+/** A ready-made instruction the owner can pick instead of writing one from scratch. */
+interface TaskTemplate {
+  id: string
+  label: string
+  taskName: string
+  instruction: string
+  frequency: Frequency
+  time: string
+}
+
+function taskTemplates(t: ReturnType<typeof useT>): TaskTemplate[] {
+  return [
+    {
+      id: 'ads-review',
+      label: t('cal.template.ads_review'),
+      taskName: t('cal.template.ads_review.name'),
+      instruction: t('cal.template.ads_review.instruction'),
+      frequency: 'daily',
+      time: '09:00',
+    },
+  ]
+}
+
 interface TaskModalProps {
   agents: Agent[]
   returnFocus: RefObject<HTMLElement | null>
   presetDate: string | null
+  /** Present when reusing this modal to edit an already-scheduled task. */
+  initialTask?: ConfiguredTask | null
   onClose: () => void
-  onCreate: (payload: CreateTaskPayload) => Promise<void>
+  onSubmit: (payload: CreateTaskPayload) => Promise<void>
 }
 
-function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskModalProps) {
+function TaskModal({ agents, returnFocus, presetDate, initialTask = null, onClose, onSubmit }: TaskModalProps) {
   const t = useT()
-  const initialMode: 'recurrent' | 'once' = presetDate ? 'once' : 'recurrent'
+  const preset = initialTask ? frequencyFromTask(initialTask) : null
+  const initialFrequency: Frequency = presetDate ? 'once' : preset?.frequency ?? 'weekly'
 
-  const [mode, setMode] = useState<'recurrent' | 'once'>(initialMode)
-  const [selectedDays, setSelectedDays] = useState<Set<number>>(new Set<number>())
+  const [frequency, setFrequency] = useState<Frequency>(initialFrequency)
+  const [selectedDays, setSelectedDays] = useState<Set<number>>(() => preset?.days ?? new Set<number>())
+  const [time, setTime] = useState(preset?.time || '09:00')
+  const [templateId, setTemplateId] = useState('')
   const [creating, setCreating] = useState(false)
   const [fieldErrors, setFieldErrors] = useState<{ name?: string; prompt?: string; date?: string; days?: string }>({})
   const nameRef = useRef<HTMLInputElement>(null)
   const promptRef = useRef<HTMLTextAreaElement>(null)
-  const timeRef = useRef<HTMLInputElement>(null)
   const timeEndRef = useRef<HTMLInputElement>(null)
   const dateRef = useRef<HTMLInputElement>(null)
   const agentRef = useRef<HTMLSelectElement>(null)
   const riskRef = useRef<HTMLSelectElement>(null)
   const submitting = useRef(false)
+
+  const initialName = initialTask?.label ?? initialTask?.title ?? initialTask?.name ?? ''
+  const initialInstruction = initialTask?.instruction ?? ''
+  const initialDate = presetDate ?? preset?.date ?? undefined
+  const initialAgentId = initialTask?.target_agent_id ?? initialTask?.agent_id ?? ''
+  const initialRisk = initialTask?.risk_ceiling ?? 'low'
 
   function toggleDay(day: number) {
     setSelectedDays(prev => {
@@ -864,7 +961,17 @@ function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskM
     setSelectedDays(prev => prev.size === 7 ? new Set() : new Set([0, 1, 2, 3, 4, 5, 6]))
   }
 
-  async function handleCreate() {
+  function applyTemplate(id: string) {
+    setTemplateId(id)
+    const template = taskTemplates(t).find(candidate => candidate.id === id)
+    if (!template) return
+    if (nameRef.current) nameRef.current.value = template.taskName
+    if (promptRef.current) promptRef.current.value = template.instruction
+    setFrequency(template.frequency)
+    setTime(template.time)
+  }
+
+  async function handleSubmit() {
     if (submitting.current) return
     const name = nameRef.current?.value.trim() ?? ''
     let prompt = promptRef.current?.value.trim() ?? ''
@@ -878,14 +985,14 @@ function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskM
       return
     }
 
-    if (mode === 'once') {
+    if (frequency === 'once') {
       const date = dateRef.current?.value ?? ''
       if (!date) {
         setFieldErrors({ date: t('cal.err.date') })
         show(t('cal.err.date'), 'warn')
         return
       }
-    } else {
+    } else if (frequency === 'weekly') {
       if (selectedDays.size === 0) {
         setFieldErrors({ days: t('cal.err.days') })
         show(t('cal.err.days'), 'warn')
@@ -894,24 +1001,23 @@ function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskM
     }
     setFieldErrors({})
 
-    const time = timeRef.current?.value || '09:00'
-    const timeEnd = timeEndRef.current?.value
+    const timeEnd = frequency !== 'hourly' ? timeEndRef.current?.value : undefined
     if (timeEnd) prompt += t('cal.window_suffix').replace('{start}', time).replace('{end}', timeEnd)
 
     const days = Array.from(selectedDays)
     const date = dateRef.current?.value ?? ''
-    const cron = buildCron({ mode, days, date, time })
+    const cron = buildCron({ frequency, days, date, time })
 
     submitting.current = true
     setCreating(true)
     try {
-      await onCreate({
+      await onSubmit({
         label: name,
         cron,
         instruction: prompt,
         target_agent_id: agentRef.current?.value || undefined,
         risk_ceiling: riskRef.current?.value || 'low',
-        one_shot: mode === 'once',
+        one_shot: frequency === 'once',
       })
     } finally {
       submitting.current = false
@@ -932,7 +1038,9 @@ function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskM
         aria-busy={creating}
       >
         <div className={styles.modalHead}>
-          <Dialog.Title className={styles.modalTitle}>{t('cal.modal.title')}</Dialog.Title>
+          <Dialog.Title className={styles.modalTitle}>
+            {initialTask ? t('cal.modal.title.edit') : t('cal.modal.title')}
+          </Dialog.Title>
           <button className={styles.modalCloseBtn} disabled={creating} onClick={() => { if (!submitting.current) onClose() }} aria-label={t('cal.modal.close.aria')}>
             <X size={14} aria-hidden="true" />
           </button>
@@ -940,6 +1048,23 @@ function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskM
 
         <div className={styles.modalBody}>
           <div className={styles.formStack}>
+            {!initialTask && (
+              <>
+                <label className={styles.formLabel} htmlFor="tm-template">{t('cal.form.template')}</label>
+                <select
+                  id="tm-template"
+                  className={styles.formInput}
+                  value={templateId}
+                  onChange={e => applyTemplate(e.target.value)}
+                >
+                  <option value="">{t('cal.form.template.none')}</option>
+                  {taskTemplates(t).map(template => (
+                    <option key={template.id} value={template.id}>{template.label}</option>
+                  ))}
+                </select>
+              </>
+            )}
+
             <label className={styles.formLabel} htmlFor="tm-name">{t('cal.form.name')}</label>
             <input
               id="tm-name"
@@ -948,6 +1073,7 @@ function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskM
               type="text"
               placeholder={t('cal.form.name.placeholder')}
               autoComplete="off"
+              defaultValue={initialName}
               aria-describedby={fieldErrors.name ? 'tm-name-err' : undefined}
               aria-invalid={fieldErrors.name ? true : undefined}
             />
@@ -962,6 +1088,7 @@ function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskM
               className={`${styles.formInput} ${styles.formTextarea}`}
               rows={3}
               placeholder={t('cal.form.instruction.placeholder')}
+              defaultValue={initialInstruction}
               aria-describedby={fieldErrors.prompt ? 'tm-prompt-err' : undefined}
               aria-invalid={fieldErrors.prompt ? true : undefined}
             />
@@ -973,14 +1100,16 @@ function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskM
             <select
               id="tm-mode"
               className={styles.formInput}
-              value={mode}
-              onChange={e => setMode(e.target.value as 'recurrent' | 'once')}
+              value={frequency}
+              onChange={e => setFrequency(e.target.value as Frequency)}
             >
-              <option value="recurrent">{t('cal.form.frequency.recurrent')}</option>
+              <option value="hourly">{t('cal.form.frequency.hourly')}</option>
+              <option value="daily">{t('cal.form.frequency.daily')}</option>
+              <option value="weekly">{t('cal.form.frequency.weekly')}</option>
               <option value="once">{t('cal.form.frequency.once')}</option>
             </select>
 
-            {mode === 'recurrent' && (
+            {frequency === 'weekly' && (
               <>
                 <label className={styles.formLabel}>{t('cal.form.days')}</label>
                 <div
@@ -1013,7 +1142,7 @@ function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskM
               </>
             )}
 
-            {mode === 'once' && (
+            {frequency === 'once' && (
               <>
                 <label className={styles.formLabel} htmlFor="tm-date">{t('cal.form.date')}</label>
                 <input
@@ -1021,7 +1150,7 @@ function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskM
                   ref={dateRef}
                   className={styles.formInput}
                   type="date"
-                  defaultValue={presetDate ?? undefined}
+                  defaultValue={initialDate}
                   aria-describedby={fieldErrors.date ? 'tm-date-err' : undefined}
                   aria-invalid={fieldErrors.date ? true : undefined}
                 />
@@ -1032,17 +1161,27 @@ function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskM
             )}
 
             <div className={styles.formGrid}>
-              <div>
-                <label className={styles.formLabel} htmlFor="tm-time">{t('cal.form.time')}</label>
-                <input id="tm-time" ref={timeRef} className={styles.formInput} type="time" defaultValue="09:00" />
-              </div>
-              <div>
-                <label className={styles.formLabel} htmlFor="tm-time-end">{t('cal.form.time_end')}</label>
-                <input id="tm-time-end" ref={timeEndRef} className={styles.formInput} type="time" />
-              </div>
+              {frequency !== 'hourly' && (
+                <div>
+                  <label className={styles.formLabel} htmlFor="tm-time">{t('cal.form.time')}</label>
+                  <input
+                    id="tm-time"
+                    className={styles.formInput}
+                    type="time"
+                    value={time}
+                    onChange={e => setTime(e.target.value)}
+                  />
+                </div>
+              )}
+              {frequency !== 'hourly' && (
+                <div>
+                  <label className={styles.formLabel} htmlFor="tm-time-end">{t('cal.form.time_end')}</label>
+                  <input id="tm-time-end" ref={timeEndRef} className={styles.formInput} type="time" />
+                </div>
+              )}
               <div>
                 <label className={styles.formLabel} htmlFor="tm-agent">{t('cal.field.agent')}</label>
-                <select id="tm-agent" ref={agentRef} className={styles.formInput}>
+                <select id="tm-agent" ref={agentRef} className={styles.formInput} defaultValue={initialAgentId}>
                   <option value="">{t('cal.form.agent.default')}</option>
                   {customAgents.map(a => (
                     <option key={a.id} value={a.id}>{a.name}</option>
@@ -1051,7 +1190,7 @@ function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskM
               </div>
               <div>
                 <label className={styles.formLabel} htmlFor="tm-risk">{t('cal.field.risk')}</label>
-                <select id="tm-risk" ref={riskRef} className={styles.formInput} defaultValue="low">
+                <select id="tm-risk" ref={riskRef} className={styles.formInput} defaultValue={initialRisk}>
                   <option value="low">{t('cal.risk.low')}</option>
                   <option value="high">{t('cal.risk.high')}</option>
                 </select>
@@ -1062,8 +1201,8 @@ function TaskModal({ agents, returnFocus, presetDate, onClose, onCreate }: TaskM
 
         <div className={styles.modalActions}>
           <Button variant="ghost" size="sm" disabled={creating} onClick={() => { if (!submitting.current) onClose() }}>{t('cal.cancel')}</Button>
-          <Button variant="primary" size="sm" onClick={handleCreate} loading={creating}>
-            {t('cal.create')}
+          <Button variant="primary" size="sm" onClick={handleSubmit} loading={creating}>
+            {initialTask ? t('cal.save') : t('cal.create')}
           </Button>
         </div>
       </Dialog.Popup>
