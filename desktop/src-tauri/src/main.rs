@@ -17,6 +17,7 @@
 use std::process::{Command, Stdio};
 use tauri::Manager;
 
+mod dialogs;
 mod window_policy;
 use window_policy::WindowPolicy;
 

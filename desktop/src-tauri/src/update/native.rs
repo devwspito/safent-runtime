@@ -7,7 +7,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tauri::{Manager, WebviewWindow};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+use tauri_plugin_dialog::MessageDialogButtons;
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 const ENDPOINT: &str =
@@ -263,7 +263,7 @@ async fn install(app: &tauri::AppHandle, check_id: u64) -> Result<InstallResult,
     let handle = app.clone();
     let version = checked.version.clone();
     let confirmed = tauri::async_runtime::spawn_blocking(move || {
-        handle.dialog().message(format!(
+        crate::dialogs::message(&handle, format!(
             "¿Descargar e instalar Safent {version}? Guarda lo que estés escribiendo. Se actualizará la app y su paquete de componentes. Tras reiniciar, Safent preparará el motor y Ads con las versiones verificadas de ese paquete."
         )).title("Actualizar la app Safent")
             .buttons(MessageDialogButtons::OkCancelCustom("Instalar y reiniciar".into(), "Ahora no".into()))
@@ -320,8 +320,7 @@ pub fn check_from_tray(app: tauri::AppHandle) {
             Ok(_) => "No hay una version mas reciente de la app nativa.",
             Err(code) => error_message(&code),
         };
-        app.dialog()
-            .message(message)
+        crate::dialogs::message(&app, message)
             .title("Actualizaciones de Safent")
             .show(|_| {});
     });

@@ -1310,7 +1310,7 @@ mod caps_ack_tests {
     fn reload_requires_one_exact_memory_ack_and_successful_exit() {
         let hash = "a".repeat(64);
         let good = format!(r#"{{"t":"caps_reloaded","caps_digest":"{hash}"}}"#);
-        let (_dir, d) = driver(&[good.clone()], 0);
+        let (_dir, d) = driver(std::slice::from_ref(&good), 0);
         assert_eq!(d.reload_ads_caps(&hash).unwrap(), hash);
         for (lines, code) in [
             (vec![], 0),

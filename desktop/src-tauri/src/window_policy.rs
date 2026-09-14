@@ -51,7 +51,9 @@ impl WindowPolicy {
         label == MAIN_WINDOW_LABEL
             && requester.username().is_empty()
             && requester.password().is_none()
-            && self.authorized().is_some_and(|origin| same_origin(&origin, requester))
+            && self
+                .authorized()
+                .is_some_and(|origin| same_origin(&origin, requester))
     }
 
     pub fn new() -> Self {

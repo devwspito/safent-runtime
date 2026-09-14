@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
 use tauri::{Manager, WebviewWindow};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+use tauri_plugin_dialog::MessageDialogButtons;
 
 const UNAVAILABLE: &str = "ads_caps_unavailable";
 const INVALID: &str = "ads_caps_invalid";
@@ -339,9 +339,7 @@ pub async fn save_ads_hard_caps(
         let file = caps_file::CapsFile::open(&config.state_home)?;
         let previous = file.read()?;
         let next = changed_bytes(&previous, &change)?;
-        if !app
-            .dialog()
-            .message(confirm_text(&change))
+        if !crate::dialogs::message(&app, confirm_text(&change))
             .title("Confirmar límites de gasto")
             .buttons(MessageDialogButtons::OkCancel)
             .blocking_show()

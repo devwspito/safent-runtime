@@ -186,7 +186,7 @@ pub async fn approve_host_folder_write(
         };
         let mut paths: Vec<_> = files.keys().cloned().collect(); paths.sort();
         let preview = paths.iter().take(12).cloned().collect::<Vec<_>>().join("\n");
-        let approved = app.dialog().message(format!(
+        let approved = crate::dialogs::message(&app, format!(
             "Guardar {} archivos en «{}» ({} MB). Se reemplazarán los archivos del mismo nombre; no se eliminarán otros archivos.\n\n{}{}",
             files.len(), name, files.values().sum::<u64>() / (1024 * 1024), preview,
             if files.len() > 12 { "\n…" } else { "" }
@@ -209,7 +209,7 @@ pub async fn write_host_folder_file(
     data: String,
 ) -> Result<(), String> {
     let origin = caller(&window)?;
-    if data.len() > (MAX_FILE as usize + 2) / 3 * 4 {
+    if data.len() > (MAX_FILE as usize).div_ceil(3) * 4 {
         return Err(LIMIT.into());
     }
     let state = window.state::<FolderBridge>().inner().clone();

@@ -839,7 +839,8 @@ fn run_once(app: AppHandle, cancel: CancelSignal) {
 
     match service.run(&notifier, &cancel) {
         LoopOutcome::Ready { ticket, .. } => {
-            app.state::<crate::ads_caps::AdsCapsState>().configure(config.clone());
+            app.state::<crate::ads_caps::AdsCapsState>()
+                .configure(config.clone());
             let request_app = app.clone();
             let control = app
                 .state::<crate::bootstrap_control::BootstrapControl>()
