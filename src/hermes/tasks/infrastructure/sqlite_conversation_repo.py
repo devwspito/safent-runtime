@@ -22,13 +22,11 @@ Schema:
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
 from dataclasses import dataclass, field
+from dataclasses import dataclass as _dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
-
-from dataclasses import dataclass as _dataclass
 
 
 @_dataclass(frozen=True, slots=True)
@@ -265,6 +263,16 @@ class SQLiteConversationRepository:
         with self._connect() as conn:
             cursor = conn.execute(
                 "UPDATE conversations SET archived = 1 "
+                "WHERE conversation_id = ?",
+                (str(conversation_id),),
+            )
+            if cursor.rowcount == 0:
+                raise ConversationNotFound(str(conversation_id))
+
+    def unarchive(self, *, conversation_id: UUID) -> None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE conversations SET archived = 0 "
                 "WHERE conversation_id = ?",
                 (str(conversation_id),),
             )

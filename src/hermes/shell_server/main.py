@@ -1217,10 +1217,13 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------
 
     @app.get("/api/v1/chat/conversations")
-    async def list_conversations(agent_id: str | None = None) -> list[dict]:
+    async def list_conversations(
+        agent_id: str | None = None, include_archived: bool = False
+    ) -> list[dict]:
         """Recientes (supervisión read-only). ?agent_id filtra por agente del
-        roster; sin él devuelve todas las conversaciones."""
-        items = conv_repo.list_summaries(agent_id=agent_id)
+        roster; sin él devuelve todas las conversaciones. Las archivadas solo
+        salen con ?include_archived=1."""
+        items = conv_repo.list_summaries(agent_id=agent_id, include_archived=include_archived)
         return [
             {
                 "conversation_id": str(c.conversation_id),
@@ -1231,6 +1234,7 @@ def create_app() -> FastAPI:
                 "last_msg_at": c.last_msg_at.isoformat(),
                 "message_count": c.message_count,
                 "agent_id": c.agent_id,
+                "archived": c.archived,
             }
             for c in items
         ]
@@ -1258,6 +1262,20 @@ def create_app() -> FastAPI:
     async def delete_conversation(conv_id: UUID) -> None:
         try:
             conv_repo.delete(conversation_id=conv_id)
+        except Exception:
+            raise HTTPException(404, "conversation not found")
+
+    @app.post("/api/v1/chat/conversations/{conv_id}/archive", status_code=204)
+    async def archive_conversation(conv_id: UUID) -> None:
+        try:
+            conv_repo.archive(conversation_id=conv_id)
+        except Exception:
+            raise HTTPException(404, "conversation not found")
+
+    @app.post("/api/v1/chat/conversations/{conv_id}/unarchive", status_code=204)
+    async def unarchive_conversation(conv_id: UUID) -> None:
+        try:
+            conv_repo.unarchive(conversation_id=conv_id)
         except Exception:
             raise HTTPException(404, "conversation not found")
 
