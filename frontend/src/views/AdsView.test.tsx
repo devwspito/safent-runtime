@@ -44,7 +44,7 @@ describe('AdsView', () => {
   beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     useAdsAvailability.mockReset()
-    useFeatures.mockReset().mockReturnValue({ edition: 'community', isLoading: false, allowed: (view: string) => view === 'integraciones' })
+    useFeatures.mockReset().mockReturnValue({ edition: 'community', isLoading: false, allowed: (view: string) => view === 'integraciones' || view === 'chat' })
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -79,6 +79,27 @@ describe('AdsView', () => {
     const iframe = container.querySelector('iframe')
     expect(iframe).not.toBeNull()
     expect(iframe?.getAttribute('src')).toBe('/ads/')
+  })
+
+  it('offers the main chat for campaign requests without sending a message or losing review guidance', () => {
+    setAvailability('ready')
+    render()
+    const link = container.querySelector<HTMLAnchorElement>('a[href="/chat"]')!
+    expect(link.textContent).toBe('Pedir campaña en el chat')
+    expect(link.title).toContain('Anuncios → Propuestas')
+    expect(link.search).toBe('')
+    expect(link.getAttribute('target')).toBeNull()
+  })
+
+  it.each([
+    { edition: 'community', isLoading: true, allowed: () => true },
+    { edition: 'community', isLoading: false, allowed: () => false },
+    { edition: 'associate', isLoading: false, allowed: () => true },
+  ])('does not offer Community chat when unavailable (case %#)', features => {
+    useFeatures.mockReturnValue(features)
+    setAvailability('ready')
+    render()
+    expect(container.querySelector('a[href="/chat"]')).toBeNull()
   })
 
   it.each([

@@ -102,6 +102,7 @@ function AdsPanel({ noAccounts }: { noAccounts: boolean }) {
   const { locale } = useLocale()
   const features = useFeatures()
   const canConfigureConnections = !features.isLoading && features.edition === 'community' && features.allowed('integraciones')
+  const canOpenChat = !features.isLoading && features.edition === 'community' && features.allowed('chat')
   const workspace = useContext(AdsWorkspaceContext)
   const setPanelActive = workspace?.setPanelActive
   const returnButton = useRef<HTMLButtonElement>(null)
@@ -135,6 +136,10 @@ function AdsPanel({ noAccounts }: { noAccounts: boolean }) {
         onClick={workspace.returnToSafent}>
         <ArrowLeft size={15} aria-hidden />{locale === 'en' ? 'Back to Safent' : 'Volver a Safent'}
       </Button> : <h1><Megaphone size={16} aria-hidden />{t('nav.ads')}</h1>}
+      {canOpenChat && <Link className="cv-btn cv-btn--primary cv-btn--sm" to="/chat"
+        title={locale === 'en' ? 'Describe your campaign in the main chat. Review drafts in Ads → Proposals.' : 'Describe tu campaña en el chat principal. Revisa los borradores en Anuncios → Propuestas.'}>
+        {locale === 'en' ? 'Request a campaign in chat' : 'Pedir campaña en el chat'}
+      </Link>}
       <Button size="sm" variant="ghost" onClick={() => { setState('loading'); setRevision(value => value + 1) }}>
         <RefreshCw size={13} aria-hidden />{t('ads.frame.reload')}
       </Button>

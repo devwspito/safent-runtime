@@ -84,6 +84,7 @@ _SAFENT_ADS_WRITE_TOOLS: frozenset[str] = frozenset({
     "propose_budget_change",
     "propose_pause",
     "propose_ad_child",
+    "propose_meta_image_upload",
     "propose_targeting_change",
     "propose_creative_publication",
     "withdraw_proposal",
