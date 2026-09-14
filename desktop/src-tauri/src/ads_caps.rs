@@ -493,6 +493,12 @@ mod caps_file {
             }
             let mut file = unsafe { File::from_raw_fd(fd) };
             let result = (|| {
+                // openat's mode is filtered by the app's inherited umask.
+                // These non-secret limits must remain readable by the broker
+                // UID, including after rollback (same contract as provision.sh).
+                if unsafe { libc::fchmod(file.as_raw_fd(), 0o644) } != 0 {
+                    return Err(UNAVAILABLE.into());
+                }
                 file.write_all(bytes)
                     .and_then(|_| file.sync_all())
                     .map_err(|_| UNAVAILABLE.to_string())?;
@@ -665,6 +671,49 @@ mod tests {
         apply_with_rollback(&f, &old, &next, |hash| Ok(hash.into())).unwrap();
         assert_eq!(f.read().unwrap(), next);
         assert!(f.replace(&digest(&old), &old).is_err());
+    }
+    #[test]
+    fn replacement_keeps_broker_readable_mode_under_private_umask() {
+        use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+        if std::env::var_os("SAFENT_CAPS_UMASK_TEST").is_none() {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "ads_caps::tests::replacement_keeps_broker_readable_mode_under_private_umask",
+                ])
+                .env("SAFENT_CAPS_UMASK_TEST", "1");
+            // Isolate the process-global umask from all other parallel tests.
+            unsafe {
+                child.pre_exec(|| {
+                    libc::umask(0o077);
+                    Ok(())
+                });
+            }
+            assert!(child.status().unwrap().success());
+            return;
+        }
+        let (root, file) = file();
+        let old = file.read().unwrap();
+        let next = changed_bytes(&old, &change()).unwrap();
+        apply_with_rollback(&file, &old, &next, |hash| Ok(hash.into())).unwrap();
+        let path = root.path().join("companions/ads/caps.yaml");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        let result = apply_with_rollback(&file, &next, &old, |hash| {
+            if hash == digest(&old) {
+                Err(UNAVAILABLE.into())
+            } else {
+                Ok(hash.into())
+            }
+        });
+        assert_eq!(result, Err("ads_caps_restored".into()));
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
     #[test]
     fn wrong_ack_rolls_back_and_requires_verified_previous_digest() {
