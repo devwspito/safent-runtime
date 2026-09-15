@@ -278,6 +278,9 @@ ADS_MCP_TOKEN=$(cat "$STATE/bearer")
 ADS_SESSION_SECRET=$session_secret
 ADS_TOTP_ENC_KEY=$totp_key
 ADS_APPROVAL_SIGNING_KEY=$signing_key
+# El companion lanzado por la app es SIEMPRE del propietario único (0.2.21+
+# exige declararlo; sin esta línea ads-api muere al arrancar).
+ADS_SINGLE_OWNER_MODE=1
 # Opcional: el dueño puede activar el bot de Telegram añadiendo aquí
 # (el arranque sigue sin ellas mientras esa vía siga siendo opcional):
 # TELEGRAM_BOT_TOKEN=
@@ -389,6 +392,7 @@ ensure_sso_keypair() {
 
   pub_urlsafe="$(printf '%s' "$pub_std" | tr '+/' '-_')"
   _write_sso_public_key_to_api_env "$pub_urlsafe"
+  _ensure_single_owner_mode_in_api_env
   _sync_sso_public_key_to_broker_env
   _ensure_composio_channel_pin
   log "par Ed25519 de SSO generado (0400) en $STATE/sso/ads-sso.key"
@@ -462,6 +466,16 @@ publish_runtime_projection() {
 # secrets/api.env unless a line for that key already exists — mirrors
 # merge_vendor_credentials' own "skip if present" discipline so re-running
 # provisioning never duplicates or overwrites the line.
+# Idempotente: instalaciones anteriores a 0.9.34 nacieron sin
+# ADS_SINGLE_OWNER_MODE y su ads-api reiniciaba en bucle con companion 0.2.21+.
+_ensure_single_owner_mode_in_api_env() {
+  local api_env="$STATE/secrets/api.env"
+  [ -f "$api_env" ] || return 0
+  grep -q '^ADS_SINGLE_OWNER_MODE=' "$api_env" && return 0
+  printf 'ADS_SINGLE_OWNER_MODE=1\n' >> "$api_env"
+  log "api.env: añadido ADS_SINGLE_OWNER_MODE=1 (instalación anterior)"
+}
+
 _write_sso_public_key_to_api_env() {
   local pub="$1" api_env="$STATE/secrets/api.env"
   grep -q '^ADS_SSO_PUBLIC_KEY=' "$api_env" 2>/dev/null && return 0
