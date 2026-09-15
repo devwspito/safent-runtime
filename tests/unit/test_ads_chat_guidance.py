@@ -92,6 +92,19 @@ def test_missing_creation_tools_are_conditional_and_gates_remain_explicit() -> N
         assert term in text
 
 
+def test_channel_mix_guidance_names_the_four_google_channels_and_pauses() -> None:
+    text = append_ads_chat_guidance("base", (_spec("mcp__safent-ads__list_businesses"),))
+    for term in [
+        "Búsqueda", "Máximo\nrendimiento", "Generación de demanda", "Display",
+        "list_google_conversion_actions", "CPC manual\nsólo existe en Búsqueda y Display",
+        "advertising_channel_type", "propose_campaign_draft", "propose_campaign_package",
+        "Expansión de URL y activos creados\nautomáticamente están siempre desactivados",
+        "image_generate", "upload_creative_asset", "PAUSED",
+        "aprobación humana lo publica",
+    ]:
+        assert term in text
+
+
 def test_incomplete_draft_guidance_requires_exact_authorized_tool() -> None:
     absent = append_ads_chat_guidance("base", (_spec("mcp__safent-ads__list_businesses"),))
     assert "BORRADORES EDITABLES" not in absent
