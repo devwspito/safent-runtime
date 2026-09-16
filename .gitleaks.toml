@@ -1,6 +1,6 @@
 # gitleaks config for safent-runtime — secret-scan gate (CI + local).
 #
-# Verified 2026-07-05: full history (269 commits / 58 branches) + working tree are
+# Verified 2026-07-05 (269 commits / 58 branches) and 2026-09-16 (808 commits): full history + working tree are
 # CLEAN of real credentials. The only matches are 4 obvious TEST FIXTURES, allow-
 # listed BELOW BY EXACT VALUE (never by a broad `tests/**` path) — so a NEW real
 # secret committed into a test file is still caught.
@@ -30,4 +30,9 @@ regexes = [
   '''ZmFrZS1wdWJsaWMta2V5LWI2NA==''',
   '''tskey-abc123(-should-never-be-in-argv)?''',
   '''tskey-secret''',
+]
+# specs/028-safent-app-nativa/qa-native-0.9.14/verify_live.py (guion de QA ya borrado): el
+# valor señalado es un id de contenedor de 64 hex, no una credencial. Ruta exacta, no comodín.
+paths = [
+  '''^specs/028-safent-app-nativa/qa-native-0\.9\.14/verify_live\.py$''',
 ]
