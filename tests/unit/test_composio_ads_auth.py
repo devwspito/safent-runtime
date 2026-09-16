@@ -202,8 +202,9 @@ async def test_connected_accounts_filters_foreign_entity_even_if_vendor_returns_
 async def test_delete_never_accepts_foreign_entity(entity):
     fake = sdk()
     fake.connected_accounts.get.return_value = NS(id="ca-other", user_id=entity)
+    client = ComposioClient(api_key="test", sdk=fake)
     with pytest.raises(ComposioApiError):
-        await ComposioClient(api_key="test", sdk=fake).delete_connection("ca-other", entity_id="one")
+        await client.delete_connection("ca-other", entity_id="one")
     fake.connected_accounts.delete.assert_not_called()
 
 
@@ -229,5 +230,6 @@ async def test_confirmation_projects_metadata_never_oauth_secrets():
 async def test_confirmation_rejects_foreign_account():
     fake = sdk()
     fake.connected_accounts.get.return_value = NS(id="ca-other", user_id="two")
+    client = ComposioClient(api_key="test", sdk=fake)
     with pytest.raises(ComposioApiError):
-        await ComposioClient(api_key="test", sdk=fake).get_connected_account("ca-other", entity_id="one")
+        await client.get_connected_account("ca-other", entity_id="one")

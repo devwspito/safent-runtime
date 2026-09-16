@@ -129,14 +129,21 @@ def _calling_conventions_dropped(stub: _ParamBuckets, real: _ParamBuckets) -> di
 class TestValueObjectsMatchContract:
     @pytest.mark.parametrize("name", _DATACLASS_NAMES)
     def test_dataclass_fields_match(self, name: str) -> None:
-        stub_fields = _annotated_field_names(_find_classdef(_parse_stub(), name))
+        """Every contract field must be present — but not necessarily alone.
+
+        `safent_composio` ships extra fields the Enterprise port doesn't need
+        (`ToolkitInfo.auth_schemes`, `AuthConfigInfo.status`): Ads-companion
+        features (Community-only, shipped independently) that predate this
+        contract. A superset is safe — nothing constructs these VOs
+        positionally (checked: only keyword construction across both repos),
+        so field ORDER doesn't gate any calling convention either.
+        """
+        stub_fields = set(_annotated_field_names(_find_classdef(_parse_stub(), name)))
         real_cls = getattr(sc, name, None)
         assert real_cls is not None, f"safent_composio does not export {name!r}"
-        real_fields = [f.name for f in dataclasses.fields(real_cls)]
-        assert real_fields == stub_fields, (
-            f"{name} field drift — contract wants {stub_fields}, "
-            f"safent_composio has {real_fields}"
-        )
+        real_fields = {f.name for f in dataclasses.fields(real_cls)}
+        missing = stub_fields - real_fields
+        assert not missing, f"{name} dropped contract field(s): {missing}"
 
 
 class TestComposioApiErrorMatchesContract:

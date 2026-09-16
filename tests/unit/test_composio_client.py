@@ -935,7 +935,7 @@ class TestConstructor:
             ComposioClient(
                 api_key="test-key",
                 sdk=_fake_sdk(),
-                transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})),
+                transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={})),
             )
 
 
@@ -972,6 +972,18 @@ class TestInjectedTransport:
                     "redirect_url": "https://composio.dev/oauth/gmail",
                     "link_token": "tok",
                     "expires_at": "2030-01-01T00:00:00Z",
+                }
+            elif path.endswith("/auth_configs/ac-1"):
+                body = {
+                    "id": "ac-1",
+                    "name": "gmail-managed",
+                    "no_of_connections": 0,
+                    "status": "ENABLED",
+                    "tool_access_config": {},
+                    "toolkit": {"logo": "", "slug": "gmail"},
+                    "type": "default",
+                    "uuid": "ac-1",
+                    "auth_scheme": "OAUTH2",
                 }
             elif path.endswith("/toolkits/gmail"):
                 body = {

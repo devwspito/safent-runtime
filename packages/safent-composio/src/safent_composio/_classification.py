@@ -38,14 +38,14 @@ def _extract_auth_schemes(item: Any) -> tuple[str, ...]:
     for attr in ("auth_schemes", "authScheme", "auth_scheme"):
         val = getattr(item, attr, None)
         if val:
-            candidates = val if isinstance(val, (list, tuple)) else [val]
+            candidates = list(val) if isinstance(val, (list, tuple)) else [val]
             break
     if not candidates:
         meta = getattr(item, "meta", None)
         for attr in ("auth_schemes", "auth_config_details", "categories"):
             val = getattr(meta, attr, None) if meta is not None else None
             if val and attr == "auth_schemes":
-                candidates = val if isinstance(val, (list, tuple)) else [val]
+                candidates = list(val) if isinstance(val, (list, tuple)) else [val]
                 break
     out: list[str] = []
     for c in candidates:

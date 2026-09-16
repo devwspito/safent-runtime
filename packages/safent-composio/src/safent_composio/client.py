@@ -22,8 +22,8 @@ from composio.exceptions import ComposioError
 from composio_client import APIError, APIStatusError
 
 from safent_composio._classification import (
-    ADS_TOOLKITS,
     _OAUTH_SIMPLE_SCHEMES,
+    ADS_TOOLKITS,
     _extract_auth_schemes,
     _is_oauth_simple,
     _managed_oauth_available,
