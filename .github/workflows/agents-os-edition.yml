@@ -78,6 +78,10 @@ jobs:
           curl -fsSL "https://github.com/NousResearch/hermes-agent/archive/${HERMES_AGENT_COMMIT}.tar.gz" \
             | tar -xz --strip-components=1 -C /tmp/hermes-agent-src
           pip install -e /tmp/hermes-agent-src
+          # safent-composio (pyproject Requires-Dist) is a LOCAL package shared with
+          # Enterprise (packages/safent-composio), not on PyPI: install it first so the
+          # pin resolves — same order as ops/container/Containerfile.
+          pip install -e packages/safent-composio
           pip install -e . pytest pytest-asyncio cryptography
         # Enterprise paths (config_sync applier/delegation/remote-approval, pairing/
         # association/license, capabilities/access_scope, jail hardening) were NOT in
@@ -109,6 +113,10 @@ jobs:
           curl -fsSL "https://github.com/NousResearch/hermes-agent/archive/${HERMES_AGENT_COMMIT}.tar.gz" \
             | tar -xz --strip-components=1 -C /tmp/hermes-agent-src
           pip install -e /tmp/hermes-agent-src
+          # safent-composio (pyproject Requires-Dist) is a LOCAL package shared with
+          # Enterprise (packages/safent-composio), not on PyPI: install it first so the
+          # pin resolves — same order as ops/container/Containerfile.
+          pip install -e packages/safent-composio
           pip install -e . pytest pytest-asyncio cryptography
       - name: Run integration tests
         # tests/integration/agents_os/ only ever held the always-skipped spec-003

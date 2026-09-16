@@ -159,7 +159,7 @@ async def test_mixed_vendor_catalog_does_not_reintroduce_ads_tool():
     with (
         patch(
             "hermes.runtime.composio_tool_specs.ComposioClient.list_connected_accounts",
-            new=AsyncMock(return_value=[ConnectedAccountInfo("ca-mail", "gmail", "one", "ACTIVE")]),
+            new=AsyncMock(return_value=[ConnectedAccountInfo(id="ca-mail", toolkit_slug="gmail", entity_id="one", status="ACTIVE")]),
         ),
         patch(
             "hermes.runtime.composio_tool_specs.ComposioClient.list_tools",

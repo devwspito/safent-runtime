@@ -9,6 +9,10 @@ Field sets are a SUPERSET of the Enterprise port contract
 that predate/exceed what Enterprise's port needs. `test_composio_port_contract.py`
 only requires the contract's fields to be PRESENT, not that these are the
 only ones — see that file's docstring.
+
+`kw_only=True` on the four contract value objects: construction is keyword-only, so
+adding or reordering a field can never silently mis-bind a positional caller in either
+product (`ToolInfo` is runtime-only and keeps positional construction).
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ToolkitInfo:
     """Catalog entry for a Composio toolkit (app).
 
@@ -44,7 +48,7 @@ class ToolInfo:
     input_parameters: dict[str, Any]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ConnectedAccountInfo:
     """A user-connected account on Composio cloud."""
 
@@ -55,7 +59,7 @@ class ConnectedAccountInfo:
     auth_config_id: str = ""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ConnectionInitResult:
     """Result of initiating an OAuth connection."""
 
@@ -64,7 +68,7 @@ class ConnectionInitResult:
     status: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class AuthConfigInfo:
     """A validated Composio auth config for one toolkit.
 
