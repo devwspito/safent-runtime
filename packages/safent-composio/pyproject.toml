@@ -1,0 +1,35 @@
+[project]
+name = "safent-composio"
+version = "0.1.0"
+description = "Pure Composio SDK client shared by safent-runtime (Community) and safent-control-enterprise (Enterprise). No FastAPI, no SQLite, no vault, no D-Bus, no logging of the API key."
+requires-python = ">=3.12"
+authors = [{ name = "luiscorrea2368@gmail.com" }]
+
+dependencies = [
+    "composio==0.13.1",
+    # composio 0.13.1 vendors this exact version of the underlying stainless
+    # client (composio.client.HttpClient IS-A composio_client.Composio); we
+    # import it directly (errors.py: APIStatusError; client.py: APIError,
+    # APIStatusError) so it is pinned explicitly, not left to composio's
+    # transitive resolution.
+    "composio-client==1.39.0",
+    "httpx>=0.27,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff==0.15.14",
+    "mypy>=1.10",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+safent_composio = ["py.typed"]

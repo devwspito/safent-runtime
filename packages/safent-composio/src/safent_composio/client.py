@@ -13,73 +13,33 @@ API on every run_cycle invocation.
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any, TypeVar
 
-from composio import Composio
+import httpx
 from composio.exceptions import ComposioError
 from composio_client import APIError, APIStatusError
 
-logger = logging.getLogger(__name__)
+from safent_composio._classification import (
+    ADS_TOOLKITS,
+    _OAUTH_SIMPLE_SCHEMES,
+    _extract_auth_schemes,
+    _is_oauth_simple,
+    _managed_oauth_available,
+)
+from safent_composio._transport import SdkHandle, build_sdk
+from safent_composio.errors import ComposioApiError, extract_detail
+from safent_composio.values import (
+    AuthConfigInfo,
+    ConnectedAccountInfo,
+    ConnectionInitResult,
+    ToolInfo,
+    ToolkitInfo,
+)
 
 _CACHE_TTL = 3600  # 1 hour, mirrors agents-autonomy/tool_catalog.py
-_SAFE_DETAIL_MAX = 300
-
-# Integraciones "OAuth simple": se conectan con un solo enlace de navegador
-# (managed OAuth). Las demás (API_KEY/BASIC/BEARER) exigen credenciales/campos
-# y NO se soportan todavía. Esta clasificación es COMPARTIDA: la usan el SO, la
-# TUI y la tool del agente (connect_integration) — la fuente única es el daemon.
-_OAUTH_SIMPLE_SCHEMES = frozenset({"OAUTH2", "OAUTH1"})
-ADS_TOOLKITS = frozenset({"googleads", "metaads"})
-
-
-def _managed_oauth_available(item: Any) -> bool | None:
-    """SDK 0.13.1 explicitly distinguishes supported auth from managed auth."""
-    schemes = getattr(item, "composio_managed_auth_schemes", None)
-    if not isinstance(schemes, (list, tuple)):
-        return None
-    return bool({str(value).upper() for value in schemes} & _OAUTH_SIMPLE_SCHEMES)
-
-
-def _extract_auth_schemes(item: Any) -> tuple[str, ...]:
-    """Best-effort: lee los auth schemes de un toolkit del SDK (defensivo).
-
-    El SDK de Composio expone el esquema de auth con nombres variables según
-    versión. Probamos varias rutas; si no se encuentra, devolvemos () (=desconocido,
-    fail-open: no bloqueamos lo que no podemos clasificar).
-    """
-    candidates: list[Any] = []
-    for attr in ("auth_schemes", "authScheme", "auth_scheme"):
-        val = getattr(item, attr, None)
-        if val:
-            candidates = val if isinstance(val, (list, tuple)) else [val]
-            break
-    if not candidates:
-        meta = getattr(item, "meta", None)
-        for attr in ("auth_schemes", "auth_config_details", "categories"):
-            val = getattr(meta, attr, None) if meta is not None else None
-            if val and attr == "auth_schemes":
-                candidates = val if isinstance(val, (list, tuple)) else [val]
-                break
-    out: list[str] = []
-    for c in candidates:
-        mode = (
-            getattr(c, "mode", None) or getattr(c, "auth_mode", None)
-            or getattr(c, "scheme", None) or c
-        )
-        if isinstance(mode, str):
-            out.append(mode.strip().upper())
-    return tuple(out)
-
-
-def _is_oauth_simple(schemes: tuple[str, ...]) -> bool:
-    """OAuth simple si HAY algún esquema OAuth, o si no se pudo determinar (fail-open)."""
-    if not schemes:
-        return True  # desconocido → no bloquear (la conexión gestionada decidirá)
-    return bool(set(schemes) & _OAUTH_SIMPLE_SCHEMES)
+_NOT_FOUND_STATUS_CODES = frozenset({404, 410})
 
 # Module-level tool cache keyed by toolkit_slug.
 # Evicted lazily when TTL expires.
@@ -98,96 +58,36 @@ def _get_cache_lock() -> asyncio.Lock:
     return _cache_lock
 
 
-def _safe_detail(exc: APIStatusError) -> str:
-    """Extract a safe, truncated error detail from an APIStatusError.
-
-    Never re-echo the API key (it won't be present in the body, but we
-    truncate defensively).
-    """
-    raw: str = ""
-    if exc.body is not None:
-        raw = str(exc.body)
-    elif hasattr(exc, "response") and exc.response is not None:
-        try:
-            raw = exc.response.text
-        except Exception:  # noqa: BLE001
-            raw = str(exc)
-    return raw[:_SAFE_DETAIL_MAX]
-
-
-@dataclass(frozen=True, slots=True)
-class ToolkitInfo:
-    """Minimal catalog entry for a Composio toolkit (app)."""
-
-    slug: str
-    name: str
-    description: str
-    auth_schemes: tuple[str, ...] = ()
-    oauth_simple: bool = True
-    managed_auth_available: bool | None = None
-    setup_required: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class AuthConfigInfo:
-    """Only non-secret metadata crosses the administration API boundary."""
-
-    id: str
-    toolkit_slug: str
-    status: str
-
-
-@dataclass(frozen=True, slots=True)
-class ToolInfo:
-    """A single action exposed by a Composio toolkit."""
-
-    slug: str
-    description: str
-    input_parameters: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class ConnectedAccountInfo:
-    """A user-connected account on Composio cloud."""
-
-    id: str
-    toolkit_slug: str
-    entity_id: str
-    status: str
-    auth_config_id: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class ConnectionInitResult:
-    """Result of initiating an OAuth connection."""
-
-    connected_account_id: str
-    redirect_url: str
-    status: str
-
-
-class ComposioApiError(Exception):
-    """Raised when the Composio SDK call fails."""
-
-    def __init__(self, status_code: int, detail: str) -> None:
-        super().__init__(f"Composio API {status_code}: {detail}")
-        self.status_code = status_code
-
-
 class ComposioClient:
     """Async Composio client backed by the official SDK.  One instance per API key."""
 
     def __init__(
-        self, api_key: str, *, sdk: Composio | None = None,
-        auth_config_ids: Mapping[str, str] | None = None,
+        self,
+        *,
+        api_key: str,
+        auth_config_ids: dict[str, str] | None = None,
+        transport: httpx.BaseTransport | None = None,
+        sdk: SdkHandle | None = None,
     ) -> None:
+        """
+        auth_config_ids: server/owner-selected toolkit_slug -> auth_config_id
+            map, never tool-call parameters. When a slug is present,
+            `initiate_connection` uses it directly instead of listing/creating
+            a managed auth config on Composio.
+        transport: injected httpx transport (Enterprise's anti-SSRF boundary —
+            fixed host, no env proxies, no redirects). `None` keeps today's
+            default: the SDK's own httpx client. See `_transport.build_sdk`.
+        sdk: full SDK substitute for tests. Mutually exclusive with
+            `transport` — a test that fakes the whole SDK has no use for a
+            real transport, and silently ignoring one of the two would hide
+            a caller bug.
+        """
         if not api_key:
             raise ValueError("api_key is required")
-        self._api_key = api_key
-        # Accept an injected SDK for tests; otherwise construct with the real key.
-        self._sdk: Composio = sdk if sdk is not None else Composio(api_key=api_key)
-        # Server/owner-selected configuration only, never tool-call parameters.
-        self._auth_config_ids = dict(auth_config_ids or {})
+        if sdk is not None and transport is not None:
+            raise ValueError("sdk and transport are mutually exclusive")
+        self._auth_config_ids = {k.lower(): v for k, v in (auth_config_ids or {}).items()}
+        self._sdk: SdkHandle = sdk if sdk is not None else build_sdk(api_key, transport=transport)
         # Composio v0.9+ REJECTS manual tools.execute() without a CONCRETE version
         # ("Toolkit version not specified" 502; "latest" is NOT accepted in manual
         # execution, nor as a global/dict default). So the agent could discover + call
@@ -206,7 +106,7 @@ class ComposioClient:
             return await asyncio.to_thread(fn)
         except APIStatusError as exc:
             # Has a concrete status_code from the HTTP response.
-            raise ComposioApiError(exc.status_code, _safe_detail(exc)) from exc
+            raise ComposioApiError(exc.status_code, extract_detail(exc)) from exc
         except APIError as exc:
             # Connection/timeout errors — no status code available.
             raise ComposioApiError(502, str(exc)) from exc
@@ -346,9 +246,7 @@ class ComposioClient:
     # Connected accounts
     # ----------------------------------------------------------------
 
-    async def list_connected_accounts(
-        self, entity_id: str
-    ) -> list[ConnectedAccountInfo]:
+    async def list_connected_accounts(self, entity_id: str) -> list[ConnectedAccountInfo]:
         """List active connected accounts for an entity."""
         response = await self._guarded(
             lambda: self._sdk.connected_accounts.list(
@@ -356,39 +254,30 @@ class ComposioClient:
                 statuses=["ACTIVE"],
             )
         )
-
         return [
-            ConnectedAccountInfo(
-                id=item.id,
-                toolkit_slug=item.toolkit.slug if item.toolkit else "",
-                entity_id=item.user_id,
-                status=item.status,
-                auth_config_id=getattr(getattr(item, "auth_config", None), "id", ""),
-            )
+            _to_connected_account_info(item)
             for item in response.items
             if item.user_id == entity_id and item.status == "ACTIVE"
         ]
 
     async def get_connected_account(
-        self, connection_id: str, *, entity_id: str,
+        self, connection_id: str, *, entity_id: str
     ) -> ConnectedAccountInfo:
         """Scoped status for OAuth confirmation; never returns state/tokens.
 
         Status can still be INITIATED. Callers admitting API execution must
         additionally require ACTIVE and the expected toolkit/auth-config.
+
+        Raises ComposioApiError(404, ...) if the id doesn't exist OR belongs
+        to a different entity — callers cannot tell the two apart, by design
+        (no account-enumeration oracle across seats).
         """
+
         def _get() -> ConnectedAccountInfo:
             account = self._sdk.connected_accounts.get(connection_id)
-            if (
-                getattr(account, "id", None) != connection_id
-                or getattr(account, "user_id", None) != entity_id or not entity_id
-            ):
+            if _not_owned_by(account, connection_id, entity_id):
                 raise ComposioApiError(404, "No se encuentra esta conexión en tu espacio.")
-            return ConnectedAccountInfo(
-                id=account.id, entity_id=entity_id, status=account.status,
-                toolkit_slug=getattr(getattr(account, "toolkit", None), "slug", ""),
-                auth_config_id=getattr(getattr(account, "auth_config", None), "id", ""),
-            )
+            return _to_connected_account_info(account)
 
         return await self._guarded(_get)
 
@@ -488,13 +377,14 @@ class ComposioClient:
         return await self._guarded(resolve)
 
     async def prepare_meta_auth_config(
-        self, *, client_id: str, client_secret: str,
+        self, *, client_id: str, client_secret: str
     ) -> AuthConfigInfo:
         """Owner-only setup. Secret goes straight to Composio, never into local storage.
 
         A deterministic name recovers a successful remote create after a lost
         response. Existing configurations are never updated or deleted here.
         """
+
         def prepare() -> AuthConfigInfo:
             try:
                 name = f"Safent Meta {client_id}"
@@ -527,12 +417,17 @@ class ComposioClient:
         return await self._guarded(prepare)
 
     def _resolve_managed_auth_config_id(self, toolkit_slug: str) -> str:
-        """Return an existing enabled managed auth config ID, or create one.
+        """Return a known, existing enabled, or newly created managed auth config ID.
 
         Must be called from a worker thread (synchronous SDK calls).
         """
+        slug = toolkit_slug.lower()
+        known = self._auth_config_ids.get(slug)
+        if known:
+            return known
+
         configs = self._sdk.auth_configs.list(
-            toolkit_slug=toolkit_slug.lower(),
+            toolkit_slug=slug,
             is_composio_managed=True,
         )
 
@@ -541,23 +436,35 @@ class ComposioClient:
                 return item.id
 
         created = self._sdk.auth_configs.create(
-            toolkit_slug.lower(),
+            slug,
             {"type": "use_composio_managed_auth"},
         )
         return created.id
 
     async def delete_connection(self, connection_id: str, *, entity_id: str) -> None:
-        """Delete a connected account by ID."""
-        def _delete() -> None:
-            account = self._sdk.connected_accounts.get(connection_id)
-            if (
-                getattr(account, "id", None) != connection_id
-                or getattr(account, "user_id", None) != entity_id or not entity_id
-            ):
-                raise ComposioApiError(404, "No se encuentra esta conexión en tu espacio.")
-            self._sdk.connected_accounts.delete(connection_id)
+        """Delete a connected account by ID.
 
-        await self._guarded(_delete)
+        Idempotent (REQ-11): a provider 404/410 while confirming ownership is
+        already a successful revocation — nothing live remains under this id.
+        An ownership mismatch (right id, wrong entity) is a real, non-idempotent
+        404: the caller must not believe they revoked someone else's connection.
+        """
+        try:
+            account = await self._guarded(
+                lambda: self._sdk.connected_accounts.get(connection_id)
+            )
+        except ComposioApiError as exc:
+            if exc.status_code in _NOT_FOUND_STATUS_CODES:
+                return
+            raise
+        if _not_owned_by(account, connection_id, entity_id):
+            raise ComposioApiError(404, "No se encuentra esta conexión en tu espacio.")
+
+        try:
+            await self._guarded(lambda: self._sdk.connected_accounts.delete(connection_id))
+        except ComposioApiError as exc:
+            if exc.status_code not in _NOT_FOUND_STATUS_CODES:
+                raise
 
     async def _latest_toolkit_version(self, tool_slug: str) -> str | None:
         """Newest concrete version of the toolkit owning `tool_slug`, cached per toolkit.
@@ -626,3 +533,21 @@ class ComposioClient:
             )
 
         return resp.get("data") or {}
+
+
+def _not_owned_by(account: Any, connection_id: str, entity_id: str) -> bool:
+    return (
+        getattr(account, "id", None) != connection_id
+        or getattr(account, "user_id", None) != entity_id
+        or not entity_id
+    )
+
+
+def _to_connected_account_info(item: Any) -> ConnectedAccountInfo:
+    return ConnectedAccountInfo(
+        id=item.id,
+        toolkit_slug=item.toolkit.slug if item.toolkit else "",
+        entity_id=item.user_id,
+        status=item.status,
+        auth_config_id=getattr(getattr(item, "auth_config", None), "id", ""),
+    )

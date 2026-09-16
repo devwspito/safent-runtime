@@ -31,9 +31,9 @@ Este adapter canonicaliza antes de clasificar.
 
 IMPORTANTE: este módulo replica la lógica de _READ_VERBS/classify_tool_risk
 inline para evitar importar hermes.runtime.composio_tool_specs (que a su vez
-importa hermes.integrations.composio.composio_client, cuya dependencia del
-SDK composio no está disponible en todos los entornos de test). El set de
-verbos READ debe mantenerse sincronizado con composio_tool_specs._READ_VERBS.
+importa safent_composio, cuya dependencia del SDK composio no está disponible
+en todos los entornos de test). El set de verbos READ debe mantenerse
+sincronizado con composio_tool_specs._READ_VERBS.
 
 Capa: application (combina domain ports sin I/O directa).
 """

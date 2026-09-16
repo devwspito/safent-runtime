@@ -14,7 +14,17 @@ dependencies = [
     "rfc3161ng>=2.1",
     "dbus-fast>=2.21",
     "aiohttp>=3.13.4",
-    "composio==0.13.1",
+    # safent-composio is NOT on an index — it is this repo's own
+    # packages/safent-composio/, installed from local source (see
+    # ops/container/Containerfile). A plain `pip install -e .` cannot
+    # resolve this name on its own: install the sibling package first —
+    #   pip install -e packages/safent-composio
+    # — then `pip install -e .` is satisfied without hitting the network
+    # (pip 24.0/Noble rejects a `file:` direct-reference URL here outright:
+    # `python3 -m pip wheel . --no-deps` fails with
+    # `InvalidRequirement: Invalid URL given` while building the wheel's
+    # own metadata).
+    "safent-composio==0.1.0",
     "hermes-agent==0.21.1",
 ]
 

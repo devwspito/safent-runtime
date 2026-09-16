@@ -29,11 +29,8 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from safent_composio import ComposioApiError, ComposioClient
 
-from hermes.integrations.composio.composio_client import (
-    ComposioApiError,
-    ComposioClient,
-)
 from hermes.shell_server.integrations.domain import IntegrationNotFound
 from hermes.shell_server.integrations.repo import SQLiteIntegrationsRepository
 from hermes.shell_server.security.owner_confirmation import require_owner_session

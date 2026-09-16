@@ -93,6 +93,12 @@ RUN HERMES_AGENT_COMMIT="$(tr -d ' \t\n\r' < /tmp/hermes-agent.lock)" \
 # `--no-cache` switch for a diagnostic clean rebuild.
 COPY pyproject.toml README.md VERSION /tmp/whlbuild/
 COPY src /tmp/whlbuild/src
+# safent-composio (spec 002 D-1): pure Composio SDK client, extracted out of
+# src/hermes so Enterprise can pin the SAME wheel by git tag + subdirectory
+# instead of copying it. Installed from local source (own pyproject.toml,
+# own composio==0.13.1 pin) — the bare `composio` dep below is intentionally
+# gone; safent-composio pins the exact SDK version for both products.
+COPY packages/safent-composio /tmp/safent-composio
 # Sync the wheel + runtime version from the repo-root VERSION file (single source of
 # truth) BEFORE building. build.sh does this for local builds, but CI builds via this
 # Containerfile directly and skipped it — so every published image baked a stale
@@ -103,10 +109,14 @@ RUN cd /tmp/whlbuild \
     && sed -i -E "s|^__version__ = .*|__version__ = \"${V}\"  # synced from repo-root VERSION at build|" src/hermes/__init__.py \
     && python3 -m pip wheel . --no-deps -w /tmp/whl \
     && python3 -m pip install --no-cache-dir --no-deps /tmp/whl/hermes_runtime-*.whl \
+    && python3 -m pip install --no-cache-dir /tmp/safent-composio \
     && python3 -m pip install --no-cache-dir \
-      aiohttp composio==0.13.1 dbus-fast rfc3161ng structlog tenacity \
+      aiohttp dbus-fast rfc3161ng structlog tenacity \
       cryptography playwright pytesseract selectolax \
-      mcp==2.0.0 fastapi 'uvicorn[standard]' python-multipart PyJWT websockets httpx croniter \
+      mcp==2.0.0 fastapi 'uvicorn[standard]' python-multipart PyJWT websockets 'httpx==0.28.1' croniter \
+      # ^ httpx pinned to the exact version composio-client==1.39.0 (installed
+      #   above via safent-composio) already resolves — unpinned here it could
+      #   drift outside safent-composio's own httpx>=0.27,<1 constraint.
       # ^ MCP SDK pinned to the exact version hermes-agent 0.21.1 declares in its
       #   `mcp` extra (2.x stateless protocol). Unpinned it drifts to 2.2+.
       anthropic==0.87.0 boto3==1.42.89 azure-identity==1.25.3 google-auth==2.55.1 \
@@ -132,7 +142,7 @@ RUN cd /tmp/whlbuild \
     # requires pydantic>=2.12 and upstream documents pydantic-core segfaults under
     # codex_responses threads on older cores. pydantic pins its own pydantic-core.
     && python3 -m pip install --no-cache-dir 'pydantic==2.13.4' \
-    && rm -rf /tmp/whlbuild /tmp/whl
+    && rm -rf /tmp/whlbuild /tmp/whl /tmp/safent-composio
 
 # ── React SPA (frontend/) — build INSIDE the container ──────────────────────
 # Layer-cache strategy (mirrors the Python wheel-build pattern above):
