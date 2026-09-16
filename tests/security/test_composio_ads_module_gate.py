@@ -12,7 +12,7 @@ from hermes.agents_os.domain.ports.surface_adapter_port import (
 )
 from hermes.agents_os.domain.surface_kind import SurfaceKind
 from hermes.capabilities.infrastructure.composio_surface_adapter import ComposioSurfaceAdapter
-from hermes.integrations.composio.tool_policy import ADS_MODULE_REQUIRED
+from safent_composio.tool_policy import ADS_MODULE_REQUIRED
 
 ADS_SLUGS = [
     "GOOGLEADS_MUTATE_CAMPAIGN_BUDGETS",
@@ -97,7 +97,7 @@ async def test_other_integrations_keep_existing_adapter_path(slug):
 @pytest.mark.asyncio
 async def test_ads_toolkits_are_not_discovered_by_generic_runtime():
     pytest.importorskip("composio.exceptions")
-    from hermes.integrations.composio.composio_client import ConnectedAccountInfo, ToolInfo
+    from safent_composio import ConnectedAccountInfo, ToolInfo
     from hermes.runtime.composio_config_source import ComposioCredential
     from hermes.runtime.composio_tool_specs import build_composio_tool_specs
 
@@ -131,7 +131,7 @@ async def test_ads_toolkits_are_not_discovered_by_generic_runtime():
 @pytest.mark.parametrize("slug", ADS_SLUGS)
 def test_tool_schema_cannot_disguise_ads_during_spec_creation(slug):
     pytest.importorskip("composio.exceptions")
-    from hermes.integrations.composio.composio_client import ToolInfo
+    from safent_composio import ToolInfo
     from hermes.runtime.composio_tool_specs import _tool_info_to_spec
 
     tool = ToolInfo(
@@ -149,7 +149,7 @@ def test_tool_schema_cannot_disguise_ads_during_spec_creation(slug):
 @pytest.mark.asyncio
 async def test_mixed_vendor_catalog_does_not_reintroduce_ads_tool():
     pytest.importorskip("composio.exceptions")
-    from hermes.integrations.composio.composio_client import ConnectedAccountInfo, ToolInfo
+    from safent_composio import ConnectedAccountInfo, ToolInfo
     from hermes.runtime.composio_config_source import ComposioCredential
     from hermes.runtime.composio_tool_specs import build_composio_tool_specs
 

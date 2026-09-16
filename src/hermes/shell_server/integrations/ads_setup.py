@@ -6,7 +6,8 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from hermes.integrations.composio.composio_client import ComposioApiError, ComposioClient
+from safent_composio import ComposioApiError, ComposioClient
+
 from hermes.shell_server.integrations.repo import SQLiteIntegrationsRepository
 from hermes.shell_server.security.secrets import SecretsVault
 
@@ -33,7 +34,7 @@ async def prepare_composio_ads_configs(
     api_key = repo.reveal_api_key(kind="composio")
     if not api_key:
         return {"googleads": False, "metaads": False}
-    client = client_factory(api_key, auth_config_ids=config_ids)
+    client = client_factory(api_key=api_key, auth_config_ids=config_ids)
     try:
         config = await asyncio.wait_for(client.resolve_ads_auth_config("googleads"), timeout=10)
     except (ComposioApiError, TimeoutError):

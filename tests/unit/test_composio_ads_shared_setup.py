@@ -6,7 +6,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 pytest.importorskip("composio.exceptions")
-from hermes.integrations.composio.composio_client import ComposioApiError, ComposioClient
+from safent_composio import ComposioApiError, ComposioClient
+
 from hermes.shell_server.integrations import ads_setup, api
 from hermes.shell_server.integrations.repo import SQLiteIntegrationsRepository
 from hermes.shell_server.security import secrets as secrets_module
@@ -35,7 +36,7 @@ async def test_prepares_only_google_and_reuses_stored_result(configured):
     }
     assert repo.auth_config_ids() == {"googleads": "ac_google"}
     fake.resolve_ads_auth_config.assert_awaited_once_with("googleads")
-    factory.assert_called_once_with("test-project-key", auth_config_ids={})
+    factory.assert_called_once_with(api_key="test-project-key", auth_config_ids={})
     await ads_setup.prepare_composio_ads_configs(db, client_factory=factory)
     fake.resolve_ads_auth_config.assert_awaited_once()
 
@@ -116,7 +117,7 @@ async def test_sdk_resolves_managed_config_without_creating_connection():
         auth_scheme="OAUTH2",
         credentials={"secret": "never-export"},
     )
-    client = ComposioClient("test", sdk=sdk)
+    client = ComposioClient(api_key="test", sdk=sdk)
     result = await client.resolve_ads_auth_config("googleads")
     assert result.id == "ac_google"
     assert "never-export" not in repr(result)
@@ -131,7 +132,7 @@ async def test_sdk_does_not_invent_managed_meta_app():
         slug="metaads", enabled=True, composio_managed_auth_schemes=[]
     )
     with pytest.raises(ComposioApiError):
-        await ComposioClient("test", sdk=sdk).resolve_ads_auth_config("metaads")
+        await ComposioClient(api_key="test", sdk=sdk).resolve_ads_auth_config("metaads")
     sdk.auth_configs.create.assert_not_called()
     sdk.connected_accounts.link.assert_not_called()
 

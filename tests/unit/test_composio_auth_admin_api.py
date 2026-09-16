@@ -8,7 +8,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 pytest.importorskip("composio.exceptions")
-from hermes.integrations.composio.composio_client import ComposioApiError
+from safent_composio import ComposioApiError
+
 from hermes.shell_server.integrations import api
 from hermes.shell_server.integrations.repo import SQLiteIntegrationsRepository
 from hermes.shell_server.security import secrets as secrets_module
