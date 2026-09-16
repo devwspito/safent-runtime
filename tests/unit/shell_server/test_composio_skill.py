@@ -322,26 +322,23 @@ class TestGetComposioSkillDetail:
 # verify_toolkit_connected — fake ComposioClient
 # ---------------------------------------------------------------------------
 
-# Env-drift guard. verify_toolkit_connected lazy-imports
-# hermes.integrations.composio.composio_client, whose module body does
-# `from composio.exceptions import ComposioError` — a symbol that only exists in
-# the composio SDK shipped in the baked image (>=1.0, e.g. 1.0.0-rc2). On a host
-# with an older composio (0.7.x, which exposes ComposioSDKError instead) that
-# import raises ImportError, and unittest.mock.patch() then cannot resolve the
-# patch target. Skip only where the image's SDK is absent, so the host stays
-# green while these tests still run in the image / CI where the deps match.
+# Env-drift guard. verify_toolkit_connected lazy-imports safent_composio,
+# whose client module does `from composio.exceptions import ComposioError` — a
+# symbol that only exists in the composio SDK shipped in the baked image
+# (>=1.0, e.g. 1.0.0-rc2). On a host with an older composio (0.7.x, which
+# exposes ComposioSDKError instead) that import raises ImportError, and
+# unittest.mock.patch() then cannot resolve the patch target. Skip only where
+# the image's SDK is absent, so the host stays green while these tests still
+# run in the image / CI where the deps match.
 try:
-    from hermes.integrations.composio.composio_client import (  # noqa: F401
-        ComposioClient as _ComposioClientProbe,
-    )
+    from safent_composio import ComposioClient as _ComposioClientProbe  # noqa: F401
 
     _COMPOSIO_CLIENT_IMPORTABLE = True
     _COMPOSIO_SKIP_REASON = ""
 except Exception as _exc:  # noqa: BLE001
     _COMPOSIO_CLIENT_IMPORTABLE = False
     _COMPOSIO_SKIP_REASON = (
-        "composio SDK in this env cannot import "
-        "hermes.integrations.composio.composio_client "
+        f"composio SDK in this env cannot import safent_composio "
         f"(baked image ships composio==0.13.1): {_exc!r}"
     )
 
@@ -369,7 +366,7 @@ class TestVerifyToolkitConnected:
             ) as MockRepo,
             patch("hermes.shell_server.security.secrets.SecretsVault"),
             patch(
-                "hermes.integrations.composio.composio_client.ComposioClient"
+                "safent_composio.ComposioClient"
             ) as MockClient,
         ):
             mock_repo = MockRepo.return_value
@@ -404,7 +401,7 @@ class TestVerifyToolkitConnected:
             ) as MockRepo,
             patch("hermes.shell_server.security.secrets.SecretsVault"),
             patch(
-                "hermes.integrations.composio.composio_client.ComposioClient"
+                "safent_composio.ComposioClient"
             ) as MockClient,
         ):
             mock_repo = MockRepo.return_value
@@ -480,7 +477,7 @@ class TestVerifyToolkitConnected:
             ) as MockRepo,
             patch("hermes.shell_server.security.secrets.SecretsVault"),
             patch(
-                "hermes.integrations.composio.composio_client.ComposioClient"
+                "safent_composio.ComposioClient"
             ) as MockClient,
         ):
             mock_repo = MockRepo.return_value

@@ -181,9 +181,8 @@ async def verify_toolkit_connected(
         ComposioCredentialMissing: if no Composio API key is configured.
         ComposioToolkitNotConnected: if the toolkit is not ACTIVE.
     """
-    from hermes.integrations.composio.composio_client import (  # noqa: PLC0415
-        ComposioClient,
-    )
+    from safent_composio import ComposioClient  # noqa: PLC0415
+
     from hermes.shell_server.integrations.domain import IntegrationNotFound  # noqa: PLC0415
     from hermes.shell_server.integrations.repo import (  # noqa: PLC0415
         SQLiteIntegrationsRepository,

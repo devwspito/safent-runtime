@@ -28,17 +28,18 @@ import re
 from typing import Any
 from uuid import UUID, uuid4
 
+from safent_composio.tool_policy import (
+    ADS_MODULE_MESSAGE,
+    ADS_MODULE_REQUIRED,
+    requires_ads_module,
+)
+
 from hermes.agents_os.domain.ports.surface_adapter_port import (
     CapturedAction,
     ReplayOutcome,
     ReplayStatus,
 )
 from hermes.agents_os.domain.surface_kind import SurfaceKind
-from hermes.integrations.composio.tool_policy import (
-    ADS_MODULE_MESSAGE,
-    ADS_MODULE_REQUIRED,
-    requires_ads_module,
-)
 
 logger = logging.getLogger("hermes.capabilities.composio_adapter")
 
@@ -169,10 +170,7 @@ class ComposioSurfaceAdapter:
         """Invoca ComposioClient.execute_action con timeout acotado."""
         import asyncio  # noqa: PLC0415
 
-        from hermes.integrations.composio.composio_client import (  # noqa: PLC0415
-            ComposioApiError,
-            ComposioClient,
-        )
+        from safent_composio import ComposioApiError, ComposioClient  # noqa: PLC0415
 
         client = ComposioClient(api_key=self._api_key)
         try:

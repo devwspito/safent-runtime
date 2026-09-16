@@ -35,18 +35,15 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from hermes.domain.tool_spec import ToolRisk, ToolSpec
-from hermes.integrations.composio.composio_client import (
-    ComposioApiError,
-    ComposioClient,
-    ToolInfo,
-)
-from hermes.integrations.composio.tool_policy import (
+from safent_composio import ComposioApiError, ComposioClient, ToolInfo
+from safent_composio.tool_policy import (
     ADS_MODULE_MESSAGE,
     ADS_MODULE_REQUIRED,
     is_ads_toolkit,
     requires_ads_module,
 )
+
+from hermes.domain.tool_spec import ToolRisk, ToolSpec
 from hermes.runtime.composio_config_source import ComposioCredential
 
 if TYPE_CHECKING:

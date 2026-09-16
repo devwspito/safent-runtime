@@ -3167,10 +3167,10 @@ class DbusRuntimeServiceWiring:
         cred = load_composio_credential(self._composio_db_path())
         if cred is None:
             return None, None
-        from hermes.integrations.composio.composio_client import ComposioClient  # noqa: PLC0415
+        from safent_composio import ComposioClient  # noqa: PLC0415
 
         return ComposioClient(
-            cred.api_key,
+            api_key=cred.api_key,
             auth_config_ids=self._composio_integrations_repo().auth_config_ids(),
         ), cred.entity_id
 
@@ -3207,10 +3207,8 @@ class DbusRuntimeServiceWiring:
         if not key:
             return {"ok": False, "error": "api_key vacía"}
         try:
-            from hermes.integrations.composio.composio_client import (  # noqa: PLC0415
-                ComposioClient,
-            )
-            toolkits = await ComposioClient(key).list_toolkits()
+            from safent_composio import ComposioClient  # noqa: PLC0415
+            toolkits = await ComposioClient(api_key=key).list_toolkits()
         except Exception as exc:  # noqa: BLE001 — el detalle va al operador
             detail = str(exc)
             if "401" in detail or "Unauthorized" in detail:

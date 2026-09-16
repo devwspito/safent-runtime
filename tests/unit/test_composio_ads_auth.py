@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 pytest.importorskip("composio.exceptions")
-from hermes.integrations.composio.composio_client import ComposioApiError, ComposioClient
+from safent_composio import ComposioApiError, ComposioClient
 
 
 def sdk():
@@ -33,7 +33,7 @@ def sdk():
 async def test_meta_setup_creates_custom_oauth_not_managed_or_api_key():
     fake = sdk()
     fake.auth_configs.create.return_value = NS(id="ac-owned")
-    client = ComposioClient("test", sdk=fake)
+    client = ComposioClient(api_key="test", sdk=fake)
     result = await client.prepare_meta_auth_config(
         client_id="123456", client_secret="PRIVATE-APP-SECRET",
     )
@@ -56,7 +56,7 @@ async def test_meta_setup_creates_custom_oauth_not_managed_or_api_key():
 async def test_meta_setup_retry_reuses_its_named_configuration():
     fake = sdk()
     fake.auth_configs.list.return_value = NS(items=[NS(name="Safent Meta 123456", id="ac-owned")])
-    result = await ComposioClient("test", sdk=fake).prepare_meta_auth_config(
+    result = await ComposioClient(api_key="test", sdk=fake).prepare_meta_auth_config(
         client_id="123456", client_secret="private",
     )
     assert result.id == "ac-owned"
@@ -70,7 +70,7 @@ async def test_meta_setup_does_not_guess_between_duplicate_names():
         NS(name="Safent Meta 123456", id="ac-one"), NS(name="Safent Meta 123456", id="ac-two"),
     ])
     with pytest.raises(ComposioApiError):
-        await ComposioClient("test", sdk=fake).prepare_meta_auth_config(
+        await ComposioClient(api_key="test", sdk=fake).prepare_meta_auth_config(
             client_id="123456", client_secret="private",
         )
     fake.auth_configs.create.assert_not_called()
@@ -79,7 +79,7 @@ async def test_meta_setup_does_not_guess_between_duplicate_names():
 @pytest.mark.asyncio
 async def test_custom_meta_uses_selected_config_without_creating_managed():
     fake = sdk()
-    client = ComposioClient("test", sdk=fake, auth_config_ids={"metaads": "ac-owned"})
+    client = ComposioClient(api_key="test", sdk=fake, auth_config_ids={"metaads": "ac-owned"})
     result = await client.initiate_connection(toolkit_slug="metaads", entity_id="safent-one")
     assert result.connected_account_id == "ca-new"
     fake.connected_accounts.link.assert_called_once_with(
@@ -104,7 +104,7 @@ async def test_custom_meta_uses_selected_config_without_creating_managed():
 async def test_invalid_custom_config_is_rejected_before_link(change):
     fake = sdk()
     fake.auth_configs.get.return_value.__dict__.update(change)
-    client = ComposioClient("test", sdk=fake, auth_config_ids={"metaads": "ac-owned"})
+    client = ComposioClient(api_key="test", sdk=fake, auth_config_ids={"metaads": "ac-owned"})
     with pytest.raises(ComposioApiError):
         await client.initiate_connection(toolkit_slug="metaads", entity_id="safent-one")
     fake.connected_accounts.link.assert_not_called()
@@ -114,7 +114,7 @@ async def test_invalid_custom_config_is_rejected_before_link(change):
 @pytest.mark.asyncio
 async def test_selected_config_is_revalidated_after_disable():
     fake = sdk()
-    client = ComposioClient("test", sdk=fake, auth_config_ids={"metaads": "ac-owned"})
+    client = ComposioClient(api_key="test", sdk=fake, auth_config_ids={"metaads": "ac-owned"})
     await client.validate_auth_config("metaads", "ac-owned")
     fake.auth_configs.get.return_value.status = "DISABLED"
     with pytest.raises(ComposioApiError):
@@ -125,7 +125,7 @@ async def test_selected_config_is_revalidated_after_disable():
 @pytest.mark.asyncio
 async def test_google_uses_real_managed_metadata_and_supports_more_than_one_connection():
     fake = sdk()
-    client = ComposioClient("test", sdk=fake)
+    client = ComposioClient(api_key="test", sdk=fake)
     await client.initiate_connection(toolkit_slug="googleads", entity_id="safent-one")
     fake.toolkits.get.assert_called_once_with(slug="googleads")
     fake.auth_configs.create.assert_called_once_with(
@@ -143,7 +143,7 @@ async def test_oauth_supported_is_not_evidence_of_managed_oauth(schemes):
     fake.toolkits.get.return_value = NS(
         slug="metaads", enabled=True, composio_managed_auth_schemes=schemes
     )
-    client = ComposioClient("test", sdk=fake)
+    client = ComposioClient(api_key="test", sdk=fake)
     with pytest.raises(ComposioApiError):
         await client.initiate_connection(toolkit_slug="metaads", entity_id="safent-one")
     fake.auth_configs.create.assert_not_called()
@@ -171,7 +171,7 @@ async def test_catalog_distinguishes_google_managed_from_meta_setup():
             ),
         ]
     )
-    items = await ComposioClient("test", sdk=fake).list_toolkits()
+    items = await ComposioClient(api_key="test", sdk=fake).list_toolkits()
     assert items[0].managed_auth_available is True and items[0].oauth_simple
     assert (
         items[1].managed_auth_available is False
@@ -179,7 +179,7 @@ async def test_catalog_distinguishes_google_managed_from_meta_setup():
         and items[1].setup_required
     )
     items = await ComposioClient(
-        "test", sdk=fake, auth_config_ids={"metaads": "ac-owned"}
+        api_key="test", sdk=fake, auth_config_ids={"metaads": "ac-owned"}
     ).list_toolkits()
     assert items[1].oauth_simple and not items[1].setup_required
 
@@ -193,7 +193,7 @@ async def test_connected_accounts_filters_foreign_entity_even_if_vendor_returns_
             NS(id="ca-other", user_id="two", status="ACTIVE", toolkit=NS(slug="metaads")),
         ]
     )
-    result = await ComposioClient("test", sdk=fake).list_connected_accounts("one")
+    result = await ComposioClient(api_key="test", sdk=fake).list_connected_accounts("one")
     assert [account.id for account in result] == ["ca-owned"]
 
 
@@ -202,8 +202,9 @@ async def test_connected_accounts_filters_foreign_entity_even_if_vendor_returns_
 async def test_delete_never_accepts_foreign_entity(entity):
     fake = sdk()
     fake.connected_accounts.get.return_value = NS(id="ca-other", user_id=entity)
+    client = ComposioClient(api_key="test", sdk=fake)
     with pytest.raises(ComposioApiError):
-        await ComposioClient("test", sdk=fake).delete_connection("ca-other", entity_id="one")
+        await client.delete_connection("ca-other", entity_id="one")
     fake.connected_accounts.delete.assert_not_called()
 
 
@@ -218,7 +219,7 @@ async def test_confirmation_projects_metadata_never_oauth_secrets():
         auth_config=NS(id="ac-owned"),
         state={"access_token": "NEVER-RETURN-TOKEN"},
     )
-    account = await ComposioClient("test", sdk=fake).get_connected_account(
+    account = await ComposioClient(api_key="test", sdk=fake).get_connected_account(
         "ca-owned", entity_id="one"
     )
     assert account.auth_config_id == "ac-owned" and account.status == "ACTIVE"
@@ -229,5 +230,6 @@ async def test_confirmation_projects_metadata_never_oauth_secrets():
 async def test_confirmation_rejects_foreign_account():
     fake = sdk()
     fake.connected_accounts.get.return_value = NS(id="ca-other", user_id="two")
+    client = ComposioClient(api_key="test", sdk=fake)
     with pytest.raises(ComposioApiError):
-        await ComposioClient("test", sdk=fake).get_connected_account("ca-other", entity_id="one")
+        await client.get_connected_account("ca-other", entity_id="one")

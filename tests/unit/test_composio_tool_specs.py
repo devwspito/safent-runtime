@@ -12,11 +12,12 @@ from uuid import uuid4
 import pytest
 
 # ENV-DRIFT GUARD: the product image ships composio==0.13.1, which exposes
-# `composio.exceptions.ComposioError`. composio_client.py (imported transitively via
-# composio_tool_specs) imports that symbol at module load. Older host SDKs (0.7.x)
-# lack it, so the import fails on a drifted host. This is dependency drift, NOT a
-# product bug — the source is correct for the baked image. Skip the whole module
-# where the SDK is too old; run it wherever the product's SDK is installed.
+# `composio.exceptions.ComposioError`. safent_composio.client (imported
+# transitively via composio_tool_specs) imports that symbol at module load.
+# Older host SDKs (0.7.x) lack it, so the import fails on a drifted host. This
+# is dependency drift, NOT a product bug — the source is correct for the baked
+# image. Skip the whole module where the SDK is too old; run it wherever the
+# product's SDK is installed.
 _composio_exceptions = pytest.importorskip(
     "composio.exceptions",
     reason="composio SDK not installed",
@@ -29,11 +30,9 @@ if not hasattr(_composio_exceptions, "ComposioError"):
         allow_module_level=True,
     )
 
+from safent_composio import ConnectedAccountInfo, ToolInfo
+
 from hermes.domain.tool_spec import ToolRisk
-from hermes.integrations.composio.composio_client import (
-    ConnectedAccountInfo,
-    ToolInfo,
-)
 from hermes.runtime.composio_config_source import ComposioCredential
 from hermes.runtime.composio_tool_specs import (
     build_composio_tool_specs,
@@ -117,7 +116,11 @@ _CRED = ComposioCredential(api_key="csk-test", entity_id="ent-1")
 
 _FAKE_ACCOUNTS = [
     ConnectedAccountInfo(
-        id="acc-1", toolkit_slug="GMAIL", entity_id="ent-1", status="ACTIVE"
+        id="acc-1",
+        toolkit_slug="GMAIL",
+        entity_id="ent-1",
+        status="ACTIVE",
+        auth_config_id="ac-1",
     ),
 ]
 
@@ -187,7 +190,11 @@ async def test_write_tool_has_no_handler_and_write_proposal_risk() -> None:
 async def test_returns_empty_when_no_active_accounts() -> None:
     inactive = [
         ConnectedAccountInfo(
-            id="acc-x", toolkit_slug="SLACK", entity_id="ent-1", status="INACTIVE"
+            id="acc-x",
+            toolkit_slug="SLACK",
+            entity_id="ent-1",
+            status="INACTIVE",
+            auth_config_id="ac-1",
         )
     ]
     with patch(
@@ -202,7 +209,7 @@ async def test_returns_empty_when_no_active_accounts() -> None:
 
 @pytest.mark.asyncio
 async def test_fails_soft_when_tool_fetch_raises() -> None:
-    from hermes.integrations.composio.composio_client import ComposioApiError  # noqa: PLC0415
+    from safent_composio import ComposioApiError  # noqa: PLC0415
 
     with (
         patch(
