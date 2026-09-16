@@ -27,6 +27,10 @@ pub struct LocalImage {
     /// also never passes `--force` — two independent guards against the
     /// same mistake, not one relied on alone.
     pub in_use: bool,
+    /// `podman image ls`'s own `Size`, in bytes — irrelevant to selection
+    /// (never compared, never a tie-breaker), carried through purely so the
+    /// caller can log how much a prune pass actually reclaimed.
+    pub size_bytes: u64,
 }
 
 /// Every local image in one of `our_repositories`, NOT pinned by `pinned`,
@@ -89,6 +93,7 @@ mod tests {
             digest: digest.into(),
             created_unix,
             in_use: false,
+            size_bytes: 0,
         }
     }
 

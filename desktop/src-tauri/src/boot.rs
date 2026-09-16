@@ -46,6 +46,17 @@ pub enum LoopOutcome {
     },
 }
 
+/// Superseded-image pruning is only ever safe once the engine/companion
+/// containers are CONFIRMED running on the digests this run pins — anything
+/// else (`FocusExisting`: another instance owns the engine; `Cancelled`: the
+/// owner backed out; `Degraded`: repairs stalled mid-way) means an image
+/// this attempt still needs, or one a retry will still need, might not be
+/// pinned yet. `run_once` gates its prune spawn on this alone so the rule is
+/// one tested predicate, not something implicit in a match arm.
+fn should_prune_after(outcome: &LoopOutcome) -> bool {
+    matches!(outcome, LoopOutcome::Ready { .. })
+}
+
 /// Bootstrap-scoped: true from the `container` CLI stage onward, matching
 /// the point past which the owner's "Cancelar" is disabled in the UI. This
 /// is NOT a universal property of `Stage` (the update flow, `src-tauri/src/
@@ -843,24 +854,34 @@ fn run_once(app: AppHandle, cancel: CancelSignal) {
         app_version(),
     );
 
-    match service.run(&notifier, &cancel) {
+    let outcome = service.run(&notifier, &cancel);
+
+    // Extracted so "only after a fully converged boot" is a single, tested
+    // guarantee (`should_prune_after`'s own tests) rather than something
+    // implicit in which match arm happens to spawn the thread — a `Degraded`
+    // mid-repair or a `Cancelled` attempt must never remove an image a
+    // still-in-progress or about-to-retry action still needs.
+    if should_prune_after(&outcome) {
+        // Cloned before `config` moves into the companion-request closure
+        // below. Runs off the calling thread and after the fact — never
+        // delays `navigate_to_ticket`, and a listing/removal failure here
+        // must never turn an already-successful boot into a failed one.
+        let prune_app = app.clone();
+        let prune_config = config.clone();
+        std::thread::spawn(move || {
+            let report = EmbeddedCliDriver::new(prune_config).prune_superseded_images();
+            if report.removed > 0 {
+                TauriNotifier { app: prune_app }.notify(&DomainEvent::ImagesPruned {
+                    removed: report.removed,
+                });
+            }
+        });
+    }
+
+    match outcome {
         LoopOutcome::Ready { ticket, .. } => {
             app.state::<crate::ads_caps::AdsCapsState>()
                 .configure(config.clone());
-            // Cloned before `config` moves into the companion-request closure
-            // below. Runs off the calling thread and after the fact — never
-            // delays `navigate_to_ticket`, and a listing/removal failure here
-            // must never turn an already-successful boot into a failed one.
-            let prune_app = app.clone();
-            let prune_config = config.clone();
-            std::thread::spawn(move || {
-                let report = EmbeddedCliDriver::new(prune_config).prune_superseded_images();
-                if report.removed > 0 {
-                    TauriNotifier { app: prune_app }.notify(&DomainEvent::ImagesPruned {
-                        removed: report.removed,
-                    });
-                }
-            });
             let request_app = app.clone();
             let control = app
                 .state::<crate::bootstrap_control::BootstrapControl>()
@@ -1703,6 +1724,43 @@ mod tests {
             service.run(&notifier, &CancelSignal::new()),
             LoopOutcome::FocusExisting
         ));
+    }
+
+    /// Real incident, 16-sep: superseded images kept accumulating on the
+    /// owner's Mac even though `prune_superseded_images` itself is correct —
+    /// pinning here that `run_once`'s decision to prune (`should_prune_after`)
+    /// fires ONLY for a genuinely converged `Ready` boot, never for the other
+    /// three outcomes a real attempt can land on.
+    #[test]
+    fn prunes_only_after_a_fully_ready_boot_never_on_any_other_outcome() {
+        let (ready_service, _clock) = service(
+            ScriptedProbe::new(vec![Ok(converged_facts())]),
+            ScriptedDriver::new(vec![(
+                RepairAction::StartContainer,
+                Ok(ApplyOutcome::Ready(ticket())),
+            )]),
+        );
+        let ready = ready_service.run(&RecordingNotifier::new(), &CancelSignal::new());
+        assert!(matches!(ready, LoopOutcome::Ready { .. }), "{ready:?}");
+        assert!(should_prune_after(&ready));
+
+        let mut disk_full = converged_facts();
+        disk_full.free_disk_bytes = Bytes(0);
+        let (degraded_service, _clock) = service(
+            ScriptedProbe::new(vec![Ok(disk_full)]),
+            ScriptedDriver::new(vec![]),
+        );
+        let degraded = degraded_service.run(&RecordingNotifier::new(), &CancelSignal::new());
+        assert!(
+            matches!(degraded, LoopOutcome::Degraded { .. }),
+            "{degraded:?}"
+        );
+        assert!(!should_prune_after(&degraded));
+
+        assert!(!should_prune_after(&LoopOutcome::FocusExisting));
+        assert!(!should_prune_after(&LoopOutcome::Cancelled {
+            lifecycle: EngineLifecycle::fresh(),
+        }));
     }
 
     #[test]

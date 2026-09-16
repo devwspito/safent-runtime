@@ -438,7 +438,44 @@ impl EmbeddedCliDriver {
         self.run_podman(&["rmi", &reference]).map(|_| ())
     }
 
+    /// Real incident, 16-sep: `rmi` above frees blocks inside the bundled
+    /// machine's OWN filesystem, but a sparse/thin-provisioned VM disk never
+    /// shrinks on the HOST until those blocks are explicitly discarded — the
+    /// owner's raw machine file stayed at 59 GB even after every superseded
+    /// image was already gone, and only came down to 13 GB once `sudo fstrim
+    /// -av` ran inside the machine by hand. `SAFENT_MACHINE_NAME` is a
+    /// literal, not something re-observed here: this adapter's bundled CLI
+    /// always creates exactly one machine under this exact name (the same
+    /// literal already fixed across this crate's own test fixtures and
+    /// `engine_adapter_cli_contract.rs`) — re-deriving it would mean
+    /// spawning the full porcelain CLI for a best-effort housekeeping step
+    /// that never varies. Best-effort like the rest of this method: a
+    /// missing `machine` subcommand (Linux has none) or a failed ssh session
+    /// is swallowed, never surfaced as an `EngineError`.
+    fn trim_machine_disk(&self) {
+        let _ = self.run_podman_with_timeout(
+            &[
+                "machine",
+                "ssh",
+                SAFENT_MACHINE_NAME,
+                "--",
+                "sudo",
+                "fstrim",
+                "-av",
+            ],
+            FSTRIM_TIMEOUT,
+        );
+    }
+
     fn run_podman(&self, args: &[&str]) -> Result<Vec<u8>, EngineError> {
+        self.run_podman_with_timeout(args, PRUNE_TIMEOUT)
+    }
+
+    fn run_podman_with_timeout(
+        &self,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, EngineError> {
         let mut cmd = Command::new(&self.config.podman_path);
         cmd.args(args);
         cmd.env("PATH", augmented_path());
@@ -456,7 +493,7 @@ impl EmbeddedCliDriver {
             })
         });
         let stderr = child.stderr.take();
-        wait_bounded(&mut child, PRUNE_TIMEOUT, stderr)?;
+        wait_bounded(&mut child, timeout, stderr)?;
         Ok(stdout.and_then(|h| h.join().ok()).unwrap_or_default())
     }
 
@@ -479,10 +516,29 @@ impl EmbeddedCliDriver {
         let mut report = PruneReport::default();
         for image in image_prune::images_to_remove(&local, &our_repositories, &pinned, 1) {
             match self.remove_image(&image) {
-                Ok(()) => report.removed += 1,
+                Ok(()) => {
+                    report.removed += 1;
+                    report.bytes_reclaimed += image.size_bytes;
+                }
                 Err(_) => report.failed += 1,
             }
         }
+        // Nothing removed ⇒ nothing to trim; an ssh round-trip into the
+        // machine for a no-op prune pass is pure overhead.
+        if report.removed > 0 {
+            self.trim_machine_disk();
+        }
+        // The only record of this pass: `report.failed` was previously
+        // discarded by both callers (`boot.rs`'s `Ready` spawn, this file's
+        // own storage-full retry) the moment it left this function — a
+        // systemic `rmi` failure left zero diagnostic trail, which is
+        // exactly how 8 superseded engine images went unnoticed until a
+        // manual inspection (16-sep). One line, always emitted, regardless
+        // of whether the UI event above also fires.
+        eprintln!(
+            "safent: prune_superseded_images removed={} failed={} bytes_reclaimed={}",
+            report.removed, report.failed, report.bytes_reclaimed
+        );
         report
     }
 }
@@ -493,6 +549,19 @@ impl EmbeddedCliDriver {
 /// `EngineError::Timeout`, not a reason to block the caller indefinitely.
 const PRUNE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// `fstrim -av` walks every mounted filesystem inside the machine, not just
+/// the handful of blocks a handful of `rmi`s just freed — generous next to
+/// `PRUNE_TIMEOUT` for the same reason `PRUNE_TIMEOUT` is generous next to
+/// `hard_timeout`: this is housekeeping that must eventually give up, not
+/// hang the background thread it runs on forever.
+const FSTRIM_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// This adapter's bundled CLI creates exactly one machine, always under this
+/// name (`domain.rs`'s own `MachineFact` test fixtures and
+/// `engine_adapter_cli_contract.rs` already fix it identically) — never a
+/// user choice, so never worth re-observing at prune time.
+const SAFENT_MACHINE_NAME: &str = "safent-engine";
+
 /// How many images `prune_superseded_images` actually removed — `boot.rs`/
 /// `run_once` notify `DomainEvent::ImagesPruned` from this, never a bare
 /// count threaded through by hand.
@@ -500,6 +569,7 @@ const PRUNE_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) struct PruneReport {
     pub removed: u32,
     pub failed: u32,
+    pub bytes_reclaimed: u64,
 }
 
 /// `podman image ls --format json`'s own shape — `RepoDigests` (never the
@@ -514,6 +584,8 @@ struct WireLocalImage {
     created: i64,
     #[serde(default, rename = "Containers")]
     containers: Option<i64>,
+    #[serde(default, rename = "Size")]
+    size: u64,
 }
 
 impl WireLocalImage {
@@ -524,6 +596,7 @@ impl WireLocalImage {
     fn into_local_images(self) -> Vec<image_prune::LocalImage> {
         let created_unix = self.created.max(0) as u64;
         let in_use = self.containers.unwrap_or(0) > 0;
+        let size_bytes = self.size;
         self.repo_digests
             .into_iter()
             .filter_map(|reference| {
@@ -533,6 +606,7 @@ impl WireLocalImage {
                     digest: digest.to_string(),
                     created_unix,
                     in_use,
+                    size_bytes,
                 })
             })
             .collect()
@@ -1597,6 +1671,126 @@ mod caps_ack_tests {
             0,
         );
         assert!(d.ads_caps_status().is_err());
+    }
+}
+
+/// Real incident, 16-sep: `prune_superseded_images`'s pure selection
+/// (`image_prune.rs`) was already correct, but nothing ever recorded a
+/// `podman rmi` failure, and nothing ever gave the freed blocks back to the
+/// host — the owner's raw machine disk stayed at 59 GB until a manual
+/// `fstrim`. These exercise the WHOLE method end to end against a fake
+/// `podman` (same "fake CLI script" pattern as `caps_ack_tests` above), not
+/// just `image_prune::images_to_remove` in isolation.
+#[cfg(all(test, unix))]
+mod prune_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    /// Answers `image ls --format json` from a fixture, always succeeds
+    /// `rmi`/`machine`, and appends every invocation (one line per call) to
+    /// `calls.log` — enough to prove both WHAT got removed and the ORDER
+    /// things happened in, without a real podman machine.
+    fn fake_podman(dir: &Path, images_json: &str) -> PathBuf {
+        std::fs::write(dir.join("images.json"), images_json).unwrap();
+        let script = dir.join("podman");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             here=$(dirname \"$0\")\n\
+             printf '%s\\n' \"$*\" >> \"$here/calls.log\"\n\
+             case \"$1\" in\n\
+             \x20   image) cat \"$here/images.json\"; exit 0 ;;\n\
+             \x20   rmi) exit 0 ;;\n\
+             \x20   machine) exit 0 ;;\n\
+             esac\n\
+             exit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        script
+    }
+
+    fn calls(dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("calls.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn config(dir: &Path, podman: PathBuf) -> EmbeddedCliConfig {
+        EmbeddedCliConfig::with_defaults(
+            dir.join("safent-unused"),
+            podman,
+            dir.join("state"),
+            ImageRef::new("ghcr.io/example/core", "sha256:current").unwrap(),
+            None,
+        )
+    }
+
+    #[test]
+    fn removes_superseded_images_reports_bytes_and_trims_the_machine_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let images_json = r#"[
+            {"RepoDigests": ["ghcr.io/example/core@sha256:current"], "Created": 500, "Containers": 1, "Size": 1000},
+            {"RepoDigests": ["ghcr.io/example/core@sha256:rollback"], "Created": 400, "Containers": 0, "Size": 2000},
+            {"RepoDigests": ["ghcr.io/example/core@sha256:ancient"], "Created": 300, "Containers": 0, "Size": 3000}
+        ]"#;
+        let podman = fake_podman(dir.path(), images_json);
+        let driver = EmbeddedCliDriver::new(config(dir.path(), podman));
+
+        let report = driver.prune_superseded_images();
+
+        assert_eq!(report.removed, 1, "{report:?}");
+        assert_eq!(report.failed, 0, "{report:?}");
+        assert_eq!(report.bytes_reclaimed, 3000, "{report:?}");
+
+        let calls = calls(dir.path());
+        assert!(
+            calls[0].starts_with("image ls"),
+            "must list images before removing anything: {calls:?}"
+        );
+        assert_eq!(
+            calls.iter().filter(|c| c.starts_with("rmi")).count(),
+            1,
+            "the pinned digest and the one rollback survivor must not be rmi'd: {calls:?}"
+        );
+        let rmi_index = calls.iter().position(|c| c.starts_with("rmi")).unwrap();
+        let trim_index = match calls.iter().position(|c| c.starts_with("machine ssh")) {
+            Some(index) => index,
+            None => panic!("a successful removal must trigger fstrim: {calls:?}"),
+        };
+        assert!(
+            trim_index > rmi_index,
+            "fstrim must run AFTER removal, never before: {calls:?}"
+        );
+        assert!(
+            calls[trim_index].contains("safent-engine")
+                && calls[trim_index].contains("fstrim")
+                && calls[trim_index].contains("-av"),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn an_already_converged_pass_removes_nothing_and_never_touches_the_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let images_json = r#"[
+            {"RepoDigests": ["ghcr.io/example/core@sha256:current"], "Created": 500, "Containers": 1, "Size": 1000}
+        ]"#;
+        let podman = fake_podman(dir.path(), images_json);
+        let driver = EmbeddedCliDriver::new(config(dir.path(), podman));
+
+        let report = driver.prune_superseded_images();
+
+        assert_eq!(report.removed, 0, "{report:?}");
+        assert_eq!(report.bytes_reclaimed, 0, "{report:?}");
+        let calls = calls(dir.path());
+        assert!(
+            !calls.iter().any(|c| c.starts_with("machine")),
+            "an idle prune pass is pure overhead if it also ssh's into the machine: {calls:?}"
+        );
     }
 }
 
