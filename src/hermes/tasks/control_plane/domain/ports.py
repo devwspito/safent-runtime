@@ -41,6 +41,11 @@ class EnqueueNotAuthorized(ControlPlaneError):
     fail-closed). Queda traza de la negacion."""
 
 
+class EnqueueBlockedByKillSwitch(ControlPlaneError):
+    """El freno de emergencia (AgentStatePort.is_paused()) está activo: no se
+    admiten turnos nuevos hasta que el dueño lo libere (025 Top-KILL)."""
+
+
 class UnknownTask(ControlPlaneError):
     """task_id inexistente."""
 
@@ -233,13 +238,11 @@ class ControlPlanePort(Protocol):
         *,
         channel: AuthenticatedChannel,
         proposal_id: UUID,
-        mfa_factors: Any | None = None,
     ) -> str:
         """HITL approve. `approved_by` = UUID(channel.sender_uid). NO dispara
         run_cycle (NFR-001); el loop re-dispatcha. Devuelve approval_token.
 
-        `mfa_factors` se reenvía al gate (punto único de verificación MFA en TODA
-        superficie — red-team 2026-06-19, finding 3)."""
+        El gate impide aprobar localmente las propuestas de Enterprise."""
         ...
 
     async def reject(

@@ -439,3 +439,61 @@ class TestReadAllMemoryEntriesIntegration:
         assert "memory" in targets
         for entry in result:
             assert 0 < len(entry["content_truncated"]) <= 200
+
+
+class TestDeleteMemoryEntry:
+    """specs/025-safent-repaso MEM-06 — DELETE on a non-existent id must 404,
+    not 200. GET already 404s (get_memory_entry → {}) and PUT already 400s
+    (update_memory_entry → {ok:false}) for the same id; DELETE was the only
+    one reporting "success" for an id that was never there, which reads as
+    "it worked" when nothing was deleted.
+    """
+
+    def _wire_real_store(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[DbusRuntimeServiceWiring, UUID]:
+        import hermes.memory.infrastructure.nous_memory_bridge as bridge_mod
+
+        tenant_id = uuid4()
+        monkeypatch.setenv("HERMES_TENANT_ID", str(tenant_id))
+        monkeypatch.setattr(bridge_mod, "_DEFAULT_MEMORY_ROOT", tmp_path)
+        return _make_wiring(), tenant_id
+
+    def test_delete_existing_entry_succeeds(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from hermes.memory.infrastructure.tenant_memory_store import TenantMemoryStore  # noqa: PLC0415
+
+        wiring, tenant_id = self._wire_real_store(tmp_path, monkeypatch)
+        store = TenantMemoryStore(root=tmp_path, tenant_id=tenant_id)
+        store.add("memory", "borrar esto")
+
+        result = wiring.delete_memory_entry(entry_id="memory:0", sender_uid=_OPERATOR_UID)
+
+        assert result == {"ok": True, "deleted": True}
+
+    def test_delete_nonexistent_id_reports_not_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The regression: deleting an id that was never written must NOT
+        look like a successful delete — {ok:false, code:'not_found'} so the
+        REST layer can 404 it (matches GET/PUT for the same id)."""
+        wiring, _tenant_id = self._wire_real_store(tmp_path, monkeypatch)
+
+        result = wiring.delete_memory_entry(entry_id="memory:0", sender_uid=_OPERATOR_UID)
+
+        assert result["ok"] is False
+        assert result["code"] == "not_found"
+
+    def test_delete_already_removed_entry_reports_not_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Double-delete: same outcome as never-existed (no tombstone tracking)."""
+        from hermes.memory.infrastructure.tenant_memory_store import TenantMemoryStore  # noqa: PLC0415
+
+        wiring, tenant_id = self._wire_real_store(tmp_path, monkeypatch)
+        store = TenantMemoryStore(root=tmp_path, tenant_id=tenant_id)
+        store.add("memory", "borrar esto")
+
+        first = wiring.delete_memory_entry(entry_id="memory:0", sender_uid=_OPERATOR_UID)
+        second = wiring.delete_memory_entry(entry_id="memory:0", sender_uid=_OPERATOR_UID)
+
+        assert first == {"ok": True, "deleted": True}
+        assert second["ok"] is False
+        assert second["code"] == "not_found"

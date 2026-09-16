@@ -33,8 +33,6 @@ _LEASE_SECONDS: int = int(os.environ.get("HERMES_TASK_LEASE_SECONDS", "600"))
 _BACKOFF_BASE_SECONDS: int = 30
 _BACKOFF_CAP_SECONDS: int = 3600
 
-_TERMINAL_STATUSES = frozenset({"completed", "failed", "rejected"})
-
 # Identificador por defecto del worker que reclama (data-model 006 §A5). El loop
 # P0 es single-writer; el id es estable dentro de un arranque del daemon. Satisface
 # la invariante I6 ('in_progress' => worker_id NOT NULL) del esquema P1.
@@ -70,10 +68,22 @@ class SqliteWorkQueue:
 
     async def enqueue(self, item: WorkItem) -> WorkItem:
         """Inserta PENDING. Idempotente por dedup_key. Rechaza sin enqueued_by (CTRL-10)."""
+        return self._enqueue(item)
+
+    async def enqueue_guarded(self, item: WorkItem, admission_guard) -> WorkItem:
+        """Pairing validation and queue commit share a bounded synchronous lock.
+
+        No await inside this guard: a concurrent coroutine cannot reenter the
+        process/thread lock while this admission is being committed.
+        """
+        with admission_guard():
+            return self._enqueue(item)
+
+    def _enqueue(self, item: WorkItem) -> WorkItem:
         _assert_enqueued_by(item)
 
         if item.dedup_key is not None:
-            existing = await self.find_by_dedup_key(item.dedup_key)
+            existing = self._find_by_dedup_key(item.dedup_key)
             if existing is not None:
                 return existing
 
@@ -129,7 +139,7 @@ class SqliteWorkQueue:
         # invariante del esquema (p.ej. I6) que ANTES se perdía en silencio.
         if inserted == 0:
             existing = (
-                await self.find_by_dedup_key(item.dedup_key)
+                self._find_by_dedup_key(item.dedup_key)
                 if item.dedup_key is not None
                 else None
             )
@@ -244,7 +254,7 @@ class SqliteWorkQueue:
             )
 
     async def mark_failed(
-        self, item_id: UUID, *, claim_token: UUID, reason: str
+        self, item_id: UUID, *, claim_token: UUID, reason: str, retryable: bool = True
     ) -> WorkItem:
         """FAILED con backoff — delega transición en la máquina de estados de dominio.
 
@@ -256,7 +266,9 @@ class SqliteWorkQueue:
             raise ValueError(f"WorkItem {item_id} no encontrado")
 
         try:
-            next_state = _domain.mark_failed(item, claim_token=claim_token, reason=reason)
+            next_state = _domain.mark_failed(
+                item, claim_token=claim_token, reason=reason, retryable=retryable
+            )
         except _domain.IllegalTransition as exc:
             raise ClaimTokenMismatch(str(exc)) from exc
 
@@ -266,7 +278,7 @@ class SqliteWorkQueue:
             # Reintento con backoff: next_state.available_at ya lo calculó el dominio.
             next_attempt_iso = _iso(next_state.available_at)
             with self._connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE agent_tasks
                     SET status           = 'pending',
@@ -285,7 +297,7 @@ class SqliteWorkQueue:
         else:
             # Terminal FAILED.
             with self._connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE agent_tasks
                     SET status           = 'failed',
@@ -301,6 +313,8 @@ class SqliteWorkQueue:
                     (reason, now_iso, str(item_id), str(claim_token)),
                 )
 
+        if cursor.rowcount != 1:
+            raise ClaimTokenMismatch("mark_failed: task state or claim changed before persistence")
         updated = await self._load_item(str(item_id))
         assert updated is not None
         return updated
@@ -426,6 +440,9 @@ class SqliteWorkQueue:
         return cursor.rowcount
 
     async def find_by_dedup_key(self, dedup_key: str) -> WorkItem | None:
+        return self._find_by_dedup_key(dedup_key)
+
+    def _find_by_dedup_key(self, dedup_key: str) -> WorkItem | None:
         """Busca item VIVO (no terminal) por dedup_key (SC-007)."""
         with self._connect() as conn:
             row = conn.execute(
@@ -439,7 +456,7 @@ class SqliteWorkQueue:
             ).fetchone()
         if row is None:
             return None
-        return await self._load_item(row["task_id"])
+        return self._load_item_sync(row["task_id"])
 
     async def renew_lease(self, item_id: UUID, *, claim_token: UUID) -> bool:
         """Renueva lease si el claim_token coincide y el item sigue in_progress.
@@ -552,6 +569,9 @@ class SqliteWorkQueue:
             ensure_tasks_schema(conn)
 
     async def _load_item(self, task_id: str) -> WorkItem | None:
+        return self._load_item_sync(task_id)
+
+    def _load_item_sync(self, task_id: str) -> WorkItem | None:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM agent_tasks WHERE task_id = ?", (task_id,)

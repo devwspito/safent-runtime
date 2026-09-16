@@ -1,0 +1,1000 @@
+"""`safent companion install|repair` and `safent agent`'s consumption of the
+install-request marker (028 T016, contracts/install-request.md).
+
+Two layers, tested separately:
+  - `TestCompanionInstall`/`TestCompanionRepair`: the verbs themselves —
+    scaffold -> full provision -> best-effort hot-reload, porcelain events.
+  - `TestAgentTick`: `_agent_tick` (one pass of `safent agent`'s loop,
+    `SAFENT_AGENT_ONCE=1`) orchestrating claim -> action -> resolve. The
+    claim/resolve marker semantics themselves (expiry, mutual exclusion)
+    are already covered at the Python level in
+    tests/unit/agents_os/test_install_requests.py and
+    tests/unit/shell_server/test_install_request_agent_cli.py — this fakes
+    `install_request_agent_cli`'s OWN exit codes/stdout (scripted via env
+    vars) so these tests stay focused on `safent`'s OWN orchestration:
+    does it call claim, react correctly to "nothing to claim" vs "claimed",
+    run the right action, and resolve success/failure correctly.
+
+Same "only podman (+curl) faked, everything else real" discipline as
+tests/unit/ops/test_companion_provision.py.
+"""
+
+from __future__ import annotations
+
+import os
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_SAFENT_CLI = _REPO_ROOT / "safent"
+_PROVISION_SH = _REPO_ROOT / "ops/container/companions/ads/provision.sh"
+_COMPOSE_YAML = _REPO_ROOT / "ops/container/companions/ads/compose.yaml"
+_CAPS_TEMPLATE = _REPO_ROOT / "ops/container/companions/ads/caps.template.yaml"
+
+_FAKE_PODMAN = r"""#!/usr/bin/env bash
+set -e
+echo "$@" >> "$FAKE_PODMAN_LOG"
+case "$1" in
+  volume)
+    [ "$2" != inspect ] || echo 'local|0|ads-runtime-projection'
+    exit 0 ;;
+  inspect)
+    case "$*" in
+      *HostConfig.PortBindings*)
+        echo "${FAKE_SAVED_PORT:-127.0.0.1:35335}"; exit 0 ;;
+      *'{{len .NetworkSettings.Networks}}'*)
+        echo "${FAKE_NETWORK_MEMBERSHIP:-1|safent-companions}"; exit 0 ;;
+      *Config.CreateCommand*)
+        printf '"%s"\n' podman run --network safent-companions --ip "${FAKE_RECORDED_IP:-10.201.0.2}"
+        [ "${FAKE_FORWARDING_CREATION:-1}" = absent ] || printf '"%s"\n' --sysctl "net.ipv4.ip_forward=${FAKE_FORWARDING_CREATION:-1}"
+        [ "${FAKE_DUPLICATE_FORWARDING:-0}" != 1 ] || printf '"%s"\n' --sysctl net.ipv4.ip_forward=1
+        [ "${FAKE_DUPLICATE_NETWORK:-0}" != 1 ] || printf '"%s"\n' --network foreign
+        exit 0 ;;
+      *'{{.Config.Image}}'*)
+        mount="${FAKE_DATA_MOUNT:-volume|agent-test-data}"
+        if [ "${FAKE_CHANGED_CORE_IDENTITY:-0}" = 1 ] && [ "${!#}" = "$FAKE_CORE_ID" ]; then mount='volume|foreign-data'; fi
+        printf '%s|%s|%s|%s\n' "$FAKE_CORE_ID" "${FAKE_CORE_REF:-$SAFENT_IMAGE}" "$FAKE_CORE_IMAGE_ID" "$mount"
+        exit 0 ;;
+      *NetworkSettings.Networks*)
+        ip="${FAKE_CORE_IP:-10.201.0.2}"
+        if [ "${FAKE_STOPPED_NO_PORT:-0}" = 1 ] && [ ! -f "${FAKE_CORE_STARTED:-/nonexistent}" ]; then ip=""; fi
+        [ ! -f "${FAKE_CORE_RECREATED:-/nonexistent}" ] || ip=10.201.0.2
+        if [ "${!#}" = "$FAKE_FOREIGN_ID" ]; then ip=10.201.0.2; fi
+        case "$*" in *'{{.Id}}|'*) printf '%s|%s\n' "${!#}" "$ip";; *) echo "$ip";; esac
+        exit 0 ;;
+      *com.docker.compose.service*)
+        case "$4" in c1) role=ads-api;; c2) role=ads-db;; c3) role=ads-worker;; c4) role=ads-broker;; c5) role=ads-migrate;; *) exit 1;; esac
+        case "$*" in
+          *'{{.Image}}'*)
+            image="$FAKE_ADS_IMAGE_ID"
+            [ "$role" != ads-db ] || image="$FAKE_DB_IMAGE_ID"
+            if [ "${FAKE_STALE_ROLE:-}" = "$role" ]; then
+              if [ "${FAKE_STUCK_IMAGE:-0}" = 1 ] || [ ! -f "${FAKE_COMPOSE_APPLIED:-/nonexistent}" ]; then image="$FAKE_OLD_IMAGE_ID"; fi
+            fi
+            printf '%s|%s\n' "$role" "$image" ;;
+          *)
+            if [ "$role" = ads-migrate ]; then printf '%s|false|exited|0\n' "$role";
+            else printf '%s|true|running|0\n' "$role"; fi ;;
+        esac
+        exit 0 ;;
+      *'/etc/hermes/companions'*)
+        if [ "${FAKE_MISSING_PROJECTION:-0}" != 1 ] || [ -f "${FAKE_CORE_RECREATED:-/nonexistent}" ]; then
+          echo 'volume|safent-companion-runtime|false'
+        fi
+        exit 0 ;;
+      *'/var/lib/hermes'*) echo "${FAKE_DATA_MOUNT:-volume|agent-test-data}"; exit 0 ;;
+      *'{{.ImageDigest}}'*) echo "${SAFENT_IMAGE#*@}"; exit 0 ;;
+      *"-f "*)
+        # `_running`: --type container -f {{.State.Running}} NAME
+        if [ -f "${FAKE_CORE_STARTED:-/nonexistent}" ] || [ -f "${FAKE_CORE_RECREATED:-/nonexistent}" ]; then echo true; else echo "${FAKE_RUNNING:-true}"; fi
+        exit 0
+        ;;
+      *)
+        # `_exists`: --type container NAME (no -f)
+        [ "${FAKE_CONTAINER_EXISTS:-1}" = "1" ] && exit 0 || exit 1
+        ;;
+    esac
+    ;;
+  container)
+    case "$2" in
+      exists) exit 1 ;;  # fresh test: ads-db never existed -> alembic guard short-circuits
+    esac
+    exit 0
+    ;;
+  network)
+    case "$2" in
+      inspect) [ "${FAKE_NETWORK_PRESENT:-1}" = "1" ] && exit 0 || exit 1 ;;
+      create) exit 0 ;;
+    esac
+    exit 0
+    ;;
+  pull) exit 0 ;;
+  ps)
+    if [ "${2:-}" = --all ]; then
+      echo "$FAKE_CORE_ID"
+      [ "${FAKE_FOREIGN_CORE_IP:-0}" != 1 ] || echo "$FAKE_FOREIGN_ID"
+    fi
+    exit 0 ;;
+  image)
+    case "$*" in
+      *'{{.Id}}'*)
+        # Real Podman returns an unprefixed image ID (not a manifest digest).
+        case "${!#}" in docker.io/library/postgres@sha256:*) echo "${FAKE_DB_IMAGE_ID#sha256:}";; ghcr.io/devwspito/safent@sha256:*) echo "${FAKE_EXPECTED_CORE_IMAGE_ID:-$FAKE_CORE_IMAGE_ID}";; *) echo "${FAKE_ADS_IMAGE_ID#sha256:}";; esac ;;
+    esac
+    exit 0 ;;
+  port)
+    if [ "${FAKE_STOPPED_NO_PORT:-0}" = 1 ] && [ ! -f "${FAKE_CORE_STARTED:-/nonexistent}" ]; then exit 0; fi
+    echo "${FAKE_PUBLISHED_PORT:-127.0.0.1:35335}"; exit 0 ;;
+  start)
+    [ "${FAKE_START_FAIL:-0}" != 1 ] || exit 1
+    [ -z "${FAKE_CORE_STARTED:-}" ] || touch "$FAKE_CORE_STARTED"
+    exit 0 ;;
+  run)
+    case "$*" in
+      *"safent-companion-runtime:/runtime"*) cat >/dev/null; exit 0 ;;
+      *'--name agent-test '*)
+        [ -n "${FAKE_CORE_RECREATED:-}" ] && touch "$FAKE_CORE_RECREATED"
+        exit 0 ;;
+    esac
+    # `run --rm --entrypoint cat <image> ...` (T015 scaffold's image-baked-
+    # file probe, _fetch_companion_file) always misses -> forces the cache
+    # tier (pre-seeded below). `run --rm --network none -- <image> python -m
+    # safent_ads.tools.gen_keys` is scripted so ensure_secrets/
+    # ensure_sso_keypair succeed. The channel probe returns only a fixed
+    # RFC 7748 public key; consume its stdin without logging master material.
+    for a in "$@"; do
+      if [ "$a" = "safent_ads.tools.composio_channel_key" ]; then
+        cat >/dev/null
+        printf '%s\n' 'hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo='
+        exit 0
+      fi
+      if [ "$a" = "safent_ads.tools.gen_keys" ]; then
+        echo "ADS_APPROVAL_SIGNING_KEY=new-seed"
+        echo "ADS_APPROVAL_PUBLIC_KEY=new-pub"
+        exit 0
+      fi
+    done
+    exit 1
+    ;;
+  compose)
+    verb="$6"
+    case "$verb" in
+      up)
+        [ "${FAKE_COMPOSE_UP_FAIL:-0}" = "1" ] && exit 1
+        [ -z "${FAKE_COMPOSE_APPLIED:-}" ] || printf '%s' "$SAFENT_ADS_IMAGE" > "$FAKE_COMPOSE_APPLIED"
+        exit 0 ;;
+      down) exit 0 ;;
+      ps) for id in c1 c2 c3 c4 c5; do echo "$id"; done; exit 0 ;;
+      exec) printf '%s\n' "${FAKE_DB_REVISION:-}"; exit 0 ;;
+    esac
+    exit 0
+    ;;
+  exec)
+    shift  # drop "exec"
+    if [ "$1" = "-u" ]; then shift 2; fi  # drop "-u <uid>"
+    shift  # drop the container name
+    case "$1 $2" in
+      "test -f") exit 1 ;;  # legacy .update-requested/.uninstall-requested: never present here
+    esac
+    case "$*" in
+      'cat /proc/sys/net/ipv4/ip_forward')
+        if [ -f "${FAKE_CORE_RECREATED:-/nonexistent}" ]; then echo "${FAKE_RECREATED_FORWARDING:-1}";
+        else echo "${FAKE_CORE_FORWARDING-1}"; fi
+        exit 0 ;;
+      'systemctl is-active hermes-runtime') echo active; exit 0 ;;
+      'cat /var/lib/hermes-bootstrap/bootstrap/webui-bootstrap') echo private-regression-ticket; exit 0 ;;
+      *install_request_agent_cli\ claim-ads*)
+        if [ -n "${FAKE_CLAIM_install_companion:-}" ]; then verb=install_companion;
+        elif [ -n "${FAKE_CLAIM_repair_companion:-}" ]; then verb=repair_companion;
+        else exit 1; fi
+        echo "$verb 0123456789abcdef0123456789abcdef"
+        exit 0
+        ;;
+      *install_request_agent_cli\ claim*)
+        verb="$5"
+        case "$verb" in
+          install_companion) slug="${FAKE_CLAIM_install_companion:-}" ;;
+          repair_companion) slug="${FAKE_CLAIM_repair_companion:-}" ;;
+          *) slug="" ;;
+        esac
+        [ -n "$slug" ] || exit 1
+        [ "$slug" = "__NONE__" ] && { echo ""; exit 0; }
+        echo "$slug"
+        exit 0
+        ;;
+      *install_request_agent_cli\ resolve*)
+        exit 0
+        ;;
+      *install_request_agent_cli\ verify-ads*)
+        if [ "${FAKE_MISSING_PROJECTION:-0}" = 1 ]; then
+          [ -f "${FAKE_CORE_RECREATED:-/nonexistent}" ] || exit 1
+        fi
+        [ "${FAKE_RELOAD_FAIL:-0}" = "1" ] && exit 1
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+"""
+
+_FAKE_CURL = r"""#!/usr/bin/env bash
+case "$*" in
+  *raw.githubusercontent.com*) exit 1 ;;  # force the cache tier, never real network
+  */healthz*) printf '200' ;;
+  *) printf '401' ;;                       # /mcp/health bearer-protected probe
+esac
+exit 0
+"""
+
+
+@pytest.fixture()
+def fake_bin_dir(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    podman = bin_dir / "podman"
+    podman.write_text(_FAKE_PODMAN)
+    podman.chmod(0o755)
+    curl = bin_dir / "curl"
+    curl.write_text(_FAKE_CURL)
+    curl.chmod(0o755)
+    return bin_dir
+
+
+def test_fake_channel_pin_probe_never_logs_stdin(tmp_path: Path, fake_bin_dir: Path) -> None:
+    log = tmp_path / "podman.log"
+    synthetic_master = "synthetic-regression-master-stdin-only"
+    result = subprocess.run(
+        [
+            str(fake_bin_dir / "podman"), "run", "--rm", "-i", "--network", "none",
+            "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--", "synthetic-image", "python", "-m", "safent_ads.tools.composio_channel_key",
+        ],
+        input=synthetic_master + "\n",
+        env={**os.environ, "FAKE_PODMAN_LOG": str(log)},
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert result.returncode == 0
+    assert result.stdout == "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=\n"
+    assert result.stderr == ""
+    assert synthetic_master not in log.read_text()
+
+
+def _seed_state_home(state_home: Path) -> None:
+    state_home.mkdir(parents=True, exist_ok=True)
+    (state_home / "safent-seccomp.json").write_text("{}")
+    bin_dir = state_home / "companions" / "ads" / "bin"
+    bin_dir.mkdir(parents=True)
+    shutil.copy(_PROVISION_SH, bin_dir / "provision.sh")
+    (bin_dir / "provision.sh").chmod(0o755)
+    shutil.copy(_COMPOSE_YAML, bin_dir / "compose.yaml")
+    shutil.copy(_CAPS_TEMPLATE, bin_dir / "caps.template.yaml")
+
+
+def _base_env(
+    tmp_path: Path, fake_bin_dir: Path, state_home: Path, podman_log: Path
+) -> dict[str, str]:
+    return {
+        **os.environ,
+        "PATH": f"{fake_bin_dir}:{os.environ.get('PATH', '')}",
+        "HOME": str(tmp_path / "home"),
+        "SAFENT_STATE_HOME": str(state_home),
+        "SAFENT_NAME": "agent-test",
+        "SAFENT_IMAGE": "ghcr.io/devwspito/safent@sha256:" + "b" * 64,
+        "SAFENT_ADS_IMAGE": "ghcr.io/devwspito/safent-ads@sha256:" + "a" * 64,
+        "FAKE_PODMAN_LOG": str(podman_log),
+        "FAKE_ADS_IMAGE_ID": "sha256:" + "c" * 64,
+        "FAKE_DB_IMAGE_ID": "sha256:" + "d" * 64,
+        "FAKE_OLD_IMAGE_ID": "sha256:" + "e" * 64,
+        "FAKE_CORE_ID": "1" * 64,
+        "FAKE_FOREIGN_ID": "2" * 64,
+        "FAKE_CORE_IMAGE_ID": "3" * 64,
+    }
+
+
+class TestCompanionInstall:
+    @pytest.mark.parametrize("argv", [["up"], ["companion", "repair"]])
+    def test_cold_resume_uses_persisted_loopback_port_and_preserves_container(
+        self, tmp_path: Path, fake_bin_dir: Path, argv: list[str]
+    ) -> None:
+        """Real Podman 6.1.1: port/IP are empty after the managed VM stops."""
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_RUNNING="false", FAKE_STOPPED_NO_PORT="1",
+                   FAKE_CORE_STARTED=str(tmp_path / "started"))
+        for _ in range(2):
+            result = subprocess.run(
+                ["sh", str(_SAFENT_CLI), *argv, "--porcelain"], env=env,
+                capture_output=True, text=True, timeout=20, check=False,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert "private-regression-ticket" not in result.stdout + result.stderr
+        lines = log.read_text().splitlines()
+        assert [line for line in lines if line.startswith("start ")] == [
+            "start " + env["FAKE_CORE_ID"]
+        ]
+        assert not any(line.startswith(("rm ", "stop ", "run -d ", "volume rm ", "network rm ")) for line in lines)
+        assert any("HostConfig.PortBindings" in line for line in lines)
+
+    @pytest.mark.parametrize("override", [
+        {"FAKE_SAVED_PORT": "0.0.0.0:35335"},
+        {"FAKE_SAVED_PORT": "127.0.0.1:35335\n0.0.0.0:35335"},
+        {"FAKE_SAVED_PORT": "127.0.0.1:65536"},
+        {"FAKE_SAVED_PORT": "127.0.0.1:invalid"},
+        {"SAFENT_PORT": "41234"},
+        {"FAKE_DATA_MOUNT": "volume|foreign-data"},
+        {"FAKE_MISSING_PROJECTION": "1"},
+        {"FAKE_NETWORK_MEMBERSHIP": "2|safent-companionsforeign"},
+        {"FAKE_NETWORK_MEMBERSHIP": "1|foreign"},
+        {"FAKE_NETWORK_MEMBERSHIP": "1|host", "FAKE_FORWARDING_CREATION": "absent"},
+        {"FAKE_RECORDED_IP": "10.201.0.14"},
+        {"FAKE_DUPLICATE_NETWORK": "1"},
+        {"FAKE_FORWARDING_CREATION": "0"},
+        {"FAKE_DUPLICATE_FORWARDING": "1"},
+        {"FAKE_FOREIGN_CORE_IP": "1"},
+        {"FAKE_CHANGED_CORE_IDENTITY": "1"},
+        {"FAKE_EXPECTED_CORE_IMAGE_ID": "4" * 64},
+    ])
+    def test_cold_resume_unknown_identity_never_starts_or_recreates(
+        self, tmp_path: Path, fake_bin_dir: Path, override: dict[str, str]
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_RUNNING="false", FAKE_STOPPED_NO_PORT="1",
+                   FAKE_CORE_STARTED=str(tmp_path / "started"), **override)
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "up", "--porcelain"], env=env,
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        assert result.returncode == 25, result.stdout + result.stderr
+        lines = log.read_text().splitlines()
+        assert not any(line.startswith(("start ", "rm ", "stop ", "run -d ", "volume rm ", "network rm ")) for line in lines)
+        assert "private-regression-ticket" not in result.stdout + result.stderr
+
+    def test_cold_resume_start_failure_never_falls_back_to_recreating(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_RUNNING="false", FAKE_STOPPED_NO_PORT="1", FAKE_START_FAIL="1",
+                   FAKE_CORE_STARTED=str(tmp_path / "started"))
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "up", "--porcelain"], env=env,
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        assert result.returncode == 25, result.stdout + result.stderr
+        lines = log.read_text().splitlines()
+        assert "start " + env["FAKE_CORE_ID"] in lines
+        assert not any(line.startswith(("rm ", "stop ", "run -d ")) for line in lines)
+
+    @pytest.mark.parametrize("explicit_engine_only", [False, True])
+    def test_failed_scaffold_preserves_existing_core_unless_companion_disabled(
+        self, tmp_path: Path, fake_bin_dir: Path, explicit_engine_only: bool
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        provision = state_home / "companions" / "ads" / "bin" / "provision.sh"
+        provision.write_text("#!/bin/sh\nexit 1\n")
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_CORE_IP="10.201.0.14", FAKE_RUNNING="false")
+        # Existing stopped core forces the native up path in either mode.
+        argv = ["sh", str(_SAFENT_CLI), "up", "--porcelain"]
+        if explicit_engine_only:
+            argv.append("--no-companion")
+        result = subprocess.run(argv, env=env, capture_output=True, text=True,
+                                timeout=20, check=False)
+        lines = log.read_text().splitlines()
+        if explicit_engine_only:
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert any(line.startswith("run -d ") for line in lines)
+        else:
+            assert result.returncode != 0
+            assert "companion_network_conflict" in result.stdout
+            assert not any(line.startswith("rm ") or line.startswith("run -d ") for line in lines)
+
+    @pytest.mark.parametrize("verb", ["install", "repair"])
+    def test_healthy_same_image_reserved_core_ip_repairs_before_compose(
+        self, tmp_path: Path, fake_bin_dir: Path, verb: str
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_CORE_IP="10.201.0.14", FAKE_CORE_RECREATED=str(tmp_path / "recreated"),
+                   SAFENT_DATA_VOLUME="custom-preserved-data", FAKE_DATA_MOUNT="volume|custom-preserved-data",
+                   FAKE_PUBLISHED_PORT="127.0.0.1:41234")
+        before = subprocess.run(["sh", str(_SAFENT_CLI), "facts", "--json"], env=env,
+                                capture_output=True, text=True, timeout=20, check=False)
+        assert json.loads(before.stdout)["companionHealth"] == "unreachable"
+        for _ in range(2):
+            result = subprocess.run(["sh", str(_SAFENT_CLI), "companion", verb, "--porcelain"],
+                                    env=env, capture_output=True, text=True, timeout=20, check=False)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert "private-regression-ticket" not in result.stdout + result.stderr
+        lines = log.read_text().splitlines()
+        runs = [line for line in lines if line.startswith("run -d --name agent-test ")]
+        assert len(runs) == 1
+        assert "--network safent-companions --ip 10.201.0.2" in runs[0]
+        assert "-p 127.0.0.1:41234:7517" in runs[0]
+        assert "-v custom-preserved-data:/var/lib/hermes" in runs[0]
+        assert lines.index(runs[0]) < next(i for i, line in enumerate(lines) if " up -d" in line)
+        assert not any(line.startswith("volume rm") for line in lines)
+
+    @pytest.mark.parametrize("override", [
+        {"FAKE_FOREIGN_CORE_IP": "1"},
+        {"FAKE_CORE_REF": "ghcr.io/foreign/core@sha256:" + "a" * 64},
+        {"FAKE_DATA_MOUNT": "bind|agent-test-data"},
+        {"FAKE_PUBLISHED_PORT": "0.0.0.0:35335"},
+        {"FAKE_PUBLISHED_PORT": "127.0.0.1:35335\n0.0.0.0:35335"},
+        {"FAKE_CHANGED_CORE_IDENTITY": "1"},
+    ])
+    def test_reserved_core_recovery_rejects_foreign_or_ambiguous_identity(
+        self, tmp_path: Path, fake_bin_dir: Path, override: dict[str, str]
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_CORE_IP="10.201.0.14", **override)
+        result = subprocess.run(["sh", str(_SAFENT_CLI), "companion", "repair", "--porcelain"],
+                                env=env, capture_output=True, text=True, timeout=20, check=False)
+        assert result.returncode != 0
+        lines = log.read_text().splitlines()
+        assert not any(line.startswith("rm ") or " up -d" in line for line in lines)
+        assert not any("verify-ads" in line for line in lines)
+
+    @pytest.mark.parametrize("role,recorded", [
+        (role, "ghcr.io/devwspito/safent-ads@sha256:" + "f" * 64)
+        for role in ["ads-api", "ads-worker", "ads-broker", "ads-db", "ads-migrate"]
+    ] + [("ads-api", "ghcr.io/devwspito/safent-ads:v0.2.2"), ("ads-api", None)])
+    def test_upgrade_requires_running_bundle_images_not_just_download_and_health(
+        self, tmp_path: Path, fake_bin_dir: Path, role: str, recorded: str | None
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        state = state_home / "companions" / "ads"
+        if recorded is not None:
+            (state / "image").write_text(recorded)
+        (state / "pg_password").write_text("fake-pg")
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        applied = tmp_path / "compose-applied"
+        env.update(FAKE_STALE_ROLE=role, FAKE_COMPOSE_APPLIED=str(applied))
+
+        def invoke(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(["sh", str(_SAFENT_CLI), *args], env=env,
+                                  capture_output=True, text=True, timeout=20, check=False)
+
+        before = invoke("facts", "--json")
+        assert before.returncode == 0, before.stderr
+        facts = json.loads(before.stdout)
+        assert facts["localCompanionImageDigest"] == env["SAFENT_ADS_IMAGE"].split("@", 1)[1]
+        assert facts["companionContainers"] == {"running": 4, "total": 4}
+        assert facts["companionHealth"] == "unreachable"
+        assert "health-ads" not in log.read_text()
+        repaired = invoke("companion", "repair", "--porcelain")
+        assert repaired.returncode == 0, repaired.stdout + repaired.stderr
+        assert applied.read_text() == env["SAFENT_ADS_IMAGE"]
+        assert (state / "image").read_text() == env["SAFENT_ADS_IMAGE"]
+        for _ in range(2):
+            after = invoke("facts", "--json")
+            assert after.returncode == 0, after.stderr
+            assert json.loads(after.stdout)["companionHealth"] == "reachable"
+        calls = log.read_text().splitlines()
+        assert sum(line.endswith(" up -d") for line in calls) == 1
+        assert sum(line.endswith(" up -d --no-recreate ads-db") for line in calls) == 1
+
+    def test_compose_success_with_old_running_image_never_verifies_ads(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_STALE_ROLE="ads-api", FAKE_STUCK_IMAGE="1")
+        result = subprocess.run(["sh", str(_SAFENT_CLI), "companion", "repair", "--porcelain"],
+                                env=env, capture_output=True, text=True, timeout=20, check=False)
+        assert result.returncode != 0
+        assert "imagenes verificadas" in result.stdout
+        assert "verify-ads" not in log.read_text()
+
+    @pytest.mark.parametrize("forwarding", ["0", "", "garbled"])
+    @pytest.mark.parametrize("verb", ["install", "repair"])
+    def test_forwarding_not_enabled_recreates_once_before_verified_reload(
+        self, tmp_path: Path, fake_bin_dir: Path, verb: str, forwarding: str
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_CORE_FORWARDING=forwarding,
+                   FAKE_CORE_RECREATED=str(tmp_path / "recreated"))
+        for _ in range(2):
+            result = subprocess.run(
+                ["sh", str(_SAFENT_CLI), "companion", verb, "--porcelain"],
+                env=env, capture_output=True, text=True, timeout=20, check=False,
+            )
+            assert result.returncode == 0, result.stderr + result.stdout
+        lines = log.read_text().splitlines()
+        runs = [line for line in lines if line.startswith("run -d --name agent-test ")]
+        assert len(runs) == 1
+        assert "--sysctl net.ipv4.ip_forward=1" in runs[0]
+        assert "-p 127.0.0.1:35335:7517" in runs[0]
+        assert "-v agent-test-data:/var/lib/hermes" in runs[0]
+        assert lines.index(runs[0]) < next(i for i, line in enumerate(lines) if "verify-ads" in line)
+        assert any("cat /proc/sys/net/ipv4/ip_forward" in line for line in lines)
+        assert not any("sysctl -w" in line or "--network host" in line or "--privileged" in line for line in lines)
+        assert sum(line == "rm -f " + env["FAKE_CORE_ID"] for line in lines) == 1
+
+    @pytest.mark.parametrize("argv", [["up"], ["companion", "repair"]])
+    def test_stopped_legacy_forwarding_recreates_only_verified_core(
+        self, tmp_path: Path, fake_bin_dir: Path, argv: list[str]
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_RUNNING="false", FAKE_STOPPED_NO_PORT="1",
+                   FAKE_FORWARDING_CREATION="absent", FAKE_CORE_FORWARDING="0",
+                   FAKE_CORE_RECREATED=str(tmp_path / "recreated"))
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), *argv, "--porcelain"], env=env,
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        lines = log.read_text().splitlines()
+        assert not any(line.startswith("start ") for line in lines)
+        runs = [line for line in lines if line.startswith("run -d --name agent-test ")]
+        assert len(runs) == 1
+        assert "--sysctl net.ipv4.ip_forward=1" in runs[0]
+        assert "-p 127.0.0.1:35335:7517" in runs[0]
+        assert "-v agent-test-data:/var/lib/hermes" in runs[0]
+        assert sum(line == "rm -f " + env["FAKE_CORE_ID"] for line in lines) == 1
+        assert not any(line.startswith(("volume rm ", "network rm ")) for line in lines)
+
+    def test_forwarding_still_disabled_after_create_never_verifies_ads(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_CORE_FORWARDING="0", FAKE_RECREATED_FORWARDING="0",
+                   FAKE_CORE_RECREATED=str(tmp_path / "recreated"))
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", "repair", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=20, check=False,
+        )
+        assert result.returncode != 0
+        assert "verify-ads" not in log.read_text()
+
+    @pytest.mark.parametrize("verb", ["install", "repair"])
+    def test_missing_projection_recreates_once_before_verified_reload(
+        self, tmp_path: Path, fake_bin_dir: Path, verb: str
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_MISSING_PROJECTION="1", FAKE_CORE_RECREATED=str(tmp_path / "recreated"))
+        for _ in range(2):
+            result = subprocess.run(
+                ["sh", str(_SAFENT_CLI), "companion", verb, "--porcelain"],
+                env=env, capture_output=True, text=True, timeout=20, check=False,
+            )
+            assert result.returncode == 0, result.stderr + result.stdout
+            assert '"t":"ready"' not in result.stdout
+            assert "private-regression-ticket" not in result.stdout + result.stderr
+        lines = log.read_text().splitlines()
+        runs = [line for line in lines if line.startswith("run -d --name agent-test ")]
+        assert len(runs) == 1
+        assert "-p 127.0.0.1:35335:7517" in runs[0]
+        assert "-v agent-test-data:/var/lib/hermes" in runs[0]
+        assert "safent-companion-runtime:/etc/hermes/companions:ro" in runs[0]
+        assert env["SAFENT_IMAGE"] in runs[0]
+        assert lines.index(runs[0]) < next(i for i, line in enumerate(lines) if "verify-ads" in line)
+        assert sum(line == "rm -f " + env["FAKE_CORE_ID"] for line in lines) == 1
+
+    @pytest.mark.parametrize("override", [
+        {"FAKE_DATA_MOUNT": "volume|other-data"},
+        {"FAKE_PUBLISHED_PORT": "0.0.0.0:35335"},
+        {"SAFENT_IMAGE": "ghcr.io/devwspito/safent:latest"},
+    ])
+    def test_projection_repair_rejects_unknown_core_identity(
+        self, tmp_path: Path, fake_bin_dir: Path, override: dict[str, str]
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log)
+        env.update(FAKE_MISSING_PROJECTION="1", **override)
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", "repair", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=20, check=False,
+        )
+        assert result.returncode != 0
+        assert not any(line.startswith("rm ") for line in log.read_text().splitlines())
+        assert "verify-ads" not in log.read_text()
+
+    @pytest.mark.parametrize("verb", ["install", "repair"])
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "",
+            "ghcr.io/devwspito/safent-ads:latest",
+            "ghcr.io/devwspito/safent-ads:v0.2.2",
+            "ghcr.io/devwspito/safent-ads@sha256:short",
+            "ghcr.io/other/ads@sha256:" + "a" * 64,
+        ],
+    )
+    def test_missing_or_mutable_bootstrap_pin_has_no_effect(
+        self, tmp_path: Path, fake_bin_dir: Path, verb: str, image: str
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        log_path = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, log_path)
+        env["SAFENT_ADS_IMAGE"] = image
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", verb],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert not log_path.exists() or log_path.read_text() == ""
+
+    def test_scaffolds_then_installs_then_reloads(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, podman_log)
+
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", "install"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        log_lines = podman_log.read_text().splitlines()
+        assert any(ln.startswith("network create") for ln in log_lines)
+        assert any(ln.startswith("compose ") and "up" in ln for ln in log_lines)
+        assert any("install_request_agent_cli verify-ads" in ln for ln in log_lines)
+        assert any(
+            "exec -u root agent-test /usr/libexec/hermes/hermes-companion-bearer" in ln
+            for ln in log_lines
+        )
+        assert "[ok] Companion instalado." in result.stdout
+        pin = state_home / "companions" / "ads" / "sso" / "ads-composio-channel.pub"
+        assert pin.read_text() == "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=\n"
+        assert pin.stat().st_mode & 0o777 == 0o444
+        assert any("python -m safent_ads.tools.composio_channel_key" in ln for ln in log_lines)
+
+    def test_porcelain_emits_scaffold_up_and_reload_stages(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, podman_log)
+
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", "install", "--porcelain"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        stage_ids = [ln for ln in result.stdout.splitlines() if '"t":"stage"' in ln]
+        assert any('"id":"companion_scaffold"' in ln for ln in stage_ids)
+        assert any('"id":"companion_up"' in ln for ln in stage_ids)
+        assert any('"id":"companion_reload"' in ln for ln in stage_ids)
+        # Every event on stdout is valid NDJSON — no human "[ok]"/"[*]" text
+        # leaked from provision.sh's own log() calls (app-engine.md §2).
+        import json as _json  # noqa: PLC0415
+
+        for line in result.stdout.splitlines():
+            _json.loads(line)
+
+    def test_hot_reload_failure_is_retryable_without_reporting_success(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """A late connection failure stays closed, but allows safe reconciliation.
+
+        Startup used to declare this permanently blocked even when the health
+        probe passed immediately afterwards, leaving no retry action in the app.
+        """
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, podman_log)
+        env["FAKE_RELOAD_FAIL"] = "1"
+
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", "install", "--porcelain"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode != 0
+        assert "[ok] Companion instalado." not in result.stdout
+        import json  # noqa: PLC0415
+
+        events = [json.loads(line) for line in result.stdout.splitlines()]
+        failed = events[-1]
+        assert failed["t"] == "failed"
+        assert failed["code"] == "companion_unreachable"
+        assert failed["retryable"] is True
+        assert not any(event["t"] == "ready" for event in events)
+        assert not any(line.startswith("rm ") for line in podman_log.read_text().splitlines())
+
+    def test_installing_twice_converges_without_duplicating_the_network(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, podman_log)
+        env["FAKE_NETWORK_PRESENT"] = "0"  # first run: network does not exist yet
+
+        first = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", "install"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert first.returncode == 0, first.stderr
+
+        env2 = dict(env)
+        env2["FAKE_NETWORK_PRESENT"] = "1"  # second run: already there
+        second = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", "install"],
+            env=env2,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert second.returncode == 0, second.stderr
+        assert "safent-ads" in second.stdout or second.returncode == 0
+
+
+class TestCompanionRepair:
+    def test_repair_runs_the_same_reconciliation_as_install(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, podman_log)
+
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", "repair"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert "[ok] Companion reparado." in result.stdout
+        log_lines = podman_log.read_text().splitlines()
+        assert any(ln.startswith("compose ") and "up" in ln for ln in log_lines)
+
+
+class TestAgentTick:
+    def _run_tick(
+        self, tmp_path: Path, fake_bin_dir: Path, *, extra_env: dict[str, str] | None = None
+    ) -> tuple[subprocess.CompletedProcess[str], Path]:
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir, state_home, podman_log)
+        env["SAFENT_AGENT_ONCE"] = "1"
+        env.update(extra_env or {})
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "agent"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return result, podman_log
+
+    def test_nothing_live_does_nothing_and_returns_cleanly(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        result, podman_log = self._run_tick(tmp_path, fake_bin_dir)
+        assert result.returncode == 0, result.stderr
+        log = podman_log.read_text()
+        assert "install_request_agent_cli resolve" not in log
+
+    def test_claimed_install_request_runs_install_and_resolves_success(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        result, podman_log = self._run_tick(
+            tmp_path, fake_bin_dir, extra_env={"FAKE_CLAIM_install_companion": "safent-ads"}
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        log_lines = podman_log.read_text().splitlines()
+        assert any("install_request_agent_cli claim-ads" in ln for ln in log_lines)
+        assert any(
+            "install_request_agent_cli resolve-ads install_companion" in ln and "--success" in ln
+            for ln in log_lines
+        )
+        # The claimed request actually ran the install (network created).
+        assert any(ln.startswith("network create") for ln in log_lines)
+
+    def test_claimed_repair_request_runs_repair_and_resolves_success(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        result, podman_log = self._run_tick(
+            tmp_path, fake_bin_dir, extra_env={"FAKE_CLAIM_repair_companion": "safent-ads"}
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        log = podman_log.read_text()
+        assert "install_request_agent_cli claim-ads" in log
+        assert (
+            "install_request_agent_cli resolve-ads repair_companion" in log and "--success" in log
+        )
+
+    def test_a_failed_install_resolves_failure_not_success(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        result, podman_log = self._run_tick(
+            tmp_path,
+            fake_bin_dir,
+            extra_env={
+                "FAKE_CLAIM_install_companion": "safent-ads",
+                "FAKE_COMPOSE_UP_FAIL": "1",
+            },
+        )
+        # The tick itself never aborts the agent loop over one failed install.
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        log = podman_log.read_text()
+        assert (
+            "install_request_agent_cli resolve-ads install_companion" in log and "--failure" in log
+        )
+        assert "--success" not in log
+
+    def test_a_request_already_claimed_by_someone_else_is_left_alone(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """install-request.md §4: 'dos lectores -> uno solo actua'. The
+        claim CLI itself enforces this (already unit-tested); here we only
+        prove the agent backs off cleanly when claiming reports nothing to
+        do (FAKE_CLAIM_* unset -> the fake's own 'no live request or
+        already claimed' response, exit 1)."""
+        result, podman_log = self._run_tick(tmp_path, fake_bin_dir)
+        assert result.returncode == 0, result.stderr
+        log = podman_log.read_text()
+        assert "companion_reload_cli" not in log
+        assert "compose " not in log or "up" not in log
+
+
+# =============================================================================
+# Desktop integration requirement: the desktop adapter treats >15s without an
+# NDJSON event as a stall and fails the bootstrap. `_run_with_heartbeat`
+# (T016) is what stands between a multi-minute image pull and that watchdog —
+# this proves it end to end through `safent companion install --porcelain`
+# against a `podman pull` that genuinely takes long enough to matter, not
+# just a fast fake that never exercises the heartbeat loop for real.
+# =============================================================================
+
+_FAKE_PODMAN_SLOW_PULL = _FAKE_PODMAN.replace(
+    "  pull) exit 0 ;;\n",
+    "  image)\n"
+    '    if [ "$2" = "inspect" ] && [ "$3" = "-f" ]; then\n'
+    '      case "${!#}" in docker.io/library/postgres@sha256:*) echo "${FAKE_DB_IMAGE_ID#sha256:}";; *) echo "${FAKE_ADS_IMAGE_ID#sha256:}";; esac\n'
+    '      exit 0\n'
+    '    fi\n'
+    '    [ "$2" = "inspect" ] && exit 1  # never "already local" -> ensure_image must pull\n'
+    "    exit 0\n"
+    "    ;;\n"
+    "  pull)\n"
+    "    _slept=0\n"
+    '    while [ "$_slept" -lt "${FAKE_PULL_SLEEP_S:-0}" ]; do sleep 1; _slept=$((_slept + 1)); done\n'
+    "    exit 0\n"
+    "    ;;\n",
+)
+
+
+@pytest.fixture()
+def fake_bin_dir_slow_pull(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "fakebin-slow"
+    bin_dir.mkdir()
+    podman = bin_dir / "podman"
+    podman.write_text(_FAKE_PODMAN_SLOW_PULL)
+    podman.chmod(0o755)
+    curl = bin_dir / "curl"
+    curl.write_text(_FAKE_CURL)
+    curl.chmod(0o755)
+    return bin_dir
+
+
+class TestHeartbeatDuringASlowPull:
+    def test_progress_events_never_gap_more_than_five_seconds(
+        self, tmp_path: Path, fake_bin_dir_slow_pull: Path
+    ) -> None:
+        import json as _json  # noqa: PLC0415
+        import time as _time  # noqa: PLC0415
+
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir_slow_pull, state_home, podman_log)
+        env["FAKE_PULL_SLEEP_S"] = "20"
+        env["FAKE_CLAIM_install_companion"] = "safent-ads"
+
+        started = _time.monotonic()
+        proc = subprocess.Popen(
+            ["sh", str(_SAFENT_CLI), "companion", "requests", "--porcelain"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        events: list[tuple[float, dict]] = []
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                events.append((_time.monotonic() - started, _json.loads(line)))
+        finally:
+            proc.wait(timeout=60)
+
+        assert proc.returncode == 0, proc.stderr.read() if proc.stderr else ""
+        assert len(events) >= 2, "expected at least one heartbeat during the slow pull"
+        request_log = podman_log.read_text()
+        assert "install_request_agent_cli renew-ads install_companion" in request_log
+        assert "--request-id 0123456789abcdef0123456789abcdef" in request_log
+        assert "install_request_agent_cli resolve-ads install_companion" in request_log
+        assert "--success" in request_log
+
+        gaps = [events[i][0] - events[i - 1][0] for i in range(1, len(events))]
+        assert max(gaps) < 15.0, (
+            f"a gap of {max(gaps):.1f}s exceeds the desktop's 15s stall threshold: {gaps}"
+        )
+
+    def test_every_stdout_line_is_valid_json_even_during_the_slow_pull(
+        self, tmp_path: Path, fake_bin_dir_slow_pull: Path
+    ) -> None:
+        import json as _json  # noqa: PLC0415
+
+        state_home = tmp_path / "state-home"
+        _seed_state_home(state_home)
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(tmp_path, fake_bin_dir_slow_pull, state_home, podman_log)
+        env["FAKE_PULL_SLEEP_S"] = "6"
+
+        result = subprocess.run(
+            ["sh", str(_SAFENT_CLI), "companion", "install", "--porcelain"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        for line in result.stdout.splitlines():
+            _json.loads(line)  # raises if any line is not valid NDJSON

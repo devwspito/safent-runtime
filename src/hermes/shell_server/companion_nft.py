@@ -8,7 +8,10 @@ the only I/O boundary, calling these functions then writing their output to
 
 Anti-pivot property (INV-3): a companion opens EXACTLY one `ip daddr` + one
 `tcp dport` — never the subnet, never the companion's own database/broker,
-never the bridge gateway. Three fragments, one per existing chain the
+never the bridge gateway. Forward/NAT also require the MCP host-side veth:
+enabling forwarding in the container must not admit a spoofed MCP source
+arriving on its external interface or the browser's veth.
+Three fragments, one per existing chain the
 generator ADDS TO (never a new table):
 
   companion-ads-fwd.nft  -> `include`d into mcp-host.nft's `forward` chain,
@@ -41,6 +44,7 @@ from hermes.shell_server.companions import CompanionEndpoint
 # comment: "hermes-mcp netns: veth-hmcp-ns 10.200.1.2/30"). A product
 # constant, like the companion subnet/port (spec.md §7) — never derived.
 MCP_NETNS_SOURCE_IP = "10.200.1.2"
+MCP_HOST_VETH = "veth-hmcp-host"
 
 FORWARD_FRAGMENT_FILENAME = "companion-ads-fwd.nft"
 OUTPUT_FRAGMENT_FILENAME = "companion-ads-out.nft"
@@ -75,7 +79,8 @@ def _render_rules(endpoints: list[CompanionEndpoint], rule_of) -> str:
 
 def _forward_rule(ep: CompanionEndpoint) -> str:
     return (
-        f"ip saddr {MCP_NETNS_SOURCE_IP} ip daddr {ep.ip} tcp dport {ep.port} accept "
+        f'iifname "{MCP_HOST_VETH}" ip saddr {MCP_NETNS_SOURCE_IP} '
+        f"ip daddr {ep.ip} tcp dport {ep.port} accept "
         f'comment "companion {ep.slug}"'
     )
 
@@ -86,6 +91,7 @@ def _output_rule(ep: CompanionEndpoint) -> str:
 
 def _nat_rule(ep: CompanionEndpoint) -> str:
     return (
-        f"ip saddr {MCP_NETNS_SOURCE_IP} ip daddr {ep.ip} masquerade "
+        f'iifname "{MCP_HOST_VETH}" ip saddr {MCP_NETNS_SOURCE_IP} '
+        f"ip daddr {ep.ip} masquerade "
         f'comment "companion {ep.slug} nat"'
     )

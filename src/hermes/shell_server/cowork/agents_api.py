@@ -114,28 +114,6 @@ def create_agents_router() -> APIRouter:
             logger.warning("hermes.agents.list_unavailable", extra={"reason": str(exc)})
             return []
 
-    @router.get("/default-roster")
-    async def get_default_roster(request: Request) -> dict:
-        """Estado del equipo de especialistas por defecto (ON/OFF). Fail-soft: ON."""
-        proxy = request.app.state.dbus_proxy
-        try:
-            return {"enabled": await proxy.call_bool("get_default_roster_enabled")}
-        except AgentUnavailable as exc:
-            logger.warning("hermes.agents.default_roster_unavailable", extra={"reason": str(exc)})
-            return {"enabled": True}
-
-    @router.post("/default-roster")
-    async def set_default_roster(request: Request, body: dict) -> dict:
-        """Enciende/apaga el equipo por defecto (oculta/restaura los 27 especialistas;
-        el CEO y tus agentes propios siempre quedan; reversible, no borra)."""
-        proxy = request.app.state.dbus_proxy
-        enabled = bool(body.get("enabled"))
-        try:
-            await proxy.call_bool("set_default_roster_enabled", enabled)
-            return {"enabled": enabled}
-        except AgentUnavailable as exc:
-            _raise_503(exc, "set_default_roster_enabled")
-
     # ------------------------------------------------------------------
     # Roster mutators
     # ------------------------------------------------------------------
@@ -191,6 +169,23 @@ def create_agents_router() -> APIRouter:
         for backward compatibility with existing frontend calls.
         """
         return {"ok": True, "active_agent_id": agent_id, "deprecated": True}
+
+    @router.get("/active")
+    async def get_active_agent(request: Request) -> dict:
+        """Read side of the deprecated no-op above — was simply never
+        implemented (spec 025 hallazgo #3): with no GET handler registered
+        for this literal path, Starlette matched the request against
+        PUT/PATCH/DELETE /{agent_id} (agent_id="active", a path match) and
+        answered 405 instead of ever reaching a handler. Same static
+        "deprecated" shape as POST .../activate — there is no global active
+        agent to read since binding moved per-conversation; this exists so
+        callers get a clean 200 instead of a 405. Shape matches
+        ActiveAgentResponse (frontend/src/api/types.ts) — the same
+        {active_agent_id: ''} the client's own .catch() fallback already
+        used for the 405 case, so getActiveAgent() now succeeds instead of
+        silently swallowing an error.
+        """
+        return {"active_agent_id": "", "deprecated": True}
 
     # ------------------------------------------------------------------
     # Per-agent capabilities

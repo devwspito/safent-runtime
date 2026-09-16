@@ -11,12 +11,16 @@ This suite tests the controls that close those gaps:
 
   (a) Forged v1 signature + insert → promote REJECTED (403).
   (b) Autonomous skill with absent/invalid signature → execution gate REJECTED.
-  (c) Sign skill, mutate a decision rule → verify() detects content mutation.
   (d) Flip signing_method from v2 to v1 on a v2 signature → promote REJECTED.
   (e) No master.key → signing RAISES SigningKeyError (no v1 fallback produced).
   (f) Selector with v1 signature → registry rejects (SelectorTamperedError).
   (g) Selector with unprefixed (plain hex) signature → registry rejects.
   (h) PlatformModelSigner.verify() detects tampered content_hash.
+
+(c) — decision-rule content-mutation detection via ``SkillCompiler`` — removed
+with the dead ``hermes.training`` GEPA subtree (unreachable from every real
+entrypoint; oleada 1 lane L1c). ``verify_skill_signature`` itself (exercised
+by (d)/(h)) is unaffected: it is the live control, not ``SkillCompiler``.
 """
 
 from __future__ import annotations
@@ -25,7 +29,6 @@ import hashlib
 import hmac
 import json
 import sqlite3
-from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID, uuid4
@@ -267,131 +270,6 @@ class TestSignatureVerificationGateAtPromotion:
 
 
 # ---------------------------------------------------------------------------
-# (c) Mutate decision rule content → verify() detects it
-# ---------------------------------------------------------------------------
-
-
-class TestContentHashCoversExecutableContent:
-    """Mutating a decision rule after signing must invalidate the content_hash."""
-
-    def _make_rule(self, *, action: str = "submit_form"):
-        from hermes.training.domain.decision_rule import (  # noqa: PLC0415
-            DecisionRule,
-            DecisionRuleSource,
-            RiskLevel,
-        )
-        return DecisionRule(
-            rule_id=uuid4(),
-            source=DecisionRuleSource.LLM_COMPILE_INFERRED,
-            action=action,
-            pattern={"selector": "#submit"},
-            risk_level=RiskLevel.LOW,
-            confidence=0.95,
-            requires_review=False,
-        )
-
-    def _make_narrative(self):
-        from hermes.training.domain.voice_narrative import VoiceFragment, VoiceNarrative, VoiceFragmentState  # noqa: PLC0415
-        fragment = VoiceFragment(
-            transcript="Click the submit button",
-            confidence=0.9,
-            state=VoiceFragmentState.ASSOCIATED,
-        )
-        return VoiceNarrative(
-            fragments=(fragment,),
-            total_steps_in_session=1,
-        )
-
-    def test_mutated_decision_rule_changes_content_hash(self) -> None:
-        """Changing a decision rule action produces a different content_hash."""
-        from hermes.training.application.skill_compiler import SkillCompiler  # noqa: PLC0415
-
-        replay_id = uuid4()
-        narrative = self._make_narrative()
-        rule_original = self._make_rule(action="submit_form")
-        rule_mutated = self._make_rule(action="delete_all_data")
-        rule_mutated = replace(rule_mutated, rule_id=rule_original.rule_id)
-
-        hash_original = SkillCompiler.compute_content_hash(
-            decision_rules=[rule_original],
-            narrative=narrative,
-            replay_script_id=replay_id,
-        )
-        hash_mutated = SkillCompiler.compute_content_hash(
-            decision_rules=[rule_mutated],
-            narrative=narrative,
-            replay_script_id=replay_id,
-        )
-
-        assert hash_original != hash_mutated, (
-            "Mutating a decision rule's action must produce a different content_hash. "
-            "If hashes match, the content_hash does not cover executable content."
-        )
-
-    def test_signed_package_detects_rule_mutation_via_content_hash(self) -> None:
-        """Sign a package, then mutate content_hash → verify fails (FR-015 addendum)."""
-        from hermes.training.application.skill_signer import (  # noqa: PLC0415
-            SignatureVerificationError,
-            SkillSigner,
-            verify_skill_signature,
-        )
-        from hermes.training.domain.skill_package import SkillPackage  # noqa: PLC0415
-        from hermes.training.domain.skill_state import SkillState  # noqa: PLC0415
-        import asyncio  # noqa: PLC0415
-
-        replay_id = uuid4()
-        narrative = self._make_narrative()
-        rule = self._make_rule(action="submit_form")
-
-        from hermes.training.application.skill_compiler import SkillCompiler  # noqa: PLC0415
-
-        original_content_hash = SkillCompiler.compute_content_hash(
-            decision_rules=[rule],
-            narrative=narrative,
-            replay_script_id=replay_id,
-        )
-
-        class FakeKms:
-            async def get_signing_key(self, *, tenant_id, key_id):
-                return _FAKE_KEY
-
-        kms = FakeKms()
-        signer = SkillSigner(kms=kms)
-        tenant_id = uuid4()
-
-        pkg = SkillPackage(
-            package_id=uuid4(),
-            skill_id=uuid4(),
-            tenant_id=tenant_id,
-            replay_script_id=replay_id,
-            voice_narrative_id=uuid4(),
-            decision_rule_ids=(rule.rule_id,),
-            state=SkillState.DRAFT,
-            compiled_by_operator_id=uuid4(),
-            runtime_version="test",
-            content_hash=original_content_hash,
-        )
-
-        signed_pkg = asyncio.run(signer.sign(package=pkg, signing_key_id="test-key"))
-
-        # Simulate mutating the decision rule → new content_hash.
-        mutated_rule = self._make_rule(action="delete_all_data")
-        mutated_rule = replace(mutated_rule, rule_id=rule.rule_id)
-        mutated_hash = SkillCompiler.compute_content_hash(
-            decision_rules=[mutated_rule],
-            narrative=narrative,
-            replay_script_id=replay_id,
-        )
-
-        # The signed package's signature covers the original content_hash.
-        # Replace content_hash with the mutated one → signature no longer valid.
-        tampered_pkg = replace(signed_pkg, content_hash=mutated_hash)
-
-        with pytest.raises(SignatureVerificationError):
-            asyncio.run(verify_skill_signature(package=tampered_pkg, kms=kms))
-
-
-# ---------------------------------------------------------------------------
 # (d) Flip signing_method v2 → v1 on a v2 signature → REJECTED
 # ---------------------------------------------------------------------------
 
@@ -478,8 +356,8 @@ class TestFailClosedSigningWithoutMasterKey:
     def test_resolve_signing_key_raises_when_native_unavailable(
         self, tmp_path: Path
     ) -> None:
-        from hermes.shell_server.training.persist import resolve_signing_key  # noqa: PLC0415
-        from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
+        from hermes.shell_server.skills.skill_signing_key import resolve_signing_key  # noqa: PLC0415
+        from hermes.capabilities.application.skill_signer import SigningKeyError  # noqa: PLC0415
         import hermes.shell_server.skills.native_keystore_adapter as _mod  # noqa: PLC0415
 
         with patch.object(_mod, "SecretsVault", side_effect=RuntimeError("no master.key")):
@@ -488,8 +366,8 @@ class TestFailClosedSigningWithoutMasterKey:
 
     def test_no_v1_tuple_returned_when_native_unavailable(self, tmp_path: Path) -> None:
         """Regression: the old code returned ('v1', key) — must now raise."""
-        from hermes.shell_server.training.persist import resolve_signing_key  # noqa: PLC0415
-        from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
+        from hermes.shell_server.skills.skill_signing_key import resolve_signing_key  # noqa: PLC0415
+        from hermes.capabilities.application.skill_signer import SigningKeyError  # noqa: PLC0415
         import hermes.shell_server.skills.native_keystore_adapter as _mod  # noqa: PLC0415
 
         with patch.object(_mod, "SecretsVault", side_effect=RuntimeError("no key")):
@@ -508,7 +386,7 @@ class TestFailClosedSigningWithoutMasterKey:
     ) -> None:
         """persist_composio_skill must propagate the SigningKeyError — no v1 skill written."""
         from hermes.shell_server.skills.composio_skill_service import persist_composio_skill  # noqa: PLC0415
-        from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
+        from hermes.capabilities.application.skill_signer import SigningKeyError  # noqa: PLC0415
         import hermes.shell_server.skills.native_keystore_adapter as _mod  # noqa: PLC0415
 
         db = tmp_path / "test.db"

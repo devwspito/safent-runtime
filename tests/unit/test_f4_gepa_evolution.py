@@ -29,7 +29,7 @@ from hermes.training.application.skill_evolution import (
     _extract_skill_name_from_row,
     extract_failure_traces,
 )
-from hermes.training.domain.skill_md_document import parse_skill_md
+from hermes.capabilities.infrastructure.skill_md_codec import parse_skill_md
 
 pytestmark = pytest.mark.unit
 

@@ -2,7 +2,7 @@
   {
     "server_id": "excel",
     "label": "Hojas de cálculo · crea y edita Excel (.xlsx) sin clave",
-    "argv": ["uvx", "--from", "excel-mcp-server", "--with", "mcp<2", "excel-mcp-server", "stdio"]
+    "argv": ["uvx", "--from", "excel-mcp-server==0.1.8", "--with", "mcp<2", "--overrides", "/usr/share/hermes/seed/excel-mcp-overrides.txt", "excel-mcp-server", "stdio"]
   },
   {
     "server_id": "word",

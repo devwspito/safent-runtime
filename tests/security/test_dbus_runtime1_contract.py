@@ -156,23 +156,27 @@ class TestMethodSignatures:
         assert m.in_signature == "s"
         assert m.out_signature == "b"
 
-    def test_resume_no_in(self, iface: Runtime1ServiceInterface) -> None:
-        """Resume: sin args → ok(b)."""
+    def test_resume_in_signature(self, iface: Runtime1ServiceInterface) -> None:
+        """Resume: reason(s) → ok(b).
+
+        The arg (reason, type 's') was added by the security review
+        2026-09-10 MEDIUM finding (CWE-778/STRIDE-R): before this, a
+        release via `safent brake release` (host access, no MFA) produced
+        the exact same AGENT_RESUMED audit entry as a TOTP-verified UI
+        release — threaded through to AgentStatePort.resume(reason=), same
+        shape Pause(reason: s) already has."""
         methods = self._method_map(iface)
         assert "Resume" in methods
         m = methods["Resume"]
-        assert m.in_signature == ""
+        assert m.in_signature == "s"
         assert m.out_signature == "b"
 
     def test_approve_in_signature(self, iface: Runtime1ServiceInterface) -> None:
-        """Approve: proposal_id(s) totp(s) → approval_token(s).
-
-        The 2nd arg (totp, type 's') was added so the owner's TOTP reaches the gate —
-        the single MFA enforcement point for all surfaces (TOTP-only model 2026-06-24)."""
+        """Approve: proposal_id(s) → result(s). Owner identity comes from the bus."""
         methods = self._method_map(iface)
         assert "Approve" in methods
         m = methods["Approve"]
-        assert m.in_signature == "ss"
+        assert m.in_signature == "s"
         assert m.out_signature == "s"
 
     def test_reject_in_signature(self, iface: Runtime1ServiceInterface) -> None:

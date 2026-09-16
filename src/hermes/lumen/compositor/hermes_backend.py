@@ -105,7 +105,7 @@ _METHODS: dict[str, tuple[str, list[tuple[str, object, str]]]] = {
     "resume": ("call_resume", []),
     # ── HITL ─────────────────────────────────────────────────────────────
     "list_hitl_pending": ("call_list_hitl_pending", [("limit", 50, "u")]),
-    "approve": ("call_approve", [("proposal_id", "", "s"), ("totp", "", "s")]),
+    "approve": ("call_approve", [("proposal_id", "", "s")]),
     "reject": ("call_reject", [("proposal_id", "", "s"), ("reason", "", "s")]),
     # ── Security Approval (Modo Guardado) ────────────────────────────────
     # ResolveApproval: choice ∈ "once" | "session" | "always" | "deny"

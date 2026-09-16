@@ -55,7 +55,15 @@ from hermes.egress_proxy.domain.policy import EgressMode, EgressPolicyEngine, Se
 from hermes.egress_proxy.infrastructure.audit_sink import StructlogAuditSink
 from hermes.egress_proxy.infrastructure.blocklist_loader import load_blocklist_file
 from hermes.egress_proxy.infrastructure.control_socket import ControlSocketServer
-from hermes.egress_proxy.infrastructure.proxy_handler import ProxyConnectionHandler
+from hermes.egress_proxy.infrastructure.proxy_handler import (
+    DirectUpstreamConnector,
+    ProxyConnectionHandler,
+)
+from hermes.egress_proxy.infrastructure.tailnet_connector import (
+    MagicDnsSuffixSource,
+    TailnetUpstreamConnector,
+    UpstreamRouter,
+)
 
 _LISTEN_HOST = os.environ.get("HERMES_EGRESS_LISTEN_HOST", "10.200.0.1")
 _LISTEN_PORT = int(os.environ.get("HERMES_EGRESS_LISTEN_PORT", "3128"))
@@ -88,6 +96,17 @@ _MCP_CLIENT_IP = os.environ.get("HERMES_EGRESS_MCP_CLIENT_IP", "10.200.1.2")
 _MCP_GRANTS_PATH = os.environ.get(
     "HERMES_EGRESS_MCP_GRANTS", "/var/lib/hermes/mcp-egress-grants.json"
 )
+
+# Governed tailnet egress (spec 022): the MagicDNS suffix source file (written by the
+# ops lane's status watcher — see specs/022-tailnet-connectivity/contracts.md) and the
+# tailscaled loopback CONNECT proxy it exposes. Off by default: an absent/unreadable
+# status file means no suffix, and the router falls back to the direct path for every
+# host (fail-closed — no tailnet routing until the owner connects a tailnet).
+_TAILNET_STATUS_PATH = os.environ.get(
+    "HERMES_TAILNET_STATUS_PATH", "/run/hermes/tailscale/status.json"
+)
+_TAILNET_PROXY_HOST = os.environ.get("HERMES_TAILNET_PROXY_HOST", "127.0.0.1")
+_TAILNET_PROXY_PORT = int(os.environ.get("HERMES_TAILNET_PROXY_PORT", "1055"))
 
 # CURATED BYOK servers WE ship + vet (mirror of the BYOK keys in hermes-mcp-launcher and
 # dbus_runtime_service._MCP_BYOK_ENV_KEYS). Their known API hosts are PRE-GRANTED so the
@@ -156,6 +175,26 @@ def _configure_logging() -> None:
             format="%(asctime)s %(levelname)s %(name)s %(message)s",
             stream=sys.stderr,
         )
+
+
+def _build_upstream_router() -> UpstreamRouter:
+    """Build the upstream selector from the MagicDNS suffix file (Fix-022).
+
+    Constructed ONCE at boot: the ``MagicDnsSuffixSource`` re-reads the file
+    per-connection (cached by mtime), so a later tailnet connect/disconnect
+    is picked up live without restarting the proxy.
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    suffix_source = MagicDnsSuffixSource(Path(_TAILNET_STATUS_PATH))
+    tailnet_connector = TailnetUpstreamConnector(
+        proxy_host=_TAILNET_PROXY_HOST, proxy_port=_TAILNET_PROXY_PORT
+    )
+    return UpstreamRouter(
+        suffix_source=suffix_source,
+        tailnet_connector=tailnet_connector,
+        default_connector=DirectUpstreamConnector(),
+    )
 
 
 def _resolve_global_mode() -> EgressMode:
@@ -235,6 +274,7 @@ async def _run(*, systemd_notify: bool) -> None:
     handler = ProxyConnectionHandler(
         policy_engine=policy_engine,
         audit_sink=audit_sink,
+        upstream_connector=_build_upstream_router(),
     )
 
     # Two listeners share ONE policy engine: the browser gateway (10.200.0.1) and the

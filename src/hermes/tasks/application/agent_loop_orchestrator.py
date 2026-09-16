@@ -27,9 +27,16 @@ from hermes.capabilities.domain.ports import (
     ConsentContext,
     ExecutionStatus,
 )
+from hermes.domain.reasoning_failure import NativeTurnFailedError
 from hermes.tasks.application.decision_context_builder import build_decision_context
 from hermes.tasks.application.worker_wake_signal import MonoWorkerWakeSignal
-from hermes.tasks.domain.ports import AgentStatePort, WorkItem, WorkItemKind, WorkQueuePort
+from hermes.tasks.domain.ports import (
+    AgentStatePort,
+    TaskStatus,
+    WorkItem,
+    WorkItemKind,
+    WorkQueuePort,
+)
 from hermes.tasks.domain.task_cancel_registry import (
     OperationCancelled,
     get_cancel_registry,
@@ -264,9 +271,9 @@ class AgentLoopOrchestrator:
                 conversation_id=_conv_id_for_inject,
             )
             await chunk_sink.emit_status(task_id=item.id, status="in_progress")
-            # Wire the chat task into live_activity so the Office floor animates
-            # the agent character while the response is in-flight — even during
-            # pure narrative replies that invoke no tool calls. The entry is
+            # Wire the chat task into live_activity so the task UI reports real
+            # in-flight work even during pure narrative replies that invoke no
+            # tool calls. The entry is
             # cleared by worker_pool._worker_loop's finally block
             # (live_activity.clear(item.id)) on task completion or failure.
             _chat_agent_id = _resolve_chat_agent_id(item.payload)
@@ -327,60 +334,38 @@ class AgentLoopOrchestrator:
         try:
             output = await self._engine.run_cycle(ctx)
         except OperationCancelled as exc:
-            # Operator stopped the task mid-cycle (stream callback raised). Terminal,
-            # NO retry (unlike a normal failure).
+            # Operator stop or revoked execution authority. Terminal, NO retry
+            # (unlike a normal failure under the same authority).
             reason = str(exc).strip() or "Detenida por el operador"
             logger.info(
                 "hermes.tasks.loop.cancelled task=%s reason=%s", str(item.id), reason
             )
             await self._handle_cancelled(item, reason, effective_sink, is_chat)
             return
+        except NativeTurnFailedError as exc:
+            # Structured engine failure: never persist provider bodies or a
+            # misleading successful answer; honor an explicit no-retry verdict.
+            logger.warning("hermes.tasks.loop.native_failure task=%s code=%s", item.id, exc.code)
+            await self._handle_engine_failure(
+                item, str(exc), effective_sink, is_chat, retryable=exc.retryable
+            )
+            return
         except Exception as exc:
             _latency_ms = int((time.monotonic() - _cycle_start) * 1000)
-            # exc_info + traceback explícito en el MENSAJE: el handler stderr→journald
-            # NO serializa `extra=` (se perdía el detalle: "engine_error" a secas, sin
-            # causa). El chat fallaba en silencio y era indebugable. Metemos la traza
-            # completa en el texto para que journalctl la muestre siempre.
-            import traceback as _tb  # noqa: PLC0415
+            # SDK exceptions may contain request headers, prompts, response
+            # bodies or signed URLs. Neither logs nor the persisted chat/task
+            # may echo them (including exception chains/tracebacks). Keep an
+            # operational correlation ID; structured native failures above
+            # supply the actionable, application-owned messages when available.
             logger.error(
-                "hermes.tasks.loop.engine_error task=%s error=%s\n%s",
-                str(item.id), str(exc), _tb.format_exc(),
-                extra={"task_id": str(item.id), "error": str(exc)},
+                "hermes.tasks.loop.engine_error task=%s category=%s latency_ms=%s",
+                str(item.id), type(exc).__name__, _latency_ms,
             )
-            # Surface the real cause to the operator (chat UI shows this). A bare
-            # exception class name is undebuggable; include the message so a
-            # provider error (model/param/quota) is actionable, not opaque.
-            _detail = str(exc).strip().replace("\n", " ")
-            error_reason = f"{type(exc).__name__}: {_detail}" if _detail else type(exc).__name__
-            error_reason = error_reason[:400]
-            if is_chat:
-                await self._safe_close_stream(
-                    effective_sink, item, "failed", error=error_reason
-                )
-            # El fallo del motor debe SER VISIBLE en la UI: ChatBar sondea
-            # get_conversation, así que sin un mensaje persistido el usuario ve
-            # "Thinking…" eterno y luego nada (fallo silencioso, indebugable
-            # desde el escritorio). Persistimos el error como turno del
-            # asistente — mismo canal que una respuesta normal. Best-effort.
-            if is_chat and self._conversation_repo is not None:
-                conv_id_str = item.payload.get("conversation_id") or ""
-                if conv_id_str:
-                    try:
-                        from uuid import UUID as _UUID  # noqa: PLC0415
-                        self._conversation_repo.append_message(
-                            conversation_id=_UUID(conv_id_str),
-                            role="assistant",
-                            content=(
-                                "⚠ No he podido completar la respuesta: "
-                                f"{error_reason}"
-                            ),
-                            task_id=item.id,
-                        )
-                    except Exception as _pexc:  # noqa: BLE001
-                        logger.warning(
-                            "hermes.tasks.loop.chat.persist_error_failed: %s", _pexc
-                        )
-            await self._do_mark_failed(item, error_reason)
+            error_reason = (
+                "El motor no pudo completar la solicitud. Revisa la conexión y "
+                f"la configuración del modelo. Referencia: {item.id}."
+            )
+            await self._handle_engine_failure(item, error_reason, effective_sink, is_chat)
             return
 
         _latency_ms = int((time.monotonic() - _cycle_start) * 1000)
@@ -425,6 +410,13 @@ class AgentLoopOrchestrator:
                 self._persist_tool_steps(item, output.tool_steps)
                 await self._safe_close_stream(effective_sink, item, "completed")
                 await self._do_mark_completed(item, None)
+                return
+            # Ejecución programada o autónoma que ya actuó (herramientas en
+            # línea) o respondió: es un ciclo terminado, no «sin acciones».
+            # Sin esto cada revisión programada acababa FAILED, se reintentaba
+            # y su resultado no llegaba a ninguna notificación.
+            if not is_chat and (output.narrative.strip() or output.tool_steps):
+                await self._do_mark_completed(item, None, summary=output.narrative)
                 return
             logger.info(
                 "hermes.tasks.loop.no_actions",
@@ -708,19 +700,56 @@ class AgentLoopOrchestrator:
                 str(item.id), outcome, exc,
             )
 
-    async def _do_mark_failed(self, item: WorkItem, reason: str) -> None:
-        await self._queue.mark_failed(
+    async def _handle_engine_failure(
+        self, item: WorkItem, reason: str, sink: Any, is_chat: bool, *, retryable: bool = True,
+    ) -> None:
+        # The durable queue owns retry/backoff. A failed attempt is not a failed
+        # task: publishing DONE now would permanently close its replay stream.
+        updated = await self._do_mark_failed(item, reason, retryable=retryable)
+        if updated.status is TaskStatus.PENDING:
+            if is_chat and sink is not None:
+                try:
+                    await sink.emit_status(task_id=item.id, status="pending")
+                except Exception:  # noqa: BLE001 — committed retry must survive stream failure
+                    logger.warning("hermes.tasks.loop.stream.retry_status_failed task=%s", item.id)
+            return
+        # One terminal error row, replacing any partial answer for this task.
+        # Write before DONE so polling/re-attach observes the same final result.
+        if is_chat and self._conversation_repo is not None:
+            conversation_id = item.payload.get("conversation_id") or ""
+            if conversation_id:
+                try:
+                    from uuid import UUID  # noqa: PLC0415
+                    self._conversation_repo.upsert_assistant_message(
+                        conversation_id=UUID(conversation_id),
+                        content=f"⚠ No he podido completar la respuesta: {reason}", task_id=item.id,
+                        status="failed",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("hermes.tasks.loop.chat.persist_error_failed: %s", exc)
+        if is_chat:
+            await self._safe_close_stream(sink, item, "failed", error=reason)
+
+    async def _do_mark_failed(
+        self, item: WorkItem, reason: str, *, retryable: bool = True,
+    ) -> WorkItem:
+        updated = await self._queue.mark_failed(
             item.id,
             claim_token=item.claim_token,  # type: ignore[arg-type]
             reason=reason,
+            **({"retryable": False} if not retryable else {}),
         )
         await self._emit_failed(item, reason)
-        self._emit_notification_failed(item, reason)
+        # Keep attempt failures in the audit, but notify the operator only when
+        # retries are exhausted (or the engine explicitly forbids a retry).
+        if updated.status is TaskStatus.FAILED:
+            self._emit_notification_failed(item, reason)
+        return updated
 
     async def _handle_cancelled(
         self, item: WorkItem, reason: str, effective_sink: Any, is_chat: bool
     ) -> None:
-        """Operator stopped this task: close the stream, persist a note, mark the
+        """Execution was stopped: close the stream, persist a note, mark the
         task CANCELLED (terminal, no retry), and clear the cancel flag."""
         if is_chat and effective_sink is not None:
             try:
@@ -737,7 +766,7 @@ class AgentLoopOrchestrator:
                     self._conversation_repo.append_message(
                         conversation_id=_UUID(conv_id_str),
                         role="assistant",
-                        content=f"⏹ Tarea detenida por el operador. {reason}".strip(),
+                        content=f"⏹ Tarea detenida. {reason}".strip(),
                         task_id=item.id,
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -754,7 +783,12 @@ class AgentLoopOrchestrator:
             get_cancel_registry().clear(item.id)
 
     async def _do_mark_completed(
-        self, item: WorkItem, audit_entry_id: Any, head_hash: str | None = None
+        self,
+        item: WorkItem,
+        audit_entry_id: Any,
+        head_hash: str | None = None,
+        *,
+        summary: str = "",
     ) -> None:
         await self._queue.mark_completed(
             item.id,
@@ -763,7 +797,7 @@ class AgentLoopOrchestrator:
             execution_head_hash=head_hash,
         )
         await self._emit_completed(item, audit_entry_id)
-        self._emit_notification_completed(item)
+        self._emit_notification_completed(item, summary)
 
     # ------------------------------------------------------------------
     # Private: audit emission (T026)
@@ -875,7 +909,7 @@ class AgentLoopOrchestrator:
     # Fail-soft: a notification failure NEVER breaks the task/chat path.
     # ------------------------------------------------------------------
 
-    def _emit_notification_completed(self, item: WorkItem) -> None:
+    def _emit_notification_completed(self, item: WorkItem, summary: str = "") -> None:
         """Emit a task-completed notification. Fail-soft."""
         if self._notification_store is None:
             return
@@ -887,7 +921,7 @@ class AgentLoopOrchestrator:
         else:
             label = _item_label(item)
             title = f"Tarea '{label}' completada"
-            body = "La tarea ha terminado con éxito."
+            body = _summary_line(summary) or "La tarea ha terminado con éxito."
         try:
             self._notification_store.add(
                 kind=kind,
@@ -1261,6 +1295,12 @@ def _record_chat_activity(task_id: str, agent_id: str) -> None:
         live_activity.record(task_id, agent_id, "chat_responding")
     except Exception:  # noqa: BLE001 — never interrupt the chat path
         pass
+
+
+def _summary_line(text: str, limit: int = 300) -> str:
+    """Primera línea legible del resultado de una tarea, para la notificación."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
 def _item_label(item: "WorkItem") -> str:

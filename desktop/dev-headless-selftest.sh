@@ -47,6 +47,25 @@ else
   echo "[!] la app terminó — /tmp/safent-desktop.log:"; tail -20 /tmp/safent-desktop.log
 fi
 
+# T013 — instancia única: una segunda apertura debe enfocar la existente, no
+# crear una segunda ventana (FR-003, SC-010). La segunda invocación debe
+# salir sola (tauri-plugin-single-instance) dejando un único proceso vivo.
+echo "[*] Abriendo una segunda instancia (debe enfocar la existente y salir sola)…"
+DISPLAY="$DISP" GDK_BACKEND=x11 \
+  WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1 \
+  SAFENT_BIN="${SAFENT_BIN:-$(command -v safent || echo "$HERE/../safent")}" \
+  "$BIN" >/tmp/safent-desktop-second.log 2>&1 &
+SECOND=$!
+sleep 3
+LIVE_COUNT="$(pgrep -f "$BIN" | wc -l | tr -d ' ')"
+if [ "$LIVE_COUNT" = "1" ]; then
+  echo "[ok] instancia única: sigue habiendo un solo proceso ($LIVE_COUNT)"
+else
+  echo "[!] instancia única FALLÓ: $LIVE_COUNT procesos vivos — /tmp/safent-desktop-second.log:"
+  tail -20 /tmp/safent-desktop-second.log
+fi
+kill "$SECOND" 2>/dev/null
+
 if DISPLAY="$DISP" import -window root "$SHOT" 2>/dev/null; then
   echo "[ok] Screenshot: $SHOT"
   echo "     Ábrelo: arriba debe salir el banner 'SSE self-test: OK — events=N deltas=M done=true'"

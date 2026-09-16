@@ -92,6 +92,20 @@ class SurfaceKind(StrEnum):
     a diferencia de delegate_task (sub-agente en la MISMA jaula/broker).
     """
 
+    TAILNET_SSH = "tailnet_ssh"
+    """spec 022 v2 — `tailnet_ssh` / `tailnet_file_get` / `tailnet_file_put`:
+    governed SSH command/file execution on an owner-approved host in the
+    agent's tailnet, via `TailnetSshSurfaceAdapter`.
+
+    LOW + auto_executable=True in the CapabilityRegistry: the real
+    authorization floor is `security_hook._resolve_tailnet_ssh_consent`
+    (Step 1.6-tailnet_ssh, per-HOST block-and-resume card, runs BEFORE this
+    surface is ever dispatched) — see specs/022-tailnet-connectivity/ssh-v2.md
+    §Governance for why the broker's own risk-based HITL is deliberately NOT
+    the gate here (it cannot express "first use per host, then flows"
+    without a second, conflicting approval surface).
+    """
+
 
 _REQUIRES_CONSENT_IN_PERSONAL_DESKTOP: frozenset[SurfaceKind] = frozenset(
     {

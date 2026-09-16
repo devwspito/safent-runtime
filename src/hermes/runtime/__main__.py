@@ -37,6 +37,53 @@ _LEASE_SECONDS = int(os.environ.get("HERMES_LEASE_SECONDS", "60"))
 # Semantic tool retrieval: present only the top-K integration tools relevant to the
 # turn's intent (see _tools_source). Process-global index, lazily loaded.
 _TOOL_RETRIEVAL_TOPK = int(os.environ.get("HERMES_TOOL_RETRIEVAL_TOPK", "12"))
+
+
+def _stamp_visible_integration(integration: list) -> None:
+    """Rank this turn's integration tools by intent and stamp the top-K as VISIBLE.
+
+    Never narrows ``integration`` itself: every connected tool must be registered
+    and gate-classified, or the model can neither see it nor reach it through
+    tool_search/tool_call ("not a deferrable tool"). Fail-soft: no message, no
+    embedder or a retrieval error → nothing stamped → everything visible.
+
+    Companion-server tools (``mcp__safent-ads__*``) are ALWAYS stamped visible,
+    exempt from the top-K narrowing: the companion is the owner's only path to
+    those ~100 tools, unlike Claude Code/Codex which see their full catalog
+    directly (parity fix 2.1). Narrowing keeps applying to every other
+    integration.
+    """
+    from hermes.runtime.companion_tools import is_companion_tool  # noqa: PLC0415
+    from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+        get_current_message,
+        set_visible_external_names,
+    )
+    set_visible_external_names(None)
+    try:
+        _msg = get_current_message()
+        if not _msg:
+            return
+        pinned: list = []
+        narrowable: list = []
+        for spec in integration:
+            bucket = pinned if is_companion_tool(getattr(spec, "name", "")) else narrowable
+            bucket.append(spec)
+        picked = _tool_index().retrieve(_msg, narrowable, k=_TOOL_RETRIEVAL_TOPK)
+        if picked is None or len(picked) >= len(narrowable):
+            return
+        visible = pinned + list(picked)
+        logger.info(
+            "hermes.runtime.tools_source.retrieved %d/%d integration tools by intent "
+            "(+%d always-visible companion tools)",
+            len(picked), len(narrowable), len(pinned),
+        )
+        logger.debug(
+            "hermes.runtime.tools_source.retrieved names=%s",
+            [getattr(s, "name", "?") for s in visible],
+        )
+        set_visible_external_names(frozenset(getattr(s, "name", "") for s in visible))
+    except Exception as _ret_exc:  # noqa: BLE001
+        logger.debug("hermes.runtime.tool_retrieval_skipped: %s", _ret_exc)
 _TOOL_INDEX_SINGLETON = None
 
 
@@ -434,7 +481,14 @@ def _build_mcp_server_manager():
                 timeout = 30.0
             return StdioMcpClient(transport=transport, timeout_sec=timeout)
 
-        manager = McpServerManager(client_factory=_client_factory)
+        from hermes.runtime.managed_ads_mcp import scoped_ads_factory  # noqa: PLC0415
+        manager = McpServerManager(
+            client_factory=_client_factory,
+            scoped_client_factory=scoped_ads_factory(
+                Path(os.environ.get('HERMES_SHELL_DB', '/var/lib/hermes/shell-state.db')),
+                _client_factory,
+            ),
+        )
         logger.info("hermes.runtime.mcp_server_manager_ready (0 servers connected at startup)")
         return manager
     except Exception as exc:  # noqa: BLE001
@@ -606,7 +660,13 @@ def _build_nous_engine(
     # and the engine falls back to the global active provider.
     _model_config_for_alias = _build_model_config_for_alias(_DB_PATH)
 
-    initial_model = _nous_model_source()
+    from hermes.runtime.model_config import ManagedProviderUnavailableError
+    try:
+        initial_model = _nous_model_source()
+    except ManagedProviderUnavailableError:
+        # Start the daemon/control plane so a newer signed policy can restore
+        # service. Per-turn resolution remains fail-closed, never personal.
+        initial_model = None
     if initial_model is None:
         logger.warning(
             "hermes.runtime.nous_model_not_configured — engine degradado hasta "
@@ -672,16 +732,28 @@ def _build_model_config_for_alias(db_path):
         return None
 
     def _resolve_by_alias(alias: str) -> "ModelConfig | None":
+        from hermes.runtime.managed_llm import resolve_managed_config
+        managed = resolve_managed_config(db_path, alias)
+        if managed is not None:
+            return managed
         resolved = resolver.resolve_by_alias(alias)
         if resolved is None:
             return None
         provider = resolved.provider
+        if not provider.enabled:
+            return None
         model = provider_model_string(provider, provider.default_model)
-        return ModelConfig.from_provider(
+        from dataclasses import replace  # noqa: PLC0415
+        config = ModelConfig.from_provider(
             model=model,
             api_key=resolved.api_key,
             base_url=resolved.base_url,
         )
+        if provider.managed_by == 'cloud':
+            if not resolved.api_key or not resolved.base_url:
+                raise RuntimeError('Managed provider credential is unavailable')
+            config = replace(config, managed=True)
+        return config
 
     return _resolve_by_alias
 
@@ -785,6 +857,33 @@ def _build_audit_components(db_path: Path):
     return firmer, audit_repo
 
 
+def _build_agent_state(*, db_path: Path, firmer, audit_repo):
+    """Construye SqliteAgentState con el signer/audit_repo REALES (CTRL-12).
+
+    A diferencia de otros componentes de este módulo (p.ej. security_hook,
+    1542), el freno de emergencia NO degrada: pause/resume es la única
+    transición de estado del agente con consecuencia de seguridad, y
+    _build_audit_components() ya documenta que un (None, None) sólo debe
+    dejar arrancar degradado a un caller de TEST — main() no lo es. Antes de
+    este fix, SqliteAgentState se construía SIN firmer/audit_repo (aunque ya
+    estaban disponibles unas líneas más abajo) y absorbía el freno en
+    silencio: la cadena firmada crecía con otros eventos pero nunca con
+    AGENT_PAUSED/AGENT_RESUMED (CLI-N4, specs/025-safent-repaso
+    matriz-final-39eeb8e, CWE-778). Fail-loud aquí: sin un signing key real
+    (HERMES_AUDIT_KEY o master.key), el daemon rehúsa arrancar en vez de
+    servir pause/resume sin auditar.
+    """
+    from hermes.tasks.infrastructure.sqlite_agent_state import SqliteAgentState  # noqa: PLC0415
+
+    if firmer is None or audit_repo is None:
+        raise RuntimeError(
+            "hermes.runtime.agent_state_audit_unavailable: no se puede "
+            "construir SqliteAgentState sin signer/audit_repo — "
+            "AGENT_PAUSED/AGENT_RESUMED nunca deben auditarse en silencio "
+            "(CTRL-12/CWE-778, CLI-N4). Configura HERMES_AUDIT_KEY o "
+            "master.key antes de arrancar."
+        )
+    return SqliteAgentState(db_path=db_path, signer=firmer, audit_repo=audit_repo)
 
 
 def _build_composio_surface_adapter(db_path: Path):
@@ -888,7 +987,7 @@ def _build_skill_store_adapter(db_path: Path):
     try:
         from hermes.capabilities.infrastructure.skill_store_adapter import SkillStoreAdapter  # noqa: PLC0415
         from hermes.shell_server.skills.native_keystore_adapter import NativeKeyStoreAdapter  # noqa: PLC0415
-        from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
+        from hermes.capabilities.application.skill_signer import SigningKeyError  # noqa: PLC0415
 
         kms = NativeKeyStoreAdapter()
         # Canonical store = $HERMES_HOME/skills (the read/exec path). Only an
@@ -933,6 +1032,49 @@ def _build_memory_surface_adapter():
         "hermes.runtime.memory_surface_adapter.ready memory_root=%s",
         str(memory_root),
     )
+    return adapter
+
+
+def _build_tailnet_ssh_surface_adapter(*, signer, audit_repo):
+    """Construye TailnetSshSurfaceAdapter para SurfaceKind.TAILNET_SSH (spec 022 v2).
+
+    No external dependencies at construction time — always succeeds (mirrors
+    `_build_memory_surface_adapter`). The three use cases share one executor,
+    one tailnet directory reader, and one WORM audit port. `ssh` binary
+    absence / tailnet not configured are RUNTIME failures surfaced per-call
+    as ReplayOutcome.failed (fail-closed), never a boot-time failure — see
+    specs/022-tailnet-connectivity/ssh-v2.md §Cableado for why this adapter
+    is registered unconditionally rather than gated on tailnet status.
+    """
+    from hermes.tailnet_ssh.application.tailnet_file_use_case import (  # noqa: PLC0415
+        TailnetFileGetUseCase,
+        TailnetFilePutUseCase,
+    )
+    from hermes.tailnet_ssh.application.tailnet_ssh_use_case import TailnetSshUseCase  # noqa: PLC0415
+    from hermes.tailnet_ssh.infrastructure.hash_chain_audit_port import HashChainAuditPort  # noqa: PLC0415
+    from hermes.tailnet_ssh.infrastructure.ssh_subprocess_executor import (  # noqa: PLC0415
+        SubprocessSshExecutor,
+    )
+    from hermes.tailnet_ssh.infrastructure.status_json_directory import (  # noqa: PLC0415
+        StatusJsonTailnetDirectory,
+    )
+    from hermes.tailnet_ssh.infrastructure.tailnet_ssh_surface_adapter import (  # noqa: PLC0415
+        TailnetSshSurfaceAdapter,
+    )
+
+    directory = StatusJsonTailnetDirectory()
+    executor = SubprocessSshExecutor()
+    audit = HashChainAuditPort(signer=signer, audit_repo=audit_repo)
+    adapter = TailnetSshSurfaceAdapter(
+        ssh_use_case=TailnetSshUseCase(directory=directory, executor=executor, audit=audit),
+        file_get_use_case=TailnetFileGetUseCase(
+            directory=directory, executor=executor, audit=audit
+        ),
+        file_put_use_case=TailnetFilePutUseCase(
+            directory=directory, executor=executor, audit=audit
+        ),
+    )
+    logger.info("hermes.runtime.tailnet_ssh_surface_adapter.ready")
     return adapter
 
 
@@ -1010,14 +1152,12 @@ def _build_real_broker(
 
     # Inject the MFA tier verifier so EVERY approve surface (web + D-Bus) is MFA-gated
     # inside the gate — closes the D-Bus MFA-skip side-door (red-team 2026-06-19).
-    from hermes.shell_server.security.mfa_tool_tier import MfaToolTierVerifier  # noqa: PLC0415
 
     approval_gate = SqliteApprovalGate(
         db_path=db_path,
         minter=minter,
         signer=firmer,
         audit_repo=audit_repo,
-        mfa_verifier=MfaToolTierVerifier(),
     )
 
     # Surface adapters reales (path/host allowlists configurables via env).
@@ -1091,6 +1231,16 @@ def _build_real_broker(
     # LOW + auto_executable in CapabilityRegistry: no HITL required.
     # Registered unconditionally — no external dependencies.
     adapters[SurfaceKind.MEMORY] = _build_memory_surface_adapter()
+
+    # spec 022 v2 — TailnetSshSurfaceAdapter: governed SSH on the owner's
+    # tailnet. LOW + auto_executable in CapabilityRegistry (the real gate is
+    # Step 1.6-tailnet_ssh in security_hook.py, BEFORE this is dispatched).
+    # Registered unconditionally — no external dependencies at construction
+    # time; a missing `ssh` binary or unconfigured tailnet fails per-call,
+    # not at boot (see _build_tailnet_ssh_surface_adapter docstring).
+    adapters[SurfaceKind.TAILNET_SSH] = _build_tailnet_ssh_surface_adapter(
+        signer=firmer, audit_repo=audit_repo
+    )
 
     # FASE 3 (A2A cross-human) — DelegationSurfaceAdapter: delegate_to_colleague's
     # execution (POST /v1/outbox). Registered unconditionally — a non-paired
@@ -1284,7 +1434,7 @@ def _ensure_state_db_secure() -> None:
         logger.warning("hermes.runtime.state_db_secure_failed", extra={"error": str(exc)})
 
 
-async def _run(*, systemd_notify: bool) -> None:
+async def _run(*, systemd_notify: bool, bootstrap=None) -> None:
     import time as _time  # noqa: PLC0415
     _t_start = _time.perf_counter()
 
@@ -1304,6 +1454,14 @@ async def _run(*, systemd_notify: bool) -> None:
     # para que el self-test quede registrado en el journal). El ruleset RUNTIME es
     # amplio (cubre todo lo que el daemon usa) → no rompe; deniega /boot /home /opt…
     _apply_runtime_landlock()
+
+    if bootstrap is not None:
+        from hermes.runtime.managed_llm_bootstrap import complete_process_bootstrap  # noqa: PLC0415
+        from hermes.runtime.managed_llm_profile import current_profile  # noqa: PLC0415
+
+        complete_process_bootstrap(
+            bootstrap, profile_factory=lambda generation: current_profile(_DB_PATH, generation)
+        )
 
     operator_id = _resolve_operator_id()
     consent_manager = _build_consent_manager()
@@ -1340,27 +1498,11 @@ async def _run(*, systemd_notify: bool) -> None:
         SqliteAgentRegistry,
     )
 
-    # Inc 5' (2026-07-07): Community seeds only the native `default` agent —
-    # the 27 roster-* templates are never created (owner: "not seeded", not
-    # merely hidden). Same store/vault pattern as _build_delegation_surface_
-    # adapter; a store error defaults to "community" (fail to the SMALLER
-    # surface, not the larger one).
-    try:
-        from hermes.instance.association_store import SQLiteAssociationStore  # noqa: PLC0415
-        from hermes.shell_server.security.secrets import SecretsVault  # noqa: PLC0415
-
-        _edition = SQLiteAssociationStore(
-            db_path=_DB_PATH, vault=SecretsVault()
-        ).edition()
-    except Exception:  # noqa: BLE001
-        _edition = "community"
-    agent_registry = SqliteAgentRegistry(
-        db_path=_DB_PATH, seed_default_roster=(_edition != "community")
-    )
+    # All editions use the native default plus explicitly configured profiles.
+    agent_registry = SqliteAgentRegistry(db_path=_DB_PATH)
 
     # Componentes del loop
     from hermes.tasks.infrastructure.sqlite_work_queue import SqliteWorkQueue  # noqa: PLC0415
-    from hermes.tasks.infrastructure.sqlite_agent_state import SqliteAgentState  # noqa: PLC0415
     from hermes.tasks.application.agent_loop_orchestrator import AgentLoopOrchestrator  # noqa: PLC0415
     from hermes.capabilities.domain.ports import ConsentContext  # noqa: PLC0415
 
@@ -1371,7 +1513,11 @@ async def _run(*, systemd_notify: bool) -> None:
         logger.warning("Cannot create DB dir %s", db_path.parent)
 
     queue = SqliteWorkQueue(db_path=db_path)
-    state = SqliteAgentState(db_path=db_path)
+    # Audit components built BEFORE agent_state (CLI-N4): the emergency-brake
+    # pause/resume audit trail must never be wired up after the fact / with a
+    # missing signer — see _build_agent_state's docstring.
+    firmer, audit_repo = _build_audit_components(db_path)
+    state = _build_agent_state(db_path=db_path, firmer=firmer, audit_repo=audit_repo)
     logger.info(
         "hermes.runtime.boot_step.sqlite_infra_ready",
         extra={"elapsed_ms": round((_time.perf_counter() - _t_start) * 1000, 1)},
@@ -1388,7 +1534,6 @@ async def _run(*, systemd_notify: bool) -> None:
     # SurfaceKind.BROWSER stays unregistered — the broker already handles None (1062).
     browser_adapter = None
 
-    firmer, audit_repo = _build_audit_components(db_path)
     logger.info(
         "hermes.runtime.boot_step.broker_deps_ready",
         extra={"elapsed_ms": round((_time.perf_counter() - _t_start) * 1000, 1)},
@@ -1596,24 +1741,7 @@ async def _run(*, systemd_notify: bool) -> None:
         # integration (composio + mcp) tools — the agent sees a handful of RELEVANT
         # tools directly. Fail-soft: no message / embedder unavailable → full set.
         integration = list(composio) + list(mcp_specs)
-        try:
-            from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
-                get_current_message,
-            )
-            _msg = get_current_message()
-            picked = _tool_index().retrieve(_msg, integration, k=_TOOL_RETRIEVAL_TOPK) if _msg else None
-            if picked is not None and len(picked) < len(integration):
-                logger.info(
-                    "hermes.runtime.tools_source.retrieved %d/%d integration tools by intent",
-                    len(picked), len(integration),
-                )
-                logger.debug(
-                    "hermes.runtime.tools_source.retrieved names=%s",
-                    [getattr(s, "name", "?") for s in picked],
-                )
-                integration = picked
-        except Exception as _ret_exc:  # noqa: BLE001
-            logger.debug("hermes.runtime.tool_retrieval_skipped: %s", _ret_exc)
+        _stamp_visible_integration(integration)
         # spec 014 inc. 3: capability_specs are static (built once, always
         # present).  Included BEFORE composio + mcp so they appear first in
         # the LLM schema. Their names are NOT in the Nous native catalog, so
@@ -1831,10 +1959,13 @@ async def _run(*, systemd_notify: bool) -> None:
     # with two retries; on failure we leave BROWSER_CDP_URL unset and the seatbelt
     # (cycle_cdp_context.install_jail_block_local_session) ensures any subsequent
     # browse call hard-fails instead of running unconfined.
+    startup_tasks = []
     if jailed_browser_manager is not None:
-        asyncio.create_task(
-            _eager_start_jailed_browser(jailed_browser_manager),
-            name="jailed-browser-eager-start",
+        startup_tasks.append(
+            asyncio.create_task(
+                _eager_start_jailed_browser(jailed_browser_manager),
+                name="jailed-browser-eager-start",
+            )
         )
 
     # MCP: reconectar al boot los servidores que el operador configuró
@@ -1843,9 +1974,11 @@ async def _run(*, systemd_notify: bool) -> None:
         from hermes.agents_os.infrastructure.dbus_runtime_service import (  # noqa: PLC0415
             reconnect_persisted_mcp_servers,
         )
-        asyncio.create_task(
-            reconnect_persisted_mcp_servers(mcp_server_manager),
-            name="mcp-reconnect",
+        startup_tasks.append(
+            asyncio.create_task(
+                reconnect_persisted_mcp_servers(mcp_server_manager),
+                name="mcp-reconnect",
+            )
         )
 
     # P3 — ModelHealthMonitor: detecta caída del LLM local y emite
@@ -1867,13 +2000,6 @@ async def _run(*, systemd_notify: bool) -> None:
         audit_repo=audit_repo,
     )
 
-    # Wire SIGTERM for clean shutdown
-    event_loop = asyncio.get_event_loop()
-    event_loop.add_signal_handler(signal.SIGTERM, orchestrator.request_shutdown)
-    event_loop.add_signal_handler(signal.SIGTERM, unix_socket.close)
-    if browser_guard is not None:
-        event_loop.add_signal_handler(signal.SIGTERM, browser_guard.signal_shutdown)
-
     # Confinement self-check: refuse to start the autonomous loop if kernel
     # confinement gates are absent. Closes the red-team "written but never loaded"
     # gap. Runs after all services are wired so any missing socket/netns is real.
@@ -1893,6 +2019,7 @@ async def _run(*, systemd_notify: bool) -> None:
     # Ejecutar en paralelo: loop principal + socket de stream + D-Bus (si disponible)
     # + ModelHealthMonitor (P3) + trigger sources (P2).
     tasks = [
+        *startup_tasks,
         asyncio.create_task(orchestrator.run_forever(), name="agent-loop"),
         asyncio.create_task(_serve_unix_socket(unix_socket, sock_path), name="stream-socket"),
     ]
@@ -1911,8 +2038,78 @@ async def _run(*, systemd_notify: bool) -> None:
         )
     tasks.extend(trigger_tasks)
 
+    # Wire SIGTERM for clean shutdown (graceful stop — item #2, spec 025 matriz).
+    #
+    # BUG FIXED (2026-09-10, verified live: `podman stop` never returned, even
+    # given 90s — SIGKILLed every time): `add_signal_handler(sig, cb)` REPLACES
+    # any previous handler for the SAME signal (asyncio, one callback per
+    # signal number) — it does NOT stack. The old code called it three times
+    # for signal.SIGTERM in a row, so only the LAST registration
+    # (browser_guard.signal_shutdown, or nothing at all when browser_guard is
+    # None) ever fired; orchestrator.request_shutdown() and unix_socket.close()
+    # were silently dead code. ONE handler, doing everything, fixes that.
+    #
+    # Even with request_shutdown() wired correctly, trigger_tasks (P2) and any
+    # task with no graceful hook (dbus_task, model_monitor_task, the composio
+    # poller) have nothing telling THEM to stop — asyncio.gather() below waits
+    # for every task, so those alone would still hang the process forever. A
+    # short grace window lets the graceful paths (orchestrator/socket/browser)
+    # exit on their own; anything still running after it is cancelled outright
+    # — every one of these loops already treats CancelledError as a clean exit
+    # (see e.g. SchedulerTimerSource.run_forever), and return_exceptions=True
+    # on the gather absorbs it without turning a clean stop into an error.
+    _SIGTERM_GRACE_S = 5.0
+
+    def _handle_sigterm() -> None:
+        from hermes.runtime.managed_llm_bootstrap import process_admission  # noqa: PLC0415
+
+        # Arm first: a third-party native interrupt callback may itself stall.
+        shutdown_deadline.arm()
+        admission = process_admission()
+        if admission is not None:
+            admission.close()
+            admission.interrupt_inflight()
+        logger.info("hermes.runtime.sigterm_received — starting graceful shutdown")
+        orchestrator.request_shutdown()
+        unix_socket.close()
+        if browser_guard is not None:
+            browser_guard.signal_shutdown()
+        asyncio.create_task(
+            _cancel_runtime_tasks_after_grace(tasks, _SIGTERM_GRACE_S),
+            name="sigterm-grace-cancel",
+        )
+
+    event_loop = asyncio.get_event_loop()
+    from hermes.runtime.shutdown_deadline import ShutdownDeadline  # noqa: PLC0415
+
+    shutdown_deadline = ShutdownDeadline()
+    event_loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
+
+    async def _watch_llm_generation() -> None:
+        from hermes.runtime.managed_llm_bootstrap import process_admission  # noqa: PLC0415
+        from hermes.runtime.managed_llm_lifecycle import watch_authority  # noqa: PLC0415
+
+        admission = process_admission()
+        if admission is None:
+            return
+        await watch_authority(admission, _handle_sigterm)
+
+    tasks.append(asyncio.create_task(_watch_llm_generation(), name="llm-generation-monitor"))
+
     await asyncio.gather(*tasks, return_exceptions=True)
     logger.info("hermes.runtime.loop_stopped")
+
+
+async def _cancel_runtime_tasks_after_grace(tasks, grace_seconds: float) -> None:
+    """Request cancellation once; the existing daemon gather joins each task.
+
+    Repeated SIGTERM must not cancel a coroutine again while it is releasing
+    its client/session in finally. This owns tasks, not external browser units.
+    """
+    await asyncio.sleep(grace_seconds)
+    for task in tasks:
+        if not task.done() and not task.cancelling():
+            task.cancel()
 
 
 async def _eager_start_jailed_browser(manager) -> None:
@@ -2934,44 +3131,94 @@ def _apply_runtime_landlock() -> None:
     """P0-2: el daemon se AUTOCONFINA con Landlock — defense-in-depth, 2ª capa LSM.
 
     OS-NATIVO: confinamiento a nivel kernel vía syscalls Landlock, aplicado por el
-    propio daemon a su proceso (NADA de backend/HTTP). Igual o superior a NemoHermes
-    (fail-closed, no best-effort). No-fatal: si Landlock no está o el ruleset falla,
-    el daemon sigue confinado por systemd (ProtectSystem=strict + ProtectHome +
-    ReadWritePaths + CapabilityBoundingSet vacío + SystemCallFilter). Se desactiva
-    con HERMES_RUNTIME_LANDLOCK=0 (CI/dev sin kernel Landlock).
+    propio daemon a su proceso (NADA de backend/HTTP). Igual o superior a NemoHermes.
+
+    FAIL-CLOSED por defecto (spec 025 hallazgo #4): si Landlock no queda REALMENTE
+    aplicado y enforcing (kernel sin soporte, arquitectura sin tabla de syscalls,
+    seccomp lo bloquea, error duro, o el self-test de /boot demuestra que es
+    teatro), el daemon SE NIEGA a arrancar los agent planes (consent manager,
+    tools registry, broker…) — `sys.exit(1)` antes de que _run() siga. Esto
+    reemplaza el degrade silencioso previo (siempre `return`, solo un
+    logger.warning, nunca abortaba), que dejaba correr el daemon "solo con
+    systemd" sin que el dueño lo supiera nunca.
+
+    Dos vías, ambas explícitas y logueadas:
+      - HERMES_RUNTIME_LANDLOCK=0        — desactiva el intento por completo
+        (CI/dev sin kernel Landlock). Comportamiento previo, sin cambios.
+      - HERMES_RUNTIME_LANDLOCK_ALLOW_DEGRADE=1 — Landlock SÍ se intenta, pero si
+        degrada, el dueño ha autorizado explícitamente seguir solo con el
+        confinamiento systemd (ProtectSystem=strict + ProtectHome +
+        ReadWritePaths + CapabilityBoundingSet vacío + SystemCallFilter).
     """
     if os.environ.get("HERMES_RUNTIME_LANDLOCK", "1") != "1":
+        logger.warning(
+            "runtime_landlock.disabled HERMES_RUNTIME_LANDLOCK=0 — daemon arranca SIN "
+            "Landlock de kernel (solo confinamiento systemd)"
+        )
         return
-    try:
-        from hermes.security.landlock_loader import load_and_apply
 
-        rc = load_and_apply("runtime")
-        # Self-test funcional: /boot NO está en el ruleset RUNTIME → debe denegar.
-        # Sin Landlock /boot es world-readable; con Landlock enforcing → EACCES.
-        # Es la prueba de que el confinamiento es REAL, no teatro ("escrito pero
-        # no cargado" era el patrón raíz del red-team).
-        try:
-            os.listdir("/boot")
-            enforcing = False
-        except PermissionError:
-            enforcing = True
-        except OSError:
-            enforcing = None
-        if enforcing is True:
-            logger.info("runtime_landlock.applied rc=%d ENFORCING — /boot denied (EACCES) ✓", rc)
-        elif enforcing is False:
-            logger.warning("runtime_landlock.applied rc=%d NOT_ENFORCING — /boot legible (¿degrade?)", rc)
-        else:
-            logger.info("runtime_landlock.applied rc=%d (self-test inconcluso)", rc)
-    except Exception as exc:  # noqa: BLE001 — jamás debe tumbar el daemon
-        logger.warning("runtime_landlock.skipped error=%r (sigue el confinamiento systemd)", exc)
+    from hermes.security.landlock_loader import (  # noqa: PLC0415
+        LandlockOutcome,
+        apply_runtime_landlock,
+    )
+
+    try:
+        result = apply_runtime_landlock("runtime")
+    except Exception as exc:  # noqa: BLE001 — un bug del loader no debe crashear con traceback
+        logger.error("runtime_landlock.loader_crashed error=%r — tratado como NO aplicado", exc)
+        result = None
+
+    # Self-test funcional: /boot NO está en el ruleset RUNTIME → debe denegar.
+    # Sin Landlock /boot es world-readable; con Landlock enforcing → EACCES.
+    # Es la prueba de que el confinamiento es REAL, no teatro ("escrito pero
+    # no cargado" era el patrón raíz del red-team) — así que incluso un
+    # outcome=APPLIED que no supere el self-test cuenta como degrade.
+    try:
+        os.listdir("/boot")
+        enforcing = False
+    except PermissionError:
+        enforcing = True
+    except OSError:
+        enforcing = None
+
+    if result is not None and result.outcome is LandlockOutcome.APPLIED and enforcing is not False:
+        logger.info(
+            "runtime_landlock.applied outcome=%s enforcing=%s ✓", result.outcome.value, enforcing
+        )
+        return
+
+    detail = (
+        f"outcome={result.outcome.value if result is not None else 'loader_crashed'} "
+        f"enforcing={enforcing}"
+    )
+
+    if os.environ.get("HERMES_RUNTIME_LANDLOCK_ALLOW_DEGRADE", "0") == "1":
+        logger.warning(
+            "runtime_landlock.degraded_ALLOWED %s — HERMES_RUNTIME_LANDLOCK_ALLOW_DEGRADE=1: "
+            "arranque autorizado explícitamente SIN Landlock de kernel enforcing "
+            "(solo confinamiento systemd). Elección del dueño, registrada aquí.",
+            detail,
+        )
+        return
+
+    logger.error(
+        "runtime_landlock.degraded_REFUSED %s — REFUSING to start the agent planes "
+        "(fail-closed). Set HERMES_RUNTIME_LANDLOCK_ALLOW_DEGRADE=1 to run without kernel "
+        "Landlock enforcement (systemd confinement only), or HERMES_RUNTIME_LANDLOCK=0 to "
+        "disable this check entirely.",
+        detail,
+    )
+    sys.exit(1)
 
 
 def main() -> int:
     args = sys.argv[1:]
     systemd_notify = "--systemd-notify" in args
+    from hermes.runtime.managed_llm_bootstrap import initialize_process  # noqa: PLC0415
+
+    bootstrap = initialize_process(_DB_PATH)
     try:
-        asyncio.run(_run(systemd_notify=systemd_notify))
+        asyncio.run(_run(systemd_notify=systemd_notify, bootstrap=bootstrap))
     except KeyboardInterrupt:
         pass
     return 0

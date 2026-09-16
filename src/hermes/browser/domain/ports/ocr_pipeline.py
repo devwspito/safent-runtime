@@ -3,8 +3,12 @@
 Trasladado del contract canónico (specs/001-stack-browser-brutal/contracts/ocr_pipeline.py)
 al dominio del runtime. Las implementaciones concretas viven en:
   - infrastructure/ocr/tesseract_pipeline.py (default, local, sin red)
-  - infrastructure/ocr/azure_di_pipeline.py  (opt-in, EU, cloud)
   - testing/fake_ocr_pipeline.py              (tests deterministas)
+
+(La implementación Azure DI opt-in del orquestador spec-002 se archivó en
+archive/browser-spec-002 — NO-GO fase 4, parcado. `OcrEngine.AZURE_DI_EU`
+se deja intacto en el enum: es un valor de dominio, no una referencia al
+código borrado.)
 
 Constitución III: los campos extraídos pueden ser PII; se tokenizan antes
 de llegar al provider LLM. El OCR en sí no tokeniza; lo hace el caller

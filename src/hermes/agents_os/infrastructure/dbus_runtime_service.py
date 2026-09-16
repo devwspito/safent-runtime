@@ -56,9 +56,10 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import wraps
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from hermes.agents_os.application.audit_hash_chain import AuditHashChainSigner
 from hermes.agents_os.application.consent_manager import Capability
@@ -72,6 +73,39 @@ if TYPE_CHECKING:
     from hermes.tasks.domain.ports import AgentStatePort, WorkQueuePort
 
 logger = logging.getLogger("hermes.agents_os.dbus_runtime_service")
+
+
+def _serialized_local_llm_write(method):
+    """Local synchronous setters commit atomically against signed LLM policy."""
+    @wraps(method)
+    def guarded(self, **kwargs):
+        self._authorize_and_resolve(kwargs['sender_uid'], operation=method.__name__)
+        from hermes.runtime.managed_llm import local_configuration_write
+        with local_configuration_write(self._local_llm_db_path()):
+            return method(self, **kwargs)
+    return guarded
+
+# Suggested default model per NATIVE catalogue provider_id (hermes_cli.auth.
+# PROVIDER_REGISTRY key) — surfaced by list_native_providers() so the UI's
+# "Add/Connect" card can pre-fill (and let the owner edit) a model instead of
+# configuring a provider with none at all (specs/025-safent-repaso PROV-02:
+# configureNativeProvider({provider_id, api_key}) never sent `model`, so
+# config.yaml ended up with model.provider set and NO model.default, and the
+# first chat died with HermesModelNotConfiguredError). Mirrors the same
+# per-id table the Lumen desktop compositor already uses for this exact
+# purpose (lumen/compositor/qml/desktop/ProviderGate.qml `defaultModels`).
+# Deliberately NOT exhaustive over the 37+ registry entries: an id missing
+# here just means the UI field starts empty and the owner types one — never
+# a hard requirement to keep this table in lockstep with the registry.
+_NATIVE_DEFAULT_MODEL: dict[str, str] = {
+    "anthropic": "claude-sonnet-4-6",
+    "openai-api": "gpt-5.4-nano",
+    "gemini": "gemini-2.5-flash",
+    "deepseek": "deepseek-chat",
+    "kimi-coding": "kimi-k2",
+    "xai": "grok-4",
+    "ollama-cloud": "llama3.1",
+}
 
 
 def _parse_redacted_params(raw: object) -> dict:
@@ -397,22 +431,71 @@ class DbusRuntimeServiceWiring:
         sender_uid: int,
         operator_token: str | None = None,
     ) -> None:
-        """Pausa el agente. sender_uid resuelto por el bus (CWE-862).
+        """Pausa el agente (freno de emergencia). sender_uid resuelto por el
+        bus (CWE-862). Engaging requires nothing else — es un freno, un solo
+        clic (la liberación sí exige TOTP, gateada en la capa REST).
 
         operator_token required when sender_uid == proxy_uid (confused-deputy
         remediation). operator_id derived from token, not from proxy uid.
 
+        Best-effort: también solicita cancelar cada turno con actividad EN
+        VIVO (live_activity — tool dispatch en curso) via el mismo registro
+        cooperativo que CancelTask usa por task_id. Un turno esperando
+        generación del LLM sin tool en curso se detiene en su próximo
+        checkpoint (broker Paso 0 / claim del worker), no aquí.
+
+        provenance (025 re-verificación d2eb8c6, "echar el freno no tiene
+        vocabulario de procedencia"): derivado del MISMO sender_uid ya
+        autorizado, no de un campo que el llamante pudiera rellenar —
+        proxy_uid (la REST API vía el shell-server) => API; cualquier uid
+        directo autorizado (host/TUI) => HOST_CLI. Sólo esta función decide;
+        ningún caller necesita cambiar.
+
         Raises:
             DbusAuthorizationError: UID del sender no está autorizado o token inválido.
         """
+        from hermes.tasks.domain.ports import AgentPauseProvenance  # noqa: PLC0415
+
         operator_id = self._authorize_and_resolve(
             sender_uid, operation="request_pause", operator_token=operator_token
         )
-        await self._state.pause(by=operator_id, reason=reason)
+        provenance = (
+            AgentPauseProvenance.API
+            if sender_uid == self._proxy_uid
+            else AgentPauseProvenance.HOST_CLI
+        )
+        await self._state.pause(by=operator_id, reason=reason, provenance=provenance)
         logger.info(
             "hermes.dbus.agent_paused",
-            extra={"by_uid": sender_uid, "reason": reason},
+            extra={"by_uid": sender_uid, "reason": reason, "provenance": provenance},
         )
+        self._cancel_live_turns(reason="freno de emergencia activado")
+
+    @staticmethod
+    def _cancel_live_turns(*, reason: str) -> None:
+        """Solicita cancelación cooperativa de cada task_id con actividad EN
+        VIVO. Best-effort: nunca levanta — un fallo aquí no debe impedir que
+        el freno quede puesto (el estado ya persistió arriba)."""
+        try:
+            from hermes.runtime import live_activity  # noqa: PLC0415
+            from hermes.tasks.domain.task_cancel_registry import (  # noqa: PLC0415
+                get_cancel_registry,
+            )
+            from uuid import UUID as _UUID  # noqa: PLC0415
+
+            registry = get_cancel_registry()
+            for entry in live_activity.snapshot():
+                try:
+                    registry.request_cancel(_UUID(entry["task_id"]), reason=reason)
+                except (ValueError, KeyError):
+                    continue
+        except Exception:  # noqa: BLE001 — best-effort, never blocks the pause itself
+            logger.warning("hermes.dbus.kill_switch_cancel_live_turns_failed", exc_info=True)
+
+    async def get_kill_switch_status(self) -> dict:
+        """Snapshot read-only del freno: {engaged, reason, changed_by,
+        changed_at}. Sin authZ (lectura, igual que get_security_policy)."""
+        return await self._state.status()
 
     async def cancel_task(
         self,
@@ -452,10 +535,18 @@ class DbusRuntimeServiceWiring:
         *,
         sender_uid: int,
         operator_token: str | None = None,
+        reason: str = "",
     ) -> None:
         """Reanuda el agente. sender_uid resuelto por el bus (CWE-862).
 
         operator_token required when sender_uid == proxy_uid.
+
+        reason: audit-only provenance marker (security review 2026-09-10,
+        MEDIUM finding) — "host_cli" from `safent brake release`, empty for
+        the normal TOTP-gated UI release via the REST proxy. Never used for
+        authorization, only threaded into the signed AGENT_RESUMED entry
+        (AgentStatePort.resume's own docstring) so the two are no longer
+        indistinguishable on the audit chain.
 
         Raises:
             DbusAuthorizationError: UID del sender no está autorizado o token inválido.
@@ -463,10 +554,10 @@ class DbusRuntimeServiceWiring:
         operator_id = self._authorize_and_resolve(
             sender_uid, operation="request_resume", operator_token=operator_token
         )
-        await self._state.resume(by=operator_id)
+        await self._state.resume(by=operator_id, reason=reason)
         logger.info(
             "hermes.dbus.agent_resumed",
-            extra={"by_uid": sender_uid},
+            extra={"by_uid": sender_uid, "reason": reason or None},
         )
 
     # ------------------------------------------------------------------
@@ -580,13 +671,11 @@ class DbusRuntimeServiceWiring:
 
         Associate mode (instance is paired with a cloud tenant):
           When cloud-managed agents exist, expose only those to the employee UI.
-          This prevents the CE default roster of 28 agents from dominating the
-          associate's UI — the enterprise controls which agents are visible.
+          The enterprise controls which managed profiles are visible.
           The default CEO (is_default=True) is always included as fallback.
 
         Community / CE mode (not associated, or no cloud agents yet):
-          Returns the full registry list unchanged (default roster filtered per
-          the default_roster_enabled flag in the registry).
+          Returns the active registry profiles; historical factory IDs are retired.
         """
         from hermes.agents.application.serialization import agent_to_dict  # noqa: PLC0415
 
@@ -666,22 +755,6 @@ class DbusRuntimeServiceWiring:
         self._require_registry().delete_agent(agent_id)
         logger.info("hermes.dbus.agent_deleted", extra={"by_uid": sender_uid})
 
-    def default_roster_enabled(self) -> bool:
-        """¿Visible el equipo de especialistas por defecto? (read, sin authZ)."""
-        if self._agent_registry is None:
-            return True
-        return self._agent_registry.default_roster_enabled()
-
-    async def set_default_roster_enabled(self, *, enabled: bool, sender_uid: int) -> bool:
-        """Enciende/apaga el equipo por defecto (filtra los `roster-*`, NO borra)."""
-        self._authorize(sender_uid, operation="set_default_roster_enabled")
-        self._require_registry().set_default_roster_enabled(enabled)
-        logger.info(
-            "hermes.dbus.default_roster_toggled",
-            extra={"enabled": enabled, "by_uid": sender_uid},
-        )
-        return True
-
     # ------------------------------------------------------------------
     # Gobernanza de skills (Principio 0 / P0-1):
     #   - Lecturas: supervisión, sin authZ.
@@ -752,34 +825,31 @@ class DbusRuntimeServiceWiring:
         *,
         set_active: bool = False,
     ) -> None:
-        """Write provider config to hermes_cli NATIVO path (fail-soft).
+        """Mirror the active local provider to Hermes's native configuration.
 
-        Maps ProviderKind → native provider_id via native_sync.kind_to_native_target,
-        then mirrors to HERMES_HOME/.env + config.yaml using the same helpers as
-        configure_native_provider.  If hermes_cli is unavailable or the kind has
-        no api_key (e.g. NOUS OAuth), this is a no-op — the SQL store remains the
-        fallback source as before.
-
-        The call is intentionally fire-and-log: native write failures MUST NOT
-        break the Safent flow (the SQL store is still valid fallback per the cascade
-        in provider_config_source.resolve_model_config).
+        Inactive aliases stay vault-only. Cloud credentials must use the signed
+        gateway path and can never be mirrored into process-global environment.
         """
+        if getattr(provider, 'managed_by', None) == 'cloud':
+            raise RuntimeError('Managed provider requires signed instance gateway')
+        if not set_active:
+            return
         try:
             from hermes.shell_server.providers.native_sync import kind_to_native_target  # noqa: PLC0415
             from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
         except Exception as exc:  # noqa: BLE001
+            if getattr(provider, 'managed_by', None) == 'cloud':
+                raise RuntimeError('Managed provider native synchronization unavailable') from None
             logger.debug("hermes.dbus.native_sync_unavailable: %s", exc)
             return
 
         try:
-            target = kind_to_native_target(provider.kind)
-
-            # NOUS and OAuth providers have no api_key path — skip write.
-            if not target.env_var:
-                return
+            target = kind_to_native_target(provider.kind, base_url=provider.base_url)
 
             key = (api_key or "").strip()
-            if not key:
+            # Inactive aliases stay in the vault. Providers sharing an env-var
+            # must never overwrite the active provider's credential on save.
+            if not set_active:
                 return
 
             # Validate env_var against PROVIDER_REGISTRY so we never write to
@@ -792,17 +862,26 @@ class DbusRuntimeServiceWiring:
                 if declared_vars:
                     env_var = declared_vars[0]
 
-            _write_hermes_env(env_var, key)
+            if env_var and target.provider_id != "custom":
+                _write_hermes_env(env_var, key)
 
             bu = (provider.base_url or "").strip()
-            if bu and target.base_url_env_var:
+            if not bu and target.base_url_env_var and target.provider_id != "custom":
+                _write_hermes_env(target.base_url_env_var, '')
+                import os as _os
+                _os.environ.pop(target.base_url_env_var, None)
+            if bu and target.base_url_env_var and target.provider_id != "custom":
                 _write_hermes_env(target.base_url_env_var, bu)
                 if registry_cfg is not None:
                     declared_bu_var = getattr(registry_cfg, "base_url_env_var", "") or ""
                     if declared_bu_var and declared_bu_var != target.base_url_env_var:
                         _write_hermes_env(declared_bu_var, bu)
 
-            if set_active:
+            if target.provider_id == "custom":
+                _write_hermes_model_config(
+                    "custom", (provider.default_model or "").strip(), bu, api_key=key,
+                )
+            elif set_active:
                 _write_hermes_model_config(
                     target.provider_id,
                     (provider.default_model or "").strip(),
@@ -813,12 +892,17 @@ class DbusRuntimeServiceWiring:
             # key on the next cycle without restart (mirrors configure_native_provider).
             try:
                 import os as _os  # noqa: PLC0415
-                _os.environ[env_var] = key
+                if env_var and key and target.provider_id != "custom":
+                    _os.environ[env_var] = key
+                elif env_var and target.provider_id != "custom":
+                    _os.environ.pop(env_var, None)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("hermes.dbus.native_sync_env_load_failed: %s", exc)
 
-            if set_active and self._active_provider_svc is not None:
-                self._active_provider_svc.force_refresh()
+            if set_active:
+                if self._active_provider_svc is not None:
+                    self._active_provider_svc.force_refresh()
+                _clear_engine_runtime_cache()
 
             logger.info(
                 "hermes.dbus.native_sync_ok",
@@ -829,6 +913,8 @@ class DbusRuntimeServiceWiring:
                 },
             )
         except Exception as exc:  # noqa: BLE001
+            if getattr(provider, 'managed_by', None) == 'cloud':
+                raise RuntimeError('Managed provider native synchronization failed') from exc
             logger.warning(
                 "hermes.dbus.native_sync_failed kind=%s: %s",
                 getattr(provider, "kind", "?"),
@@ -883,9 +969,9 @@ class DbusRuntimeServiceWiring:
         except Exception as exc:  # noqa: BLE001
             logger.warning("hermes.dbus.migrate_provider.failed: %s", exc)
 
+    @_serialized_local_llm_write
     def add_provider(self, *, draft_json: str, sender_uid: int) -> dict:
         """Crea provider. draft: {kind, alias, default_model, base_url, api_key, set_active}."""
-        self._authorize_and_resolve(sender_uid, operation="add_provider")
         if self._provider_repo is None:
             raise RuntimeError("provider_repo no inyectado en el daemon")
         from hermes.shell_server.providers.domain import (  # noqa: PLC0415
@@ -894,6 +980,8 @@ class DbusRuntimeServiceWiring:
         )
 
         d = json.loads(draft_json)
+        if d.get('managed_by'):
+            raise PermissionError('Managed providers require a signed Enterprise policy')
         api_key = d.get("api_key") or None
         provider = new_provider(
             alias=d["alias"],
@@ -902,9 +990,6 @@ class DbusRuntimeServiceWiring:
             base_url=d.get("base_url") or None,
             has_api_key=api_key is not None,
         )
-        # Ownership: the config-sync applier stamps managed_by="cloud" so the row
-        # is gated against local edits/deletes (REST layer) + reconcilable.
-        provider.managed_by = d.get("managed_by") or None
         saved = self._provider_repo.add(provider=provider, api_key=api_key)
         set_active = bool(d.get("set_active"))
         if set_active:
@@ -913,49 +998,97 @@ class DbusRuntimeServiceWiring:
         self._sync_to_native_provider(saved, api_key, set_active=set_active)
         return self._provider_to_dict(saved)
 
+    @_serialized_local_llm_write
     def update_provider(self, *, provider_id: str, draft_json: str, sender_uid: int) -> dict:
         """Actualiza alias/default_model/base_url/enabled/api_key."""
-        self._authorize_and_resolve(sender_uid, operation="update_provider")
         from uuid import UUID as _UUID  # noqa: PLC0415
 
         pid = _UUID(provider_id)
         current = self._provider_repo.get(provider_id=pid)
         d = json.loads(draft_json)
+        if current.managed_by == 'cloud' or d.get('managed_by'):
+            raise PermissionError('Managed providers require a signed Enterprise policy')
         if d.get("alias") is not None:
             current.alias = d["alias"]
         if d.get("default_model") is not None:
             current.default_model = d["default_model"]
-        if d.get("base_url") is not None:
+        if "base_url" in d:
             current.base_url = d["base_url"]
         if d.get("enabled") is not None:
             current.enabled = bool(d["enabled"])
-        if d.get("managed_by") is not None:
-            current.managed_by = d["managed_by"]
         api_key = d.get("api_key") or None
         self._provider_repo.update(provider=current, api_key=api_key)
-        # Honor set_active on update too (parity with add_provider): the cloud
-        # bundle marks the agent's provider_alias active, and re-publishes route
-        # through update_provider once the row exists. Without this the engine
-        # keeps no active model and chat fails with "HERMES_MODEL no definido".
-        set_active = bool(d.get("set_active"))
+        if api_key is None and current.has_api_key:
+            api_key = self._provider_repo.reveal_api_key(provider_id=pid)
+        # Editing the active local alias must refresh native selection even
+        # when the request did not repeat set_active.
+        set_active = bool(d.get("set_active")) or current.is_active
         if set_active:
             self._provider_repo.set_active(provider_id=pid)
         updated = self._provider_repo.get(provider_id=pid)
         self._sync_to_native_provider(updated, api_key, set_active=set_active)
         return self._provider_to_dict(updated)
 
+    @_serialized_local_llm_write
     def delete_provider(self, *, provider_id: str, sender_uid: int) -> bool:
-        self._authorize_and_resolve(sender_uid, operation="delete_provider")
         from uuid import UUID as _UUID  # noqa: PLC0415
 
-        self._provider_repo.delete(provider_id=_UUID(provider_id))
+        provider = self._provider_repo.get(provider_id=_UUID(provider_id))
+        if provider.managed_by == 'cloud':
+            raise PermissionError('Managed providers require a signed Enterprise policy')
+        if provider.is_active:
+            from hermes_cli.config import load_config, save_config
+            cfg = load_config() or {}
+            cfg.pop('model', None)
+            save_config(cfg)
+        self._provider_repo.delete(provider_id=provider.provider_id)
+        if self._active_provider_svc is not None:
+            self._active_provider_svc.force_refresh()
+        _clear_engine_runtime_cache()
         return True
 
+    def _local_llm_db_path(self):
+        import os
+        from pathlib import Path
+        if self._provider_repo is not None:
+            return self._provider_repo._db_path
+        return Path(os.environ.get('HERMES_SHELL_DB', '/var/lib/hermes/shell-state.db'))
+
+    def _reject_local_llm_mutation(self) -> None:
+        from hermes.runtime.managed_llm import read_policy
+        if read_policy(self._local_llm_db_path()) is not None:
+            raise PermissionError('LLM configuration is managed by Enterprise')
+
+    def apply_managed_llm_gateway(self, *, bundle_json: str, sender_uid: int) -> dict:
+        self._authorize_and_resolve(sender_uid, operation='apply_managed_llm_gateway')
+        from hermes.runtime.managed_llm import apply_signed_gateway
+        return apply_signed_gateway(self, bundle_json)
+
+    def apply_managed_ads_policy(self, *, bundle_json: str, sender_uid: int) -> dict:
+        self._authorize_and_resolve(sender_uid, operation='apply_managed_ads_policy')
+        from hermes.runtime.managed_ads_policy import apply_signed_ads
+        if self._association_store is None:
+            raise PermissionError('Enterprise association unavailable')
+        return apply_signed_ads(self._association_store, bundle_json)
+
+    @_serialized_local_llm_write
     def set_active_provider(self, *, provider_id: str, sender_uid: int) -> dict:
-        self._authorize_and_resolve(sender_uid, operation="set_active_provider")
+        """Activa un provider — endpoint ÚNICO que la UI llama para CUALQUIER
+        fila (custom/SQL o catálogo nativo, ver ProviderRow.handleActivate).
+
+        provider_id UUID → fila del repo SQL (comportamiento original).
+        provider_id no-UUID → id del catálogo nativo (p.ej. "gemini"): antes
+        esto reventaba con ValueError (_UUID lo rechaza) y la UI nunca podía
+        reactivar un provider nativo ya configurado sin volver a pegar la
+        api key — ver specs/025-safent-repaso hallazgo #1.
+        """
         from uuid import UUID as _UUID  # noqa: PLC0415
 
-        pid = _UUID(provider_id)
+        try:
+            pid = _UUID(provider_id)
+        except ValueError:
+            return self._set_active_native_provider(provider_id=provider_id)
+
         self._provider_repo.set_active(provider_id=pid)
         p = self._provider_repo.get(provider_id=pid)
         # Reveal the stored api_key so _sync_to_native_provider can forward it.
@@ -970,22 +1103,131 @@ class DbusRuntimeServiceWiring:
         # the case where _sync_to_native fails (fail-soft path leaves svc stale).
         if self._active_provider_svc is not None:
             self._active_provider_svc.force_refresh()
+        _clear_engine_runtime_cache()
         return self._provider_to_dict(p)
+
+    def _set_active_native_provider(self, *, provider_id: str) -> dict:
+        """Reactiva un provider del catálogo NATIVO ya configurado antes
+        (configure_native_provider guardó su clave en .env y su último
+        modelo en native_providers.json) — sin pedir de nuevo la api key.
+        {ok:false, error} si el provider no existe o no tiene clave guardada.
+
+        Levanta ValueError (→ 422 en REST, ver SetActiveProvider en el
+        adapter) si nunca se recordó un modelo para este provider — activar
+        sin uno dejaría config.yaml con `model.provider` pero SIN
+        `model.default`, y el primer chat moriría con
+        HermesModelNotConfiguredError en vez de fallar aquí, claro (PROV-02:
+        la UI llamaba a configureNativeProvider({provider_id, api_key}), sin
+        `model`, y esta función lo activaba igual).
+        """
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.native_activate_unavailable: %s", exc)
+            return {"ok": False, "error": "hermes_cli no disponible"}
+        cfg = PROVIDER_REGISTRY.get(provider_id)
+        if cfg is None:
+            return {"ok": False, "error": f"provider desconocido: {provider_id}"}
+        env_vars = getattr(cfg, "api_key_env_vars", ()) or ()
+        key = next((v for v in (_read_hermes_env(ev) for ev in env_vars) if v), None) if env_vars else None
+        if env_vars and not key:
+            return {
+                "ok": False,
+                "error": f"{provider_id} no está configurado todavía (sin api key guardada)",
+            }
+        model, base_url = _recall_native_provider_model(provider_id)
+        if not model:
+            raise ValueError(
+                f"{provider_id} no tiene un modelo configurado — indica uno "
+                "(configureNativeProvider con `model`) antes de activarlo"
+            )
+        try:
+            _write_hermes_model_config(provider_id, model, base_url)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.native_activate_write_failed: %s", exc)
+            return {"ok": False, "error": f"no se pudo escribir config: {exc}"}
+        if key:
+            try:
+                import os as _os  # noqa: PLC0415
+                _os.environ[env_vars[0]] = key
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("hermes.dbus.native_activate_env_load_failed: %s", exc)
+        if self._active_provider_svc is not None:
+            self._active_provider_svc.force_refresh()
+        _clear_engine_runtime_cache()
+        logger.info("hermes.dbus.native_provider_reactivated id=%s", provider_id)
+        return _read_native_active() or {"ok": True, "provider_id": provider_id}
+
+    async def _test_native_provider(self, *, provider_id: str) -> dict:
+        """Prueba un provider del catálogo NATIVO (sin fila en el repo SQL)
+        contra el runtime real — misma clave/modelo que _set_active_native_provider
+        recuerda de configure_native_provider. {ok, error}; {ok:false, error}
+        si el provider es desconocido o aún no tiene clave/modelo guardados
+        (mismo patrón fail-soft que _set_active_native_provider).
+        """
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.native_test_unavailable: %s", exc)
+            return {"ok": False, "error": "hermes_cli no disponible"}
+        cfg = PROVIDER_REGISTRY.get(provider_id)
+        if cfg is None:
+            return {"ok": False, "error": f"provider desconocido: {provider_id}"}
+        env_vars = getattr(cfg, "api_key_env_vars", ()) or ()
+        key = next((v for v in (_read_hermes_env(ev) for ev in env_vars) if v), None) if env_vars else None
+        if env_vars and not key:
+            return {
+                "ok": False,
+                "error": f"{provider_id} no está configurado todavía (sin api key guardada)",
+            }
+        model, base_url = _recall_native_provider_model(provider_id)
+        if not model:
+            return {"ok": False, "error": f"{provider_id} no tiene modelo configurado"}
+        try:
+            ok, err, code = await _nous_validate_model_string(f"{provider_id}/{model}", key, base_url)
+        except Exception as exc:  # noqa: BLE001
+            ok, err, code = False, f"{type(exc).__name__}: {str(exc)[:300]}", None
+        return {"ok": ok, "error": err, "code": code}
 
     async def test_provider(self, *, provider_id: str, sender_uid: int) -> dict:
         """Valida el provider a través del runtime REAL (Nous), no de un dialecto
         paralelo: resuelve el ModelConfig como el daemon + una completion mínima
-        por hermes-agent. {ok, error}. Mantiene 'idioma de Hermes'."""
+        por hermes-agent. {ok, error, code}. Mantiene 'idioma de Hermes'.
+
+        provider_id UUID → fila del repo SQL (comportamiento original).
+        provider_id no-UUID → id del catálogo nativo (p.ej. "anthropic",
+        "gemini"): antes esto reventaba _UUID() con ValueError, que dbus-fast
+        entrega como un error genérico — el proxy REST lo traducía a
+        AgentUnavailable y la tarjeta SIEMPRE veía 200 {"ok":false,
+        "error":"daemon_unavailable"}, aunque la clave fuese válida (nunca
+        activaba). Mismo bug/mismo arreglo que set_active_provider — ver
+        specs/025-safent-repaso PROV-03.
+
+        `code` (PROV-03, matriz-final-39eeb8e — "cambia la causa, no el
+        síntoma"): la sonda de anthropic salía a `POST
+        api.anthropic.com/chat/completions` (forma OpenAI) → 404 SIEMPRE, con
+        clave válida o no, porque Anthropic nunca ha servido esa ruta (la
+        suya es `/v1/messages`). Clasifica honestamente en vez de un `{ok:
+        false}` plano: None en éxito, "invalid_key" si el endpoint respondió
+        pero rechazó la credencial (401/403), "endpoint_error" si la ruta no
+        existe (404 — base_url mal configurada), None para cualquier otro
+        fallo (se conserva el mensaje real del proveedor en `error`).
+        """
         self._authorize_and_resolve(sender_uid, operation="test_provider")
+        self._reject_local_llm_mutation()
         from uuid import UUID as _UUID  # noqa: PLC0415
 
-        pid = _UUID(provider_id)
+        try:
+            pid = _UUID(provider_id)
+        except ValueError:
+            return await self._test_native_provider(provider_id=provider_id)
+
         provider = self._provider_repo.get(provider_id=pid)
         api_key = self._provider_repo.reveal_api_key(provider_id=pid)
         try:
-            ok, err = await _nous_validate_provider(provider, api_key)
+            ok, err, code = await _nous_validate_provider(provider, api_key)
         except Exception as exc:  # noqa: BLE001
-            ok, err = False, f"{type(exc).__name__}: {str(exc)[:300]}"
+            ok, err, code = False, f"{type(exc).__name__}: {str(exc)[:300]}", None
         from hermes.shell_server.providers.domain import ProviderConnectivity  # noqa: PLC0415
         from datetime import datetime, timezone  # noqa: PLC0415
 
@@ -994,7 +1236,7 @@ class DbusRuntimeServiceWiring:
         )
         provider.last_checked_at = datetime.now(tz=timezone.utc)
         self._provider_repo.update(provider=provider)
-        return {"ok": ok, "error": err}
+        return {"ok": ok, "error": err, "code": code}
 
     # ------------------------------------------------------------------
     # Egress (config-sync path) — soberanía daemon-side.
@@ -1200,10 +1442,13 @@ class DbusRuntimeServiceWiring:
         en executor para no bloquear el event loop del daemon.
         """
         self._authorize_and_resolve(sender_uid, operation="start_provider_oauth")
+        self._reject_local_llm_mutation()
         import os  # noqa: PLC0415
         import threading  # noqa: PLC0415
         import time as _time  # noqa: PLC0415
         import uuid as _uuid  # noqa: PLC0415
+
+        llm_db_path = str(self._local_llm_db_path())
 
         # xAI (SuperGrok): OAuth de NAVEGADOR (loopback PKCE). El daemon levanta
         # un callback server local + construye la authorize URL; la UI la abre en
@@ -1239,6 +1484,7 @@ class DbusRuntimeServiceWiring:
                     "challenge": challenge, "state": state,
                     "token_endpoint": discovery["token_endpoint"],
                     "discovery": discovery, "error_message": None,
+                    "llm_db_path": llm_db_path,
                 }
             threading.Thread(
                 target=_xai_loopback_worker, args=(sid,), daemon=True,
@@ -1255,6 +1501,7 @@ class DbusRuntimeServiceWiring:
                 _OAUTH_SESSIONS[sid] = {
                     "status": "pending", "provider_id": "openai-codex",
                     "user_code": "", "verification_url": "", "error_message": None,
+                    "llm_db_path": llm_db_path,
                 }
             threading.Thread(
                 target=_codex_oauth_worker, args=(sid,), daemon=True,
@@ -1319,6 +1566,7 @@ class DbusRuntimeServiceWiring:
             "status": "pending",
             "provider_id": "nous",
             "device_code": str(device_data["device_code"]),
+            "llm_db_path": llm_db_path,
             "interval": int(device_data["interval"]),
             "expires_at": _time.time() + int(device_data["expires_in"]),
             "portal_base_url": portal_base_url,
@@ -1457,6 +1705,164 @@ class DbusRuntimeServiceWiring:
                 entry["companion_status"] = status
         return out
 
+    # ------------------------------------------------------------------
+    # Companion SSO bridge (026, contracts/sso.md §3) — the daemon is the
+    # ONLY reader of the SSO private key and the ONLY reader of the
+    # companion's bearer for a health probe (T004). The shell-server
+    # (transport, T005) never touches either secret.
+    # ------------------------------------------------------------------
+
+    def _authorize_shell_server_caller(self, sender_uid: int, *, operation: str) -> None:
+        """Gate for verbs ONLY the shell-server transport may call — never
+        the operator's own D-Bus session (hermes-user), unlike every other
+        mutator in this class. The assertion `mint_companion_owner_assertion`
+        signs carries no human identity (its `sub` is a deterministic,
+        install-wide value, contracts/sso.md §3) — there is nothing an
+        operator_token could add, so this is a simpler, stricter check than
+        `_authorize_and_resolve`: exact match against the shell-server's own
+        resolved uid, fail-closed if that uid was never configured."""
+        if self._proxy_uid is None or sender_uid != self._proxy_uid:
+            logger.warning(
+                "hermes.dbus.authz_denied",
+                extra={"operation": operation, "sender_uid": sender_uid},
+            )
+            raise DbusAuthorizationError(
+                f"UID {sender_uid} no autorizado para '{operation}' "
+                "(solo el uid del shell-server, contracts/sso.md §3, CWE-862)"
+            )
+
+    def _require_companion_sso_authority(self):
+        """Lazy singleton — same pattern as `_scan_service_lazy()`: stateless
+        to construct, built once, reused across calls."""
+        if not hasattr(self, "_companion_sso_authority_instance"):
+            from hermes.agents_os.infrastructure.companion_sso_authority import (  # noqa: PLC0415
+                CompanionSsoAuthority,
+            )
+
+            self._companion_sso_authority_instance = CompanionSsoAuthority()
+        return self._companion_sso_authority_instance
+
+    def _require_companion_health_checker(self):
+        if not hasattr(self, "_companion_health_checker_instance"):
+            from hermes.agents_os.infrastructure.companion_health_check import (  # noqa: PLC0415
+                CompanionHealthChecker,
+            )
+
+            self._companion_health_checker_instance = CompanionHealthChecker()
+        return self._companion_health_checker_instance
+
+    def mint_companion_owner_assertion(self, *, slug: str, sender_uid: int) -> dict:
+        """Sign a fresh, single-use owner assertion for *slug* (contracts/
+        sso.md §3). authZ: `_authorize_shell_server_caller` — ONLY the
+        shell-server's own uid, 30/min rate-limited inside the authority.
+        Never returns/logs the private key; `CompanionSsoAuthorityError`
+        subclasses carry only a reason, never key material."""
+        self._authorize_shell_server_caller(
+            sender_uid, operation="mint_companion_owner_assertion"
+        )
+        if slug == 'safent-ads':
+            policy = _ads_routing_policy()
+            if policy is not None and policy.mode == 'managed':
+                raise PermissionError('Local Ads owner assertions forbidden while managed')
+        authority = self._require_companion_sso_authority()
+        assertion = authority.mint_owner_assertion(slug=slug)
+        return {"assertion": assertion.assertion, "expires_at": assertion.expires_at}
+
+    async def publish_companion_composio_lease(self, *, sender_uid: int) -> dict:
+        """Publish only to the current local Ads companion; never return a credential.
+
+        The caller supplies neither destination nor recipient key nor claims.
+        Authorization happens before construction, policy, vault or network IO.
+        """
+        self._authorize_shell_server_caller(
+            sender_uid, operation="publish_companion_composio_lease"
+        )
+        if not hasattr(self, "_companion_composio_publisher_instance"):
+            from hermes.agents_os.infrastructure.companion_composio_publisher import (  # noqa: PLC0415
+                CompanionComposioPublisher,
+            )
+
+            self._companion_composio_publisher_instance = CompanionComposioPublisher(
+                db_path=self._composio_db_path(),
+                authority=self._require_companion_sso_authority(),
+            )
+        return await self._companion_composio_publisher_instance.publish()
+
+    async def get_companion_health(self, *, slug: str) -> dict:
+        """`/mcp/health` read-only probe (sin authZ, igual que
+        `get_kill_switch_status` — metadatos, no acción). Fail-soft: any
+        network/TLS anomaly resolves to `state="unreachable"`, never an
+        exception (FR-3: a companion is optional infrastructure)."""
+        checker = self._require_companion_health_checker()
+        report = await checker.check(slug)
+        return {
+            "state": report.state,
+            "reachable": report.reachable,
+            "http_status": report.http_status,
+            "contract_version": report.contract_version,
+            "accounts_linked": report.accounts_linked,
+        }
+
+    async def reload_companion_presence(self, *, slug: str, sender_uid: int) -> dict:
+        """Re-read companions.json/bearer for *slug* and re-seed + reconnect
+        its MCP entry WITHOUT restarting the daemon (028 T017).
+
+        authZ: `_authorize_shell_server_caller` — the SAME shell-server-uid-
+        only gate as `mint_companion_owner_assertion` (contracts/sso.md
+        §3): this is a system reconciliation step tied to the install-
+        request lifecycle (T016), never something the operator's own D-Bus
+        session should be able to trigger directly.
+
+        Closes the gap `_import_seed_companion_servers` cannot close on its
+        own: that importer only ever runs once, at boot
+        (`reconnect_persisted_mcp_servers`). If the companion becomes ready
+        AFTER boot (`safent companion install|repair`, T016), the daemon
+        has already passed its one-time reconnect attempt — re-running the
+        SAME seed step here (idempotent: a slug already marked imported is
+        a no-op) plus an explicit reconnect is what makes "ready" appear in
+        the sidebar with zero restart (029 CL-002: hot-reload preferred
+        over a transparent restart).
+
+        The companion's fixed-IP nftables egress rule is deliberately NOT
+        re-triggered here: it is generated by a ROOT-only oneshot from this
+        SAME companions.json, and — since T015 makes that file valid from
+        Safent's very first boot, before any install ever runs — the rule
+        is already correct by the time this verb is ever called. This
+        method only touches what genuinely requires the daemon's own
+        process/uid: the in-memory MCP registry.
+        """
+        self._authorize_shell_server_caller(sender_uid, operation="reload_companion_presence")
+        from hermes.shell_server.companions import get_companion  # noqa: PLC0415
+
+        endpoint = get_companion(slug)
+        if endpoint is None:
+            return {"ok": False, "reason": "not_installed"}
+
+        _import_seed_companion_servers()
+        await self._reconnect_companion_mcp(slug, endpoint)
+
+        checker = self._require_companion_health_checker()
+        report = await checker.check(slug)
+        return {"ok": True, "state": report.state, "reachable": report.reachable}
+
+    async def _reconnect_companion_mcp(self, slug: str, endpoint) -> None:
+        """Best-effort: a reconnect failure must never fail the whole
+        reload — GetCompanionHealth (called right after, by the caller)
+        remains the source of truth for whether the companion is actually
+        reachable."""
+        if self._mcp_manager is None:
+            return
+        try:
+            await _mcp_connect(
+                self._mcp_manager, slug, endpoint.argv,
+                env={"ADS_BEARER": "", "NODE_EXTRA_CA_CERTS": ""},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "hermes.dbus.companion_reload_connect_failed",
+                extra={"slug": slug, "reason": type(exc).__name__},
+            )
+
     async def add_mcp_server(self, *, draft_json: str, sender_uid: int) -> dict:
         """Configura + conecta un servidor MCP stdio. Muta → authZ operador.
 
@@ -1467,13 +1873,18 @@ class DbusRuntimeServiceWiring:
         D-Bus (nunca del LLM — Transport docstring lo exige).
 
         env (BYOK): diccionario opcional de variables de entorno BYOK para el
-        servidor. Solo se permiten claves en _MCP_BYOK_ENV_KEYS; claves
-        arbitrarias son rechazadas (no silenciadas) para evitar inyección.
-        OD_DAEMON_URL se valida como URL http(s). El token OD_API_TOKEN se
-        persiste cifrado en la config y nunca se registra en claro en logs.
-        HOME/MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME pasan la validación (R16)
-        pero el LAUNCHER decide el HOME real del hijo MCP — ver el comentario
-        de _MCP_BYOK_ENV_KEYS.
+        servidor. Cada clave debe cumplir _MCP_ENV_KEY_PATTERN y no estar en
+        el deny-list (_MCP_ENV_DENY_EXACT/_MCP_ENV_DENY_PREFIXES) — ver
+        _validate_mcp_env; una clave que no cumpla es rechazada (no
+        silenciada) para evitar inyección. OD_DAEMON_URL se valida como URL
+        http(s). Los valores nunca se registran en claro en logs (solo los
+        NOMBRES de clave, p.ej. byok_keys=[...]). HOME SÍ pasa esta
+        validación (R16: rechazarla aquí tumbaría todo el draft de un
+        servidor OAuth-bridge cuyo McpSpec.env la incluya) pero el LAUNCHER
+        decide siempre el HOME real del hijo MCP y nunca reenvía el que el
+        caller haya puesto aquí — mismo patrón para
+        MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME (validadas aquí, nunca
+        reenviadas por el launcher).
         """
         self._authorize_and_resolve(sender_uid, operation="add_mcp_server")
         if self._mcp_manager is None:
@@ -1768,8 +2179,8 @@ class DbusRuntimeServiceWiring:
         call. Import is deferred so the scanner infra is never loaded unless
         the scan path is actually exercised.
 
-        Returns None if hermes.security_center is not installed (scan is
-        additive/optional — must never crash the install path).
+        Returns None if hermes.security_center is unavailable. Installation
+        callers must block; an unavailable scanner is never an implicit PASS.
         """
         if self._scan_service is not None:
             return self._scan_service
@@ -1807,8 +2218,7 @@ class DbusRuntimeServiceWiring:
             )
         except ImportError:
             logger.warning(
-                "hermes.dbus.security_center_unavailable — scan es no-op "
-                "(instalar hermes.security_center para habilitar)"
+                "hermes.dbus.security_center_unavailable — installation blocked"
             )
             return None
         # Slot CVE: usa Trivy real cuando el binario está horneado (/usr/bin/trivy),
@@ -1928,11 +2338,16 @@ class DbusRuntimeServiceWiring:
 
         Security: runs a ScanService scan BEFORE do_install. If the scan
         verdict is FAIL and policy.auto_block_fail is True, the install is
-        blocked. When force=True (operator-gated path only) the block dict is
-        returned to the caller with scan_id so the owner can review real score
-        and risks. On force=True we record decision=ALLOWED via
-        ScanService.allow_target(), then re-run the scan — the cache now
-        returns decision=ALLOWED so scan_service no longer raises → proceed.
+        blocked. When force=True the block dict is returned to the caller with
+        scan_id so the owner can review real score and risks. The REST route
+        (skills_api.py) requires the owner's TOTP before it ever calls this
+        verb with force=True — same require_owner_mfa gate as
+        POST /security/decisions (025 Top-4). On force=True we route the
+        override through record_install_decision (decision=allow_once) — same
+        mutator /security/decisions calls, so the sovereign override lands in
+        install_reviews AND flips scan_records.decision=ALLOWED — then re-run
+        the scan — the cache now returns decision=ALLOWED so scan_service no
+        longer raises → proceed.
         """
         self._authorize_and_resolve(sender_uid, operation="install_hub_skill")
         ident = (identifier or "").strip()
@@ -1943,7 +2358,7 @@ class DbusRuntimeServiceWiring:
         if scan_result is not None and scan_result.get("blocked"):
             if not force:
                 return scan_result
-            return self._apply_owner_override_and_rescan(ident, scan_result)
+            return self._apply_owner_override_and_rescan(ident, scan_result, sender_uid=sender_uid)
 
         return _start_hub_op(
             "install", ident,
@@ -1951,11 +2366,21 @@ class DbusRuntimeServiceWiring:
             signal_emitter=self._scan_signal_emitter,
         )
 
-    def _apply_owner_override_and_rescan(self, identifier: str, block: dict) -> dict:
+    def _apply_owner_override_and_rescan(
+        self, identifier: str, block: dict, *, sender_uid: int
+    ) -> dict:
         """Record owner-sovereign ALLOWED decision then re-scan so the gate passes.
 
         Invariant: the scan ALREADY ran (block was produced by _scan_hub_target).
         This only sets decision=ALLOWED on the existing record, never skips the scan.
+
+        025 Top-4: the hub installer's force=True path used to mark the scan
+        ALLOWED inline (scan_svc.allow_target) without ever touching
+        install_reviews — a sovereign override left NO row in the same audit
+        table /security/decisions writes to. Now it calls record_install_decision
+        (the SAME mutator, not a copy): one code path persists the decision AND
+        flips scan_records.decision=ALLOWED, whether the override came from the
+        Security Center modal or the hub installer's force flag.
         """
         from uuid import UUID as _UUID  # noqa: PLC0415
 
@@ -1966,12 +2391,24 @@ class DbusRuntimeServiceWiring:
 
         scan_id_str = block.get("scan_id") or ""
         try:
-            scan_id = _UUID(scan_id_str)
+            _UUID(scan_id_str)
         except (ValueError, AttributeError):
             return {"ok": False, "blocked": True,
                     "error": f"scan_id inválido en el bloqueo: {scan_id_str!r}"}
 
-        scan_svc.allow_target(scan_id)
+        decision = self.record_install_decision(
+            scan_id=scan_id_str,
+            decision="allow_once",
+            identifier=identifier,
+            kind="skill",
+            score=int(block.get("score", -1)),
+            verdict=str(block.get("verdict", "")),
+            risks_json=json.dumps(block.get("risks", [])),
+            sender_uid=sender_uid,
+        )
+        if not decision.get("ok"):
+            return {"ok": False, "blocked": True,
+                    "error": decision.get("error") or "no se pudo registrar la decisión soberana"}
         logger.warning(
             "hermes.dbus.install_owner_override identifier=%s scan_id=%s "
             "— instalación permitida por decisión SOBERANA del dueño",
@@ -2035,7 +2472,7 @@ class DbusRuntimeServiceWiring:
         source_url: str = "",
         emit_signals: bool = True,
         allow_warn: bool = False,
-    ) -> dict | None:
+    ) -> dict:
         """Run a pre-install security scan for ANY install kind.
 
         The Security Center is the SO's "antivirus" — system threats (kind
@@ -2043,8 +2480,6 @@ class DbusRuntimeServiceWiring:
         tool linter, signature, prompt-injection heuristics) share one gate.
 
         Returns:
-          None                    — scanner NO desplegado (operador optó por no
-                                    instalarlo): se procede (fail-open consciente).
           {"record": record}      — PASS only (or WARN cuando allow_warn=True):
                                     install may proceed.
           {"blocked": True, ...}  — FAIL (auto_block), WARN sin override, O error
@@ -2058,22 +2493,25 @@ class DbusRuntimeServiceWiring:
         procede con allow_warn=True (override explícito del dueño, p.ej. una
         confirmación de usuario ya registrada por la UI gated).
 
-        Postura: si el scanner NO está (ImportError / no construible), fail-OPEN
-        (None) — es decisión de despliegue. Si el scanner SÍ está pero revienta en
-        runtime, fail-CLOSED (blocked) — un SO público no instala sin un veredicto
-        de seguridad fiable. argv (linter de runner MCP) y source_url (procedencia
-        de paquete) alimentan los scanners.
+        Missing/broken scanner always blocks. An installation needs a real
+        review; force may acknowledge a recorded finding, not invent a review.
+        argv and source_url feed runner/provenance analysis.
         """
         try:
             from hermes.security_center.domain.install_target import InstallTarget  # noqa: PLC0415
             from hermes.security_center.application.scan_service import ScanBlockedError  # noqa: PLC0415
         except ImportError:
             logger.warning(
-                "hermes.dbus.security_center_unavailable — _scan_install_target es no-op"
+                "hermes.dbus.security_center_unavailable — installation blocked"
             )
-            return None
-        if self._scan_service_lazy() is None:
-            return None
+            return self._scan_unavailable()
+        try:
+            scan_service = self._scan_service_lazy()
+        except Exception as exc:  # noqa: BLE001 — broken scanner must not authorize installation
+            logger.warning("hermes.dbus.scan_initialization_failed reason=%s", type(exc).__name__)
+            return self._scan_unavailable()
+        if scan_service is None:
+            return self._scan_unavailable()
 
         target = InstallTarget(
             kind=kind,
@@ -2143,6 +2581,16 @@ class DbusRuntimeServiceWiring:
                 ),
             }
         return {"record": record}
+
+    @staticmethod
+    def _scan_unavailable() -> dict:
+        """No scan ID, score or verdict without an actual scanner result."""
+        return {
+            "ok": False,
+            "blocked": True,
+            "code": "scan_unavailable",
+            "error": "El análisis de seguridad no está disponible. No se ha instalado nada.",
+        }
 
     @staticmethod
     def _build_block_dict_from_record(record: "Any", exc: "Any") -> dict:
@@ -2265,12 +2713,8 @@ class DbusRuntimeServiceWiring:
             kind, ident, argv=argv, source_url=source_url,
             emit_signals=False, allow_warn=True,
         )
-        if result is None:
-            # security_center ausente/no-op → PASS implícito para no bloquear la UI.
-            return json.dumps({
-                "scan_id": "", "identifier": ident, "score": 100,
-                "verdict": "PASS", "risks": [],
-            })
+        if result is None or result.get("code") == "scan_unavailable":
+            return json.dumps(self._scan_unavailable())
         if result.get("blocked"):
             return self._serialize_scan_record_from_blocked(ident)
         return self._serialize_scan_record(result["record"])
@@ -2353,21 +2797,34 @@ class DbusRuntimeServiceWiring:
         except Exception as exc:  # noqa: BLE001
             return {"op_id": op_id, "status": "unknown", "error_message": str(exc)}
 
+    @_serialized_local_llm_write
     def configure_native_provider(
         self, *, provider_id: str, api_key: str, model: str,
-        base_url: str, sender_uid: int,
+        base_url: str, sender_uid: int, set_active: bool = False,
     ) -> dict:
         """Configura un provider NATIVO de hermes_cli por su id real (api-key).
 
         Camino NATIVO (no la abstracción shell_server/kinds): escribe la clave en
         HERMES_HOME/.env bajo la env var REAL del provider (p.ej. OPENAI_API_KEY
-        para `openai-api`) + fija model.{provider,default} en config.yaml. El
-        motor (resolve_runtime_provider) lo lee directo — igual que
-        `hermes auth add` + `hermes --provider <id>`. Soporta CUALQUIER provider
-        api-key de la tabla (openai-api directo, gemini, deepseek, groq, mistral,
-        copilot…). Para OAuth/suscripción → start_provider_oauth.
+        para `openai-api`) — persistida siempre, para poder reactivar luego sin
+        repetirla (ver set_active_provider → _set_active_native_provider).
+
+        set_active=False (guardar sin activar) NO toca config.yaml ni el
+        os.environ del proceso vivo — activar es un paso aparte
+        (set_active_provider), exactamente como en el camino SQL
+        (_sync_to_native_provider). Antes esto se ignoraba y CUALQUIER
+        configure (incluso guardar una clave de prueba) pisaba el provider
+        activo del motor sin pasar por "Activar" — ver specs/025-safent-repaso
+        hallazgo #1 ("el activo de la UI no gobierna el motor").
+
+        set_active=True fija model.{provider,default,base_url} en config.yaml
+        y expone SÓLO la clave de ESTE provider al proceso vivo (least-
+        privilege: los demás quedan en .env pero no en os.environ hasta que
+        se activen). El motor (resolve_runtime_provider) lo lee directo —
+        igual que `hermes auth add` + `hermes --provider <id>`. Soporta
+        CUALQUIER provider api-key de la tabla (openai-api, gemini, deepseek,
+        groq, mistral, copilot…). Para OAuth/suscripción → start_provider_oauth.
         """
-        self._authorize_and_resolve(sender_uid, operation="configure_native_provider")
         try:
             from hermes_cli.auth import PROVIDER_REGISTRY  # noqa: PLC0415
         except Exception as exc:  # noqa: BLE001
@@ -2385,34 +2842,65 @@ class DbusRuntimeServiceWiring:
         env_vars = getattr(cfg, "api_key_env_vars", ()) or ()
         if not env_vars:
             return {"ok": False, "error": f"{provider_id} no declara env var de clave"}
+        bare_model = (model or "").strip()
+        if set_active and not bare_model:
+            # Sin esta guarda, _write_hermes_model_config conserva el `default`
+            # del provider ANTERIOR (p.ej. "claude-sonnet-4-5" heredado de
+            # Anthropic) bajo el provider NUEVO — falla en runtime con un
+            # modelo que ese provider no sirve en vez de fallar aquí, claro.
+            return {"ok": False, "error": "model requerido para activar"}
         try:
             _write_hermes_env(env_vars[0], key)
             bu = (base_url or "").strip()
             if bu and getattr(cfg, "base_url_env_var", ""):
                 _write_hermes_env(cfg.base_url_env_var, bu)
-            _write_hermes_model_config(provider_id, (model or "").strip(), bu)
+            _remember_native_provider_model(provider_id, bare_model, bu)
+            if set_active:
+                _write_hermes_model_config(provider_id, bare_model, bu)
         except Exception as exc:  # noqa: BLE001
             logger.warning("hermes.dbus.native_cfg_write_failed: %s", exc)
             return {"ok": False, "error": f"no se pudo escribir config: {exc}"}
-        # Carga la API-key recién escrita al os.environ del proceso vivo. El
-        # resolver POR CICLO (provider_config_source._load_native_model_config)
-        # lee la key de PROVIDER_REGISTRY[pid].api_key_env_vars; sin esta línea,
-        # esa env-var no existe en el daemon ya arrancado y el primer chat tras
-        # "Configurar" iría sin key (401). El model/provider los lee del
-        # config.yaml directo (no necesita reload).
-        try:
-            import os as _os  # noqa: PLC0415
-            _os.environ[env_vars[0]] = key
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("hermes.dbus.env_load_failed: %s", exc)
-        logger.info("hermes.dbus.native_provider_configured id=%s", provider_id)
-        if self._active_provider_svc is not None:
-            self._active_provider_svc.force_refresh()
-        return {"ok": True}
+        if set_active:
+            # Carga la API-key recién escrita al os.environ del proceso vivo. El
+            # resolver POR CICLO (provider_config_source._load_native_model_config)
+            # lee la key de PROVIDER_REGISTRY[pid].api_key_env_vars; sin esta línea,
+            # esa env-var no existe en el daemon ya arrancado y el primer chat tras
+            # "Activar" iría sin key (401). El model/provider los lee del
+            # config.yaml directo (no necesita reload).
+            try:
+                import os as _os  # noqa: PLC0415
+                _os.environ[env_vars[0]] = key
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("hermes.dbus.env_load_failed: %s", exc)
+            if self._active_provider_svc is not None:
+                self._active_provider_svc.force_refresh()
+            _clear_engine_runtime_cache()
+        logger.info(
+            "hermes.dbus.native_provider_configured id=%s set_active=%s",
+            provider_id, set_active,
+        )
+        return {"ok": True, "provider_id": provider_id}
 
     def get_native_active(self) -> dict:
         """Provider nativo activo según config.yaml ({} si ninguno). Read-only."""
         return _read_native_active()
+
+    def list_native_provider_models(self, *, provider_id: str, sender_uid: int) -> dict:
+        """Live account-scoped model choices; never OAuth credentials."""
+        from hermes.providers.infrastructure import native_model_selection  # noqa: PLC0415
+        return native_model_selection.list_models(
+            self, provider_id=provider_id, sender_uid=sender_uid,
+        )
+
+    def set_native_provider_model(
+        self, *, provider_id: str, model: str, expected_model: str, sender_uid: int,
+    ) -> dict:
+        """Select a discovered model while retaining the native OAuth connection."""
+        from hermes.providers.infrastructure import native_model_selection  # noqa: PLC0415
+        return native_model_selection.select_model(
+            self, provider_id=provider_id, model=model,
+            expected_model=expected_model, sender_uid=sender_uid,
+        )
 
     # ------------------------------------------------------------------
     # Web search backend keys (Brave/Tavily/Exa) — mejora de web_search.
@@ -2463,6 +2951,59 @@ class DbusRuntimeServiceWiring:
             "ddgs_fallback": True,
         }
 
+    # ------------------------------------------------------------------
+    # Image generation key (FAL.ai) — mismo patrón que web search: env var
+    # real en HERMES_HOME/.env + os.environ del proceso vivo. El motor Hermes
+    # (tools/image_generation_tool.py: check_image_generation_requirements)
+    # lee FAL_KEY con os.getenv, sin abstracción intermedia.
+    # ------------------------------------------------------------------
+    _IMAGE_GENERATION_PROVIDER = "fal"
+    _IMAGE_GENERATION_ENV_VAR = "FAL_KEY"
+
+    async def set_image_generation_api_key(self, *, api_key: str, sender_uid: int) -> dict:
+        """Configura FAL_KEY para generación de imágenes (FAL.ai).
+
+        Mismo patrón que set_web_search_api_key: escribe la env var en
+        HERMES_HOME/.env (persistente — la carga env_loader al arrancar) Y la
+        inyecta en os.environ del proceso vivo, para que
+        check_image_generation_requirements() la vea sin reiniciar.
+        """
+        self._authorize_and_resolve(sender_uid, operation="set_image_generation_api_key")
+        key = (api_key or "").strip()
+        if not key:
+            return {"ok": False, "error": "api_key vacía"}
+        try:
+            import os as _os  # noqa: PLC0415
+            _write_hermes_env(self._IMAGE_GENERATION_ENV_VAR, key)
+            _os.environ[self._IMAGE_GENERATION_ENV_VAR] = key
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.image_generation_key_write_failed: %s", exc)
+            return {"ok": False, "error": f"no se pudo escribir: {exc}"}
+        logger.info("hermes.dbus.image_generation_key_set")
+        return {"ok": True, "provider": self._IMAGE_GENERATION_PROVIDER, "configured": True}
+
+    async def delete_image_generation_api_key(self, *, sender_uid: int) -> dict:
+        """Elimina FAL_KEY (mismo mecanismo que set, con valor vacío = no configurada)."""
+        self._authorize_and_resolve(sender_uid, operation="delete_image_generation_api_key")
+        try:
+            import os as _os  # noqa: PLC0415
+            _write_hermes_env(self._IMAGE_GENERATION_ENV_VAR, "")
+            _os.environ.pop(self._IMAGE_GENERATION_ENV_VAR, None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.image_generation_key_delete_failed: %s", exc)
+            return {"ok": False, "error": f"no se pudo eliminar: {exc}"}
+        logger.info("hermes.dbus.image_generation_key_deleted")
+        return {"ok": True, "provider": self._IMAGE_GENERATION_PROVIDER, "configured": False}
+
+    def get_image_generation_status(self) -> dict:
+        """Proveedor + key configurada + modelo de generación de imágenes (read-only)."""
+        import os as _os  # noqa: PLC0415
+        return {
+            "provider": self._IMAGE_GENERATION_PROVIDER,
+            "has_key": bool(_os.getenv(self._IMAGE_GENERATION_ENV_VAR, "").strip()),
+            "model": _read_image_gen_model(),
+        }
+
     def list_native_providers(self) -> list[dict]:
         """Catálogo NATIVO de providers de Hermes (hermes_cli.auth.PROVIDER_REGISTRY).
 
@@ -2492,6 +3033,10 @@ class DbusRuntimeServiceWiring:
                 "auth_type": getattr(cfg, "auth_type", "api_key"),
                 "base_url": getattr(cfg, "inference_base_url", "") or "",
                 "env_vars": list(getattr(cfg, "api_key_env_vars", ()) or ()),
+                # Suggested model to pre-fill the "Add/Connect" form with — the
+                # owner can still overwrite it. "" when this id has no curated
+                # suggestion (_NATIVE_DEFAULT_MODEL is not exhaustive).
+                "default_model": _NATIVE_DEFAULT_MODEL.get(pid, ""),
             })
         return out
 
@@ -2624,7 +3169,10 @@ class DbusRuntimeServiceWiring:
             return None, None
         from hermes.integrations.composio.composio_client import ComposioClient  # noqa: PLC0415
 
-        return ComposioClient(cred.api_key), cred.entity_id
+        return ComposioClient(
+            cred.api_key,
+            auth_config_ids=self._composio_integrations_repo().auth_config_ids(),
+        ), cred.entity_id
 
     @staticmethod
     def _composio_to_dict(obj: Any) -> dict:
@@ -2668,8 +3216,11 @@ class DbusRuntimeServiceWiring:
             if "401" in detail or "Unauthorized" in detail:
                 return {"ok": False, "error": "Key inválida o revocada (Composio 401). Genera una nueva en composio.dev → Settings → API Keys."}
             return {"ok": False, "error": f"No se pudo validar contra Composio Cloud: {detail[:200]}"}
-        self._composio_integrations_repo().set_credential(
-            kind="composio", api_key=key
+        repo = self._composio_integrations_repo()
+        previous = repo.get_or_none(kind="composio")
+        repo.set_credential(
+            kind="composio", api_key=key,
+            entity_id=previous.entity_id if previous else f"safent-{uuid4()}",
         )
         logger.info(
             "hermes.dbus.composio_key_set", extra={"by_uid": sender_uid, "toolkits": len(toolkits)}
@@ -3010,7 +3561,6 @@ class DbusRuntimeServiceWiring:
         *,
         proposal_id: UUID,
         sender_uid: int,
-        totp: str | None = None,
         operator_token: str | None = None,
     ) -> HitlApprovalResult:
         """Aprueba una acción HIGH pendiente y re-encola la tarea (FR-015).
@@ -3033,19 +3583,9 @@ class DbusRuntimeServiceWiring:
         approved_by = self._authorize_and_resolve(
             sender_uid, operation="approve_action", operator_token=operator_token
         )
-        # Forward the owner's TOTP to the gate — the gate is the single MFA enforcement
-        # point for ALL surfaces (red-team 2026-06-19, finding 3). mfa-tier tools require
-        # valid factors here; simple-tier tools ignore them. Dropping totp here caused
-        # gate.approve to always fail with mfa_required for mfa-tier proposals, which was
-        # then mis-reported as proposal_invalid (bug 2026-06-25).
-        mfa_factors: Any | None = None
-        if totp:
-            from hermes.shell_server.security.mfa_tool_tier import MfaFactors  # noqa: PLC0415
-            mfa_factors = MfaFactors(totp=totp)
         token = await self._gate.approve(
             proposal_id=proposal_id,
             approved_by=approved_by,
-            mfa_factors=mfa_factors,
         )
         logger.info(
             "hermes.dbus.hitl_approved",
@@ -3210,7 +3750,10 @@ class DbusRuntimeServiceWiring:
         service = self._require_delegation_approval_service()
         if service is None:
             return {"ok": False, "error": "delegation_service_not_configured"}
-        status = await service.submit(envelope=envelope)
+        try:
+            status = await service.submit(envelope=envelope)
+        except PermissionError:
+            return {"ok": False, "error": "delegation_authority_changed"}
         logger.info(
             "hermes.dbus.delegation_submitted",
             extra={"message_id": envelope.get("message_id"), "status": status},
@@ -3227,10 +3770,9 @@ class DbusRuntimeServiceWiring:
         ANY failure — fail-closed: no association/pubkey/signature_hex means
         the card is NOT registered.
         """
-        from hermes.config_sync.delegation_inbox import (  # noqa: PLC0415
-            delegation_signing_bytes,
+        from hermes.tasks.triggers.application.delegation_authority import (  # noqa: PLC0415
+            DelegationAdmissionAuthority,
         )
-        from hermes.config_sync.signature import verify_bundle  # noqa: PLC0415
 
         signature_hex = envelope.get("signature_hex")
         if not isinstance(signature_hex, str) or not signature_hex:
@@ -3242,19 +3784,12 @@ class DbusRuntimeServiceWiring:
         if assoc is None or not assoc.signing_pubkey_hex:
             return "no_tenant_pubkey"
 
-        plain_envelope = {
-            k: v for k, v in envelope.items() if k != "signature_hex"
-        }
-        if not all(isinstance(v, str) for v in plain_envelope.values()):
-            return "invalid_envelope_shape"
-
-        payload = delegation_signing_bytes(plain_envelope)
-        if not verify_bundle(
-            payload_canonical=payload,
-            signature_hex=signature_hex,
-            pubkey_hex=assoc.signing_pubkey_hex,
-        ):
-            return "bad_signature"
+        try:
+            DelegationAdmissionAuthority(
+                association_store=self._association_store, pending_repo=None,
+            ).capture(envelope)
+        except (PermissionError, ValueError, KeyError, AttributeError) as exc:
+            return str(exc) if isinstance(exc, PermissionError) else "invalid_envelope_shape"
         return None
 
     async def resolve_inbound_delegation(
@@ -3304,7 +3839,7 @@ class DbusRuntimeServiceWiring:
         solo metadatos, sin secretos ni firma)."""
         service = self._require_delegation_approval_service()
         if service is None:
-            return []
+            raise RuntimeError("Delegation admission service is unavailable")
         return service.list_pending()
 
     def _require_delegation_approval_service(self):
@@ -3328,6 +3863,9 @@ class DbusRuntimeServiceWiring:
             DelegationApprovalService,
         )
         from hermes.tasks.triggers.application.trigger_gate import TriggerGate  # noqa: PLC0415
+        from hermes.tasks.triggers.application.delegation_authority import (  # noqa: PLC0415
+            DelegationAdmissionAuthority,
+        )
 
         trigger_repo = self._require_trigger_repo()
         db_path = self._composio_db_path()
@@ -3344,6 +3882,9 @@ class DbusRuntimeServiceWiring:
             trigger_repo=trigger_repo,
             gate=gate,
             conversation_repo=self._conversation_repo,
+            authority=DelegationAdmissionAuthority(
+                association_store=self._association_store, pending_repo=pending_repo,
+            ),
         )
         return self._delegation_approval_service
 
@@ -3573,26 +4114,92 @@ class DbusRuntimeServiceWiring:
         jobs = _neus_cron_list_jobs(include_disabled=True)
         return [_neus_job_to_task_dict(job) for job in jobs[:limit]]
 
+    async def get_tasks_dashboard(
+        self, *, limit: int = 100, sender_uid: int, operator_token: str | None = None,
+    ) -> dict:
+        """Owner-only read including task results, not the public metadata surface."""
+        self._authorize_and_resolve(
+            sender_uid, operation="get_tasks_dashboard", operator_token=operator_token,
+        )
+        from hermes.tasks.infrastructure.sqlite_task_dashboard import (  # noqa: PLC0415
+            read_task_dashboard,
+        )
+
+        return read_task_dashboard(self._composio_db_path(), limit=limit)
+
     async def list_recent_tasks(self, *, limit: int = 50) -> list[dict]:
         """Recent work items across all statuses (activity log).
 
         Read-only supervision — no authZ required (CTRL-P1-5).
         instruction_truncated capped at 120 chars; no full payload exposed.
+
+        Merges THREE sources, dedup'd by task_id, sorted newest-first
+        (spec 025 hallazgo B — "/tasks/recent siempre [] con 12 filas en
+        agent_tasks"):
+
+          1. self._cp_service.list_recent_tasks() — works ONLY when cp_service
+             was constructed with a trigger_repo (tests do; __main__.py's
+             production wiring does NOT — a separate
+             SqliteAuthorizedTriggerRepository connection is built later,
+             only for SchedulerTimerSource/SystemEventTriggerSource, and
+             never plumbed into ControlPlaneService). In production this
+             branch always contributed zero rows.
+          2. self._require_trigger_repo().list_recent_tasks() — this wiring's
+             OWN lazily-built repo, the SAME shell-state.db, the SAME path
+             every other trigger verb here already uses
+             (get_scheduled_task, delete_scheduled_task, …). THIS is what
+             actually surfaces chat_message rows and Safent-authorized
+             timer-fired rows (agent_tasks) in production — added
+             additively (not a replacement for #1) so an explicitly-wired
+             cp_service (tests) keeps working unchanged.
+          3. _neus_cron_recent_runs() — Neus cron/jobs.json's own
+             last_run_at/last_status, now kept in sync by
+             SchedulerTimerSource._sync_neus_bookkeeping on every poll
+             (timer_trigger_source.py) instead of staying null forever.
         """
-        if self._cp_service is None:
-            return []
-        rows = await self._cp_service.list_recent_tasks(limit=limit)
-        return [
-            {
-                "task_id": r.task_id,
-                "label": r.label,
-                "status": r.status,
-                "trigger_kind": r.trigger_kind,
-                "enqueued_at": r.enqueued_at,
-                "claimed_at": r.claimed_at,
-            }
-            for r in rows
-        ]
+        rows: list[dict] = []
+        seen_task_ids: set[str] = set()
+
+        def _add(row: dict) -> None:
+            task_id = row.get("task_id")
+            if task_id:
+                if task_id in seen_task_ids:
+                    return
+                seen_task_ids.add(task_id)
+            rows.append(row)
+
+        if self._cp_service is not None:
+            cp_rows = await self._cp_service.list_recent_tasks(limit=limit)
+            for r in cp_rows:
+                _add({
+                    "task_id": r.task_id,
+                    "label": r.label,
+                    "status": r.status,
+                    "trigger_kind": r.trigger_kind,
+                    "enqueued_at": r.enqueued_at,
+                    "claimed_at": r.claimed_at,
+                })
+
+        try:
+            repo_rows = self._require_trigger_repo().list_recent_tasks(limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes.dbus.list_recent_tasks_repo_unavailable: %s", exc)
+            repo_rows = []
+        for r in repo_rows:
+            _add({
+                "task_id": r["task_id"],
+                "label": r["instruction_truncated"] or f"[{r['trigger_kind']}]",
+                "status": r["status"],
+                "trigger_kind": r["trigger_kind"],
+                "enqueued_at": r["enqueued_at"] or "",
+                "claimed_at": r.get("claimed_at"),
+            })
+
+        for r in _neus_cron_recent_runs(limit=limit):
+            _add(r)
+
+        rows.sort(key=lambda r: r["enqueued_at"] or "", reverse=True)
+        return rows[:limit]
 
     async def get_scheduled_task(self, *, trigger_id: str) -> dict:
         """Return detail for one scheduled task trigger (read-only, no authZ).
@@ -4494,8 +5101,10 @@ class DbusRuntimeServiceWiring:
     def delete_memory_entry(self, *, entry_id: str, sender_uid: int) -> dict:
         """Olvida (borra) una entrada de memoria por su id compuesto '{target}:{index}'.
 
-        Operación idempotente: si la entrada ya no existe devuelve {ok: true}
-        (sin lanzar) para que el frontend pueda hacer DELETE seguro.
+        Si la entrada no existe (nunca existió o ya se borró — no hay
+        tombstone, es el mismo estado) devuelve {ok:false, code:"not_found"}
+        para que la capa REST responda 404, igual que GET/PUT sobre el mismo
+        id (specs/025-safent-repaso MEM-06).
         PII: el contenido NUNCA se loguea, sólo el target e índice (metadatos).
         authZ: operador (sender_uid).
         """
@@ -4535,8 +5144,14 @@ class DbusRuntimeServiceWiring:
             return {"ok": False, "error": f"cannot read target {target!r}: {exc}"}
 
         if entry_index >= len(entries):
-            # Idempotent: already gone.
-            return {"ok": True, "deleted": False, "reason": "entry not found (already removed)"}
+            # specs/025-safent-repaso MEM-06: this used to be treated as
+            # idempotent-success ({ok:true, deleted:false}) — but there is no
+            # tombstone here (removal just shrinks the list), so "never
+            # existed" and "already removed" are the SAME state and both must
+            # read as not-found, matching GET (404) and PUT (400) for the
+            # same id instead of silently reporting a delete that never
+            # happened as a success.
+            return {"ok": False, "code": "not_found", "error": "memory entry not found"}
 
         old_text = entries[entry_index]
         result = store.remove(target, old_text)
@@ -5329,32 +5944,152 @@ class DbusRuntimeServiceWiring:
         return json.dumps({"auto_mode": load_auto_mode()})
 
 
-async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[bool, str | None]":
-    """Valida un provider EJECUTANDO el runtime real (hermes-agent) en el daemon.
+async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[bool, str | None, str | None]":
+    """Valida un provider SQL (shell_server.providers.domain.Provider) EJECUTANDO
+    el runtime real (hermes-agent) en el daemon. Ver _nous_validate_model_string
+    para el camino compartido con el catálogo NATIVO (test_provider, id no-UUID).
+    """
+    from hermes.shell_server.providers.domain import litellm_model_string  # noqa: PLC0415
 
-    Mismo camino que el chat: resolve_runtime_provider (idioma de Hermes) + una
-    completion mínima sin tools. NO litellm, NO shell-server. Corre en el daemon
-    (6G, sin OOM). Devuelve (ok, error_real_del_proveedor).
+    model = litellm_model_string(provider, provider.default_model)
+    return await _nous_validate_model_string(model, api_key, provider.base_url)
+
+
+def _classify_probe_http_status(status: int | None) -> str | None:
+    """Maps an HTTP status from a provider reachability+auth probe to
+    test_provider's `code` (specs/025-safent-repaso PROV-03, matriz-final-
+    39eeb8e): "invalid_key" for a REACHABLE endpoint that rejected the
+    credential, "endpoint_error" for a 404 (wrong base_url/path — the exact
+    shape of the anthropic bug: routing through the OpenAI Chat Completions
+    client always 404s against api.anthropic.com, valid key or not). None
+    for anything else — the caller keeps the raw provider error message.
+    """
+    if status in (401, 403):
+        return "invalid_key"
+    if status == 404:
+        return "endpoint_error"
+    return None
+
+
+_ANTHROPIC_MESSAGES_PATH = "/v1/messages"
+_ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
+_ANTHROPIC_API_VERSION = "2023-06-01"
+
+
+async def _probe_anthropic_messages_api(
+    *, bare_model: str, api_key: str | None, base_url: str | None
+) -> "tuple[bool, str | None, str | None]":
+    """Honest reachability+auth probe against Anthropic's REAL wire format —
+    the Messages API (`x-api-key` + `anthropic-version`, POST /v1/messages) —
+    instead of the OpenAI Chat Completions shape `_nous_validate_model_string`
+    sends every other provider. `api.anthropic.com` has never implemented
+    `/chat/completions`; routing anthropic through the OpenAI-shaped client
+    404s unconditionally, valid key or not, so the Anthropic card never
+    auto-activated (PROV-03, specs/025-safent-repaso matriz-final-39eeb8e).
+
+    Returns (ok, error, code) — same contract as _nous_validate_model_string.
+
+    Journal: unlike every other provider (routed through httpx/the openai SDK,
+    both of which log their own request line), this probe used aiohttp
+    directly and left ZERO trace in the journal — the one provider whose bug
+    was the exact endpoint it hit had no observable evidence of what it
+    actually called (specs/025-safent-repaso matriz-final-39eeb8e
+    re-verificación d2eb8c6). Logs exactly one structured line per probe —
+    provider id, endpoint host+path, HTTP status, classified `code` — never
+    the API key or the response body.
+    """
+    import aiohttp  # noqa: PLC0415
+    from urllib.parse import urlsplit  # noqa: PLC0415
+
+    url = f"{(base_url or _ANTHROPIC_DEFAULT_BASE_URL).rstrip('/')}{_ANTHROPIC_MESSAGES_PATH}"
+    parsed_url = urlsplit(url)
+    endpoint = f"{parsed_url.netloc}{parsed_url.path}"
+    headers = {
+        "x-api-key": api_key or "",
+        "anthropic-version": _ANTHROPIC_API_VERSION,
+        "content-type": "application/json",
+    }
+    body = {
+        "model": bare_model,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "OK"}],
+    }
+    try:
+        async with aiohttp.ClientSession() as session, session.post(
+            url, headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=20.0)
+        ) as resp:
+            status = resp.status
+            text = (await resp.text())[:300]
+    except Exception as exc:  # noqa: BLE001 — surface the REAL network error
+        logger.info(
+            "hermes.providers.probe_completed",
+            extra={
+                "provider_id": "anthropic",
+                "endpoint": endpoint,
+                "status": None,
+                "code": None,
+            },
+        )
+        raw = str(exc).strip()
+        return False, (raw[:300] if raw else type(exc).__name__), None
+
+    code = None if status == 200 else _classify_probe_http_status(status)
+    logger.info(
+        "hermes.providers.probe_completed",
+        extra={
+            "provider_id": "anthropic",
+            "endpoint": endpoint,
+            "status": status,
+            "code": code,
+        },
+    )
+    if status == 200:
+        return True, None, None
+    return False, (text or f"HTTP {status}"), code
+
+
+async def _nous_validate_model_string(
+    model: str, api_key: str | None, base_url: str | None
+) -> "tuple[bool, str | None, str | None]":
+    """Valida un `<provider_id>/<model>' EJECUTANDO el runtime real (hermes-agent)
+    en el daemon — mismo camino que el chat: resolve_runtime_provider (idioma de
+    Hermes) + una completion mínima sin tools. NO litellm, NO shell-server. Corre
+    en el daemon (6G, sin OOM). Devuelve (ok, error_real_del_proveedor, code).
 
     Migrado (spec 016): usa el catálogo unificado vía nous_request_from_model_config
     en lugar del antiguo _HERMES_SLUG_BY_PREFIX (que tenía 'openai'→'openai-api',
     slug inválido que causaba AuthError).
+
+    Extraído de _nous_validate_provider (specs/025-safent-repaso PROV-03) para que
+    el catálogo NATIVO (ids que no son UUID: "anthropic", "gemini"…) pueda probarse
+    sin construir un Provider SQL falso — ambos caminos ya producían el MISMO
+    '<provider_id>/<model>' vía litellm_model_string, así que el string es la
+    única entrada real que este helper necesita.
+
+    anthropic (`model` con prefijo "anthropic/", el MISMO que litellm_model_string
+    produce tanto para el catálogo nativo como para una fila SQL kind=anthropic)
+    se enruta a _probe_anthropic_messages_api en vez del cliente OpenAI de abajo
+    — ver esa función para la causa raíz (PROV-03, matriz-final-39eeb8e).
     """
+    provider_prefix, _sep, bare_model = model.partition("/")
+    if provider_prefix == "anthropic":
+        return await _probe_anthropic_messages_api(
+            bare_model=bare_model, api_key=api_key, base_url=base_url
+        )
+
     import asyncio  # noqa: PLC0415
 
-    from hermes.shell_server.providers.domain import litellm_model_string  # noqa: PLC0415
     from hermes.runtime.model_config import ModelConfig  # noqa: PLC0415
     from hermes.providers.infrastructure.nous_provider_adapter import (  # noqa: PLC0415
         nous_request_from_model_config,
     )
 
-    model = litellm_model_string(provider, provider.default_model)
     # Build a temporary ModelConfig to reuse nous_request_from_model_config.
-    # api_key comes from the caller (already decrypted by the D-Bus handler).
+    # api_key comes from the caller (already decrypted/looked-up by the D-Bus handler).
     temp_config = ModelConfig.from_provider(
         model=model,
         api_key=api_key,
-        base_url=provider.base_url or None,
+        base_url=base_url or None,
     )
     req, bare = nous_request_from_model_config(temp_config)
 
@@ -5368,6 +6103,11 @@ async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[
             explicit_base_url=req.explicit_base_url,
             target_model=req.target_model,
         )
+        if rt.get("api_mode") == "codex_responses":
+            from hermes.providers.infrastructure.native_probe import (  # noqa: PLC0415
+                probe_responses_runtime,
+            )
+            return probe_responses_runtime(rt, bare)
         # HONEST reachability+auth probe: hit the CONFIGURED endpoint with a
         # 1-token completion and let it RAISE on 404 / 401 / offline / DNS. The
         # OLD path ran the full agent loop (AIAgent.run_conversation), which
@@ -5399,8 +6139,9 @@ async def _nous_validate_provider(provider: Any, api_key: str | None) -> "tuple[
         ok, err = await loop.run_in_executor(None, _run)
     except Exception as exc:  # noqa: BLE001 — surface the REAL provider error
         raw = str(exc).strip()
-        return False, (raw[:300] if raw else type(exc).__name__)
-    return ok, err
+        code = _classify_probe_http_status(getattr(exc, "status_code", None))
+        return False, (raw[:300] if raw else type(exc).__name__), code
+    return ok, err, None
 
 
 def _uid_to_uuid(uid: int) -> UUID:
@@ -5913,6 +6654,18 @@ _OAUTH_SESSIONS: dict[str, dict] = {}
 _OAUTH_SESSIONS_LOCK = _oauth_threading.Lock()
 
 
+def _oauth_local_commit(session_id: str):
+    """Late callback boundary; session authority was captured by the daemon."""
+    from pathlib import Path
+    from hermes.runtime.managed_llm import local_configuration_write
+    with _OAUTH_SESSIONS_LOCK:
+        sess = _OAUTH_SESSIONS.get(session_id)
+        db_path = sess.get('llm_db_path') if sess else None
+    if not db_path:
+        raise PermissionError('OAuth session has no verified local configuration scope')
+    return local_configuration_write(Path(db_path))
+
+
 def _nous_oauth_poller(session_id: str) -> None:
     """Lleva el device-code de Nous a término y persiste credenciales.
 
@@ -5970,10 +6723,9 @@ def _nous_oauth_poller(session_id: str) -> None:
         full_state = refresh_nous_oauth_from_state(
             auth_state, timeout_seconds=15.0, force_refresh=False
         )
-        persist_nous_credentials(full_state)
-        # NATIVO: fija el provider activo en config.yaml para que el motor
-        # resuelva Nous directo (suscripción), sin vault ni catálogo.
-        _write_hermes_model_config("nous", "hermes-4-405b")
+        with _oauth_local_commit(session_id):
+            persist_nous_credentials(full_state)
+            _write_hermes_model_config("nous", "hermes-4-405b")
         with _OAUTH_SESSIONS_LOCK:
             sess["status"] = "approved"
         logger.info("hermes.dbus.oauth_nous_approved session=%s", session_id[:8])
@@ -6037,17 +6789,18 @@ def _xai_loopback_worker(session_id: str) -> None:
         if not access_token or not refresh_token:
             _fail("xAI: token exchange incompleto"); return
         last_refresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        hauth._save_xai_oauth_tokens(
-            {
-                "access_token": access_token, "refresh_token": refresh_token,
-                "id_token": str(payload.get("id_token", "") or "").strip(),
-                "expires_in": payload.get("expires_in"),
-                "token_type": str(payload.get("token_type") or "Bearer").strip() or "Bearer",
-            },
-            discovery=sess.get("discovery"), redirect_uri=sess["redirect_uri"],
-            last_refresh=last_refresh,
-        )
-        _write_hermes_model_config("xai-oauth", "grok-4")
+        with _oauth_local_commit(session_id):
+            hauth._save_xai_oauth_tokens(
+                {
+                    "access_token": access_token, "refresh_token": refresh_token,
+                    "id_token": str(payload.get("id_token", "") or "").strip(),
+                    "expires_in": payload.get("expires_in"),
+                    "token_type": str(payload.get("token_type") or "Bearer").strip() or "Bearer",
+                },
+                discovery=sess.get("discovery"), redirect_uri=sess["redirect_uri"],
+                last_refresh=last_refresh,
+            )
+            _write_hermes_model_config("xai-oauth", "grok-4")
         with _OAUTH_SESSIONS_LOCK:
             _OAUTH_SESSIONS[session_id]["status"] = "approved"
         logger.info("hermes.dbus.oauth_xai_approved session=%s", session_id[:8])
@@ -6131,16 +6884,17 @@ def _codex_oauth_worker(session_id: str) -> None:
         tokens = tok.json()
         if not tokens.get("access_token"):
             raise RuntimeError("sin access_token")
-        _save_codex_tokens({
-            "access_token": tokens["access_token"],
-            "refresh_token": tokens.get("refresh_token", ""),
-        })
         # Default model comes from the catalog (single source of truth, item 4 /
         # plan.md D-A4) rather than a second hardcoded literal here.
         from hermes.providers.domain.catalog import canonical_for  # noqa: PLC0415
         from hermes.shell_server.providers.domain import ProviderKind  # noqa: PLC0415
         _codex_default_model = canonical_for(ProviderKind.CODEX).default_model or "gpt-6-astra"
-        _write_hermes_model_config("openai-codex", _codex_default_model)
+        with _oauth_local_commit(session_id):
+            _save_codex_tokens({
+                "access_token": tokens["access_token"],
+                "refresh_token": tokens.get("refresh_token", ""),
+            })
+            _write_hermes_model_config("openai-codex", _codex_default_model)
         with _OAUTH_SESSIONS_LOCK:
             _OAUTH_SESSIONS[session_id]["status"] = "approved"
         logger.info("hermes.dbus.oauth_codex_approved session=%s", session_id[:8])
@@ -6183,19 +6937,115 @@ def _write_hermes_env(var: str, value: str) -> None:
     _os.replace(tmp, env_path)
 
 
-def _write_hermes_model_config(provider_id: str, model: str, base_url: str = "") -> None:
+def _write_hermes_model_config(
+    provider_id: str, model: str, base_url: str = "", *, api_key: str | None = None,
+) -> None:
     """Fija model.{provider,default,base_url} en config.yaml — TRIGGER del path
     nativo: si está, el motor resuelve por hermes_cli (no por vault/catálogo)."""
     from hermes_cli.config import load_config, save_config  # noqa: PLC0415
     cfg = load_config() or {}
     m = dict(cfg.get("model") or {})
+    if m.get("provider") != provider_id:
+        # Transport and inline custom credential belong to the previous selection.
+        m.pop("api_mode", None)
+        m.pop("api_key", None)
+        m.pop("api", None)
     m["provider"] = provider_id
+    if provider_id == "custom":
+        # Let Hermes infer the custom endpoint's native protocol; do not carry
+        # a previous Codex/Anthropic mode into a newly selected custom endpoint.
+        m.pop("api_mode", None)
+        if api_key is not None:
+            m["api_key"] = api_key
     if model:
         m["default"] = model
     if base_url:
         m["base_url"] = base_url
+    else:
+        m.pop("base_url", None)
     cfg["model"] = m
     save_config(cfg)
+
+
+def _read_hermes_env(var: str) -> str | None:
+    """Lee VAR= de HERMES_HOME/.env directamente del fichero (no de os.environ:
+    otro provider pudo escribir la clave sin cargarla en el proceso vivo —
+    least-privilege, ver _clear_engine_runtime_cache). None si no existe."""
+    env_path = _hermes_home() / ".env"
+    if not env_path.exists():
+        return None
+    for ln in env_path.read_text(encoding="utf-8").splitlines():
+        if ln.strip().startswith(f"{var}="):
+            return ln.split("=", 1)[1].strip()
+    return None
+
+
+def _clear_engine_runtime_cache() -> None:
+    """Invalida la caché de 30s del motor (nous_engine._RUNTIME_PROVIDER_CACHE)
+    tras cualquier switch de provider, para que el PRÓXIMO chat use el
+    provider nuevo sin esperar el TTL ni reiniciar el daemon. Fail-soft: el
+    motor puede no estar cargado (tests, TUI standalone) sin romper el switch."""
+    try:
+        from hermes.runtime.nous_engine import clear_runtime_provider_cache  # noqa: PLC0415
+        clear_runtime_provider_cache()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("hermes.dbus.engine_cache_clear_skip: %s", exc)
+
+
+def _native_provider_models_path() -> "Path":
+    from pathlib import Path as _Path  # noqa: PLC0415
+    return _hermes_home() / "native_providers.json"
+
+
+def _remember_native_provider_model(provider_id: str, model: str, base_url: str) -> None:
+    """Recuerda el último model/base_url elegido PARA ESTE provider nativo.
+
+    config.yaml sólo guarda un `model.default` GLOBAL (no por provider), así
+    que reactivar un provider nativo ya configurado (switch A→B→A) perdería
+    su modelo si no se recuerda aparte. Fail-soft: nunca rompe el configure.
+    """
+    if not model:
+        return
+    try:
+        import json as _json  # noqa: PLC0415
+        path = _native_provider_models_path()
+        state: dict = {}
+        if path.exists():
+            state = _json.loads(path.read_text(encoding="utf-8") or "{}")
+        state[provider_id] = {"model": model, "base_url": base_url}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps(state), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("hermes.dbus.native_model_memory_write_failed: %s", exc)
+
+
+def _recall_native_provider_model(provider_id: str) -> "tuple[str, str]":
+    """(model, base_url) recordados para este provider nativo, o ("", "")."""
+    try:
+        import json as _json  # noqa: PLC0415
+        path = _native_provider_models_path()
+        if not path.exists():
+            return "", ""
+        state = _json.loads(path.read_text(encoding="utf-8") or "{}")
+        entry = state.get(provider_id) or {}
+        return str(entry.get("model") or ""), str(entry.get("base_url") or "")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("hermes.dbus.native_model_memory_read_failed: %s", exc)
+        return "", ""
+
+
+def _read_image_gen_model() -> str | None:
+    """``image_gen.model`` de config.yaml, o None si no está fijado.
+
+    Hermes aplica su propio valor por defecto (FLUX) cuando la clave está
+    ausente — no lo replicamos aquí para no acoplarnos a su catálogo interno.
+    """
+    try:
+        from hermes_cli.config import load_config  # noqa: PLC0415
+        model = ((load_config() or {}).get("image_gen") or {}).get("model")
+        return str(model).strip() or None if model else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _read_native_active() -> dict:
@@ -6548,6 +7398,70 @@ def _grant_cache_group_write(cache_dir: str) -> None:
                 pass
 
 
+_PREFETCH_EXDEV_RETRIES = 10  # 1 initial attempt + 9 retries — cheap: a genuinely
+# different failure (bad coordinate, registry down) is never retried at all (see
+# the signature check below), so this budget only costs time on the EXDEV path.
+# uv word-wraps its pretty-printed error at a fixed column when stderr is a pipe
+# (capture_output=True), so "Invalid cross-device link" can arrive split across a
+# newline ("Invalid\n      cross-device link"). "os error 18" is the raw errno
+# tag uv always emits on the SAME line as "link", immune to that wrapping —
+# match on that instead of the prose around it.
+_PREFETCH_EXDEV_SIGNATURE = "os error 18"
+
+
+def _run_prefetch_subprocess(
+    cmd: list[str], env: dict[str, str], timeout_s: float,
+) -> "_subprocess.CompletedProcess[str]":
+    """Run *cmd* (npm/uv) detached from this process's session, retrying EXDEV.
+
+    Root cause (2026-09-10, verified live in an isolated container, spec 025
+    matriz item #5): `uv tool install` for a NEVER-cached package spawned
+    directly off this daemon's long-lived, multi-threaded asyncio process
+    intermittently dies with "Invalid cross-device link (os error 18)"
+    renaming its OWN download temp file into its OWN cache dir
+    (`uv-cache/.tmp* -> uv-cache/archive-v0/…`) — even though a diagnostic
+    `os.stat()` taken right before the spawn shows cache/archive/TMPDIR on
+    the IDENTICAL st_dev every time (not a real mount-boundary crossing).
+    The exact same command NEVER reproduced it once across dozens of live
+    trials when spawned as its own session/process group (`systemd-run
+    --pipe`, or a plain fork with `start_new_session=True`) instead of
+    inheriting this process's session — some state tied to the daemon's own
+    long-lived asyncio session (not fd inheritance: close_fds is already the
+    default) confuses uv's cache-population rename for a fraction of fresh
+    packages. `systemd-run` itself is NOT reachable from here (the daemon
+    runs unprivileged, User=hermes, and this host's D-Bus policy denies it
+    `org.freedesktop.systemd1.Manager.StartTransientUnit` — verified: "Access
+    denied"; loosening that policy is a security-posture change, out of
+    scope for this fix). `start_new_session=True` needs no new privilege and
+    cleared the large majority of live trials outright; the retry loop below
+    is the backstop for the remainder — only the EXDEV signature is retried,
+    any other failure (bad coordinate, registry down, no wheel) returns on
+    the first attempt, unchanged.
+    """
+    import subprocess as _subprocess  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
+
+    result = None
+    for attempt in range(1, _PREFETCH_EXDEV_RETRIES + 1):
+        result = _subprocess.run(  # noqa: S603 — cmd is a fixed list, no shell
+            cmd, env=env, capture_output=True, text=True,
+            timeout=timeout_s, check=False,
+            close_fds=True, start_new_session=True,
+        )
+        if result.returncode == 0:
+            return result
+        tail = (result.stderr or "") + (result.stdout or "")
+        if _PREFETCH_EXDEV_SIGNATURE not in tail:
+            return result  # a different failure — don't mask it with retries
+        logger.warning(
+            "hermes.dbus.mcp_prefetch_exdev_retry attempt=%s/%s cmd=%s",
+            attempt, _PREFETCH_EXDEV_RETRIES, cmd[:2],
+        )
+        if attempt < _PREFETCH_EXDEV_RETRIES:
+            _time.sleep(min(0.2 * attempt, 1.0))  # bounded backoff, cheap either way
+    return result
+
+
 def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
     """Download the MCP's package into the shared runner cache in the TRUSTED daemon path.
 
@@ -6636,12 +7550,11 @@ def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
             # cross-uid (root) entries that make `npm install` die EACCES. A fresh cache
             # inside the install dir is always writable by this process.
             _pf_env = {**env, "npm_config_cache": str(install_dir / ".npm-cache")}
-            _r = _subprocess.run(  # noqa: S603 — fixed list, no shell
+            _r = _run_prefetch_subprocess(
                 [npm, "install", pkg_spec, "--prefix", str(install_dir),
                  "--ignore-scripts", "--no-audit", "--no-fund", "--no-save",
                  "--loglevel=error"],
-                env=_pf_env, capture_output=True, text=True,
-                timeout=_MCP_PREFETCH_TIMEOUT_S, check=False,
+                _pf_env, _MCP_PREFETCH_TIMEOUT_S,
             )
         except (OSError, _subprocess.TimeoutExpired) as exc:
             _shutil.rmtree(install_dir, ignore_errors=True)
@@ -6685,14 +7598,7 @@ def _prefetch_mcp_package(server_id: str, argv: list[str]) -> None:
         raise RuntimeError(f"ecosistema no soportado para prefetch: {ecosystem!r}")
 
     try:
-        result = _subprocess.run(  # noqa: S603 — cmd is a fixed list, no shell
-            cmd,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=_MCP_PREFETCH_TIMEOUT_S,
-            check=False,
-        )
+        result = _run_prefetch_subprocess(cmd, env, _MCP_PREFETCH_TIMEOUT_S)
     except (OSError, _subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"prefetch del paquete MCP falló: {exc}") from exc
     if result.returncode != 0:
@@ -6724,72 +7630,148 @@ def _prefetch_git_mcp(server_id: str, git_spec: str) -> None:
     )
 
 
-# BYOK env keys permitted in MCP server entries. Mirrors _ALLOWED_ENV_KEYS in
-# hermes-mcp-launcher — both gates must stay in sync; a key allowed here but
-# not in the launcher will be silently discarded at spawn time.
-# Expanding this set is a security-posture decision: add only named, bounded
-# variables for specific published MCP servers; never allow arbitrary keys.
+# MCP-05 root cause (spec 025 matriz, fixed): the fixed frozenset below WAS
+# the allowlist ("BYOK env keys permitted in MCP server entries") — the
+# form's OWN placeholder (McpView.tsx, `mcp.env.label`: "BRAVE_API_KEY=br-
+# xxx") named a key that was never IN it, so anyone who followed the UI's own
+# example got a raw 400 back. A hand-curated per-server allowlist can never
+# keep up with "any published MCP server that needs one bounded secret" — the
+# fix is a VALIDATED PATTERN (any plausible env-var name) plus a DENY-list of
+# names that are actually dangerous to hand an MCP child, not a per-service
+# allowlist that must be edited (in TWO files, this one and hermes-mcp-
+# launcher's _ALLOWED_ENV_KEYS, "both gates must stay in sync") every time a
+# new server ships.
+_MCP_ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+
+# Security review 2026-09-10 (H-1, verdict SHIP WITH FIXES on 4030b54..f7a3a2d):
+# a reimplementation of both BYOK gates enumerated ~70 dangerous env names and
+# found ~50 passing both — TLS-trust overrides for every runtime OTHER than
+# OpenSSL (NODE_EXTRA_CA_CERTS, NODE_TLS_REJECT_UNAUTHORIZED, REQUESTS_CA_
+# BUNDLE, CURL_CA_BUNDLE), interpreter/shell hijack knobs the PYTHON*/LD_*
+# entries never generalised to (BASH_ENV, PERL5OPT, RUBYOPT, NODE_PATH,
+# ELECTRON_RUN_AS_NODE, JAVA_TOOL_OPTIONS, GODEBUG, ...), and this product's
+# own package-manager/registry knobs (GIT_*, UV_*, PIP_*, NPM_CONFIG_*).
 #
-# 2026-07-07 (R16) — HOME/MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME: OAuth-bridge
-# servers (mcp-remote, used by the managed-remote "safent-control" MCP) write a
-# local token cache and need a writable HOME. These are validated HERE (so a
-# bundle/BYOK draft carrying them does not hard-fail add_mcp_server wholesale —
-# see _validate_mcp_env, which rejects the ENTIRE draft on any unrecognised
-# key) but are DELIBERATELY NOT mirrored into the launcher's
-# _ALLOWED_ENV_KEYS for HOME: the launcher's own unit env already pins a
-# writable, group-writable HOME (/var/lib/hermes/mcp-home) for every MCP
-# child, and letting a caller (even a signed cloud bundle) override it risks
-# repointing HOME at a path the jailed MCP child cannot write (exactly the
-# EACCES this class of bug produces — see hermes-mcp-launcher's own comment
-# on _ALLOWED_ENV_KEYS). MCP_REMOTE_CONFIG_DIR/XDG_CONFIG_HOME are validated
-# here but likewise not forwarded by the launcher: they fall back to
-# $HOME/.mcp-auth / $HOME/.config, both writable once HOME is launcher-pinned.
-_MCP_BYOK_ENV_KEYS: frozenset[str] = frozenset({
-    "OD_DAEMON_URL",
-    "OD_API_TOKEN",
-    "OD_AUTH_MODE",
-    "OD_BASIC_USER",
-    "OD_BASIC_PASS",
-    # Curated pack (published servers, named/bounded BYOK secrets — mirror in
-    # hermes-mcp-launcher._ALLOWED_ENV_KEYS):
-    # REPLICATE_API_TOKEN — Replicate MCP (replicate-mcp): imagen + vídeo.
-    # CONTEXT7_API_KEY    — Context7 MCP: docs de librerías al día para código.
-    "REPLICATE_API_TOKEN",
-    "CONTEXT7_API_KEY",
-    # Ruflo MCP (ruflo): endpoint OpenAI-compatible → enruta a nuestro LLM nativo.
-    "OPENAI_BASE_URL",
-    "OPENAI_API_KEY",
-    # OAuth-bridge servers (mcp-remote / safent-control). NOT mirrored into the
-    # launcher's _ALLOWED_ENV_KEYS — see the block comment above.
-    "HOME",
-    "MCP_REMOTE_CONFIG_DIR",
-    "XDG_CONFIG_HOME",
-    # safent-ads companion (024): declared-empty placeholders in the seeded
-    # entry, filled at connect time from hermes.shell_server.companions (see
-    # _mcp_connect) — never from a caller-supplied value (ADS_BEARER can only
-    # ever be FILLED here, the same fill-only discipline as OPENAI_API_KEY
-    # above; a caller passing a non-empty value would be ignored, not trusted).
-    "ADS_BEARER",
-    "NODE_EXTRA_CA_CERTS",
+# _MCP_ENV_DENY_EXACT_CORE / _MCP_ENV_DENY_PREFIXES_CORE are the SHARED
+# source of truth — hermes-mcp-launcher's own _BYOK_ENV_DENY_EXACT_CORE /
+# _BYOK_ENV_DENY_PREFIXES MUST stay byte-identical (duplicated on purpose,
+# no runtime cross-import across that root-privilege boundary — see that
+# script's own note); tests/unit/agents_os/test_validate_mcp_env.py::
+# TestDenyListParityWithTheLauncher parses both literals and asserts they
+# match, so the two can never silently drift again the way the original
+# fixed allowlist did (MCP-05).
+#
+# Exact names — each one either re-points a resource the launcher/daemon
+# ALREADY pins correctly for every MCP child (PATH, NODE_OPTIONS — see
+# hermes-mcp-launcher's own _ALWAYS_FORWARDED_ENV_KEYS comment), defeats a
+# defense-in-depth layer (UV_OFFLINE — MEDIUM finding, forces uv/uvx's
+# OWN internal resolution back online even though the --offline argv
+# injection still covers argv[0]), is a TLS-trust override (the NODE_*/
+# REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE family — MITM of the MCP child's own
+# outbound TLS), an interpreter/shell startup hijack (BASH_ENV, ENV,
+# SHELLOPTS, PS4, IFS, PERL5OPT/PERL5LIB, RUBYOPT/RUBYLIB, GODEBUG/GOFLAGS,
+# CLASSPATH, NIX_LD, MALLOC_CONF, GCONV_PATH, LOCPATH), or a network
+# interception knob (the http(s)_proxy family).
+#
+# TERMINFO/TERMINFO_DIRS/TMPDIR/TEMP/TMP: no legitimate BYOK secret is ANY
+# of these; TMPDIR doubles as defense-in-depth for the launcher's own
+# _INTERNAL_ENV_KEYS (that daemon-set exact match is checked BEFORE this
+# deny-list there, so it is unaffected).
+_MCP_ENV_DENY_EXACT_CORE: frozenset[str] = frozenset({
+    "PATH", "NODE_OPTIONS", "NODE_PATH", "ELECTRON_RUN_AS_NODE",
+    "UV_OFFLINE",
+    "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "BASH_ENV", "ENV", "SHELLOPTS", "PS4", "IFS",
+    "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+    "GODEBUG", "GOFLAGS", "CLASSPATH", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS",
+    "NIX_LD", "MALLOC_CONF", "GCONV_PATH", "LOCPATH",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY",
+    "TERMINFO", "TERMINFO_DIRS", "TMPDIR", "TEMP", "TMP",
 })
+# Prefixes — LD_* (dynamic linker — library injection/preload into whatever
+# the launcher execs), PYTHON* (interpreter path/startup hijack), HERMES_*
+# (impersonates the daemon's OWN config surface — every Environment= this
+# product's units set is HERMES_* or one of the exact names above),
+# SSL_CERT_* (OpenSSL trust store override), NODE_*/GIT_*/UV_*/PIP_*/
+# NPM_CONFIG_*/JAVA_*/JDK_*/_JAVA/DOTNET_ (the same class of runtime/package-
+# manager hijack as the exact names above, generalised to every variable a
+# given tool family recognises — e.g. GIT_SSH_COMMAND, PIP_INDEX_URL,
+# NPM_CONFIG_REGISTRY), XDG_*/DYLD_* (loader/base-dir redirection),
+# SAFENT_* (this product's own CLI/provisioning surface, never BYOK input).
+_MCP_ENV_DENY_PREFIXES_CORE: tuple[str, ...] = (
+    "LD_", "PYTHON", "HERMES_", "SSL_CERT_",
+    "NODE_", "GIT_", "UV_", "PIP_", "NPM_CONFIG_", "XDG_", "DYLD_",
+    "JAVA_", "JDK_", "_JAVA", "SAFENT_", "DOTNET_",
+)
+
+# HOME is deliberately NOT in the core deny set (R16, test_r16_mcp_bridge_
+# handshake.py::TestByokEnvKeysAcceptOAuthBridgeVars): the cloud's
+# McpSpec.env for a MANAGED_REMOTE/OAuth-bridge server (mcp-remote)
+# legitimately carries HOME — rejecting it HERE would hard-fail the entire
+# add_mcp_server draft before it ever reaches scan/prefetch/connect (R16's
+# original root cause #1), not just leave HOME unused. It is still NEVER
+# honoured as an override: the launcher (hermes-mcp-launcher._is_allowed_
+# env_key) denies it independently and always forwards its OWN HOME instead
+# (_ALWAYS_FORWARDED_ENV_KEYS).
+#
+# ADS_BEARER is the daemon-only inverse of that same split (H-1 follow-up,
+# "make NODE_EXTRA_CA_CERTS fill-only like ADS_BEARER" — this module's own
+# prior comment claimed ADS_BEARER was already ignored-if-caller-supplied,
+# which _autowire_companion_env's `if not resolved_env.get(...)` fill-only-
+# when-EMPTY check does not actually enforce; denying both HERE makes that
+# claim true instead of just documented): _autowire_companion_env fills
+# ADS_BEARER/NODE_EXTRA_CA_CERTS from hermes.shell_server.companions at
+# CONNECT time (trusted, daemon-controlled, never persisted — INV-4).
+# Denying them at THIS caller-facing gate means the only way either key ever
+# gets a value is that fill step, never a caller-supplied add_mcp_server
+# draft. NODE_EXTRA_CA_CERTS is already covered by the shared NODE_ prefix
+# above; ADS_BEARER needs its own entry (no shared prefix covers it) and is
+# intentionally NOT added to the launcher's deny-list — the launcher MUST
+# still forward the daemon-injected value once autowire has filled it (see
+# hermes-mcp-launcher's own _LAUNCHER_ALLOW_DESPITE_DENY for the NODE_
+# prefix's own equivalent carve-out).
+_MCP_ENV_DENY_EXACT: frozenset[str] = _MCP_ENV_DENY_EXACT_CORE | frozenset({"ADS_BEARER"})
+_MCP_ENV_DENY_PREFIXES: tuple[str, ...] = _MCP_ENV_DENY_PREFIXES_CORE
+
+# The new XDG_ deny prefix would otherwise ALSO catch XDG_CONFIG_HOME, which
+# R16 (test_r16_mcp_bridge_handshake.py::TestByokEnvKeysAcceptOAuthBridgeVars)
+# already accepts here for the exact same reason HOME does: a MANAGED_REMOTE/
+# OAuth-bridge draft's McpSpec.env legitimately carries it and rejecting it
+# would hard-fail add_mcp_server before scan/prefetch/connect. Same asymmetry
+# as HOME — the launcher still never forwards it (_NEVER_FORWARDED_KEYS).
+_MCP_ENV_ALLOW_DESPITE_DENY: frozenset[str] = frozenset({"XDG_CONFIG_HOME"})
+
+
+def _is_denied_mcp_env_key(key: str) -> bool:
+    """Case-insensitive on purpose: the allow PATTERN only ever matches
+    upper-case names, but the deny-list must not be dodged by a caller
+    exploiting some future loosening of that pattern (defense in depth —
+    matches this module's own fail-closed-on-both-sides style)."""
+    upper = key.upper()
+    if upper in _MCP_ENV_ALLOW_DESPITE_DENY:
+        return False
+    return upper in _MCP_ENV_DENY_EXACT or upper.startswith(_MCP_ENV_DENY_PREFIXES)
 
 
 def _validate_mcp_env(raw: object) -> dict[str, str]:
     """Validate and sanitise a caller-supplied BYOK env dict.
 
-    Returns a clean dict whose keys are a subset of _MCP_BYOK_ENV_KEYS and
-    whose values are non-empty strings. Raises ValueError on any violation.
+    Returns a clean dict of str->non-empty-str. Raises ValueError on any
+    violation — the message never echoes a VALUE, only key names and the
+    rule that rejected them (values are secrets; never logged in clear).
 
     Security invariants:
-      - Only explicitly allowlisted keys pass through; arbitrary keys are
-        rejected, not silently dropped — fail-loud on unknown keys so
-        callers notice misconfiguration rather than silently missing env.
+      - A key must match _MCP_ENV_KEY_PATTERN (`^[A-Z][A-Z0-9_]{2,63}$` —
+        the shape of every real env-var name a published MCP server's docs
+        ever ask for) AND must not be on the deny-list
+        (_MCP_ENV_DENY_EXACT / _MCP_ENV_DENY_PREFIXES) — fail-loud on
+        anything else so callers notice misconfiguration rather than
+        silently missing env.
       - Values must be strings; empty strings are rejected (would confuse the
         MCP server just as much as missing env vars).
       - OD_DAEMON_URL must parse as an http(s) URL (scheme + netloc present).
         This prevents open-design-mcp from being pointed at file://, data://, etc.
-      - OD_API_TOKEN is passed through opaquely; it MUST NOT be logged in
-        clear — callers must use the masked helpers below.
     """
     if not isinstance(raw, dict):
         raise ValueError("env debe ser un diccionario str→str")
@@ -6797,11 +7779,13 @@ def _validate_mcp_env(raw: object) -> dict[str, str]:
     for key, val in raw.items():
         if not isinstance(key, str):
             raise ValueError(f"clave de env no es string: {key!r}")
-        if key not in _MCP_BYOK_ENV_KEYS:
+        if not _MCP_ENV_KEY_PATTERN.match(key):
             raise ValueError(
                 f"clave de env no permitida: {key!r} "
-                f"(allowlist: {sorted(_MCP_BYOK_ENV_KEYS)})"
+                f"(debe cumplir {_MCP_ENV_KEY_PATTERN.pattern!r})"
             )
+        if _is_denied_mcp_env_key(key):
+            raise ValueError(f"clave de env no permitida: {key!r} (reservada por el sistema)")
         if not isinstance(val, str) or not val:
             raise ValueError(f"valor de env para {key!r} debe ser string no vacío")
         if key == "OD_DAEMON_URL":
@@ -6901,6 +7885,10 @@ def _neus_write_mcp_entry(
     """
     from hermes_cli.config import load_config, save_config  # noqa: PLC0415
 
+    if server_id == 'safent-ads':
+        policy = _ads_routing_policy()
+        if policy is not None and policy.mode == 'managed':
+            raise PermissionError('Native local Ads configuration forbidden while managed')
     cfg = load_config()
     mcp_servers: dict = cfg.setdefault("mcp_servers", {})
     entry: dict = {
@@ -7048,6 +8036,27 @@ _COMPANION_SEED_LABELS: dict[str, str] = {
 }
 
 
+def _ads_routing_policy():
+    import os
+    from pathlib import Path
+    from hermes.runtime.managed_ads_policy import read_ads_policy
+    return read_ads_policy(Path(os.environ.get('HERMES_SHELL_DB', '/var/lib/hermes/shell-state.db')))
+
+
+async def reconcile_managed_ads_client(manager):
+    from hermes.mcp.domain.value_objects import McpServerId
+    if manager is None:
+        return
+    try:
+        policy = _ads_routing_policy()
+    except PermissionError:
+        await manager.disconnect(McpServerId('safent-ads'))
+        raise
+    if policy is not None and policy.mode == 'managed':
+        await manager.disconnect(McpServerId('safent-ads'))
+        await _mcp_connect(manager, 'safent-ads', ['managed-ads'])
+
+
 def _import_seed_companion_servers() -> None:
     """Import not-yet-imported companion-backed seeds (fail-soft per slug).
 
@@ -7070,6 +8079,13 @@ def _import_seed_companion_servers() -> None:
     existing = {e["server_id"] for e in _neus_load_entries()}
     changed = False
     for slug in sorted(_SEEDED_MCP_SLUGS):
+        if slug == 'safent-ads':
+            try:
+                policy = _ads_routing_policy()
+                if policy is not None and policy.mode == 'managed':
+                    continue
+            except PermissionError:
+                continue
         if slug in imported:
             continue
         endpoint = get_companion(slug)
@@ -7349,6 +8365,20 @@ def _neus_job_to_task_dict(job: dict) -> dict:
     the return value — only the title/label (same as CTRL-P1-5 on the
     trigger_repo path which capped task_instruction at 120 chars in the
     label derivation). We truncate prompt to 120 chars max for the label.
+
+    trigger_id: for jobs created through Safent (create_scheduled_task writes
+    origin.trigger_instance_id — the authorized_trigger UUID — onto the Neus
+    job precisely so it can be recovered here), this MUST be that UUID, not
+    the raw Neus job id. get_scheduled_task/set_scheduled_task_enabled/
+    delete_scheduled_task all do `UUID(trigger_id)` against the Safent trigger
+    table — feeding them the short Neus id (e.g. "c2217361b797") raised
+    ValueError -> {"ok": false, "error": "trigger_id inválido"} on every
+    toggle/delete, and a 404 on detail (spec 025 hallazgo #6: "ids
+    incompatibles lista/detalle"). Jobs the AGENT created directly via its own
+    `cronjob` tool have no origin (never went through the authorization gate)
+    — for those the raw Neus id is the only id that exists, so it's kept as
+    the honest fallback (toggle/delete on those rows is a separate, pre-
+    existing gap — see specs/025-safent-repaso follow-ups).
     """
     from datetime import UTC, datetime  # noqa: PLC0415
 
@@ -7357,7 +8387,9 @@ def _neus_job_to_task_dict(job: dict) -> dict:
         _cron_recurrence_human,
     )
 
-    job_id = str(job.get("id") or "")
+    origin = job.get("origin") or {}
+    safent_trigger_id = str(origin.get("trigger_instance_id") or "").strip() if isinstance(origin, dict) else ""
+    job_id = safent_trigger_id or str(job.get("id") or "")
     name = str(job.get("name") or "").strip()
     prompt = str(job.get("prompt") or "").strip()
     label = name or prompt[:120] or job_id or "cron job"
@@ -7413,6 +8445,39 @@ def _neus_job_to_task_dict(job: dict) -> dict:
     }
 
 
+def _neus_cron_recent_runs(*, limit: int) -> list[dict]:
+    """RecentTaskView-shaped rows synthesized from Neus cron jobs' own
+    last_run_at/last_status (cron/jobs.py mark_job_run — the SAME fields
+    _neus_job_to_task_dict already reads for the dashboard's last-run
+    columns). One row per job that has actually run at least once; jobs
+    never fired (last_run_at still null) contribute nothing. Fail-soft: []
+    on any error, same contract as _neus_cron_list_jobs.
+    """
+    jobs = _neus_cron_list_jobs(include_disabled=True)
+    rows: list[dict] = []
+    for job in jobs:
+        last_run_at = str(job.get("last_run_at") or "").strip()
+        if not last_run_at:
+            continue
+        origin = job.get("origin") or {}
+        safent_trigger_id = (
+            str(origin.get("trigger_instance_id") or "").strip() if isinstance(origin, dict) else ""
+        )
+        task_id = safent_trigger_id or str(job.get("id") or "")
+        name = str(job.get("name") or "").strip()
+        prompt = str(job.get("prompt") or "").strip()
+        label = name or (prompt[:120] if prompt else "") or task_id or "cron job"
+        rows.append({
+            "task_id": task_id,
+            "label": label,
+            "status": str(job.get("last_status") or "unknown"),
+            "trigger_kind": "timer",
+            "enqueued_at": last_run_at,
+            "claimed_at": last_run_at,
+        })
+    return rows[:limit]
+
+
 def _mcp_id(server_id: str):
     from hermes.mcp.domain.value_objects import McpServerId  # noqa: PLC0415
     return McpServerId(server_id)
@@ -7465,6 +8530,12 @@ def _grant_mcp_egress_for_managed_remote(server_id: str) -> None:
     """
     if server_id not in _MANAGED_REMOTE_MCP_SLUGS:
         return
+    if server_id == 'safent-ads':
+        policy = _ads_routing_policy()
+        if policy is not None and policy.mode == 'managed':
+            # No MCP subprocess is used in this mode. Never consult legacy
+            # endpoint overrides or mint a grant for a local companion.
+            return
     host = _resolve_managed_remote_endpoint_host(server_id) or _resolve_paired_cloud_host()
     if not host:
         return
@@ -7576,6 +8647,9 @@ def _autowire_companion_env(server_id: str, resolved_env: dict[str, str]) -> Non
         return
     if "ADS_BEARER" not in resolved_env and "NODE_EXTRA_CA_CERTS" not in resolved_env:
         return
+    policy = _ads_routing_policy()
+    if policy is not None and policy.mode == 'managed':
+        raise PermissionError('Local Ads credentials forbidden for managed instance')
     try:
         from hermes.shell_server.companions import (  # noqa: PLC0415
             get_companion,
@@ -7608,6 +8682,17 @@ async def _mcp_connect(
         Transport,
         TrustLevel,
     )
+    if server_id == 'safent-ads':
+        policy = _ads_routing_policy()
+        if policy is not None and policy.mode == 'managed':
+            # The scoped factory consumes this inert descriptor; no subprocess,
+            # URL override, CA file or local bearer may be selected here.
+            if getattr(manager, '_scoped_client_factory', None) is None:
+                raise PermissionError('Managed Ads client unavailable')
+            return await manager.connect(
+                server_id=McpServerId(server_id), slug=ServerSlug(server_id),
+                transport=Transport.stdio(['managed-ads']), trust_level=TrustLevel.MANAGED_REMOTE,
+            )
     # Auto-wire the owner's ACTIVE LLM provider into MCPs that declare OpenAI-compatible
     # BYOK keys but leave them empty (e.g. ruflo's swarm: env has OPENAI_BASE_URL="" /
     # OPENAI_API_KEY=""). The MCP child is spawned by the launcher and does NOT inherit
@@ -7630,6 +8715,8 @@ async def _mcp_connect(
                 _os_pv.environ.get("HERMES_SHELL_DB", "/var/lib/hermes/shell-state.db")
             )
             _mc = ActiveProviderService(db_path=_db).resolve()
+            if _mc is not None and _mc.managed:
+                raise PermissionError('Enterprise inference credentials cannot be exported to MCP')
             if _mc is not None:
                 if not resolved_env.get("OPENAI_BASE_URL") and getattr(_mc, "base_url", None):
                     resolved_env["OPENAI_BASE_URL"] = str(_mc.base_url)
@@ -7866,6 +8953,17 @@ async def reconnect_persisted_mcp_servers(manager) -> None:
     # provisioned file, not the image), same "land then reconnect below" flow.
     _import_seed_companion_servers()
     entries = _neus_load_entries()
+    try:
+        ads_policy = _ads_routing_policy()
+    except PermissionError:
+        entries = [entry for entry in entries if entry['server_id'] != 'safent-ads']
+    else:
+        if ads_policy is not None and ads_policy.mode == 'managed':
+            entries = [entry for entry in entries if entry['server_id'] != 'safent-ads']
+            try:
+                await reconcile_managed_ads_client(manager)
+            except Exception:
+                logger.warning('hermes.dbus.managed_ads_unavailable')
     if not entries:
         return
     for entry in entries:

@@ -39,6 +39,11 @@ from uuid import UUID
 from dbus_fast import DBusError, Variant
 from dbus_fast.service import ServiceInterface, method, signal
 
+from hermes.agents_os.infrastructure.companion_sso_authority import (
+    CompanionSsoAuthorityError,
+    CompanionSsoRateLimitedError,
+)
+
 if TYPE_CHECKING:
     from dbus_fast.aio import MessageBus
 
@@ -231,10 +236,16 @@ class Runtime1ServiceInterface(ServiceInterface):
         return True
 
     @method()
-    async def Resume(self) -> "b":  # noqa: N802,F821,UP037
-        """Reanuda. by = UID del bus."""
+    async def Resume(self, reason: "s") -> "b":  # noqa: N802,F821,UP037
+        """Reanuda. by = UID del bus.
+
+        reason (security review 2026-09-10, MEDIUM finding): audit-only
+        provenance string, threaded to the signed AGENT_RESUMED entry via
+        request_resume/AgentStatePort.resume — "host_cli" for `safent brake
+        release`, "" for the normal REST/UI path (cowork/dbus_proxy.py).
+        """
         sender_uid = await self._resolve_current_sender_uid()
-        await self._wiring.request_resume(sender_uid=sender_uid)
+        await self._wiring.request_resume(sender_uid=sender_uid, reason=reason)
         return True
 
     @method()
@@ -248,15 +259,20 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(result)
 
     @method()
-    async def Approve(self, proposal_id: "s", totp: "s") -> "s":  # noqa: N802,F821,UP037
+    async def GetKillSwitchStatus(self) -> "s":  # noqa: N802,F821,UP037
+        """Estado del freno de emergencia (read-only, sin authZ).
+
+        Devuelve JSON: {engaged, reason, changed_by, changed_at}.
+        """
+        status = await self._wiring.get_kill_switch_status()
+        return json.dumps(status)
+
+    @method()
+    async def Approve(self, proposal_id: "s") -> "s":  # noqa: N802,F821,UP037
         """HITL approve. approved_by = UID del bus. NO dispara run_cycle.
 
-        `totp` = owner's TOTP code, forwarded to the gate so the gate (the single MFA
-        enforcement point for ALL surfaces — red-team 2026-06-19, finding 3) verifies it.
-        Empty string = no factor (the gate rejects, fail-closed).
-
         ApprovalGateError is caught here and re-raised as a structured D-Bus error whose
-        error name encodes the gate reason (e.g. org.hermes.Error.ApprovalGate.mfa_required)
+        error name encodes the gate reason (e.g. enterprise_route_requires_cloud_decision)
         so that the client adapter (_translate_dbus_error) can reconstruct the exact reason
         code without string-matching the human-readable message.
 
@@ -273,7 +289,6 @@ class Runtime1ServiceInterface(ServiceInterface):
             result = await self._wiring.approve_action(
                 proposal_id=UUID(proposal_id),
                 sender_uid=sender_uid,
-                totp=totp or None,
             )
         except ApprovalGateError as exc:
             # Encode the machine-readable reason into the D-Bus error name so
@@ -463,6 +478,20 @@ class Runtime1ServiceInterface(ServiceInterface):
         return json.dumps(rows)
 
     @method()
+    async def GetTasksDashboard(  # noqa: N802
+        self, limit: "u", operator_token: "s",  # noqa: F821,UP037
+    ) -> "s":  # noqa: F821,UP037
+        """Durable task dashboard for an authenticated local operator."""
+        sender_uid = await self._resolve_current_sender_uid()
+        try:
+            result = await self._wiring.get_tasks_dashboard(
+                limit=int(limit), sender_uid=sender_uid, operator_token=operator_token or None,
+            )
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
+        return json.dumps(result)
+
+    @method()
     async def GetScheduledTask(self, trigger_id: "s") -> "s":  # noqa: N802,F821,UP037
         """Detalle de una tarea programada por su trigger_id (read-only, no authZ).
 
@@ -568,22 +597,6 @@ class Runtime1ServiceInterface(ServiceInterface):
         except CannotDeleteDefaultAgent as exc:
             raise DBusError("org.hermes.Error.NotAllowed", str(exc)) from exc
 
-    @method()
-    async def GetDefaultRosterEnabled(self) -> "b":  # noqa: N802,F821,UP037
-        """¿Visible el equipo de especialistas por defecto? (read-only, sin authZ)."""
-        return self._wiring.default_roster_enabled()
-
-    @method()
-    async def SetDefaultRosterEnabled(self, enabled: "b") -> "b":  # noqa: N802,F821,UP037
-        """Enciende/apaga el equipo por defecto (oculta/restaura los `roster-*`)."""
-        try:
-            sender_uid = await self._resolve_current_sender_uid()
-            return await self._wiring.set_default_roster_enabled(
-                enabled=enabled, sender_uid=sender_uid
-            )
-        except PermissionError as exc:
-            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
-
     # ------------------------------------------------------------------
     # Gobernanza de skills (JSON sobre D-Bus, autoría sender_uid / P0-1)
     # ------------------------------------------------------------------
@@ -681,6 +694,19 @@ class Runtime1ServiceInterface(ServiceInterface):
         )
 
     @method()
+    async def ApplyManagedLlmGateway(self, bundle_json: "s") -> "s":  # noqa: N802,F821,UP037
+        sender_uid = await self._resolve_current_sender_uid()
+        return json.dumps(self._wiring.apply_managed_llm_gateway(bundle_json=bundle_json, sender_uid=sender_uid))
+
+    @method()
+    async def ApplyManagedAdsPolicy(self, bundle_json: "s") -> "s":  # noqa: N802,F821,UP037
+        sender_uid = await self._resolve_current_sender_uid()
+        result = self._wiring.apply_managed_ads_policy(bundle_json=bundle_json, sender_uid=sender_uid)
+        from hermes.agents_os.infrastructure.dbus_runtime_service import reconcile_managed_ads_client
+        await reconcile_managed_ads_client(self._wiring._mcp_manager)
+        return json.dumps(result)
+
+    @method()
     async def AddProvider(self, draft_json: "s") -> "s":  # noqa: N802,F821,UP037
         """Crea provider. draft: {kind, alias, default_model, base_url, api_key, set_active}."""
         sender_uid = await self._resolve_current_sender_uid()
@@ -735,9 +761,16 @@ class Runtime1ServiceInterface(ServiceInterface):
     @method()
     async def SetActiveProvider(self, provider_id: "s") -> "s":  # noqa: N802,F821,UP037
         sender_uid = await self._resolve_current_sender_uid()
-        result = self._wiring.set_active_provider(
-            provider_id=provider_id, sender_uid=sender_uid
-        )
+        try:
+            result = self._wiring.set_active_provider(
+                provider_id=provider_id, sender_uid=sender_uid
+            )
+        except ValueError as exc:
+            # specs/025-safent-repaso PROV-02: activating a native provider
+            # with no model recorded (e.g. never configured with one) must
+            # reach the caller as a clear 422, not silently write a
+            # model.provider-without-model.default config.yaml.
+            raise DBusError("org.hermes.Error.InvalidInput", str(exc)) from exc
         self._schedule_byok_mcp_rewire()
         return json.dumps(result)
 
@@ -811,8 +844,11 @@ class Runtime1ServiceInterface(ServiceInterface):
     async def ConfigureNativeProvider(self, draft_json: "s") -> "s":  # noqa: N802,F821,UP037
         """Configura un provider NATIVO de hermes_cli (api-key) por su id real.
 
-        draft: {provider_id, api_key, model, base_url}. Escribe .env + config.yaml
-        del HERMES_HOME — el motor lo resuelve directo. authZ operador.
+        draft: {provider_id, api_key, model, base_url, set_active}. Escribe
+        .env siempre; config.yaml del HERMES_HOME (lo que el motor resuelve
+        directo) SÓLO si set_active — antes este flag se perdía aquí y
+        CUALQUIER configure activaba el provider sin pasar por "Activar"
+        (specs/025-safent-repaso hallazgo #1). authZ operador.
         """
         import asyncio as _asyncio  # noqa: PLC0415
         from functools import partial  # noqa: PLC0415
@@ -828,6 +864,7 @@ class Runtime1ServiceInterface(ServiceInterface):
                 model=str(d.get("model", "")),
                 base_url=str(d.get("base_url", "")),
                 sender_uid=sender_uid,
+                set_active=bool(d.get("set_active", False)),
             ),
         )
         if isinstance(result, dict) and result.get("ok"):
@@ -838,6 +875,30 @@ class Runtime1ServiceInterface(ServiceInterface):
     async def GetNativeActive(self) -> "s":  # noqa: N802,F821,UP037
         """Provider nativo activo según config.yaml ({} si ninguno)."""
         return json.dumps(self._wiring.get_native_active())
+
+    @method()
+    async def ListNativeProviderModels(self, provider_id: "s") -> "s":  # noqa: N802,F821,UP037
+        """Read the native account catalog without blocking the daemon loop."""
+        import asyncio  # noqa: PLC0415
+        sender_uid = await self._resolve_current_sender_uid()
+        result = await asyncio.to_thread(
+            self._wiring.list_native_provider_models,
+            provider_id=provider_id, sender_uid=sender_uid,
+        )
+        return json.dumps(result)
+
+    @method()
+    async def SetNativeProviderModel(  # noqa: N802
+        self, provider_id: "s", model: "s", expected_model: "s",  # noqa: F821,UP037
+    ) -> "s":  # noqa: F821,UP037
+        """Model-only owner write; the daemon revalidates policy and catalog."""
+        import asyncio  # noqa: PLC0415
+        sender_uid = await self._resolve_current_sender_uid()
+        result = await asyncio.to_thread(
+            self._wiring.set_native_provider_model,
+            provider_id=provider_id, model=model, expected_model=expected_model, sender_uid=sender_uid,
+        )
+        return json.dumps(result)
 
     @method()
     async def StartProviderOauth(self, provider_id: "s") -> "s":  # noqa: N802,F821,UP037
@@ -1028,6 +1089,74 @@ class Runtime1ServiceInterface(ServiceInterface):
         )
         return json.dumps(result)
 
+    # ── Companion SSO bridge (026, contracts/sso.md §3, T004) ────────────
+
+    @method()
+    async def MintCompanionOwnerAssertion(self, slug: "s") -> "s":  # noqa: N802,F821,UP037
+        """Firma una aserción de propietario de un solo uso para *slug*.
+
+        authZ: SOLO el uid del shell-server (contracts/sso.md §3) — ni
+        siquiera el operador (hermes-user) puede llamar este verbo
+        directamente, la aserción no lleva identidad humana que extraer.
+        Devuelve JSON {assertion, expires_at}. La clave privada nunca sale
+        de este proceso.
+        """
+        sender_uid = await self._resolve_current_sender_uid()
+        try:
+            result = self._wiring.mint_companion_owner_assertion(
+                slug=slug, sender_uid=sender_uid
+            )
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
+        except CompanionSsoRateLimitedError as exc:
+            raise DBusError("org.hermes.Error.RateLimited", str(exc)) from exc
+        except CompanionSsoAuthorityError as exc:
+            raise DBusError("org.hermes.Error.Unavailable", str(exc)) from exc
+        return json.dumps(result)
+
+    @method()
+    async def PublishCompanionComposioLease(self) -> "s":  # noqa: N802,F821,UP037
+        """Fixed-purpose daemon publication. Only an acceptance boolean returns."""
+        sender_uid = await self._resolve_current_sender_uid()
+        try:
+            result = await self._wiring.publish_companion_composio_lease(sender_uid=sender_uid)
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", "Caller unauthorized") from exc
+        except Exception as exc:  # noqa: BLE001 - no upstream/credential error details
+            raise DBusError("org.hermes.Error.Unavailable", "Publication unavailable") from exc
+        return json.dumps(result)
+
+    @method()
+    async def GetCompanionHealth(self, slug: "s") -> "s":  # noqa: N802,F821,UP037
+        """`/mcp/health` read-only (sin authZ, igual que GetKillSwitchStatus).
+
+        Devuelve JSON {state, reachable, http_status, contract_version,
+        accounts_linked}. Nunca lanza: cualquier anomalía de red/TLS se
+        resuelve a state="unreachable" (FR-3, companion opcional).
+        """
+        result = await self._wiring.get_companion_health(slug=slug)
+        return json.dumps(result)
+
+    @method()
+    async def ReloadCompanionPresence(self, slug: "s") -> "s":  # noqa: N802,F821,UP037
+        """Re-lee companions.json/bearer para *slug* y resiembra + reconecta
+        su entrada MCP SIN reiniciar el daemon (028 T017).
+
+        authZ: SOLO el uid del shell-server (misma frontera que
+        MintCompanionOwnerAssertion) — invocado por el agente anfitrión tras
+        un `safent companion install|repair` con éxito, nunca directamente
+        por el operador. Devuelve JSON {ok, state?, reachable?} o
+        {ok: false, reason: "not_installed"} si el andamiaje aún no valida.
+        """
+        sender_uid = await self._resolve_current_sender_uid()
+        try:
+            result = await self._wiring.reload_companion_presence(
+                slug=slug, sender_uid=sender_uid
+            )
+        except PermissionError as exc:
+            raise DBusError("org.hermes.Error.Unauthorized", str(exc)) from exc
+        return json.dumps(result)
+
     @method()
     async def SetManagedRemoteEndpoint(  # noqa: N802
         self, slug: "s", url: "s"  # noqa: F821,UP037
@@ -1074,6 +1203,29 @@ class Runtime1ServiceInterface(ServiceInterface):
     async def GetWebSearchStatus(self) -> "s":  # noqa: N802,F821,UP037
         """Qué backends de búsqueda web tienen key (read-only)."""
         return json.dumps(self._wiring.get_web_search_status())
+
+    @method()
+    async def SetImageGenerationApiKey(self, api_key: "s") -> "s":  # noqa: N802,F821,UP037
+        """Configura FAL_KEY para generación de imágenes (FAL.ai). {ok,error}."""
+        sender_uid = await self._resolve_current_sender_uid()
+        return json.dumps(
+            await self._wiring.set_image_generation_api_key(
+                api_key=api_key, sender_uid=sender_uid
+            )
+        )
+
+    @method()
+    async def DeleteImageGenerationApiKey(self) -> "s":  # noqa: N802,F821,UP037
+        """Elimina FAL_KEY. {ok,error}."""
+        sender_uid = await self._resolve_current_sender_uid()
+        return json.dumps(
+            await self._wiring.delete_image_generation_api_key(sender_uid=sender_uid)
+        )
+
+    @method()
+    async def GetImageGenerationStatus(self) -> "s":  # noqa: N802,F821,UP037
+        """Proveedor + key configurada + modelo de generación de imágenes (read-only)."""
+        return json.dumps(self._wiring.get_image_generation_status())
 
     @method()
     async def ListComposioApps(self) -> "s":  # noqa: N802,F821,UP037
@@ -1504,7 +1656,8 @@ class Runtime1ServiceInterface(ServiceInterface):
     async def ForgetMemoryEntry(self, entry_id: "s") -> "s":  # noqa: N802,F821,UP037
         """Olvida (borra) una entrada de memoria por su id '{target}:{index}'.
 
-        Idempotente: devuelve {ok:true} aunque la entrada ya haya sido borrada.
+        {ok:false, code:"not_found"} si la entrada no existe (nunca existió o
+        ya se borró) — la capa REST lo traduce a 404.
         authZ: operador (sender_uid del bus, CWE-862).
         PII: el contenido NUNCA cruza el bus ni se loguea.
         """

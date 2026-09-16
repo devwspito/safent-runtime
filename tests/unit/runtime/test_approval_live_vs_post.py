@@ -125,7 +125,7 @@ def _make_fake_control_plane(dbus_json_response: str | None):
     """Build a fake ControlPlane whose .approve() returns dbus_json_response."""
 
     class FakeCP:
-        async def approve(self, *, channel, proposal_id, mfa_factors=None):
+        async def approve(self, *, channel, proposal_id):
             return dbus_json_response
 
     return FakeCP()
@@ -135,7 +135,7 @@ def _make_fake_control_plane(dbus_json_response: str | None):
 async def test_C_approvals_api_returns_live_true_when_dbus_says_live() -> None:
     """C — live=true from D-Bus propagates to the HTTP response body."""
     from hermes.shell_server.cowork.approvals_api import create_approvals_router
-    from hermes.shell_server.security.mfa import MfaStore
+
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -144,14 +144,14 @@ async def test_C_approvals_api_returns_live_true_when_dbus_says_live() -> None:
 
     app = FastAPI()
     app.state.control_plane = cp
-    app.include_router(create_approvals_router(mfa=MfaStore()))
+    app.include_router(create_approvals_router())
 
     client = TestClient(app, raise_server_exceptions=True)
     pid = str(uuid4())
 
     resp = client.post(
         f"/api/v1/approvals/{pid}",
-        json={"decision": "once", "totp": None},
+        json={"decision": "once"},
     )
     assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
     body = resp.json()
@@ -165,7 +165,7 @@ async def test_C_approvals_api_returns_live_true_when_dbus_says_live() -> None:
 async def test_D_approvals_api_returns_live_false_when_dbus_says_post() -> None:
     """D — live=false from D-Bus propagates to the HTTP response body (POST path)."""
     from hermes.shell_server.cowork.approvals_api import create_approvals_router
-    from hermes.shell_server.security.mfa import MfaStore
+
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -174,14 +174,14 @@ async def test_D_approvals_api_returns_live_false_when_dbus_says_post() -> None:
 
     app = FastAPI()
     app.state.control_plane = cp
-    app.include_router(create_approvals_router(mfa=MfaStore()))
+    app.include_router(create_approvals_router())
 
     client = TestClient(app, raise_server_exceptions=True)
     pid = str(uuid4())
 
     resp = client.post(
         f"/api/v1/approvals/{pid}",
-        json={"decision": "once", "totp": None},
+        json={"decision": "once"},
     )
     assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
     body = resp.json()
@@ -197,7 +197,7 @@ async def test_D_approvals_api_returns_live_false_when_dbus_says_post() -> None:
 async def test_E_approvals_api_defaults_live_true_for_non_json_response() -> None:
     """E — if D-Bus returns a non-JSON string, live defaults to True (safe fallback)."""
     from hermes.shell_server.cowork.approvals_api import create_approvals_router
-    from hermes.shell_server.security.mfa import MfaStore
+
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -205,14 +205,14 @@ async def test_E_approvals_api_defaults_live_true_for_non_json_response() -> Non
 
     app = FastAPI()
     app.state.control_plane = cp
-    app.include_router(create_approvals_router(mfa=MfaStore()))
+    app.include_router(create_approvals_router())
 
     client = TestClient(app, raise_server_exceptions=True)
     pid = str(uuid4())
 
     resp = client.post(
         f"/api/v1/approvals/{pid}",
-        json={"decision": "once", "totp": None},
+        json={"decision": "once"},
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -225,7 +225,7 @@ async def test_E_approvals_api_defaults_live_true_for_non_json_response() -> Non
 async def test_E2_approvals_api_defaults_live_true_for_none_response() -> None:
     """E2 — if D-Bus returns None (non-D-Bus adapter), live defaults to True."""
     from hermes.shell_server.cowork.approvals_api import create_approvals_router
-    from hermes.shell_server.security.mfa import MfaStore
+
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -233,14 +233,14 @@ async def test_E2_approvals_api_defaults_live_true_for_none_response() -> None:
 
     app = FastAPI()
     app.state.control_plane = cp
-    app.include_router(create_approvals_router(mfa=MfaStore()))
+    app.include_router(create_approvals_router())
 
     client = TestClient(app, raise_server_exceptions=True)
     pid = str(uuid4())
 
     resp = client.post(
         f"/api/v1/approvals/{pid}",
-        json={"decision": "once", "totp": None},
+        json={"decision": "once"},
     )
     assert resp.status_code == 200
     body = resp.json()

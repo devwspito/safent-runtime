@@ -40,6 +40,10 @@ class NousRisk(StrEnum):
 # ---------------------------------------------------------------------------
 
 _NOUS_TOOL_RISK: dict[str, NousRisk] = {
+    # Native deferred catalog reads; tool_call is unwrapped to the actual tool
+    # before Hermes invokes pre_tool_call and never receives a blanket grant.
+    "tool_search": NousRisk.READ,
+    "tool_describe": NousRisk.READ,
     # ----------------------------------------------------------------
     # File tools
     # ----------------------------------------------------------------

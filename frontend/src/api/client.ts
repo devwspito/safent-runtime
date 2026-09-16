@@ -1,4 +1,4 @@
-import { token, refreshToken } from '../lib/token'
+import { token, refreshToken, getAuthStatus } from '../lib/token'
 import type {
   Agent,
   ActiveAgentResponse,
@@ -18,7 +18,9 @@ import type {
   HubOpStatus,
   ComposioStatus,
   ComposioApp,
+  ComposioConnectedAccount,
   WebSearchStatus,
+  ImageGenerationStatus,
   McpServer,
   McpRegistryEntry,
   McpAddResponse,
@@ -32,12 +34,13 @@ import type {
   EgressDomainsResponse,
   EgressMode,
   EgressModeResponse,
+  TailnetStatus,
+  SshHostsResponse,
+  KillSwitchStatus,
   PendingApproval,
   InboundDelegation,
-  MfaStatus,
   PoliciesResponse,
   InstallDecisionPayload,
-  AgentRoster,
   WorkspaceFile,
   MemoryItem,
   MemoryEntryDetail,
@@ -45,6 +48,7 @@ import type {
   UnreadCountResponse,
   InstallScanResponse,
   SecurityDecisionPayload,
+  SecurityDecisionResponse,
   SkillDetails,
   UsageSummary,
   UsageByAgent,
@@ -52,7 +56,12 @@ import type {
   ConversationUsage,
   UsagePeriod,
   UsageDimension,
-  AgentStatsResponse,
+  AdsBridgeSessionResponse,
+  HostVerb,
+  InstallRequestResponse,
+  InstallRequestsListResponse,
+  VersionSet,
+  UpdatePiece,
 } from './types'
 
 // Mirrors the timeout strategy in vanilla api.js: snappy GETs fail fast;
@@ -63,20 +72,43 @@ const BASE = '/api/v1'
 export class ApiError extends Error {
   readonly status: number
   readonly body: unknown
+  readonly code: string | undefined
 
   constructor(message: string, status: number, body: unknown) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.body = body
+    this.code = errorCode(body)
   }
 }
+
+function errorCode(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined
+  const detail = (body as Record<string, unknown>).detail
+  const code = detail && typeof detail === 'object'
+    ? (detail as Record<string, unknown>).code : undefined
+  return typeof code === 'string' ? code : undefined
+}
+
+const FACTOR_ERRORS = new Set([
+  'mfa_required', 'invalid_totp', 'mfa_not_enrolled', 'invalid_owner_approval',
+])
 
 interface RequestOptions extends RequestInit {
   timeoutMs?: number
 }
 
 async function request<T>(path: string, options: RequestOptions = {}, _retried = false): Promise<T> {
+  // 028 FR-012/SC-012: once we know the bearer is gone (no token was ever present,
+  // or a prior refresh definitively failed), every caller short-circuits HERE,
+  // before fetch() — this is what turns "session lost" into zero further
+  // /api/v1/* calls instead of every polling hook 401-ing forever. The app shell
+  // (App.tsx) reacts to the same auth status by swapping to the reconnect screen.
+  if (getAuthStatus().kind === 'unauthenticated' && path !== '/session/refresh') {
+    throw new ApiError('No hay una sesión activa.', 401, null)
+  }
+
   const { timeoutMs = DEFAULT_TIMEOUT_MS, headers: extraHeaders, ...rest } = options
 
   const headers: Record<string, string> = {
@@ -109,17 +141,24 @@ async function request<T>(path: string, options: RequestOptions = {}, _retried =
   }
   clearTimeout(timer)
 
+  let errorBody: unknown = null
+  if (!res.ok) {
+    try { errorBody = await res.json() } catch { /* non-JSON */ }
+  }
+
+  // A rejected action approval is not an expired session. Never replay its
+  // single-use grant or disturb the authenticated owner's session.
   // Session token rotated/expired mid-use → renew once and retry, so the user
   // never hits a dead 401 while the tab is active.
-  if (res.status === 401 && !_retried && token() && path !== '/session/refresh') {
+  if (res.status === 401 && !FACTOR_ERRORS.has(errorCode(errorBody) ?? '')
+    && !_retried && token() && path !== '/session/refresh') {
     if (await refreshToken()) {
       return request<T>(path, options, true)
     }
   }
 
   if (!res.ok) {
-    let body: unknown = null
-    try { body = await res.json() } catch { /* non-JSON */ }
+    const body = errorBody
     const b = body as Record<string, unknown> | null
     const message =
       (b?.detail as Record<string, unknown> | undefined)?.message as string
@@ -134,7 +173,7 @@ async function request<T>(path: string, options: RequestOptions = {}, _retried =
 
   // Mirror the vanilla api.js {ok:false} guard (mutators return 2xx with ok:false
   // on daemon-level failures — e.g. addMcpServer).
-  if (json['ok'] === false) {
+  if (json && json['ok'] === false) {
     throw new ApiError(
       (json['error'] as string | undefined) ?? 'La operación falló.',
       res.status,
@@ -174,23 +213,6 @@ export function updateAgent(agentId: string, payload: UpdateAgentPayload): Promi
 
 export function deleteAgent(agentId: string): Promise<unknown> {
   return request<unknown>(`/agents/${encodeURIComponent(agentId)}`, { method: 'DELETE' })
-}
-
-export function getAgentRoster(): Promise<AgentRoster> {
-  return request<AgentRoster>('/agents/roster').catch(
-    () => ({ departments: [] }),
-  )
-}
-
-export function getDefaultRoster(): Promise<{ enabled: boolean }> {
-  return request<{ enabled: boolean }>('/agents/default-roster').catch(() => ({ enabled: true }))
-}
-
-export function setDefaultRoster(enabled: boolean): Promise<{ enabled: boolean }> {
-  return request<{ enabled: boolean }>('/agents/default-roster', {
-    method: 'POST',
-    body: JSON.stringify({ enabled }),
-  })
 }
 
 /**
@@ -250,6 +272,10 @@ export function addProvider(payload: Record<string, unknown>): Promise<Provider>
   return request<Provider>('/providers', { method: 'POST', body: JSON.stringify(payload) })
 }
 
+export function updateProvider(providerId: string, payload: Record<string, unknown>): Promise<Provider> {
+  return request<Provider>(`/providers/${encodeURIComponent(providerId)}`, { method: 'PATCH', body: JSON.stringify(payload) })
+}
+
 /**
  * Configure a NATIVE catalogue provider (OpenAI, Anthropic, …) by kind + api_key.
  * The native catalogue path must NOT use addProvider() → POST /providers, which
@@ -272,16 +298,71 @@ export function configureNativeProvider(payload: {
  *  Returns null when none is configured. Merged into the configured list by the UI. */
 export function getNativeActive(): Promise<Provider | null> {
   return request<Provider | Record<string, never>>('/providers/native/active')
-    .then(p => (p && (p as Provider).provider_id ? (p as Provider) : null))
-    .catch(() => null)
+    .then(p => {
+      if (p === null || (p && typeof p === 'object' && !Array.isArray(p) && Object.keys(p).length === 0)) return null
+      if (p && typeof p.provider_id === 'string' && p.provider_id) return p as Provider
+      throw new ApiError('No se pudo verificar el proveedor activo.', 502, null)
+    })
 }
 
-export function setActiveProvider(providerId: string): Promise<unknown> {
-  return request<unknown>(`/providers/${encodeURIComponent(providerId)}/activate`, { method: 'POST' })
+export interface NativeModelSelection {
+  provider_id: 'openai-codex'
+  active_model: string
+}
+export interface NativeModelCatalog extends NativeModelSelection { models: string[] }
+
+function nativeModelResult(value: unknown): NativeModelSelection {
+  if (!value || typeof value !== 'object' || !('provider_id' in value) || value.provider_id !== 'openai-codex'
+    || !('active_model' in value) || typeof value.active_model !== 'string' || value.active_model.length > 128) {
+    throw new ApiError('No se pudo verificar el modelo.', 502, null)
+  }
+  return { provider_id: 'openai-codex', active_model: value.active_model }
 }
 
-export function testProvider(providerId: string): Promise<{ ok?: boolean }> {
-  return request<{ ok?: boolean }>(
+export async function getNativeModelCatalog(): Promise<NativeModelCatalog> {
+  const value = await request<unknown>('/providers/native/models', { timeoutMs: 60_000 })
+  const selection = nativeModelResult(value)
+  const models = (value as { models?: unknown }).models
+  if (!Array.isArray(models) || !models.length || models.length > 1_000
+    || models.some(model => typeof model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(model))) {
+    throw new ApiError('No se pudo verificar el catálogo de modelos.', 502, null)
+  }
+  return { ...selection, models: [...new Set(models)] }
+}
+
+export async function selectNativeModel(payload: NativeModelSelection & { model: string }): Promise<NativeModelSelection> {
+  const value = await request<unknown>('/providers/native/model', {
+    method: 'PATCH', timeoutMs: 60_000,
+    body: JSON.stringify({ provider_id: payload.provider_id, model: payload.model, expected_model: payload.active_model }),
+  })
+  const selection = nativeModelResult(value)
+  if (selection.active_model !== payload.model) throw new ApiError('No se pudo confirmar el cambio de modelo.', 502, null)
+  return selection
+}
+
+export async function setActiveProvider(providerId: string): Promise<unknown> {
+  try {
+    const result = await request<unknown>(`/providers/${encodeURIComponent(providerId)}/activate`, { method: 'POST' })
+    if (!result || typeof result !== 'object' || Array.isArray(result)
+      || ('ok' in result && result.ok === false)
+      || !('provider_id' in result) || typeof result.provider_id !== 'string' || !result.provider_id
+      || !(('ok' in result && result.ok === true) || ('is_active' in result && result.is_active === true))) {
+      throw new ApiError('No se pudo confirmar la activación del proveedor.', 502, null)
+    }
+    return result
+  } catch (error) {
+    throw new ApiError('No se pudo confirmar la activación del proveedor.', error instanceof ApiError && error.status !== 200 ? error.status : 502, null)
+  }
+}
+
+/** `code` (PROV-03, specs/025-safent-repaso): honest classification of a
+ *  non-ok result — "invalid_key" (endpoint reachable, credential rejected),
+ *  "endpoint_error" (wrong base_url/path, e.g. a 404), or undefined for an
+ *  unclassified provider error (still surfaced via `error`). */
+export function testProvider(
+  providerId: string,
+): Promise<{ ok?: boolean; error?: string | null; code?: 'invalid_key' | 'endpoint_error' | null }> {
+  return request<{ ok?: boolean; error?: string | null; code?: 'invalid_key' | 'endpoint_error' | null }>(
     `/providers/${encodeURIComponent(providerId)}/test`,
     { method: 'POST', timeoutMs: 60_000 },
   )
@@ -301,7 +382,7 @@ export function startProviderOAuth(providerId: string): Promise<Record<string, u
 export function getProviderOAuthStatus(sessionId: string): Promise<{ status?: string; error?: string; error_message?: string }> {
   return request<{ status?: string; error?: string; error_message?: string }>(
     `/providers/oauth/${encodeURIComponent(sessionId)}`,
-  ).catch(() => ({ status: 'unknown' }))
+  )
 }
 
 // ── Skills ────────────────────────────────────────────────────────────────────
@@ -313,24 +394,28 @@ export function listSkills(): Promise<Skill[]> {
 export function searchSkillsHub(query: string): Promise<{ results?: HubSkillResult[] } | HubSkillResult[]> {
   return request<{ results?: HubSkillResult[] } | HubSkillResult[]>(
     `/skills/hub/search?q=${encodeURIComponent(query)}`,
-  ).catch(() => [])
+  )
 }
 
 export function listHubSkills(): Promise<HubSkillResult[]> {
-  return request<HubSkillResult[]>('/skills/hub').catch(() => [])
+  return request<HubSkillResult[]>('/skills/hub')
 }
 
-export function installSkill(identifier: string, force = false): Promise<HubInstallResponse> {
+export function installSkill(
+  identifier: string,
+  force = false,
+  approvalGrant?: string,
+): Promise<HubInstallResponse> {
   return request<HubInstallResponse>('/skills/hub/install', {
     method: 'POST',
     body: JSON.stringify({ identifier, force }),
+    // Exact-action, single-use confirmation from POST /security/decisions.
+    ...(approvalGrant ? { headers: { 'X-Owner-Approval-Grant': approvalGrant } } : {}),
   })
 }
 
 export function getHubOpStatus(opId: string): Promise<HubOpStatus> {
-  return request<HubOpStatus>(`/skills/hub/ops/${encodeURIComponent(opId)}`).catch(
-    () => ({ status: 'unknown' }),
-  )
+  return request<HubOpStatus>(`/skills/hub/ops/${encodeURIComponent(opId)}`)
 }
 
 export function uninstallHubSkill(name: string): Promise<HubInstallResponse> {
@@ -354,12 +439,50 @@ export function getComposioStatus(): Promise<ComposioStatus> {
   return request<ComposioStatus>('/integrations/composio/status')
 }
 
-export function listComposioConnected(): Promise<ComposioApp[]> {
-  return request<ComposioApp[]>('/integrations/composio/connected')
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
 }
 
-export function listComposioApps(): Promise<ComposioApp[]> {
-  return request<ComposioApp[]>('/integrations/composio/toolkits')
+export async function listComposioConnected(): Promise<ComposioConnectedAccount[]> {
+  const payload = await request<unknown>('/integrations/composio/connected')
+  const invalid = () => new ApiError('No se pudieron verificar tus conexiones. Vuelve a intentarlo.', 502, null)
+  if (!Array.isArray(payload)) throw invalid()
+  const ids = new Set<string>()
+  return payload.map(account => {
+    if (!account || typeof account !== 'object'
+      || !nonEmptyString(account.id) || ids.has(account.id)
+      || !nonEmptyString(account.toolkit_slug)
+      || !nonEmptyString(account.entity_id) || !nonEmptyString(account.status)
+      || (account.auth_config_id !== undefined && typeof account.auth_config_id !== 'string')) {
+      throw invalid()
+    }
+    ids.add(account.id)
+    return {
+      id: account.id,
+      toolkit_slug: account.toolkit_slug.trim().toLowerCase(),
+      entity_id: account.entity_id,
+      status: account.status.trim().toUpperCase(),
+      auth_config_id: account.auth_config_id ?? '',
+    }
+  })
+}
+
+export async function listComposioApps(): Promise<ComposioApp[]> {
+  const payload = await request<unknown>('/integrations/composio/toolkits')
+  const invalid = () => new ApiError('No se pudo cargar el catálogo de aplicaciones. Vuelve a intentarlo.', 502, null)
+  if (!Array.isArray(payload)) throw invalid()
+  return payload.map(app => {
+    if (!app || typeof app !== 'object' || !nonEmptyString(app.slug)
+      || ['name', 'description', 'logo'].some(key => app[key] !== undefined && typeof app[key] !== 'string')) {
+      throw invalid()
+    }
+    return {
+      slug: app.slug.trim().toLowerCase(),
+      name: app.name?.trim() || undefined,
+      description: app.description?.trim() || undefined,
+      logo: app.logo?.trim() || undefined,
+    }
+  })
 }
 
 export function connectComposioApp(slug: string): Promise<{ redirect_url?: string }> {
@@ -369,15 +492,80 @@ export function connectComposioApp(slug: string): Promise<{ redirect_url?: strin
   })
 }
 
-export function setComposioApiKey(apiKey: string): Promise<unknown> {
-  return request<unknown>('/integrations/composio/key', {
-    method: 'POST',
-    body: JSON.stringify({ api_key: apiKey }),
-  })
+export async function setComposioApiKey(apiKey: string): Promise<{ has_key: true }> {
+  try {
+    const result = await request<unknown>('/integrations/composio/key', {
+      method: 'POST', body: JSON.stringify({ api_key: apiKey }),
+    })
+    if (!result || typeof result !== 'object' || !('has_key' in result) || result.has_key !== true) {
+      throw new ApiError('No se pudo confirmar Composio.', 502, null)
+    }
+    return { has_key: true }
+  } catch (failure) {
+    throw new ApiError('No se pudo guardar la clave de Composio.', failure instanceof ApiError ? failure.status : 0, null)
+  }
 }
 
-export function disconnectComposioApp(slug: string): Promise<unknown> {
-  return request<unknown>(`/integrations/composio/connected/${encodeURIComponent(slug)}`, {
+export type ComposioAdsToolkit = 'googleads' | 'metaads'
+
+/** Saved app configuration only: this does not authorize an advertising account. */
+export async function getComposioAdsConfig(toolkit: ComposioAdsToolkit): Promise<{ ready: boolean }> {
+  try {
+    if (toolkit !== 'googleads' && toolkit !== 'metaads') throw new ApiError('Plataforma no válida.', 400, null)
+    const result = await request<unknown>(`/integrations/composio/auth-configs/${toolkit}`)
+    if (!result || typeof result !== 'object' || !('toolkit_slug' in result) || result.toolkit_slug !== toolkit
+      || !('auth_config_id' in result) || (result.auth_config_id !== null && !nonEmptyString(result.auth_config_id))) {
+      throw new ApiError('No se pudo confirmar la configuración.', 502, null)
+    }
+    return { ready: result.auth_config_id !== null }
+  } catch (failure) {
+    throw new ApiError('No se pudo comprobar la configuración de Anuncios.', failure instanceof ApiError ? failure.status : 0, null)
+  }
+}
+
+export async function prepareComposioAds(): Promise<{ googleads: boolean; metaads: boolean }> {
+  try {
+    const result = await request<unknown>('/integrations/composio/ads/prepare', { method: 'POST', timeoutMs: 60_000 })
+    if (!result || typeof result !== 'object' || !('googleads' in result) || typeof result.googleads !== 'boolean'
+      || !('metaads' in result) || typeof result.metaads !== 'boolean') {
+      throw new ApiError('No se pudo confirmar la preparación.', 502, null)
+    }
+    return { googleads: result.googleads, metaads: result.metaads }
+  } catch (failure) {
+    throw new ApiError('No se pudo preparar Anuncios.', failure instanceof ApiError ? failure.status : 0, null)
+  }
+}
+
+export interface ComposioMetaSetupInput {
+  client_id: string
+  client_secret: string
+}
+
+export interface ComposioMetaSetupResult {
+  ready: true
+}
+
+/** Owner-only preparation, not account authorization. Never retain provider error bodies. */
+export async function setupComposioMeta(input: ComposioMetaSetupInput): Promise<ComposioMetaSetupResult> {
+  try {
+    const result = await request<unknown>('/integrations/composio/meta/setup', {
+      method: 'POST',
+      timeoutMs: 60_000,
+      body: JSON.stringify({ client_id: input.client_id, client_secret: input.client_secret }),
+    })
+    if (!result || typeof result !== 'object' || !('ready' in result) || result.ready !== true) {
+      throw new ApiError('No se pudo confirmar la preparación de Meta Ads.', 502, null)
+    }
+    return { ready: true }
+  } catch (failure) {
+    // Upstream failures may echo submitted credentials. Only the status is
+    // needed to choose a safe, local message; neither body nor cause escapes.
+    throw new ApiError('No se pudo preparar Meta Ads.', failure instanceof ApiError ? failure.status : 0, null)
+  }
+}
+
+export function disconnectComposioApp(connectionId: string): Promise<unknown> {
+  return request<unknown>(`/integrations/composio/connected/${encodeURIComponent(connectionId)}`, {
     method: 'DELETE',
   })
 }
@@ -393,13 +581,32 @@ export function setWebSearchKey(provider: string, apiKey: string): Promise<{ ok?
   })
 }
 
+// ── Image generation (FAL.ai) ───────────────────────────────────────────────────
+
+export function getImageGenerationStatus(): Promise<ImageGenerationStatus> {
+  return request<ImageGenerationStatus>('/integrations/image-generation')
+}
+
+export function setImageGenerationKey(apiKey: string): Promise<{ has_key: boolean }> {
+  return request<{ has_key: boolean }>('/integrations/image-generation/key', {
+    method: 'POST',
+    body: JSON.stringify({ api_key: apiKey }),
+  })
+}
+
+export function deleteImageGenerationKey(): Promise<{ has_key: boolean }> {
+  return request<{ has_key: boolean }>('/integrations/image-generation/key', {
+    method: 'DELETE',
+  })
+}
+
 // ── MCP ───────────────────────────────────────────────────────────────────────
 
 export function listMcpServers(): Promise<McpServer[]> {
   return request<McpServer[]>('/mcp')
 }
 
-export function addMcpServer(payload: Record<string, unknown>): Promise<McpAddResponse> {
+export function addMcpServer(payload: Record<string, unknown>, approvalGrant?: string): Promise<McpAddResponse> {
   // The daemon connects eagerly; a rejection (bad draft, disallowed runner,
   // security-scan block, ...) is now a 400/403 — request<T>'s !res.ok branch
   // throws ApiError(message, status, body) with the daemon's {ok, error, ...}
@@ -408,6 +615,7 @@ export function addMcpServer(payload: Record<string, unknown>): Promise<McpAddRe
   // still resolves — callers surface that warning separately.
   return request<McpAddResponse>('/mcp', {
     method: 'POST',
+    headers: approvalGrant ? { 'X-Owner-Approval-Grant': approvalGrant } : undefined,
     body: JSON.stringify(payload),
     timeoutMs: 300_000,
   })
@@ -429,15 +637,64 @@ export function listManagedRemoteEndpoints(): Promise<ManagedRemoteEndpointsResp
     .catch(() => ({ endpoints: {} }))
 }
 
-export function connectManagedRemote(slug: string, url: string, force = false): Promise<McpAddResponse> {
+export function connectManagedRemote(slug: string, url: string, force = false, approvalGrant?: string): Promise<McpAddResponse> {
   return request<McpAddResponse>(`/mcp/managed-remote/${encodeURIComponent(slug)}/connect`, {
     method: 'POST',
+    headers: approvalGrant ? { 'X-Owner-Approval-Grant': approvalGrant } : undefined,
     body: JSON.stringify({ url, force }),
     timeoutMs: 300_000,
   })
 }
 
+// ── Ads bridge (026, contracts/sso.md) ──────────────────────────────────────
+// Mints/refreshes the `ads_bridge` cookie (same-origin, HttpOnly — invisible
+// to this client) AND reports companion readiness in one round trip, so the
+// sidebar's poll both keeps the bridge warm (SC-002: zero-second logins)
+// and drives the disabled/enabled state. Fail-soft: a transient network
+// error degrades to "unavailable/unreachable", never a thrown exception —
+// useAdsAvailability keeps the last known state instead.
+export function mintAdsBridgeSession(): Promise<AdsBridgeSessionResponse> {
+  return request<AdsBridgeSessionResponse>('/ads/bridge/session', { method: 'POST' })
+    .catch(() => ({ status: 'unavailable', reason: 'unreachable' }))
+}
+
+// ── Install requests (028/029, contracts/install-request.md) ───────────────────
+// The sandbox leaves a marker; the host agent (or the app itself) claims and
+// fulfils it. Shared by the Ads companion install/repair action (029) and the
+// system update/uninstall footer (028) — one contract, one client surface.
+
+export function postInstallRequest(
+  verb: HostVerb,
+  opts: { slug?: 'safent-ads'; retention?: 'keep' | 'purge' } = {},
+): Promise<InstallRequestResponse> {
+  return request<InstallRequestResponse>('/system/requests', {
+    method: 'POST',
+    body: JSON.stringify({ verb, ...opts }),
+  }).catch((e) => {
+    // 409 = "a live request for this verb already exists" — the contract's own
+    // idempotency signal (install-request.md §1.5), not a failure: the caller
+    // adopts the existing request instead of showing an error (FR-008).
+    if (e instanceof ApiError && e.status === 409 && e.body && typeof e.body === 'object') {
+      return e.body as InstallRequestResponse
+    }
+    throw e
+  })
+}
+
+export function getInstallRequests(): Promise<InstallRequestsListResponse> {
+  return request<InstallRequestsListResponse>('/system/requests')
+}
+
 // ── Tasks ─────────────────────────────────────────────────────────────────────
+
+export function getTaskDashboard(): Promise<import('./types').TaskDashboardResponse> {
+  return request('/tasks/dashboard?limit=100')
+}
+
+/** No empty fallback: transport failure is not an empty inbox. */
+export function getTaskInbox(): Promise<InboundDelegation[]> {
+  return request('/inbound-delegations')
+}
 
 export function listConfiguredTasks(): Promise<ConfiguredTasksResponse> {
   return request<ConfiguredTasksResponse>('/tasks/configured').catch(
@@ -457,6 +714,28 @@ export function listRecentTasks(limit = 20): Promise<RecentTasksResponse> {
  */
 export function cancelTask(taskId: string): Promise<{ ok: boolean; requested?: boolean }> {
   return request(`/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST', body: '{}' })
+}
+
+export interface ChatTaskStatus {
+  task_id: string
+  status: 'pending' | 'in_progress' | 'pending_approval' | TaskTerminalStatus
+  attempts: number
+}
+
+/** Precise owner-scoped lifecycle read, never a scheduled-task or global-list lookup. */
+export async function getChatTaskStatus(taskId: string): Promise<ChatTaskStatus> {
+  try {
+    const result = await request<unknown>(`/tasks/${encodeURIComponent(taskId)}/status`)
+    if (!result || typeof result !== 'object' || !('task_id' in result) || result.task_id !== taskId
+      || !('status' in result) || typeof result.status !== 'string'
+      || !['pending', 'in_progress', 'pending_approval', 'completed', 'failed', 'cancelled', 'rejected'].includes(result.status)
+      || !('attempts' in result) || !Number.isSafeInteger(result.attempts) || (result.attempts as number) < 0) {
+      throw new ApiError('No se pudo confirmar el estado de la tarea.', 502, null)
+    }
+    return { task_id: taskId, status: result.status as ChatTaskStatus['status'], attempts: result.attempts as number }
+  } catch (failure) {
+    throw new ApiError('No se pudo consultar el estado de la tarea.', failure instanceof ApiError ? failure.status : 0, null)
+  }
 }
 
 export function createTask(payload: CreateTaskPayload): Promise<ConfiguredTask> {
@@ -493,84 +772,6 @@ export function getRuntimeStatus(): Promise<RuntimeStatus> {
   )
 }
 
-/**
- * Per-agent live stats: state (idle/working), today's task count, cost, tokens.
- * Falls back to an empty-but-valid shape so callers can guard with `?? []` on agents.
- */
-export function getAgentStats(): Promise<AgentStatsResponse> {
-  return request<AgentStatsResponse>('/runtime/agent-stats').catch(
-    () => ({ available: false, agents: [] }),
-  )
-}
-
-/** A live Office-floor snapshot pushed over SSE. */
-export interface RuntimeSnapshot {
-  runtime: RuntimeStatus
-  stats: AgentStatsResponse
-}
-
-const RUNTIME_STREAM_RECONNECT_MIN_MS = 1_000
-const RUNTIME_STREAM_RECONNECT_MAX_MS = 15_000
-
-/**
- * Subscribe to the live Office floor via SSE (runtime status + agent stats).
- * Replaces the old 4 s poll: one connection, the server pushes on change.
- *
- * EventSource auto-reconnects by itself on most transient drops (readyState
- * goes back to CONNECTING), but a permanently CLOSED source (e.g. a fatal
- * network error, or the browser giving up) otherwise leaves both Office tabs
- * silently stale forever since this is their only path to `runtimeStatus`/
- * `agentStats`. So: on CLOSED we resubscribe ourselves with exponential
- * backoff (1s → 2s → … capped at 15s), reset to 1s once a connection opens.
- * Returns a disposer that stops both the stream and any pending reconnect.
- */
-export function openRuntimeStream(
-  onSnapshot: (snap: RuntimeSnapshot) => void,
-): () => void {
-  let es: EventSource | null = null
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  let reconnectDelayMs = RUNTIME_STREAM_RECONNECT_MIN_MS
-  let disposed = false
-
-  function scheduleReconnect() {
-    if (disposed) return
-    const delay = reconnectDelayMs
-    reconnectDelayMs = Math.min(reconnectDelayMs * 2, RUNTIME_STREAM_RECONNECT_MAX_MS)
-    reconnectTimer = setTimeout(connect, delay)
-  }
-
-  function connect() {
-    const source = new EventSource('/api/v1/runtime/agent-stream')
-    es = source
-
-    source.onopen = () => {
-      reconnectDelayMs = RUNTIME_STREAM_RECONNECT_MIN_MS
-    }
-
-    source.onmessage = (event: MessageEvent) => {
-      try {
-        onSnapshot(JSON.parse(event.data as string) as RuntimeSnapshot)
-      } catch {
-        /* ignore a malformed frame — the next tick supersedes it */
-      }
-    }
-
-    source.onerror = () => {
-      if (disposed || source.readyState !== EventSource.CLOSED) return
-      source.close()
-      scheduleReconnect()
-    }
-  }
-
-  connect()
-
-  return () => {
-    disposed = true
-    if (reconnectTimer) clearTimeout(reconnectTimer)
-    es?.close()
-  }
-}
-
 // ── Chat ──────────────────────────────────────────────────────────────────────
 
 /**
@@ -591,10 +792,34 @@ export function getConversation(id: string): Promise<ConversationDetail> {
   return request<ConversationDetail>(`/chat/conversations/${encodeURIComponent(id)}`)
 }
 
-/** List conversation summaries. */
-export function listConversations(agentId?: string): Promise<ConversationSummary[]> {
-  const qs = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ''
-  return request<ConversationSummary[]>(`/chat/conversations${qs}`).catch(() => [])
+/**
+ * List conversation summaries. Archived ones are excluded unless `includeArchived`
+ * is set — in that case the response carries both, each flagged via `archived`.
+ */
+export function listConversations(
+  agentId?: string,
+  opts: { includeArchived?: boolean } = {},
+): Promise<ConversationSummary[]> {
+  const params = new URLSearchParams()
+  if (agentId) params.set('agent_id', agentId)
+  if (opts.includeArchived) params.set('include_archived', '1')
+  const qs = params.toString()
+  return request<ConversationSummary[]>(`/chat/conversations${qs ? `?${qs}` : ''}`)
+}
+
+/** Hide a conversation from the default list without deleting it. */
+export function archiveConversation(id: string): Promise<unknown> {
+  return request<unknown>(`/chat/conversations/${encodeURIComponent(id)}/archive`, { method: 'POST' })
+}
+
+/** Restore a previously archived conversation to the default list. */
+export function unarchiveConversation(id: string): Promise<unknown> {
+  return request<unknown>(`/chat/conversations/${encodeURIComponent(id)}/unarchive`, { method: 'POST' })
+}
+
+/** Permanently delete a conversation. */
+export function deleteConversation(id: string): Promise<unknown> {
+  return request<unknown>(`/chat/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 // ── Security ──────────────────────────────────────────────────────────────────
@@ -627,8 +852,10 @@ export function scanInstall(kind: 'mcp' | 'skill', identifier: string): Promise<
   })
 }
 
-export function recordSecurityDecision(payload: SecurityDecisionPayload): Promise<unknown> {
-  return request<unknown>('/security/decisions', {
+export function recordSecurityDecision(
+  payload: SecurityDecisionPayload,
+): Promise<SecurityDecisionResponse> {
+  return request<SecurityDecisionResponse>('/security/decisions', {
     method: 'POST',
     body: JSON.stringify(payload),
     timeoutMs: 30_000,
@@ -640,11 +867,11 @@ export function recordSecurityDecision(payload: SecurityDecisionPayload): Promis
 export function listNotifications(limit = 100, unreadOnly = false): Promise<Notification[]> {
   return request<Notification[]>(
     `/notifications?limit=${limit}&unread_only=${unreadOnly}`,
-  ).catch(() => [])
+  )
 }
 
 export function getUnreadCount(): Promise<UnreadCountResponse> {
-  return request<UnreadCountResponse>('/notifications/unread-count').catch(() => ({ count: 0 }))
+  return request<UnreadCountResponse>('/notifications/unread-count')
 }
 
 export function markNotificationRead(id: string): Promise<unknown> {
@@ -698,12 +925,12 @@ export async function getEgressMode(): Promise<EgressModeResponse> {
 }
 
 /**
- * Change the egress mode.  Always requires a valid TOTP code (MFA gate).
+ * Change the egress mode after an explicit Community owner confirmation.
  */
-export function setEgressMode(mode: EgressMode, totp: string): Promise<unknown> {
+export function setEgressMode(mode: EgressMode): Promise<unknown> {
   return request<unknown>('/egress/mode', {
     method: 'POST',
-    body: JSON.stringify({ mode, totp }),
+    body: JSON.stringify({ mode }),
   })
 }
 
@@ -723,6 +950,78 @@ export function unblockEgressDomain(domain: string): Promise<unknown> {
   })
 }
 
+// ── Governed tailnet (spec 022) ─────────────────────────────────────────────
+
+const TAILNET_UNCONFIGURED: TailnetStatus = {
+  configured: false,
+  online: false,
+  node_name: null,
+  magicdns_suffix: null,
+  tailnet: null,
+  peers: [],
+  last_attempt: null,
+}
+
+/** Current tailnet status. Falls back to "not configured" on any fetch error
+ * (mirrors listEgressDomains) so a transient backend hiccup never crashes the card. */
+export function getTailnetStatus(): Promise<TailnetStatus> {
+  return request<TailnetStatus>('/tailnet').catch(() => TAILNET_UNCONFIGURED)
+}
+
+export function getTailnetPeers(): Promise<{ peers: TailnetStatus['peers'] }> {
+  return request<{ peers: TailnetStatus['peers'] }>('/tailnet/peers').catch(() => ({ peers: [] }))
+}
+
+/** Stage a tailnet connect. The key is never echoed back by the backend. */
+export function connectTailnet(authKey: string): Promise<{ staged: boolean }> {
+  return request<{ staged: boolean }>('/tailnet/connect', {
+    method: 'POST',
+    body: JSON.stringify({ auth_key: authKey }),
+  })
+}
+
+/** Stage a tailnet disconnect — gated by the device password (PAM, root helper). */
+export function disconnectTailnet(password: string): Promise<{ staged: boolean }> {
+  return request<{ staged: boolean }>('/tailnet/disconnect', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  })
+}
+
+/** Hosts approved for governed SSH (spec 022 v2). Fail-soft: an empty list on
+ * fetch error, never a crash (mirrors getTailnetStatus/getTailnetPeers above). */
+export function getSshHosts(): Promise<SshHostsResponse> {
+  return request<SshHostsResponse>('/tailnet/ssh-hosts').catch(() => ({ hosts: [] }))
+}
+
+/** Revoke a host's governed-SSH approval after owner confirmation. */
+export function revokeSshHost(host: string): Promise<SshHostsResponse> {
+  return request<SshHostsResponse>(`/tailnet/ssh-hosts/${encodeURIComponent(host)}`, {
+    method: 'DELETE',
+    body: JSON.stringify({}),
+  })
+}
+
+/** Emergency brake status. Fail-soft: never throws, defaults to not-engaged. */
+export function getKillSwitch(): Promise<KillSwitchStatus> {
+  return request<KillSwitchStatus>('/security/kill-switch')
+}
+
+/** Engage the brake — no MFA required, one click (it's a brake). */
+export function engageKillSwitch(reason: string): Promise<unknown> {
+  return request<unknown>('/security/kill-switch', {
+    method: 'POST',
+    body: JSON.stringify({ engaged: true, reason }),
+  })
+}
+
+/** Release the brake after explicit owner confirmation. No Community MFA. */
+export function releaseKillSwitch(): Promise<unknown> {
+  return request<unknown>('/security/kill-switch', {
+    method: 'POST', body: JSON.stringify({ engaged: false }),
+  })
+}
+
 // ── Approvals (HITL) ──────────────────────────────────────────────────────────
 
 export function listPendingApprovals(): Promise<PendingApproval[]> {
@@ -731,12 +1030,11 @@ export function listPendingApprovals(): Promise<PendingApproval[]> {
 
 export function resolveApproval(
   proposalId: string,
-  decision: string,
-  factors: { totp?: string | null } = {},
+  decision: 'once' | 'deny',
 ): Promise<unknown> {
   return request<unknown>(`/approvals/${encodeURIComponent(proposalId)}`, {
     method: 'POST',
-    body: JSON.stringify({ decision, totp: factors.totp ?? null }),
+    body: JSON.stringify({ decision }),
   })
 }
 
@@ -756,52 +1054,37 @@ export function resolveInboundDelegation(
   )
 }
 
-// ── MFA enrollment ────────────────────────────────────────────────────────────
-
-export function mfaStatus(): Promise<MfaStatus> {
-  return request<MfaStatus>('/mfa/status').catch(() => ({ enrolled: false }))
-}
-
-export function mfaEnroll(totp: string | null = null): Promise<{ otpauth_uri?: string; secret?: string }> {
-  return request<{ otpauth_uri?: string; secret?: string }>('/mfa/enroll', {
-    method: 'POST',
-    body: JSON.stringify({ totp }),
-  })
-}
-
 // ── Security policies ─────────────────────────────────────────────────────────
 
 export function getPolicies(): Promise<PoliciesResponse> {
-  return request<PoliciesResponse>('/policies').catch(
-    () => ({ preset: 'equilibrado', tools: {}, mfa_on_dangers: true }),
-  )
+  return request<PoliciesResponse>('/policies')
 }
 
-export function setPolicyPreset(preset: string, totp: string): Promise<unknown> {
+export function setPolicyPreset(preset: string): Promise<unknown> {
   return request<unknown>('/policies/preset', {
     method: 'POST',
-    body: JSON.stringify({ preset, totp }),
+    body: JSON.stringify({ preset }),
   })
 }
 
-export function setPolicyTool(tool: string, enabled: boolean, totp: string): Promise<unknown> {
+export function setPolicyTool(tool: string, enabled: boolean): Promise<unknown> {
   return request<unknown>('/policies/tool', {
     method: 'POST',
-    body: JSON.stringify({ tool, enabled, totp }),
+    body: JSON.stringify({ tool, enabled }),
   })
 }
 
-export function setPolicyTools(tools: Record<string, boolean>, totp: string): Promise<unknown> {
+export function setPolicyTools(tools: Record<string, boolean>): Promise<unknown> {
   return request<unknown>('/policies/tools', {
     method: 'POST',
-    body: JSON.stringify({ tools, totp }),
+    body: JSON.stringify({ tools }),
   })
 }
 
-export function setMfaOnDangers(enabled: boolean, totp: string): Promise<unknown> {
-  return request<unknown>('/policies/mfa_on_dangers', {
+export function setApprovalOnDangers(enabled: boolean): Promise<unknown> {
+  return request<unknown>('/policies/approval_on_dangers', {
     method: 'POST',
-    body: JSON.stringify({ enabled, totp }),
+    body: JSON.stringify({ enabled }),
   })
 }
 
@@ -828,7 +1111,7 @@ export function forgetMemoryItem(id: string): Promise<unknown> {
  */
 export function listWorkspaceFiles(path?: string): Promise<WorkspaceFile[]> {
   const qs = path ? `?path=${encodeURIComponent(path)}` : ''
-  return request<WorkspaceFile[]>(`/workspace/files${qs}`).catch(() => [])
+  return request<WorkspaceFile[]>(`/workspace/files${qs}`)
 }
 
 /**
@@ -882,26 +1165,26 @@ export function getInstanceFeatures(): Promise<InstanceFeatures> {
 
 // ── System update ─────────────────────────────────────────────────────────────
 
+// Rich shape per contracts/update.md §3 — "current_version", "latest_version" and
+// "update_available" are the pre-028 fields (conserved for back-compat: expandir
+// → contraer, never a hard cutover); "current"/"to"/"pieces"/"checked_at" mirror
+// the window.__safentUpdate object the Tauri host shell injects once it has
+// actually checked (the daemon's own check can be blocked by the egress cage).
 export interface SystemUpdateStatus {
   current_version: string
   latest_version: string | null
   update_available: boolean
   updating: boolean
+  available?: boolean
+  current?: VersionSet
+  to?: VersionSet
+  pieces?: UpdatePiece[]
+  checked_at?: string
 }
 
-/** Falls back to a "nothing to see here" shape so a transient failure never surfaces a false update prompt. */
+/** A failed check is unknown, not evidence that no update exists. */
 export function getSystemUpdate(): Promise<SystemUpdateStatus> {
-  return request<SystemUpdateStatus>('/system/update').catch(() => ({
-    current_version: '',
-    latest_version: null,
-    update_available: false,
-    updating: false,
-  }))
-}
-
-/** Drops a marker for the host agent to pick up; it applies the update and the container recreates on its own. */
-export function requestSystemUpdate(): Promise<{ ok: boolean; updating: boolean }> {
-  return request('/system/update', { method: 'POST', body: JSON.stringify({}) })
+  return request<SystemUpdateStatus>('/system/update')
 }
 
 /** Drops an uninstall marker; the host `safent agent` runs `safent uninstall` (removes the
@@ -913,34 +1196,17 @@ export function requestSystemUninstall(): Promise<{ ok: boolean }> {
 // ── Usage / Cost ──────────────────────────────────────────────────────────────
 
 export function getUsageSummary(period: UsagePeriod): Promise<UsageSummary> {
-  return request<UsageSummary>(`/usage/summary?period=${encodeURIComponent(period)}`).catch(() => ({
-    available: false,
-    period,
-    currency: 'USD',
-    total_cost_usd: 0,
-    projected_cost_usd: 0,
-    total_tokens: 0,
-    cycles: 0,
-    failures: 0,
-    self_hosted_cycles: 0,
-    top_models: [],
-  }))
+  return request<UsageSummary>(`/usage/summary?period=${encodeURIComponent(period)}`)
 }
 
 export function getUsageByAgent(period: UsagePeriod): Promise<UsageByAgent> {
-  return request<UsageByAgent>(`/usage/by-agent?period=${encodeURIComponent(period)}`).catch(() => ({
-    available: false,
-    agents: [],
-  }))
+  return request<UsageByAgent>(`/usage/by-agent?period=${encodeURIComponent(period)}`)
 }
 
 export function getUsageTimeseries(period: UsagePeriod, dimension: UsageDimension): Promise<UsageTimeseries> {
   return request<UsageTimeseries>(
     `/usage/timeseries?period=${encodeURIComponent(period)}&dimension=${encodeURIComponent(dimension)}`,
-  ).catch(() => ({
-    available: false,
-    points: [],
-  }))
+  )
 }
 
 export function getConversationUsage(id: string): Promise<ConversationUsage> {
@@ -954,9 +1220,11 @@ export interface StreamCallbacks {
   onThinking(text: string): void
   onToolCall(frame: Extract<StreamFrame, { kind: 'tool_call' }>): void
   onStatus(message: string): void
-  onDone(): void
+  onDone(outcome?: TaskTerminalStatus): void
   onError(message: string): void
 }
+
+export type TaskTerminalStatus = 'completed' | 'failed' | 'cancelled' | 'rejected'
 
 interface StreamHandle {
   close(): void
@@ -971,8 +1239,9 @@ interface StreamHandle {
  * per-task `seq` we put in each event's `id:`); the server replays only the missed
  * frames from the broker log. Resume is the PROTOCOL's job — no bespoke reconnect/
  * backoff/replay here (that fragility was the recurring "chat dies on refresh" bug).
- * Same-origin GET, no auth header (loopback + unguessable UUID; GET isn't token-gated;
- * EventSource cannot set headers anyway).
+ * Same-origin GET, session-token-gated like every other /api/v1/* route. EventSource
+ * cannot set an Authorization header, so the bearer travels as `?token=` instead —
+ * same credential, alternate transport (see main.py's `_require_operator_token`).
  *
  * Frame kinds: delta | thinking_delta | tool_call | status | done | error
  */
@@ -981,7 +1250,7 @@ export function openTaskStream(
   callbacks: StreamCallbacks,
   _opts: { maxRetries?: number } = {},
 ): StreamHandle {
-  const path = `/api/v1/chat/stream/${encodeURIComponent(taskId)}`
+  const path = `/api/v1/chat/stream/${encodeURIComponent(taskId)}?token=${encodeURIComponent(token())}`
   let es: EventSource | null = new EventSource(path)
   let closed = false
   // Defensive dedup; the server already filters by Last-Event-ID so this rarely fires.
@@ -993,9 +1262,13 @@ export function openTaskStream(
   }
 
   es.onmessage = (event: MessageEvent) => {
+    if (closed) return
     let frame: StreamFrame
     try {
       frame = JSON.parse(event.data as string) as StreamFrame
+      if (!frame || typeof frame !== 'object') return
+      const receivedTask = (frame as unknown as Record<string, unknown>).task_id
+      if (receivedTask !== undefined && receivedTask !== taskId) return
     } catch {
       return
     }
@@ -1010,8 +1283,8 @@ export function openTaskStream(
   es.onerror = () => {
     // EventSource reconnects AUTOMATICALLY on a transient drop (it does not give up,
     // and re-sends Last-Event-ID). Do NOT close or raise a fatal error: the task keeps
-    // running server-side and the server replays on re-attach. A real terminal task
-    // error arrives as a `kind:error` FRAME (handled in dispatch → finish()), not here.
+    // running server-side and the server replays on re-attach. Terminal outcome
+    // comes from DONE or the exact durable task-status read, not transport errors.
     if (!closed) callbacks.onStatus('Reconectando con el agente…')
   }
 
@@ -1038,12 +1311,21 @@ export function openTaskStream(
       case 'status':
         callbacks.onStatus(str(f.message) ?? str(f.status) ?? str(p?.message) ?? '')
         break
-      case 'done':
+      case 'done': {
+        const outcome = str(f.outcome) ?? str(p?.outcome)
+        // An explicit nonterminal/unknown outcome must not release the composer.
+        // Old brokers omit outcome or use "done" for successful completion.
+        if (outcome !== undefined && !['completed', 'failed', 'cancelled', 'rejected', 'done'].includes(outcome)) {
+          callbacks.onError('Unconfirmed task outcome')
+          break
+        }
         finish()  // close the EventSource so it does NOT auto-reconnect after the end
-        callbacks.onDone()
+        callbacks.onDone(outcome === undefined || outcome === 'done' ? 'completed' : outcome as TaskTerminalStatus)
         break
+      }
       case 'error':
-        finish()
+        // Error frames can describe attachment failures or retryable engine
+        // attempts. Keep receiving: only DONE or durable task state is terminal.
         callbacks.onError(str(f.message) ?? str(f.error) ?? str(p?.error) ?? 'Error desconocido del agente')
         break
     }
@@ -1054,20 +1336,6 @@ export function openTaskStream(
       finish()
     },
   }
-}
-
-// ── Teaching over the noVNC browser (UI-driven, En vivo → Enseñar) ────────────
-export async function startTeaching(
-  skillName: string,
-): Promise<{ session_id: string; skill_name: string }> {
-  return request('/teach/start', {
-    method: 'POST',
-    body: JSON.stringify({ skill_name: skillName }),
-  })
-}
-
-export async function signTeaching(sessionId: string): Promise<{ ok: boolean }> {
-  return request(`/teach/${sessionId}/save`, { method: 'POST', body: JSON.stringify({}) })
 }
 
 // ── Clipboard bridge for the noVNC view (proxies the jail's xclip server) ──────

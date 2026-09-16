@@ -154,6 +154,37 @@ class TestVerify:
         with pytest.raises(AuditChainCorrupted):
             other.verify_chain([e])
 
+    def test_verify_detects_payload_json_content_tamper(
+        self, signer: AuditHashChainSigner
+    ) -> None:
+        """The hash must bind the payload (matriz-final-39eeb8e re-verificación
+        d2eb8c6): a payload_json that no longer hashes to payload_hash_hex is
+        tampering, even when the hash-chain links and the HMAC signature are
+        both untouched."""
+        e = signer.append(
+            audit_kind=AuditKind.AGENT_PAUSED,
+            actor="u",
+            description="Agent paused: real reason",
+            payload={"reason": "real reason"},
+        )
+        tampered = AuditEntry(
+            entry_id=e.entry_id,
+            node_installation_id=e.node_installation_id,
+            tenant_id=e.tenant_id,
+            timestamp=e.timestamp,
+            actor=e.actor,
+            audit_kind=e.audit_kind,
+            category=e.category,
+            description=e.description,
+            payload_hash_hex=e.payload_hash_hex,
+            prev_entry_hash_hex=e.prev_entry_hash_hex,
+            signed_payload_hash_hex=e.signed_payload_hash_hex,
+            signature_hex=e.signature_hex,
+            payload_json='{"reason":"forged reason"}',
+        )
+        with pytest.raises(AuditChainCorrupted):
+            signer.verify_chain([tampered])
+
 
 class TestDeterminism:
     def test_canonical_payload_order_does_not_matter(

@@ -183,29 +183,6 @@ class ShellBackendClient:
             path=f"/api/v1/skills/{package_id}/deprecate", method="POST"
         ) or {}
 
-    def start_teaching(
-        self,
-        *,
-        skill_name: str,
-        description: str | None = None,
-        surface_kind: str = "browser",
-        site_id: str = "",
-    ) -> dict:
-        """POST /api/v1/training with teaching context fields.
-
-        Returns {session_id, state, teaching_context:{context_id,
-        isolation_key, surface_kind, input_owner}}.
-        Raises urllib.error.HTTPError 409 if input_owner_conflict.
-        """
-        body: dict[str, Any] = {
-            "skill_name": skill_name,
-            "surface_kind": surface_kind,
-            "site_id": site_id,
-        }
-        if description:
-            body["description"] = description
-        return self._request(path="/api/v1/training", method="POST", body=body) or {}
-
     def promote_skill(self, *, package_id: str) -> dict:
         """POST /api/v1/skills/{package_id}/promote — transitions validated → autonomous.
 

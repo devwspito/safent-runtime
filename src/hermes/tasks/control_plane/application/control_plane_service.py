@@ -34,6 +34,7 @@ from hermes.agents_os.application.audit_hash_chain import AuditEntry, AuditKind
 from hermes.tasks.control_plane.domain.ports import (
     AuthenticatedChannel,
     ConfiguredTaskView,
+    EnqueueBlockedByKillSwitch,
     EnqueueNotAuthorized,
     EnqueueResult,
     PendingTaskView,
@@ -167,8 +168,16 @@ class ControlPlaneService:
         enqueued_by del payload del cliente.
         CTRL-P1-4: AuditEntry WORKITEM_ACCEPTED síncrono antes de devolver.
         CTRL-P1-6: rate-limit + cap de profundidad antes de tocar la cola.
+        Kill-switch (025 Top-KILL): un turno nuevo es rechazado ANTES de tocar
+        la cola mientras el freno de emergencia está activo — mismo puerto
+        (AgentStatePort.is_paused()) que ya gatea el dispatch de tools en el
+        broker (capability_broker Paso 0) y el claim de los workers.
         """
         self._authorize(channel.sender_uid, operation="enqueue")
+        if await self._state.is_paused():
+            raise EnqueueBlockedByKillSwitch(
+                "freno de emergencia activo — no se admiten turnos nuevos"
+            )
         await self._check_rate_limit(channel.sender_uid)
         operator_uuid = _uid_to_uuid(channel.sender_uid)
         # CTRL-P1-25 (T049 🔒): tokenizar PII ANTES de persistir.
@@ -219,19 +228,18 @@ class ControlPlaneService:
         *,
         channel: AuthenticatedChannel,
         proposal_id: UUID,
-        mfa_factors: Any | None = None,
     ) -> str:
         """HITL approve. approved_by = UUID(channel.sender_uid). NO dispara run_cycle.
 
-        `mfa_factors` se reenvía al gate, que verifica la MFA del dueño: la decisión de
-        seguridad vive en el gate (toda superficie), no aquí (red-team 2026-06-19).
+        La autorización usa el UID del canal; el gate conserva la restricción
+        de decisiones firmadas para propuestas enrutadas a Enterprise.
         """
         self._authorize(channel.sender_uid, operation="approve")
         if self._gate is None:
             raise NotImplementedError("approval_gate no inyectado")
         approved_by = _uid_to_uuid(channel.sender_uid)
         return await self._gate.approve(
-            proposal_id=proposal_id, approved_by=approved_by, mfa_factors=mfa_factors
+            proposal_id=proposal_id, approved_by=approved_by
         )
 
     async def reject(

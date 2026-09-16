@@ -96,6 +96,16 @@ class TestDynamicAcceptsLandBeforeTheTerminalDrop:
         assert '"--remove"' in _PROXY_ACCEPT
         assert "ExecStop=-/usr/libexec/hermes/hermes-mcp-proxy-accept --remove" in _NETNS_UNIT
 
+    def test_ruleset_accepts_the_gvproxy_subnet_used_by_podman_machine(self) -> None:
+        """macOS reaches the published port through gvproxy, whose guest-side
+        network is 192.168.127.0/24. Without this accept the packet arrives and
+        the terminal drop eats it: :7517 answers inside the VM and not from the
+        host (specs/028-safent-app-nativa/diagnostico-red-macos.md)."""
+        assert "192.168.127.0/24 tcp dport 7517 accept" in _NFT
+        # the three hypervisor planes are siblings: none may be dropped silently
+        for subnet in ("10.0.2.0/24", "192.168.64.0/24", "192.168.127.0/24"):
+            assert f"ip saddr {subnet} tcp dport 7517 accept" in _NFT
+
     def test_engine_port_script_targets_the_dynamic_chain(self) -> None:
         assert "input_dynamic" in _ENGINE_PORT
         assert "nft add rule inet hermes_host input " not in _ENGINE_PORT

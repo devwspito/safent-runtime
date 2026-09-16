@@ -1,24 +1,14 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Safent",
-  "version": "0.1.0",
+  "version": "0.9.36",
   "identifier": "com.safent.desktop",
   "build": {
     "frontendDist": "../ui"
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [
-      {
-        "label": "main",
-        "title": "Safent",
-        "width": 1280,
-        "height": 860,
-        "minWidth": 900,
-        "minHeight": 600,
-        "url": "index.html"
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
@@ -26,6 +16,15 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "dmg": {
+        "background": "dmg/background.png",
+        "windowSize": { "width": 660, "height": 400 },
+        "appPosition": { "x": 180, "y": 200 },
+        "applicationFolderPosition": { "x": 480, "y": 200 }
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -33,5 +32,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "__TAURI_UPDATER_PUBKEY__",
+      "endpoints": [
+        "https://github.com/devwspito/safent-runtime/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

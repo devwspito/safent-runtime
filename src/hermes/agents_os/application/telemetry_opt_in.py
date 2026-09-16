@@ -7,22 +7,25 @@ Reglas duras:
   - default OFF en cualquier ISO recién instalada (verificado por
     schema migration 022 + el wizard de first-boot NO marca on por
     defecto).
-  - solo el operador humano local puede flipear ON via CLI con TOTP
-    validado (`hermes telemetry --enable --confirm`).
-  - flip OFF es siempre permitido sin TOTP (fail-safe).
-  - cualquier flip se persiste como audit entry firmada
-    (AuditKind.TELEMETRY_TOGGLED).
+  - habilitar requiere propietario autenticado y confirmación explícita, sin MFA.
+  - deshabilitar no exige una segunda confirmación (fail-safe).
+  - cualquier cambio genera una entrada de auditoría firmada en memoria.
   - la lista de exportadores está enumerada — NO se puede activar un
     exportador desconocido (deny-by-default).
+
+El estado y la cadena de este servicio son en memoria, no un opt-in durable. El
+adaptador de entrada debe autenticar al propietario y verificar su confirmación;
+el booleano interno no es una credencial ni puede proceder de un payload de agente.
+El shell lo construye deshabilitado; no hay ruta de habilitación CLI/UI conectada.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from hermes.agents_os.application.audit_hash_chain import (
     AuditHashChainSigner,
@@ -34,8 +37,8 @@ class TelemetryOptInError(RuntimeError):
     pass
 
 
-class TotpRequiredError(TelemetryOptInError):
-    """FR-061: flip ON requiere TOTP humano local."""
+class OwnerConfirmationRequiredError(TelemetryOptInError):
+    """FR-061: habilitar exige confirmación explícita del propietario local."""
 
 
 class UnknownExporterError(TelemetryOptInError):
@@ -64,7 +67,7 @@ class TelemetryState:
 
 @dataclass(slots=True)
 class TelemetryOptInService:
-    """Gestiona el flag global de telemetría + audit firmada."""
+    """Gestiona el opt-in y audit firmada en memoria, deshabilitado al arrancar."""
 
     audit_signer: AuditHashChainSigner
     _state: TelemetryState = field(
@@ -84,23 +87,19 @@ class TelemetryOptInService:
         self,
         *,
         human_user_id: UUID,
-        totp_validated: bool,
+        owner_confirmation_validated: bool,
         exporters: frozenset[TelemetryExporter],
         node_installation_id: UUID | None = None,
     ) -> TelemetryState:
-        if not totp_validated:
-            raise TotpRequiredError(
-                "FR-061: enable requiere TOTP humano local"
+        if owner_confirmation_validated is not True or not isinstance(human_user_id, UUID):
+            raise OwnerConfirmationRequiredError(
+                "FR-061: enable requiere confirmación del propietario local"
             )
         if not exporters:
-            raise TelemetryOptInError(
-                "exporters vacío — debe declarar al menos uno"
-            )
+            raise TelemetryOptInError("exporters vacío — debe declarar al menos uno")
         for exporter in exporters:
-            if exporter not in TelemetryExporter:
-                raise UnknownExporterError(
-                    f"exporter {exporter!r} no enumerado"
-                )
+            if not isinstance(exporter, TelemetryExporter):
+                raise UnknownExporterError(f"exporter {exporter!r} no enumerado")
         audit_entry = self.audit_signer.append(
             audit_kind=AuditKind.CONSENT_GRANTED,
             actor=str(human_user_id),
@@ -129,7 +128,7 @@ class TelemetryOptInService:
         reason: str,
         node_installation_id: UUID | None = None,
     ) -> TelemetryState:
-        # FR-061: disable NO requiere TOTP — fail-safe.
+        # FR-061: desactivar no exige una segunda confirmación — fail-safe.
         audit_entry = self.audit_signer.append(
             audit_kind=AuditKind.CONSENT_REVOKED,
             actor=str(human_user_id),

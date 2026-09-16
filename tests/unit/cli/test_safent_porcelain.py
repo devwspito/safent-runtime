@@ -1,0 +1,2182 @@
+"""`safent --porcelain` — the NDJSON wire protocol (T004, contracts/app-engine.md).
+
+Runs the REAL `safent` CLI (POSIX sh) as a subprocess, with only `podman`
+faked (a logging shim on PATH — same technique as
+tests/unit/ops/test_safent_cli_backup_restore.py). `HOME` is redirected to an
+isolated tmp dir so nothing ever touches the real `~/.safent`.
+
+Covers the protocol invariants app-engine.md defines, not engine behavior:
+  - stdout in porcelain mode is line-delimited JSON ONLY: every line parses,
+    every line has a known `t`, every `stage` closes with exactly one `done`
+    XOR one `failed` before the next stage opens (§2, §3).
+  - the bootstrap ticket (`?k=...`) NEVER appears on stdout or stderr, only
+    on the dedicated `--secret-fd` (§5).
+  - a `failed` event's `code` maps to the documented closed vocabulary and
+    the process exit code lands in the stable 10..39 domain range (§2/§3).
+  - without --porcelain, the same verbs still work and print human text
+    instead (§1: the flag "no altera el comportamiento").
+  - `facts` is pure: it never calls a mutating podman verb (run/rm/pull/stop).
+  - `SAFENT_PODMAN` wins over PATH resolution (§1 env table).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_SAFENT_CLI = _REPO_ROOT / "safent"
+
+_SECRET_TOKEN = "s3cr3t-token-do-not-leak"  # noqa: S105 - test fixture, not a real credential
+
+_KNOWN_EVENT_TYPES = {"stage", "progress", "done", "failed", "facts", "ready", "status", "url"}
+
+# app-engine.md §3 / engine_adapter.rs's map_progress_unit — CLOSED, never
+# widened for one call site's convenience (MAC5-01, verificacion-mac-5.md:
+# a heartbeat emitting "unit":"seconds" made the adapter reject the WHOLE
+# line as cli_porcelain_unsupported on every cold boot).
+_KNOWN_PROGRESS_UNITS = {"bytes", "layers", "steps"}
+
+_FAKE_PODMAN = """#!/usr/bin/env bash
+set -e
+echo "$@" >> "$FAKE_PODMAN_LOG"
+if [ -n "${FAKE_PRIVATE_ENV_LOG:-}" ]; then
+  for key in HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR TMPDIR CONTAINERS_CONF CONTAINERS_CONF_OVERRIDE CONTAINERS_STORAGE_CONF CONTAINERS_REGISTRIES_CONF PODMAN_CONNECTIONS_CONF CONTAINER_CONNECTION CONTAINER_HOST DOCKER_HOST REGISTRY_AUTH_FILE DOCKER_CONFIG CONTAINERS_MACHINE_PROVIDER SSH_AUTH_SOCK; do
+    printf '%s=%s\\n' "$key" "${!key-}" >> "$FAKE_PRIVATE_ENV_LOG"
+  done
+fi
+
+case "$1" in
+  info)
+    [ "${FAKE_INFO_FAILS:-false}" != true ] || exit 1
+    exit 0 ;;
+  inspect)
+    shift
+    # BKP-01: the CLI now pins `inspect --type container` so a same-named
+    # volume can never satisfy a container check — accept the flag pair here.
+    if [ "$1" = "--type" ]; then shift 2; fi
+    if [ "$1" = "-f" ]; then
+      case "$2" in
+        '{{.State.Running}}')
+          [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
+          echo "$FAKE_CONTAINER_RUNNING"; exit 0 ;;
+        '{{.ImageDigest}}')
+          # MAC3-02 (verificacion-mac-3.md): the REAL per-container digest
+          # field — confirmed against real podman 6.1.1. The OLD fake had
+          # `{{.Image}}` (the local image ID field) answer with a
+          # sha256-shaped value, which is exactly the wrong assumption
+          # that let the pre-fix bug (safent used `{{.Image}}` for this)
+          # pass every test while failing on a real Mac.
+          [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
+          [ "${FAKE_IMAGE_DIGEST_EMPTY:-false}" = "true" ] && exit 0
+          echo "sha256:$FAKE_IMAGE_DIGEST"; exit 0 ;;
+        '{{.Image}}')
+          # The REAL local image ID — bare hex, no "sha256:" prefix (that
+          # prefix only ever appears on a genuine digest/{{.ImageDigest}}).
+          [ "$FAKE_CONTAINER_EXISTS" = "true" ] || exit 1
+          echo "${FAKE_CONTAINER_IMAGE_ID:-idonlyfallback0000000000000000000000000000000000000000000000}"; exit 0 ;;
+      esac
+      exit 0
+    fi
+    [ "$FAKE_CONTAINER_EXISTS" = "true" ] && exit 0 || exit 1
+    ;;
+  image)
+    if [ "$2" = "inspect" ]; then
+      [ "$FAKE_IMAGE_LOCAL" = "true" ] || exit 1
+      [ "${FAKE_PINNED_IMAGE_LOOKUP_FAILS:-false}" != true ] || exit 1
+      printf '%s\\n' "${FAKE_PINNED_IMAGE_ID:-}"
+      exit 0
+    fi
+    [ "$2" = "exists" ] || exit 0
+    [ "$FAKE_IMAGE_LOCAL" = "true" ] && exit 0 || exit 1
+    ;;
+  volume)
+    case "$2" in
+      exists) [ "$FAKE_VOLUME_EXISTS" = "true" ] && exit 0 || exit 1 ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  port)
+    echo "0.0.0.0:$FAKE_PORT"
+    exit 0
+    ;;
+  exec)
+    shift 2  # drop "exec" "$NAME"
+    case "$1" in
+      systemctl)
+        [ "$FAKE_HEALTH_ACTIVE" = "true" ] && echo active || echo failed
+        exit 0 ;;
+      cat)
+        [ "$2" != /proc/sys/net/ipv4/ip_forward ] || { echo "${FAKE_CORE_FORWARDING:-1}"; exit 0; }
+        [ "$FAKE_HEALTH_ACTIVE" = "true" ] && printf '%s' "$FAKE_SECRET"
+        exit 0 ;;
+      python3)
+        printf '%s' "$FAKE_APP_VERSION"; exit 0 ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  run)
+    # _ensure_seccomp / _fetch_companion_file probe the image via
+    # `run --rm --entrypoint cat <image> <path>` and need non-empty stdout
+    # on success so they never fall through to a real network fetch.
+    case " $* " in
+      *" --entrypoint cat "*) printf '#!/bin/sh\\nexit 0\\n' ;;
+    esac
+    exit 0
+    ;;
+  pull)
+    # MAC2-02/MAC2-03 (verificacion-mac-2.md): a real pull can sit silent
+    # for over a minute between podman's own output lines — simulate that
+    # shape (silent for FAKE_PULL_DELAY_SECONDS, no intermediate output at
+    # all) so the heartbeat mechanism is exercised for real, not just
+    # "podman printed something and we echoed it back."
+    [ -n "${FAKE_PULL_DELAY_SECONDS:-}" ] && sleep "$FAKE_PULL_DELAY_SECONDS"
+    [ "${FAKE_PULL_FAILS:-false}" = "true" ] && exit 1
+    exit 0
+    ;;
+  rm|start|stop)
+    exit 0
+    ;;
+  machine)
+    shift  # drop "machine"; $1 is now list/inspect/init/start/...
+    sub="$1"; shift
+    case "$sub" in
+      list)
+        # MAC2-01 (verificacion-mac-2.md): _machines_json now also calls
+        # `machine list --format json` for provider/cpus/memory (real
+        # podman's `machine inspect` has none of the three) — FAKE_MACHINE_
+        # DETAILS is "name:provider:cpus:memory_bytes" per line, looked up
+        # per name in FAKE_MACHINES_STATE.
+        if [ "${1:-}" = "--format" ] && [ "${2:-}" = "json" ]; then
+          printf '['
+          first=true
+          if [ -n "${FAKE_MACHINES_STATE:-}" ] && [ -f "$FAKE_MACHINES_STATE" ]; then
+            while IFS= read -r mname; do
+              [ -n "$mname" ] || continue
+              provider="unknown"; cpus=0; mem=0
+              if [ -n "${FAKE_MACHINE_DETAILS:-}" ] && [ -f "$FAKE_MACHINE_DETAILS" ]; then
+                line="$(grep "^$mname:" "$FAKE_MACHINE_DETAILS" 2>/dev/null | head -1)"
+                if [ -n "$line" ]; then
+                  provider="$(echo "$line" | cut -d: -f2)"
+                  cpus="$(echo "$line" | cut -d: -f3)"
+                  mem="$(echo "$line" | cut -d: -f4)"
+                fi
+              fi
+              [ "$first" = "true" ] || printf ','
+              first=false
+              printf '\n    {\n        "Name": "%s",\n        "VMType": "%s",\n        "CPUs": %s,\n        "Memory": "%s"\n    }' \
+                "$mname" "$provider" "$cpus" "$mem"
+            done < "$FAKE_MACHINES_STATE"
+          fi
+          printf '\n]\n'
+          exit 0
+        fi
+        # cmd_ensure_machine only ever calls `machine list -q`; state is a
+        # plain newline-separated list of existing machine names, mutated
+        # by `init` below (MAC-05, verificacion-mac-1.md tests).
+        [ -n "${FAKE_MACHINES_STATE:-}" ] && [ -f "$FAKE_MACHINES_STATE" ] && cat "$FAKE_MACHINES_STATE"
+        exit 0
+        ;;
+      inspect)
+        mname="$1"; shift
+        exists=false
+        if [ -n "${FAKE_MACHINES_STATE:-}" ] && [ -f "$FAKE_MACHINES_STATE" ] \
+           && grep -qx "$mname" "$FAKE_MACHINES_STATE"; then
+          exists=true
+        fi
+        if [ "${1:-}" = "--format" ]; then
+          [ "$exists" = "true" ] || exit 1
+          case "$2" in
+            '{{.Rootful}}') echo "${FAKE_MACHINE_ROOTFUL:-true}" ;;
+            '{{.State}}') echo "${FAKE_MACHINE_STATE-running}" ;;
+          esac
+          exit 0
+        fi
+        [ "$exists" = "true" ] && exit 0 || exit 1
+        ;;
+      init)
+        # MAC4-05 (verificacion-mac-4.md): simulates the real, silent
+        # 20.93 s `machine init`/`start` gap so a heartbeat mechanism has
+        # something to actually heartbeat THROUGH, same shape as
+        # FAKE_PULL_DELAY_SECONDS for pull_engine.
+        [ -n "${FAKE_MACHINE_INIT_DELAY_SECONDS:-}" ] && sleep "$FAKE_MACHINE_INIT_DELAY_SECONDS"
+        [ "${FAKE_MACHINE_INIT_FAILS:-false}" = "true" ] && exit 1
+        mname="$1"
+        [ -n "${FAKE_MACHINES_STATE:-}" ] && echo "$mname" >> "$FAKE_MACHINES_STATE"
+        exit 0
+        ;;
+      start)
+        [ -n "${FAKE_MACHINE_START_DELAY_SECONDS:-}" ] && sleep "$FAKE_MACHINE_START_DELAY_SECONDS"
+        [ -n "${FAKE_MACHINE_START_ERROR:-}" ] && printf '%s\\n' "$FAKE_MACHINE_START_ERROR" >&2
+        [ "${FAKE_MACHINE_START_FAILS:-false}" = "true" ] && exit 1
+        exit 0
+        ;;
+      *)
+        exit 0
+        ;;
+    esac
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"""
+
+
+@pytest.fixture()
+def fake_bin_dir(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    podman = bin_dir / "podman"
+    podman.write_text(_FAKE_PODMAN)
+    podman.chmod(0o755)
+    return bin_dir
+
+
+class _HealthzHandler(BaseHTTPRequestHandler):
+    """MAC2-05 (verificacion-mac-2.md): `cmd_up` now curls this exact
+    unauthenticated endpoint from the HOST before ever declaring ready —
+    `podman`/`podman exec` are faked, but this probe is a REAL `curl`
+    against a REAL socket, so tests need a real (tiny) listener, not
+    another shell-script fake."""
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's own name
+        if self.path == "/healthz":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib's own signature
+        pass  # silence per-request logging — tests already assert on safent's own output
+
+
+@pytest.fixture()
+def healthz_server():
+    """Starts a real HTTP server on an OS-assigned free port, serving 200 on
+    `/healthz`. Yields the port number as a str (matching `_base_env`'s own
+    `port` parameter type) — callers pass it straight through."""
+    server = HTTPServer(("127.0.0.1", 0), _HealthzHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield str(server.server_address[1])
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def _base_env(
+    *,
+    fake_bin_dir: Path,
+    home_dir: Path,
+    podman_log: Path,
+    container_exists: bool = True,
+    container_running: bool = True,
+    volume_exists: bool = True,
+    health_active: bool = True,
+    port: str = "17517",
+    image_digest: str = "deadbeef",
+    image_local: bool = True,
+    app_version: str = "0.8.42",
+    secret: str = _SECRET_TOKEN,
+    pull_fails: bool = False,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    home_dir.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
+    env["HOME"] = str(home_dir)
+    env["SAFENT_NAME"] = "safent-test"
+    env["SAFENT_DATA_VOLUME"] = "safent-test-data"
+    env["FAKE_PODMAN_LOG"] = str(podman_log)
+    env["FAKE_CONTAINER_EXISTS"] = "true" if container_exists else "false"
+    env["FAKE_CONTAINER_RUNNING"] = "true" if container_running else "false"
+    env["FAKE_VOLUME_EXISTS"] = "true" if volume_exists else "false"
+    env["FAKE_HEALTH_ACTIVE"] = "true" if health_active else "false"
+    env["FAKE_PORT"] = port
+    env["FAKE_IMAGE_DIGEST"] = image_digest
+    env["FAKE_IMAGE_LOCAL"] = "true" if image_local else "false"
+    env["FAKE_APP_VERSION"] = app_version
+    env["FAKE_SECRET"] = secret
+    env["FAKE_PULL_FAILS"] = "true" if pull_fails else "false"
+    if extra_env:
+        env.update(extra_env)
+    # All copies of this fake are fixtures for the patched bundled runtime,
+    # including tests which select their copy AFTER calling _base_env.
+    for pinned in fake_bin_dir.parent.rglob("podman"):
+        if not pinned.is_file() or pinned.read_text() != _FAKE_PODMAN:
+            continue
+        (pinned.parent / "podman-private-build.json").write_text(json.dumps({
+            "schema_version": 1,
+            "capability": "safent-private-machine-v1",
+            "source_commit": "8303f2e25b675ea7f82099d615c60969aec15870",
+            "patch_sha256": "a" * 64,
+            "binary_sha256": hashlib.sha256(pinned.read_bytes()).hexdigest(),
+        }, indent=2))
+    return env
+
+
+def _run_safent(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["sh", str(_SAFENT_CLI), *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def _podman_calls(podman_log: Path) -> list[str]:
+    if not podman_log.exists():
+        return []
+    return [line for line in podman_log.read_text().splitlines() if line]
+
+
+def _parse_ndjson(stdout: str) -> list[dict]:
+    lines = [line for line in stdout.splitlines() if line]
+    events = []
+    for line in lines:
+        parsed = json.loads(line)  # raises if any line is not valid JSON
+        assert parsed.get("t") in _KNOWN_EVENT_TYPES, parsed
+        events.append(parsed)
+    return events
+
+
+def _assert_stage_closure_invariant(events: list[dict]) -> None:
+    """Every `stage` closes with exactly one `done` XOR one `failed` before
+    the next stage opens; `progress` only appears within its own open stage."""
+    open_stage = None
+    for ev in events:
+        t = ev["t"]
+        if t == "stage":
+            assert open_stage is None, f"stage {ev['id']!r} opened while {open_stage!r} was still open"
+            open_stage = ev["id"]
+        elif t == "progress":
+            assert ev["id"] == open_stage, ev
+        elif t in ("done", "failed"):
+            assert ev["id"] == open_stage, ev
+            open_stage = None
+    assert open_stage is None, f"stage {open_stage!r} never closed"
+
+
+def _make_bundle(
+    tmp_path: Path,
+    entries: list[tuple[str, bytes, str]],
+    podman_version: str = "6.1.1",
+) -> Path:
+    """A minimal <bundle>/engine/ layout: a real copy of `safent` alongside a
+    runtime-bundle.json manifest and the binaries it describes."""
+    engine_dir = tmp_path / "bundle" / "engine"
+    engine_dir.mkdir(parents=True)
+    (engine_dir / "safent").write_bytes(_SAFENT_CLI.read_bytes())
+    (engine_dir / "safent").chmod(0o755)
+
+    manifest_entries = []
+    for rel_path, content, mode in entries:
+        target = engine_dir / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        manifest_entries.append({"path": rel_path, "sha256": hashlib.sha256(content).hexdigest(), "mode": mode})
+    manifest = {"podman_version": podman_version, "entries": manifest_entries}
+    (engine_dir / "runtime-bundle.json").write_text(json.dumps(manifest, indent=2))
+    return engine_dir
+
+
+class TestDataVolumeDerivesFromName:
+    """Regression test (packaging review item 4,
+    verificacion-paquete-linux.md §6): DATA_VOLUME was hardcoded to
+    "safent-data" regardless of SAFENT_NAME (unlike
+    ops/container/run-safent.sh's own VOLUME="${NAME}-data") — a second
+    instance with its own SAFENT_NAME silently mounted the FIRST instance's
+    volume if one already existed under that fixed name."""
+
+    def test_a_custom_name_gets_its_own_derived_volume(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        env["SAFENT_NAME"] = "custom-instance"
+        del env["SAFENT_DATA_VOLUME"]  # do not let the fixture's own default mask this
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        assert any(c == "volume exists custom-instance-data" for c in calls), calls
+        assert not any("safent-data" in c for c in calls), calls
+
+    def test_default_name_keeps_the_original_default_volume_unchanged(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        del env["SAFENT_DATA_VOLUME"]
+        env.pop("SAFENT_NAME", None)
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert any(c == "volume exists safent-data" for c in _podman_calls(podman_log))
+
+
+class TestEveryProgressUnitIsInTheClosedVocabulary:
+    """MAC5-01 (verificacion-mac-5.md): a static scan of the REAL `safent`
+    source, never a runtime exercise of each call site — a bug like
+    `_run_with_heartbeat`'s "seconds" unit only fires on whichever code
+    path a test happens to drive live, but every `_stage_progress` call
+    site is a source-level fact this test can check in one pass,
+    independent of which stages this suite's other tests actually reach.
+    Catches this class of bug on Linux, no Mac needed."""
+
+    def test_every_stage_progress_call_site_uses_a_known_unit(self) -> None:
+        source = _SAFENT_CLI.read_text()
+        calls = re.findall(r"_stage_progress\s+\S+\s+\S+\s+([a-zA-Z]+)", source)
+        assert calls, "no _stage_progress call sites found — did the function get renamed?"
+        unknown = sorted({unit for unit in calls if unit not in _KNOWN_PROGRESS_UNITS})
+        assert not unknown, (
+            f"_stage_progress call site(s) use a unit outside app-engine.md §3's closed "
+            f"vocabulary {sorted(_KNOWN_PROGRESS_UNITS)}: {unknown}"
+        )
+
+
+class TestFactsIsPureObservation:
+    @pytest.mark.parametrize(
+        ("actual_id", "pinned_id", "lookup_fails", "matches"),
+        [
+            ("a" * 64, "a" * 64, False, True),
+            ("a" * 64, "sha256:" + "a" * 64, False, True),
+            ("a" * 64, "b" * 64, False, False),
+            ("a" * 64, "a" * 64, True, False),
+            ("", "", False, False),
+            ("not-an-image-id", "not-an-image-id", False, False),
+        ],
+    )
+    def test_index_alias_requires_identical_pinned_content(
+        self, tmp_path: Path, fake_bin_dir: Path,
+        actual_id: str, pinned_id: str, lookup_fails: bool, matches: bool,
+    ) -> None:
+        desired = "sha256:" + "d" * 64
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home",
+            podman_log=tmp_path / "podman.log", image_digest="e" * 64,
+            extra_env={
+                "SAFENT_IMAGE": "ghcr.io/devwspito/safent@" + desired,
+                "FAKE_CONTAINER_IMAGE_ID": actual_id,
+                "FAKE_PINNED_IMAGE_ID": pinned_id,
+                "FAKE_PINNED_IMAGE_LOOKUP_FAILS": str(lookup_fails).lower(),
+            },
+        )
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, result.stderr
+        expected = desired if matches else "sha256:" + "e" * 64
+        assert json.loads(result.stdout)["engineContainer"]["imageDigest"] == expected
+
+    def test_bare_facts_emits_one_line_of_parseable_json(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        lines = [line for line in result.stdout.splitlines() if line]
+        assert len(lines) == 1
+        facts = json.loads(lines[0])
+        assert facts["os"] == "linux"
+        assert isinstance(facts["freeDiskBytes"], int)
+        assert facts["engineContainer"]["running"] is True
+        assert facts["engineContainer"]["imageDigest"] == "sha256:deadbeef"
+        assert facts["dataVolume"] is True
+
+    def test_engine_container_image_digest_is_never_the_local_image_id(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """MAC3-02 (verificacion-mac-3.md): `inspect -f '{{.Image}}'` (the
+        field the CLI used to read) returns podman's LOCAL IMAGE ID, never
+        a digest — reconcile.rs's images_gap compared it against
+        desired.engine_image.digest (always sha256:...) and could NEVER
+        match, so a perfectly healthy, correctly-digested container was
+        destroyed and recreated on every single observation. A distinct
+        FAKE_CONTAINER_IMAGE_ID here proves the ID value is never what
+        ends up in imageDigest — only {{.ImageDigest}}'s real digest is."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            image_digest="realdigest0123456789",
+            extra_env={"FAKE_CONTAINER_IMAGE_ID": "totallydifferentlocalimageid00000000000000000000000000000000"},
+        )
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        facts = json.loads(result.stdout.strip())
+        assert facts["engineContainer"]["imageDigest"] == "sha256:realdigest0123456789"
+        assert "totallydifferentlocalimageid" not in facts["engineContainer"]["imageDigest"]
+
+    def test_engine_container_image_digest_falls_back_to_the_image_id_when_no_digest_is_recorded(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """Defensive fallback (not expected in this app's own flow — every
+        container it creates runs an image pulled BY digest, so podman
+        always has one recorded) for the rare case {{.ImageDigest}}
+        reports nothing at all: better a comparable-but-stale ID than a
+        silently absent fact."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_IMAGE_DIGEST_EMPTY": "true",
+                "FAKE_CONTAINER_IMAGE_ID": "fallbacklocalimageid000000000000000000000000000000000000000000",
+            },
+        )
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        facts = json.loads(result.stdout.strip())
+        assert facts["engineContainer"]["imageDigest"] == "fallbacklocalimageid000000000000000000000000000000000000000000"
+
+    def test_porcelain_facts_is_wrapped_in_a_facts_event(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("facts", "--porcelain", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        assert len(events) == 1
+        assert events[0]["t"] == "facts"
+        assert "facts" in events[0]
+
+    def test_facts_never_calls_a_mutating_podman_verb(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("facts", "--porcelain", env=env)
+        assert result.returncode == 0
+        calls = _podman_calls(podman_log)
+        for verb in ("run", "rm", "pull", "stop", "start"):
+            assert not any(c.startswith(verb + " ") or c == verb for c in calls), calls
+
+    def test_facts_reflects_absent_container_and_volume(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            container_exists=False,
+            volume_exists=False,
+        )
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        facts = json.loads(result.stdout.strip())
+        assert facts["engineContainer"]["exists"] is False
+        assert facts["engineContainer"]["running"] is False
+        assert facts["engineContainer"]["imageDigest"] is None
+        assert facts["dataVolume"] is False
+
+    def test_local_engine_image_digest_reflects_podman_image_exists_for_a_digest_pinned_image(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """Regression test (app-desk-integration): without this field,
+        reconcile.rs's images_gap() has no way to tell "already pulled" from
+        "never pulled" independent of whether a container is running it yet
+        — it would ask to pull forever, even against an already-converged
+        engine. `localEngineImageDigest`/`localCompanionImageDigest` close
+        that gap; `podman image exists` decides them."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            image_local=True,
+            extra_env={
+                "SAFENT_IMAGE": "ghcr.io/devwspito/safent@sha256:engineexample",
+                "SAFENT_ADS_IMAGE": "ghcr.io/devwspito/safent-ads@sha256:adsexample",
+            },
+        )
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        facts = json.loads(result.stdout.strip())
+        assert facts["localEngineImageDigest"] == "sha256:engineexample"
+        assert facts["localCompanionImageDigest"] == "sha256:adsexample"
+
+    def test_local_engine_image_digest_is_null_when_not_pulled_or_not_digest_pinned(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        # Not pulled yet, even though digest-pinned.
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            image_local=False,
+            extra_env={"SAFENT_IMAGE": "ghcr.io/devwspito/safent@sha256:engineexample"},
+        )
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert json.loads(result.stdout.strip())["localEngineImageDigest"] is None
+
+        # Bare tag, not digest-pinned (plain terminal use) — never claims a match.
+        env2 = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home2",
+            podman_log=podman_log,
+            image_local=True,
+        )
+        result2 = _run_safent("facts", env=env2)
+        assert result2.returncode == 0
+        assert json.loads(result2.stdout.strip())["localEngineImageDigest"] is None
+        assert json.loads(result2.stdout.strip())["localCompanionImageDigest"] is None
+
+
+class TestFactsFailsClosedInsteadOfSilentlyOnAnIncompleteCompanionScaffold:
+    """MAC4-04 (verificacion-mac-4.md, "mina"): a companion compose scaffold
+    can exist (a prior `safent up` without --no-companion ran
+    provision.sh's --scaffold step) while its persisted image marker does
+    not (an incomplete/transitional state) — `cmd_facts`'s own
+    `_companion_container_counts` reaches `_persisted_ads_image`, which
+    used to `echo ...; exit 1` raw: rc=1, ZERO bytes on stdout, breaking
+    --porcelain's own contract (app-engine.md §2) and translated by the
+    adapter into an undifferentiated daemon_unhealthy."""
+
+    def test_facts_emits_a_closed_failed_event_instead_of_dying_silently(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        companion_bin_dir = home_dir / ".safent" / "companions" / "ads" / "bin"
+        companion_bin_dir.mkdir(parents=True)
+        (companion_bin_dir / "compose.yaml").write_text("services: {}\n")
+        # Deliberately NOT writing .../ads/image — the incomplete state.
+
+        result = _run_safent("facts", "--porcelain", env=env)
+
+        assert result.returncode == 25, f"stdout={result.stdout}\nstderr={result.stderr}"  # companion_network_conflict
+        lines = [line for line in result.stdout.splitlines() if line]
+        assert len(lines) == 1, f"--porcelain must emit exactly one NDJSON line, got: {result.stdout!r}"
+        event = json.loads(lines[0])  # raises if it is not valid JSON at all
+        assert event["t"] == "failed"
+        assert event["code"] == "companion_network_conflict"
+        assert "image" in event["detail"]
+        assert event["retryable"] is False
+
+    def test_non_porcelain_still_prints_a_clear_message_on_stderr(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        companion_bin_dir = home_dir / ".safent" / "companions" / "ads" / "bin"
+        companion_bin_dir.mkdir(parents=True)
+        (companion_bin_dir / "compose.yaml").write_text("services: {}\n")
+
+        result = _run_safent("facts", env=env)
+
+        assert result.returncode == 25, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert result.stdout == ""
+        assert "image" in result.stderr
+
+
+class TestEnsureMachineOnLinuxIsANoOp:
+    def test_ensure_machine_closes_immediately_without_touching_podman_machine(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert [e["t"] for e in events] == ["stage", "done"]
+        assert events[0]["id"] == "machine"
+        assert not any(c.startswith("machine ") for c in _podman_calls(podman_log))
+
+    def test_non_porcelain_prints_human_text_to_stderr_not_stdout(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("ensure-machine", env=env)
+        assert result.returncode == 0
+        assert result.stdout == ""
+        assert "[ok]" in result.stderr
+
+
+_FAKE_UNAME = """#!/bin/sh
+case "$1" in
+  -s) echo Darwin ;;
+  -m) echo arm64 ;;
+  *) echo Darwin ;;
+esac
+"""
+
+
+def _fake_darwin(fake_bin_dir: Path) -> None:
+    """`cmd_ensure_machine`'s macOS branch is gated on `uname -s` (safent's
+    own `OS="$(uname -s ...)"`) — faking it, not the CLI's own logic, is
+    what makes these MAC-05 tests prove the REAL script's behavior on a
+    simulated Mac rather than a restated assumption. Writes straight into
+    the test's OWN `fake_bin_dir` (function-scoped fixture — a fresh tmp
+    dir per test), so no other test's PATH is affected."""
+    uname = fake_bin_dir / "uname"
+    uname.write_text(_FAKE_UNAME)
+    uname.chmod(0o755)
+
+
+class TestMacPrivatePodman:
+    def test_running_machine_without_its_own_connection_is_not_ready(self, tmp_path, fake_bin_dir):
+        _fake_darwin(fake_bin_dir)
+        machines = tmp_path / "machines"
+        machines.write_text("safent-test-engine\n")
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "owner",
+                        podman_log=tmp_path / "calls", extra_env={"FAKE_INFO_FAILS": "true", "FAKE_MACHINES_STATE": str(machines)})
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+        assert result.returncode != 0
+        failure = _parse_ndjson(result.stdout)[-1]
+        assert failure["code"] == "machine_start_failed"
+        assert failure["retryable"] is False
+
+    def test_legacy_start_uses_named_private_machine_not_first_machine_on_path(self, tmp_path, fake_bin_dir):
+        _fake_darwin(fake_bin_dir)
+        calls = tmp_path / "calls"
+        machines = tmp_path / "machines"
+        machines.write_text("podman-machine-default\nsafent-test-engine\n")
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "owner", podman_log=calls,
+                        container_exists=False, extra_env={"FAKE_MACHINES_STATE": str(machines),
+                                                          "FAKE_MACHINE_STATE": "stopped"})
+        result = _run_safent("start", env=env)
+        assert result.returncode != 0
+        observed = _podman_calls(calls)
+        assert "machine start safent-test-engine" in observed
+        assert not any("podman-machine-default" in call for call in observed)
+        assert not any(call == "info" for call in observed)
+
+    def test_recorded_foreign_name_cannot_retarget_this_install(self, tmp_path, fake_bin_dir):
+        _fake_darwin(fake_bin_dir)
+        calls = tmp_path / "calls"
+        home = tmp_path / "owner"
+        machines = tmp_path / "machines"
+        machines.write_text("podman-machine-default\nsafent-test-engine\n")
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home, podman_log=calls,
+                        extra_env={"FAKE_MACHINES_STATE": str(machines)})
+        (home / ".safent").mkdir()
+        (home / ".safent/machine.json").write_text(json.dumps({"name": "podman-machine-default", "adopted": False}))
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+        assert result.returncode == 0, result.stderr
+        assert not any("podman-machine-default" in call for call in _podman_calls(calls))
+
+    def test_two_install_names_keep_distinct_connection_transports(self, tmp_path, fake_bin_dir):
+        _fake_darwin(fake_bin_dir)
+        env_log = tmp_path / "env-log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "owner",
+                        podman_log=tmp_path / "calls", extra_env={"FAKE_PRIVATE_ENV_LOG": str(env_log)})
+        for name in ("alpha", "beta"):
+            result = _run_safent("facts", "--porcelain", env={**env, "SAFENT_NAME": name})
+            assert result.returncode == 0, result.stderr
+        for name in ("alpha", "beta"):
+            transport = tmp_path / f"owner/.safent/podman/native-v1/bin/{name}-engine/podman"
+            assert subprocess.run([str(transport), "info"], env=env, capture_output=True).returncode == 0
+            values = dict(line.split("=", 1) for line in env_log.read_text().splitlines())
+            assert values["CONTAINER_CONNECTION"] == f"{name}-engine-root"
+
+    def test_every_client_identity_is_private_and_parent_home_is_unchanged(self, tmp_path, fake_bin_dir):
+        _fake_darwin(fake_bin_dir)
+        env_log = tmp_path / "private-env"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "owner",
+                        podman_log=tmp_path / "calls", extra_env={
+                            "FAKE_PRIVATE_ENV_LOG": str(env_log),
+                            "CONTAINER_HOST": "unix:///foreign/socket",
+                            "DOCKER_HOST": "unix:///foreign/docker",
+                            "CONTAINER_CONNECTION": "podman-machine-default",
+                            "CONTAINERS_CONF_OVERRIDE": "/foreign/override",
+                            "CONTAINERS_CONF": "/foreign/config",
+                            "CONTAINERS_STORAGE_CONF": "/foreign/storage",
+                            "REGISTRY_AUTH_FILE": "/foreign/auth",
+                            "PODMAN_CONNECTIONS_CONF": "/foreign/connections",
+                            "TMPDIR": "/foreign/tmp",
+                            "SSH_AUTH_SOCK": "/foreign/ssh",
+                            "CONTAINERS_MACHINE_PROVIDER": "libkrun",
+                        })
+        result = _run_safent("facts", "--porcelain", env=env)
+        assert result.returncode == 0, result.stderr
+        observations = dict(line.split("=", 1) for line in env_log.read_text().splitlines())
+        profile = (tmp_path / "owner/.safent/podman/native-v1").resolve()
+        assert observations["HOME"] == observations["TMPDIR"] + "/home"
+        assert len(observations["HOME"] + "/.podman/safent-test-engine-ignition.sock") < 104
+        for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "CONTAINERS_CONF",
+                     "CONTAINERS_STORAGE_CONF", "CONTAINERS_REGISTRIES_CONF", "REGISTRY_AUTH_FILE",
+                     "PODMAN_CONNECTIONS_CONF", "DOCKER_CONFIG"):
+            assert observations[name].startswith(str(profile) + "/"), (name, observations[name])
+        assert observations["CONTAINER_HOST"] == observations["DOCKER_HOST"] == ""
+        assert observations["CONTAINERS_CONF_OVERRIDE"] == observations["SSH_AUTH_SOCK"] == ""
+        assert observations["CONTAINERS_MACHINE_PROVIDER"] == "applehv"
+        assert observations["TMPDIR"] == observations["XDG_RUNTIME_DIR"]
+        assert len(observations["TMPDIR"] + "/podman/safent-test-engine-gvproxy.sock") < 104
+        assert (tmp_path / "owner/.safent").is_dir()
+        assert not (tmp_path / "owner/.config/containers").exists()
+        # Invoke the SAME transport inherited by the separate provisioner.
+        child = subprocess.run([str(profile / "bin/safent-test-engine/podman"), "info"], env=env, capture_output=True)
+        assert child.returncode == 0
+        observations = dict(line.split("=", 1) for line in env_log.read_text().splitlines())
+        assert observations["CONTAINER_CONNECTION"] == "safent-test-engine-root"
+
+    @pytest.mark.parametrize("invalid", ["missing", "wrong-hash", "wrong-capability"])
+    def test_stock_or_mismatched_binary_never_reaches_machine_commands(self, tmp_path, fake_bin_dir, invalid):
+        _fake_darwin(fake_bin_dir)
+        calls = tmp_path / "calls"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "owner", podman_log=calls)
+        marker = fake_bin_dir / "podman-private-build.json"
+        if invalid == "missing":
+            marker.unlink()
+        else:
+            data = json.loads(marker.read_text())
+            data["binary_sha256" if invalid == "wrong-hash" else "capability"] = "invalid"
+            marker.write_text(json.dumps(data, indent=2))
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+        assert result.returncode != 0
+        assert not _podman_calls(calls)
+        assert "isolated Podman build" in result.stderr
+
+    def test_private_profile_symlink_is_rejected_without_touching_target(self, tmp_path, fake_bin_dir):
+        _fake_darwin(fake_bin_dir)
+        home = tmp_path / "owner"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home, podman_log=tmp_path / "calls")
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        (home / ".safent").mkdir()
+        (home / ".safent/podman").symlink_to(foreign, target_is_directory=True)
+        result = _run_safent("facts", "--porcelain", env=env)
+        assert result.returncode != 0
+        assert list(foreign.iterdir()) == []
+
+
+def _fake_codesign(fake_bin_dir: Path, *, verify_ok: bool) -> None:
+    """Owner's decision (11-sep-2026): `cmd_stage_runtime` shells out to
+    ONE shallow `codesign --verify --strict <enclosing .app>` on macOS —
+    faking the REAL binary (not the CLI's own logic) so these tests prove
+    the actual verification branch, not a restated assumption.
+    `verify_ok=False` simulates a tampered/invalid signature."""
+    script = (
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  --verify)\n"
+        f"    {'exit 0' if verify_ok else 'exit 1'} ;;\n"
+        "esac\n"
+    )
+    codesign = fake_bin_dir / "codesign"
+    codesign.write_text(script)
+    codesign.chmod(0o755)
+
+
+def _fake_ps(fake_bin_dir: Path, output: str) -> None:
+    """Fakes the REAL `ps` binary `_foreign_engine_helper` (MAC3-07,
+    MAC4-03) shells out to — `output` is exactly what `ps -axo args=`
+    would print: one process per line, "<full-path> <rest-of-args...>",
+    no pid column (MAC4-03: combining `comm=` with any other field
+    truncates it to 16 characters on real macOS `ps` — dropped entirely).
+    Ignores its own argv (the fake never needs to distinguish invocations,
+    unlike `_FAKE_PODMAN`) since `_foreign_engine_helper` only ever calls
+    `ps` one way."""
+    ps = fake_bin_dir / "ps"
+    ps.write_text(f"#!/bin/sh\ncat <<'PSEOF'\n{output}\nPSEOF\n")
+    ps.chmod(0o755)
+
+
+class TestEnsureMachineNeverAdoptsAForeignMachine:
+    """MAC-05 (verificacion-mac-1.md): `cmd_ensure_machine` used to adopt
+    whichever machine `podman machine list -q | head -1` returned first —
+    on the owner's real Mac that was their OWN live `podman-machine-default`,
+    started by their own separately-installed podman. This app must only
+    ever create/use a machine under its OWN name and never so much as
+    inspect-with-intent-to-adopt anything else."""
+
+    def test_a_foreign_default_machine_is_never_touched_our_own_gets_created(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("podman-machine-default\n")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["t"] == "done"
+
+        calls = _podman_calls(podman_log)
+        assert not any("podman-machine-default" in c for c in calls), (
+            f"the owner's own foreign machine must never be referenced at all: {calls}"
+        )
+        assert any(c == "machine init safent-test-engine --rootful --cpus 4 --memory 8192 --disk-size 60" for c in calls), (
+            f"expected our OWN name (safent-test-engine, from SAFENT_NAME=safent-test) to be created: {calls}"
+        )
+        assert any(c.startswith("machine start safent-test-engine") for c in calls)
+
+        machine_json = json.loads((tmp_path / "home" / ".safent" / "machine.json").read_text())
+        assert machine_json == {"name": "safent-test-engine", "adopted": False}
+
+    @pytest.mark.parametrize("start_fails", ["true", "false"])
+    @pytest.mark.parametrize("machine_state", ["stopped", "starting", ""])
+    def test_success_requires_the_named_machine_running_not_another_daemon(
+        self, tmp_path: Path, fake_bin_dir: Path, start_fails: str, machine_state: str
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("podman-machine-default\nsafent-test-engine\n")
+        conflict = (
+            "podman-machine-default already starting or running on the libkrun provider: "
+            "only one VM can be active at a time"
+        )
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_STATE": machine_state,
+                "FAKE_MACHINE_START_FAILS": start_fails,
+                "FAKE_MACHINE_START_ERROR": conflict,
+            },
+        )
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 16, result.stdout
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["code"] == "machine_start_failed"
+        assert events[-1]["retryable"] is False
+        assert "safent-test-engine" in events[-1]["detail"]
+        assert conflict in result.stderr
+        calls = _podman_calls(podman_log)
+        assert calls.count("machine start safent-test-engine") == 1
+        assert "machine inspect safent-test-engine --format {{.State}}" in calls
+        assert not any(c == "info" or c.startswith("info ") for c in calls)
+        assert not any(c.startswith(("machine stop", "machine rm")) for c in calls)
+
+    def test_nonzero_start_is_idempotent_only_if_the_named_machine_is_running(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("safent-test-engine\n")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state),
+                       "FAKE_MACHINE_STATE": "running", "FAKE_MACHINE_START_FAILS": "true"},
+        )
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+        assert result.returncode == 0, result.stderr
+        assert _parse_ndjson(result.stdout)[-1]["t"] == "done"
+        assert "machine inspect safent-test-engine --format {{.State}}" in _podman_calls(podman_log)
+
+    def test_our_own_already_existing_machine_is_reused_without_recreating(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        # Steady state: OUR machine already exists (from a prior bootstrap)
+        # alongside the owner's unrelated foreign one.
+        machines_state.write_text("podman-machine-default\nsafent-test-engine\n")
+        home_dir = tmp_path / "home"
+        state_home = home_dir / ".safent"
+        state_home.mkdir(parents=True)
+        (state_home / "machine.json").write_text('{"name":"safent-test-engine","adopted":false}\n')
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        assert not any(c.startswith("machine init") for c in calls), (
+            f"an already-existing, already-ours machine must never be re-created: {calls}"
+        )
+        assert not any("podman-machine-default" in c for c in calls)
+        assert any(c.startswith("machine start safent-test-engine") for c in calls)
+
+
+class TestMachinesJsonReportsRealProviderAndSize:
+    """MAC2-01 (verificacion-mac-2.md): `facts.machines[]` used to hardcode
+    `provider:"podman"` and omit cpus/memoryBytes entirely — `MachineSpec::
+    is_satisfied_by` (Rust) never matched a real machine because of it, so
+    the planner treated every correctly created machine as permanent drift
+    (RecreateEngine on every single boot)."""
+
+    def test_facts_reports_real_provider_cpus_and_memory_bytes(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("safent-test-engine\n")
+        machine_details = tmp_path / "machine.details"
+        # 4 CPUs, 8192 MiB — cmd_ensure_machine's own real --cpus/--memory.
+        machine_details.write_text("safent-test-engine:applehv:4:8589934592\n")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_DETAILS": str(machine_details),
+                "FAKE_MACHINE_ROOTFUL": "true",
+                "FAKE_MACHINE_STATE": "running",
+            },
+        )
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        machines = json.loads(result.stdout.strip())["machines"]
+        assert len(machines) == 1, machines
+        m = machines[0]
+        assert m["name"] == "safent-test-engine"
+        assert m["provider"] == "applehv", f"must be the REAL provider, not a hardcoded 'podman': {m}"
+        assert m["cpus"] == 4
+        assert m["memoryBytes"] == 8589934592
+        assert m["rootful"] is True
+        assert m["running"] is True
+
+    def test_facts_reports_a_foreign_machine_alongside_ours_with_its_own_provider(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """The owner's own podman-machine-default (libkrun) must be
+        reported honestly if it happens to be listed — never coerced into
+        our own provider — even though this app never touches it
+        (MAC-05/MAC2-14: separate concerns, adoption vs. observation)."""
+        _fake_darwin(fake_bin_dir)
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("podman-machine-default\nsafent-test-engine\n")
+        machine_details = tmp_path / "machine.details"
+        machine_details.write_text(
+            "podman-machine-default:libkrun:4:8589934592\n"
+            "safent-test-engine:applehv:4:8589934592\n"
+        )
+        home_dir = tmp_path / "home"
+        state_home = home_dir / ".safent"
+        state_home.mkdir(parents=True)
+        (state_home / "machine.json").write_text('{"name":"safent-test-engine","adopted":false}\n')
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=home_dir,
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_DETAILS": str(machine_details),
+            },
+        )
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        machines = {m["name"]: m for m in json.loads(result.stdout.strip())["machines"]}
+        assert machines["podman-machine-default"]["provider"] == "libkrun"
+        assert machines["podman-machine-default"]["ours"] is False
+        assert machines["safent-test-engine"]["provider"] == "applehv"
+        assert machines["safent-test-engine"]["ours"] is True
+
+
+class TestStageRuntime:
+    def test_without_a_bundle_manifest_is_a_harmless_noop(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("stage-runtime", "--porcelain", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert [e["t"] for e in events] == ["stage", "done"]
+
+    def test_verified_binaries_are_staged_under_state_home_with_their_manifest_mode(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        engine_dir = _make_bundle(
+            tmp_path, entries=[("podman", b"fake-podman-binary", "0755")]
+        )
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        result = subprocess.run(
+            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert [e["t"] for e in events] == ["stage", "progress", "done"]
+
+        staged = home_dir / ".safent" / "runtime" / "6.1.1" / "podman"
+        assert staged.read_bytes() == b"fake-podman-binary"
+        assert (home_dir / ".safent" / "runtime" / "6.1.1" / ".verified").exists()
+
+    def test_hash_mismatch_fails_closed_without_staging_anything(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        engine_dir = _make_bundle(tmp_path, entries=[("podman", b"fake-podman-binary", "0755")])
+        # Corrupt the manifest's sha256 for the one entry AFTER the fact.
+        manifest_path = engine_dir / "runtime-bundle.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["entries"][0]["sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        result = subprocess.run(
+            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 14, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        failed = events[-1]
+        assert failed["t"] == "failed"
+        assert failed["code"] == "runtime_hash_mismatch"
+        assert failed["retryable"] is False
+        assert not (home_dir / ".safent" / "runtime" / "6.1.1" / "podman").exists()
+
+    def test_a_correct_sha256_entry_stages_normally(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        """Owner's decision (11-sep-2026, "el codigo mas simple es el que
+        funciona mejor"): macOS integrity is Apple's own codesign seal,
+        verified ONCE at the bundle level — removed the whole per-file
+        cdhash mechanism (MAC-02) that used to exist alongside this. Linux
+        keeps the sha256 manifest exactly as before."""
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        engine_dir = _make_bundle(
+            tmp_path, entries=[("provision.sh", b"#!/bin/sh\necho hi\n", "0755")]
+        )
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        result = subprocess.run(
+            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        staged = home_dir / ".safent" / "runtime" / "6.1.1" / "provision.sh"
+        assert staged.read_bytes() == b"#!/bin/sh\necho hi\n"
+
+
+def _make_app_bundle(tmp_path: Path, entries: list[tuple[str, bytes, str]], podman_version: str = "6.1.1") -> Path:
+    """Same shape as `_make_bundle`, but nested under `<Name>.app/Contents/
+    Resources/runtime/` — the real Tauri macOS layout `cmd_stage_runtime`'s
+    `${bundle_dir%%/Contents/*}` strips back to find the enclosing `.app`
+    to `codesign --verify --strict`."""
+    engine_dir = tmp_path / "Safent.app" / "Contents" / "Resources" / "runtime"
+    engine_dir.mkdir(parents=True)
+    (engine_dir / "safent").write_bytes(_SAFENT_CLI.read_bytes())
+    (engine_dir / "safent").chmod(0o755)
+
+    manifest_entries = []
+    for rel_path, content, mode in entries:
+        target = engine_dir / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        manifest_entries.append({"path": rel_path, "sha256": hashlib.sha256(content).hexdigest(), "mode": mode})
+    manifest = {"podman_version": podman_version, "entries": manifest_entries}
+    (engine_dir / "runtime-bundle.json").write_text(json.dumps(manifest, indent=2))
+    return engine_dir
+
+
+class TestStageRuntimeOnDarwinTrustsTheAppBundlesCodesignSeal:
+    """Owner's decision (11-sep-2026, "el codigo mas simple es el que
+    funciona mejor"): macOS integrity is Apple's own code-signing seal,
+    nothing else — ONE shallow `codesign --verify --strict` of the
+    ENCLOSING .app, never a per-file sha256/cdhash re-derivation (that
+    whole mechanism, MAC-02/MAC4-01/MAC5-02, is gone)."""
+
+    def test_a_valid_signature_stages_every_file_even_with_a_wrong_sha256(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """The sha256 recorded in the manifest is deliberately WRONG here —
+        proving darwin no longer checks it at all once the bundle-level
+        codesign verify passes (Linux still would reject this)."""
+        _fake_darwin(fake_bin_dir)
+        _fake_codesign(fake_bin_dir, verify_ok=True)
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        engine_dir = _make_app_bundle(tmp_path, entries=[("podman", b"a real signed binary", "0755")])
+        manifest_path = engine_dir / "runtime-bundle.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["entries"][0]["sha256"] = "0" * 64  # deliberately wrong
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        result = subprocess.run(
+            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["t"] == "done"
+        staged = home_dir / ".safent" / "runtime" / "6.1.1" / "podman"
+        assert staged.read_bytes() == b"a real signed binary"
+
+    def test_an_invalid_signature_fails_closed_before_staging_anything(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        _fake_codesign(fake_bin_dir, verify_ok=False)
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        engine_dir = _make_app_bundle(tmp_path, entries=[("podman", b"tampered binary", "0755")])
+
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        result = subprocess.run(
+            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 14, f"stdout={result.stdout}\nstderr={result.stderr}"  # runtime_hash_mismatch
+        failed = _parse_ndjson(result.stdout)[-1]
+        assert failed["code"] == "runtime_hash_mismatch"
+        assert failed["retryable"] is False
+        assert not (home_dir / ".safent" / "runtime" / "6.1.1" / "podman").exists()
+
+    def test_a_bundle_not_inside_an_app_fails_closed_instead_of_skipping_verification(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """A loose runtime dir with no enclosing `.app` (not the real macOS
+        layout at all) must never SILENTLY skip verification — data-model.md's
+        own invariant, "un binario que no verifica no se ejecuta jamas"."""
+        _fake_darwin(fake_bin_dir)
+        _fake_codesign(fake_bin_dir, verify_ok=True)
+        podman_log = tmp_path / "podman.log"
+        home_dir = tmp_path / "home"
+        engine_dir = _make_bundle(tmp_path, entries=[("podman", b"fake-podman-binary", "0755")])
+
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        result = subprocess.run(
+            ["sh", str(engine_dir / "safent"), "stage-runtime", "--porcelain"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 14, f"stdout={result.stdout}\nstderr={result.stderr}"
+        failed = _parse_ndjson(result.stdout)[-1]
+        assert failed["code"] == "runtime_hash_mismatch"
+        assert not (home_dir / ".safent" / "runtime" / "6.1.1" / "podman").exists()
+
+
+class TestEnsureImages:
+    def test_success_emits_pull_engine_stage(self, tmp_path: Path, fake_bin_dir: Path) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("ensure-images", "--porcelain", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[0] == {"t": "stage", "id": "pull_engine", "label": events[0]["label"]}
+        assert events[-1]["t"] == "done"
+        assert any(c.startswith("pull ") for c in _podman_calls(podman_log))
+
+    def test_registry_unreachable_fails_closed_with_the_documented_exit_code(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, pull_fails=True
+        )
+        result = _run_safent("ensure-images", "--porcelain", env=env)
+        assert result.returncode == 19, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["code"] == "registry_unreachable"
+        assert events[-1]["retryable"] is True
+
+    def test_a_silent_multi_second_pull_still_emits_progress_heartbeats(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """MAC2-02/MAC2-03 (verificacion-mac-2.md): a real pull_engine
+        measured 84 s with a 60.9 s window with NOT ONE line on any
+        channel — app-engine.md §3.2 requires progress at least every 5 s
+        while a stage is alive, and the adapter's 15 s stall watchdog
+        killed the CLI well before that. `podman pull` here is silent for
+        6 s straight (no intermediate output at all, the worst case) —
+        the CLI itself must still emit progress on its own cadence."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_PULL_DELAY_SECONDS": "6"},
+        )
+        result = _run_safent("ensure-images", "--porcelain", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        progress_events = [e for e in events if e["t"] == "progress" and e["id"] == "pull_engine"]
+        assert len(progress_events) >= 1, (
+            f"a 6 s silent pull must still emit at least one heartbeat: {events}"
+        )
+        for e in progress_events:
+            assert e["unit"] == "steps"
+            assert "total" not in e, "the heartbeat's total is genuinely unknown, must be omitted, not guessed"
+        assert events[-1]["t"] == "done"
+
+
+def _run_up_with_secret_pipe(
+    *args: str,
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    with_companion: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """Run `up` with a real pipe open for the ticket descriptor, passed to
+    the child at whatever fd number the OS actually gave it — forcing a
+    SPECIFIC number (e.g. 3) via preexec_fn is unreliable with CPython's
+    subprocess (close_fds runs AFTER preexec_fn, closing anything not in the
+    ORIGINAL pass_fds set). --secret-fd is designed to be told the number
+    instead, which is exactly what a real embedding wrapper would do too.
+
+    Runs inside capsys.disabled(): pytest's default fd-level capture holds
+    its own low-numbered descriptors open, which corrupts fd inheritance for
+    a child that expects a specific extra fd — real terminal fds are needed
+    here, same as any other test driving raw fd plumbing under pytest.
+    Returns (result, ticket_text)."""
+    r_fd, w_fd = os.pipe()
+    os.set_inheritable(w_fd, True)
+    try:
+        with capsys.disabled():
+            command = ["sh", str(_SAFENT_CLI)]
+            if not with_companion:
+                command.append("--no-companion")
+            command.extend(["up", *args, "--secret-fd", str(w_fd)])
+            result = subprocess.run(
+                command,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                pass_fds=(w_fd,),
+            )
+    finally:
+        os.close(w_fd)
+    ticket = os.read(r_fd, 65536).decode()
+    os.close(r_fd)
+    return result, ticket
+
+
+class TestUpDeliversTheTicketOnlyOnTheSecretFd:
+    def test_porcelain_up_never_leaks_the_ticket_on_stdout_or_stderr(
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, port=healthz_server
+        )
+
+        result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert ticket.strip() == f"http://127.0.0.1:{healthz_server}/?k={_SECRET_TOKEN}"
+        assert _SECRET_TOKEN not in result.stdout
+        assert _SECRET_TOKEN not in result.stderr
+
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert [e["t"] for e in events] == ["stage", "done", "stage", "done", "ready"]
+        assert events[-1] == {"t": "ready", "endpoint_ref": "stdout-secret"}
+
+    def test_non_porcelain_up_prints_the_url_to_stdout_like_the_existing_url_verb(
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, port=healthz_server
+        )
+
+        result, ticket = _run_up_with_secret_pipe(env=env, capsys=capsys)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert result.stdout.strip() == f"http://127.0.0.1:{healthz_server}/?k={_SECRET_TOKEN}"
+        assert ticket == ""  # non-porcelain `up` never touches --secret-fd
+
+    def test_daemon_never_becoming_active_fails_closed(
+        self, tmp_path: Path, fake_bin_dir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            health_active=False,
+        )
+        result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+        assert result.returncode == 24, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert ticket == ""
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["t"] == "failed"
+        assert events[-1]["code"] == "daemon_unhealthy"
+        assert _SECRET_TOKEN not in result.stdout
+        assert _SECRET_TOKEN not in result.stderr
+
+    def test_ready_never_fires_if_the_published_port_never_answers_from_the_host(
+        self, tmp_path: Path, fake_bin_dir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """MAC2-05 (verificacion-mac-2.md): a real Mac run had systemd
+        report the daemon active, the bootstrap secret readable — and
+        `ready` fired — while the published port answered `000` from the
+        HOST (only `307` from the VM's own loopback). No server at all is
+        listening here — the exact "engine healthy inside, unreachable
+        outside" shape, on a port fast/cheap enough for a unit test to
+        actually exhaust the retry budget (SAFENT_HEALTHZ_PROBE_ATTEMPTS)."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            port="1",  # nothing ever listens on port 1 without root — always refused
+            extra_env={
+                "SAFENT_HEALTHZ_PROBE_ATTEMPTS": "2",
+                "SAFENT_HEALTHZ_PROBE_INTERVAL_SECONDS": "1",
+            },
+        )
+        result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+        assert result.returncode == 24, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert ticket == "", "no ticket must ever reach the secret fd for a port nobody answers on"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["t"] == "failed"
+        assert events[-1]["code"] == "daemon_unhealthy"
+        assert "ready" not in [e["t"] for e in events], (
+            "ready must NEVER fire on internal-only evidence — this is the whole point of MAC2-05"
+        )
+
+    def test_probe_retries_until_the_port_actually_starts_answering(
+        self, tmp_path: Path, fake_bin_dir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The systemd unit can report active a moment before the app
+        itself is actually accepting connections — the probe must retry,
+        not fail on the very first attempt. The socket is not even BOUND
+        until after the delay (an already-bound-but-not-yet-served
+        HTTPServer still completes the TCP handshake instantly, which
+        would make a single curl attempt succeed without ever retrying —
+        this must reproduce "connection refused", not "slow response")."""
+        import socket
+        import time
+
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        port = str(probe.getsockname()[1])
+        probe.close()
+
+        holder: dict[str, HTTPServer] = {}
+
+        def _start_late() -> None:
+            time.sleep(1.5)
+            server = HTTPServer(("127.0.0.1", int(port)), _HealthzHandler)
+            holder["server"] = server
+            server.serve_forever()
+
+        thread = threading.Thread(target=_start_late, daemon=True)
+        thread.start()
+        try:
+            podman_log = tmp_path / "podman.log"
+            env = _base_env(
+                fake_bin_dir=fake_bin_dir,
+                home_dir=tmp_path / "home",
+                podman_log=podman_log,
+                port=port,
+                extra_env={
+                    "SAFENT_HEALTHZ_PROBE_ATTEMPTS": "10",
+                    "SAFENT_HEALTHZ_PROBE_INTERVAL_SECONDS": "1",
+                },
+            )
+            result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+            assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+            assert ticket.strip() == f"http://127.0.0.1:{port}/?k={_SECRET_TOKEN}"
+            events = _parse_ndjson(result.stdout)
+            _assert_stage_closure_invariant(events)
+            assert events[-1] == {"t": "ready", "endpoint_ref": "stdout-secret"}
+            progress_events = [e for e in events if e["t"] == "progress"]
+            assert len(progress_events) >= 1, "at least one retry must have happened before success"
+        finally:
+            if "server" in holder:
+                holder["server"].shutdown()
+            thread.join(timeout=5)
+
+
+class TestUpConvergesInsteadOfDestroyingAHealthyEngine:
+    """MAC4-02 (verificacion-mac-4.md, third distinct cause): `boot.rs`'s
+    `confirm_ready` re-invokes `up` on EVERY reopen with an already-healthy
+    engine, just to re-mint the ticket — `_run` used to `rm -f` and
+    recreate UNCONDITIONALLY, so a perfectly healthy, digest-matching
+    container lost its id and port on every single reopen (measured live:
+    12.7 s, new id, new port). `up` must reuse a converged container
+    (exists, running, serving the DESIRED digest) instead of destroying
+    it — only when SAFENT_IMAGE is digest-pinned (repo@sha256:...), the
+    only shape the desktop app ever sets."""
+
+    def test_reopening_twice_never_destroys_or_recreates_a_converged_container(
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        digest = "deadbeef" * 8  # 64 hex chars — sha256-shaped, value itself is arbitrary
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            port=healthz_server,
+            image_digest=digest,
+            extra_env={"SAFENT_IMAGE": f"ghcr.io/devwspito/safent@sha256:{digest}"},
+        )
+
+        result1, ticket1 = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+        assert result1.returncode == 0, f"stdout={result1.stdout}\nstderr={result1.stderr}"
+        calls_after_first = _podman_calls(podman_log)
+        assert not any(c.startswith("rm -f ") for c in calls_after_first), calls_after_first
+        assert not any(c.startswith("run -d ") for c in calls_after_first), calls_after_first
+
+        result2, ticket2 = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+        assert result2.returncode == 0, f"stdout={result2.stdout}\nstderr={result2.stderr}"
+        calls_after_both = _podman_calls(podman_log)
+        calls_from_second_run = calls_after_both[len(calls_after_first) :]
+        assert not any(c.startswith("rm -f ") for c in calls_from_second_run), calls_from_second_run
+        assert not any(c.startswith("run -d ") for c in calls_from_second_run), calls_from_second_run
+
+        assert ticket1.strip() == ticket2.strip() == f"http://127.0.0.1:{healthz_server}/?k={_SECRET_TOKEN}"
+
+    def test_a_non_digest_pinned_image_still_recreates_every_time_unchanged(
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A bare terminal install (SAFENT_IMAGE unset, or a plain tag) has
+        no digest to converge against — it must keep today's behavior
+        (always recreate) rather than silently claiming convergence."""
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, port=healthz_server
+        )
+
+        result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        assert any(c.startswith("rm -f ") for c in calls), calls
+        assert any(c.startswith("run -d ") for c in calls), calls
+
+
+class TestStatusHonoursPorcelain:
+    """CLI-N2 (specs/025-safent-repaso matriz-final-39eeb8e): `cmd_status`
+    (safent:788-796 at the time of the finding) `echo`d human text
+    unconditionally, even under --porcelain — the only channel invariant
+    app-engine.md §2 states ("stdout — exclusivamente NDJSON... Nada más se
+    escribe aquí"). Not in the closed verb table of §4 either, so this pins
+    the CLI's own general porcelain contract, not a wrapper dependency."""
+
+    def test_non_porcelain_running_is_unchanged_human_text_on_stdout(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("status", env=env)
+        assert result.returncode == 0
+        assert result.stdout.strip() == "[ok] Safent running at  http://localhost:17517/   (open with: safent)"
+        assert result.stderr == ""
+
+    def test_porcelain_running_emits_ndjson_status_event_only(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("status", "--porcelain", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        assert events == [{"t": "status", "state": "running", "port": 17517}]
+        assert "[ok]" not in result.stdout
+        assert "http://localhost" not in result.stdout
+
+    def test_porcelain_stopped_and_not_installed_states(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        stopped_env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home-stopped", podman_log=podman_log,
+            container_exists=True, container_running=False,
+        )
+        stopped = _run_safent("status", "--porcelain", env=stopped_env)
+        assert stopped.returncode == 0, f"stdout={stopped.stdout}\nstderr={stopped.stderr}"
+        assert _parse_ndjson(stopped.stdout) == [{"t": "status", "state": "stopped"}]
+
+        absent_env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home-absent", podman_log=podman_log,
+            container_exists=False, container_running=False,
+        )
+        absent = _run_safent("status", "--porcelain", env=absent_env)
+        assert absent.returncode == 0, f"stdout={absent.stdout}\nstderr={absent.stderr}"
+        assert _parse_ndjson(absent.stdout) == [{"t": "status", "state": "not_installed"}]
+
+
+class TestUrlHonoursPorcelain:
+    """CLI-N2: `cmd_url` (safent:379-383 at the time of the finding) printed
+    the bootstrap URL — WITH the `?k=` ticket — to stdout even under
+    --porcelain, against app-engine.md §5 ("Nunca en stdout"). Non-porcelain
+    behaviour (this command's whole purpose: hand the URL to the caller) is
+    unchanged; under --porcelain the same line moves to stderr and stdout
+    gets a secret-free completion marker instead."""
+
+    def test_non_porcelain_prints_the_url_with_ticket_to_stdout_unchanged(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("url", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert result.stdout.strip() == f"http://localhost:17517/?k={_SECRET_TOKEN}"
+
+    def test_porcelain_never_leaks_the_ticket_on_stdout(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        result = _run_safent("url", "--porcelain", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert _SECRET_TOKEN not in result.stdout
+        assert "?k=" not in result.stdout
+
+        events = _parse_ndjson(result.stdout)
+        assert events == [{"t": "url", "delivered_via": "stderr"}]
+
+        # The URL still reaches the caller — just no longer via stdout.
+        assert f"http://localhost:17517/?k={_SECRET_TOKEN}" in result.stderr
+
+
+class TestSafentPodmanOverridesPath:
+    def test_facts_uses_safent_podman_even_when_path_podman_would_fail(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        # PATH's `podman` fails hard on ANY invocation — proves it was never called.
+        broken = fake_bin_dir / "podman"
+        broken.write_text("#!/usr/bin/env bash\nexit 97\n")
+        broken.chmod(0o755)
+
+        pinned_dir = tmp_path / "pinned"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        facts = json.loads(result.stdout.strip())
+        assert facts["engineContainer"]["running"] is True
+
+
+class TestBundledPodmanGetsItsOwnStorage:
+    """Regression test (packaging review item 3,
+    specs/028-safent-app-nativa/verificacion-paquete-linux.md §"Pasada 1"):
+    a bundled STATIC (musl) podman and the host's own (glibc) podman/docker
+    collide on ONE shared per-uid /dev/shm lock segment ("failed to open
+    2048 locks ... numerical result out of range"). safent must give the
+    PINNED podman (SAFENT_PODMAN set — never a bare terminal `podman`) its
+    own storage tree under SAFENT_STATE_HOME and its own containers.conf,
+    without ever touching the host's default ~/.local/share/containers."""
+
+    def test_pinned_podman_gets_a_private_storage_conf_and_containers_conf(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        # The file stage-runtime.sh's _patch_bundled_containers_conf produces,
+        # sitting beside the pinned podman exactly as it would once flattened.
+        (pinned_dir / "containers.conf").write_text(
+            '[engine]\ncgroup_manager = "cgroupfs"\nlock_type = "file"\n'
+        )
+
+        home_dir = tmp_path / "home"
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        env["SAFENT_PODMAN"] = str(pinned)
+        state_home = home_dir / ".safent"
+        env["SAFENT_STATE_HOME"] = str(state_home)
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+
+        storage_conf = state_home / "podman" / "storage.conf"
+        assert storage_conf.is_file(), "safent must generate its own storage.conf"
+        content = storage_conf.read_text()
+        assert str(state_home / "podman" / "storage") in content
+        assert str(state_home / "podman" / "runroot") in content
+        # Never the host's own default rootless storage path.
+        assert ".local/share/containers" not in content
+
+    def test_a_bare_terminal_podman_on_path_is_left_completely_alone(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """SAFENT_PODMAN unset (a dev/owner's own podman/docker on PATH) must
+        NEVER be redirected to a private storage tree — that would silently
+        orphan whatever they already have there."""
+        home_dir = tmp_path / "home"
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=home_dir, podman_log=podman_log)
+        state_home = home_dir / ".safent"
+        env["SAFENT_STATE_HOME"] = str(state_home)
+        env.pop("SAFENT_PODMAN", None)
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert not (state_home / "podman" / "storage.conf").exists()
+
+
+class TestSeccompProfileIsCopiedFromTheBundleIntoPrivateState:
+    """MAC3-03 (verificacion-mac-3.md, MAC2-07 repeated unfixed): a real Mac
+    run failed with a raw podman error — "opening seccomp profile failed:
+    open <path>: no such file or directory" — because the profile was
+    fetched INTO $SAFENT_STATE_HOME at runtime (image extraction or a
+    raw.githubusercontent download), and podman actually runs INSIDE the
+    podman-machine VM, which only ever virtiofs-mounts /Users, /private and
+    /var/folders. Shipping the profile as a bundled, hash-verified runtime
+    asset (like podman/gvproxy/vfkit) removes the network/image dependency
+    entirely for the PINNED-podman (desktop app) case.  The source may live
+    under /Applications, but the path passed to podman must live in the
+    canonical private state directory that podman-machine actually shares."""
+
+    def test_bundled_profile_is_used_instead_of_fetching_at_runtime(
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        # ops/container/seccomp/safent.json, staged flat exactly as
+        # stage-runtime.sh's APP_FILES would (see runtime-manifest.lock's
+        # app_files.entries) — content is irrelevant to this test, only
+        # its PATH being the one actually used matters.
+        bundled_profile = pinned_dir / "safent.json"
+        bundled_profile.write_text('{"defaultAction":"SCMP_ACT_ERRNO"}')
+
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log, port=healthz_server
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+        env["SAFENT_STATE_HOME"] = str(tmp_path / "home" / ".safent")
+
+        result, ticket = _run_up_with_secret_pipe("--porcelain", env=env, capsys=capsys)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert ticket.strip() == f"http://127.0.0.1:{healthz_server}/?k={_SECRET_TOKEN}"
+        events = [json.loads(line) for line in result.stdout.splitlines()]
+        stages = [event["id"] for event in events if event["t"] == "stage"]
+        assert stages[-2:] == ["container", "health"], stages
+        assert {event["id"] for event in events if event["t"] == "done"} >= {
+            "container", "health"
+        }
+        run_calls = [c for c in _podman_calls(podman_log) if c.startswith("run -d ")]
+        assert len(run_calls) == 1, run_calls
+        private_profile = Path(env["SAFENT_STATE_HOME"]) / "safent-seccomp.json"
+        assert private_profile.read_bytes() == bundled_profile.read_bytes()
+        assert f"--security-opt seccomp={private_profile}" in run_calls[0], run_calls[0]
+        assert str(bundled_profile) not in run_calls[0]
+
+    def test_bundled_companion_scaffold_is_used_without_helper_containers(
+        self, tmp_path: Path, fake_bin_dir: Path, healthz_server: str,
+        capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        pinned_dir = tmp_path / "Applications" / "Safent.app" / "Contents" / "Resources" / "runtime"
+        pinned_dir.mkdir(parents=True)
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        (pinned_dir / "safent.json").write_text('{"defaultAction":"SCMP_ACT_ERRNO"}')
+        (pinned_dir / "provision.sh").write_text("#!/bin/sh\nexit 0\n")
+        (pinned_dir / "compose.yaml").write_text("services: {}\n")
+        (pinned_dir / "caps.template.yaml").write_text("accounts: {}\n")
+
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            port=healthz_server,
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+        env["SAFENT_STATE_HOME"] = str(tmp_path / "home" / ".safent")
+        # This is a fresh bundled install, not an existing container with
+        # unspecified image/data identity that the CLI may safely replace.
+        env["FAKE_CONTAINER_EXISTS"] = "false"
+
+        result, _ticket = _run_up_with_secret_pipe(
+            "--porcelain", env=env, capsys=capsys, with_companion=True
+        )
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        assert not any("run --rm --entrypoint cat" in call for call in calls), calls
+        assert not any(call.startswith("rm ") for call in calls), calls
+        assert any("--network safent-companions --ip 10.201.0.2" in call for call in calls)
+        scaffold_dir = Path(env["SAFENT_STATE_HOME"]) / "companions" / "ads" / "bin"
+        for name in ("provision.sh", "compose.yaml", "caps.template.yaml"):
+            assert (scaffold_dir / name).read_bytes() == (pinned_dir / name).read_bytes()
+
+    def test_state_home_given_as_a_symlink_is_canonicalized_before_use(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """Reproduces the exact shape of the real failure: verificacion-mac-3.md's
+        own harness set SAFENT_STATE_HOME to a /tmp path, which is itself a
+        symlink to /private/tmp on macOS — the HOST resolves it fine, but
+        the guest VM (a different OS, no such symlink) cannot. The report's
+        own pass 2 proved the CANONICAL form of the identical folder works;
+        this asserts safent now canonicalizes any override itself instead
+        of depending on the caller already spelling it that way."""
+        real_state = tmp_path / "real-state"
+        real_state.mkdir()
+        alias_state = tmp_path / "alias-state"
+        alias_state.symlink_to(real_state)
+
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+
+        podman_log = tmp_path / "podman.log"
+        env = _base_env(fake_bin_dir=fake_bin_dir, home_dir=tmp_path / "home", podman_log=podman_log)
+        env["SAFENT_PODMAN"] = str(pinned)
+        env["SAFENT_STATE_HOME"] = str(alias_state)
+
+        result = _run_safent("facts", env=env)
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+
+        storage_conf = real_state / "podman" / "storage.conf"
+        assert storage_conf.is_file(), "safent must generate its own storage.conf under the CANONICAL state home"
+        content = storage_conf.read_text()
+        assert str(real_state / "podman" / "storage") in content
+        assert str(alias_state) not in content, (
+            f"storage.conf must record the canonical path, not the symlink alias: {content}"
+        )
+
+
+class TestMachineInitUsesTheBundledImage:
+    """MAC-06 (verificacion-mac-1.md): `machine init` shipped with no
+    `--image` at all, so the bundled 932 MB `podman-machine.aarch64.
+    applehv.raw.zst` (93% of the DMG) went unused and podman would download
+    its own copy from quay.io — contradicting contracts/app-engine.md §4's
+    "crea la nuestra desde la imagen empaquetada, sin red". Only applies to
+    the PINNED podman (SAFENT_PODMAN set, same distinction
+    TestBundledPodmanGetsItsOwnStorage draws) — a bare terminal install
+    ships no machine image to point at."""
+
+    def test_machine_init_receives_image_and_provider_when_the_bundled_image_is_present(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        image_file = pinned_dir / "podman-machine.aarch64.applehv.raw.zst"
+        image_file.write_bytes(b"not a real disk image, existence is what's tested")
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        expected = (
+            f"machine init safent-test-engine --image {image_file} --provider applehv "
+            "--rootful --cpus 4 --memory 8192 --disk-size 60"
+        )
+        assert expected in calls, f"expected exactly: {expected!r}\ngot: {calls}"
+
+    def test_machine_init_omits_image_and_provider_when_the_bundled_image_file_is_absent(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        # Deliberately NOT creating podman-machine.aarch64.applehv.raw.zst.
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        calls = _podman_calls(podman_log)
+        assert "machine init safent-test-engine --rootful --cpus 4 --memory 8192 --disk-size 60" in calls
+        assert not any("--image" in c for c in calls), calls
+
+
+class TestEnsureMachineFailsLoudlyOnAForeignHelperBinary:
+    """MAC3-07 (verificacion-mac-3.md, MAC-07/MAC2-13 repeated unfixed): a
+    real Mac had its machine started fine, but `ps` showed the OWNER's own
+    `/opt/podman/bin/gvproxy`/`vfkit` actually serving it (different
+    sha256) — no bundled containers.conf steered podman's helper
+    resolution. `cmd_ensure_machine` must now catch this and fail loudly
+    instead of shipping silently.
+
+    MAC4-03 (verificacion-mac-4.md): the ORIGINAL guard was dead code on a
+    real Mac — `ps -o comm=` truncates to 16 characters once combined with
+    any other field, and the expected bundled path had a spurious `bin/`
+    component the REAL .app never has (it ships its runtime FLAT). Both
+    fixed; these fixtures now reflect the FLAT layout and a `ps -axo
+    args=`-only shape (no pid column, no truncation)."""
+
+    def test_a_foreign_gvproxy_serving_our_own_machine_fails_the_machine_stage(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        (pinned_dir / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "vfkit").write_bytes(b"bundled vfkit")
+        # The OWNER's own podman.io install — a DIFFERENT path — is what is
+        # actually running for OUR machine (safent-test-engine).
+        _fake_ps(
+            fake_bin_dir,
+            "/opt/podman/bin/gvproxy --listen safent-test-engine\n"
+            "/opt/podman/bin/vfkit --machine safent-test-engine",
+        )
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 16, f"stdout={result.stdout}\nstderr={result.stderr}"  # machine_start_failed
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        failed = events[-1]
+        assert failed["t"] == "failed"
+        assert failed["code"] == "machine_start_failed"
+        assert "foreign helper binary" in failed["detail"]
+        assert "/opt/podman/bin/gvproxy" in failed["detail"]
+        assert failed["retryable"] is False
+
+    def test_a_foreign_gvproxy_under_a_path_longer_than_16_characters_is_still_caught(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """MAC4-03's exact reproduction on the real Mac: both the bundled
+        AND the foreign path happened to be longer than 16 characters
+        ("/opt/podman/bin/" and "/private/tmp/saf" themselves already
+        measure exactly 16) — a fixture whose comparison only "worked" on
+        short paths would hide the same class of bug again."""
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "a-rather-long-bundle-directory-name-on-purpose"
+        pinned_dir.mkdir(parents=True)
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        (pinned_dir / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "vfkit").write_bytes(b"bundled vfkit")
+        foreign = "/Users/someone/.local/share/containers/podman/bin/gvproxy"
+        assert len(foreign) > 16
+        _fake_ps(fake_bin_dir, f"{foreign} --listen safent-test-engine")
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 16, f"stdout={result.stdout}\nstderr={result.stderr}"
+        failed = _parse_ndjson(result.stdout)[-1]
+        assert failed["code"] == "machine_start_failed"
+        assert foreign in failed["detail"], failed["detail"]
+
+    def test_the_bundled_gvproxy_serving_our_own_machine_passes(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        (pinned_dir / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "vfkit").write_bytes(b"bundled vfkit")
+        # The comm path matches the BUNDLED one exactly (flat, no bin/) — no problem.
+        _fake_ps(
+            fake_bin_dir,
+            f"{pinned_dir}/gvproxy --listen safent-test-engine\n"
+            f"{pinned_dir}/vfkit --machine safent-test-engine",
+        )
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        assert events[-1]["t"] == "done"
+
+    def test_no_gvproxy_or_vfkit_running_yet_is_not_a_failure(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """A machine that just started and has not spun up its helpers yet
+        (or a `ps` that finds nothing at all) must never be treated as a
+        foreign-helper failure — absence of evidence is not evidence."""
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+        (pinned_dir / "gvproxy").write_bytes(b"bundled gvproxy")
+        (pinned_dir / "vfkit").write_bytes(b"bundled vfkit")
+        _fake_ps(fake_bin_dir, "/sbin/launchd\n/usr/libexec/something-unrelated")
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={"FAKE_MACHINES_STATE": str(machines_state)},
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        assert events[-1]["t"] == "done"
+
+
+class TestEnsureMachineEmitsHeartbeatsOnASilentInitOrStart:
+    """MAC4-05 (verificacion-mac-4.md, MAC3-06 unchanged): the `machine`
+    stage measured 20.93 s with ZERO `progress` events — the single
+    biggest silent gap in the whole boot. app-engine.md §3 requires
+    progress at least every 5 s while a stage is alive; `pull_engine`
+    already solved this with a heartbeat (_pull_with_heartbeat) —
+    `cmd_ensure_machine` must not be the one stage left behind."""
+
+    def test_a_silent_machine_init_still_emits_progress_heartbeats(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_INIT_DELAY_SECONDS": "6",
+            },
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        progress_events = [e for e in events if e["t"] == "progress" and e["id"] == "machine"]
+        assert len(progress_events) >= 1, f"expected at least one heartbeat during a 6s silent init: {events}"
+
+    def test_a_silent_machine_start_still_emits_progress_heartbeats(
+        self, tmp_path: Path, fake_bin_dir: Path
+    ) -> None:
+        """The machine already exists (a prior boot created it) — only
+        `machine start` (the VM boot itself) is slow this time."""
+        _fake_darwin(fake_bin_dir)
+        pinned_dir = tmp_path / "bundle"
+        pinned_dir.mkdir()
+        pinned = pinned_dir / "podman"
+        pinned.write_text(_FAKE_PODMAN)
+        pinned.chmod(0o755)
+
+        podman_log = tmp_path / "podman.log"
+        machines_state = tmp_path / "machines.state"
+        machines_state.write_text("safent-test-engine\n")
+        env = _base_env(
+            fake_bin_dir=fake_bin_dir,
+            home_dir=tmp_path / "home",
+            podman_log=podman_log,
+            extra_env={
+                "FAKE_MACHINES_STATE": str(machines_state),
+                "FAKE_MACHINE_START_DELAY_SECONDS": "6",
+            },
+        )
+        env["SAFENT_PODMAN"] = str(pinned)
+
+        result = _run_safent("ensure-machine", "--porcelain", env=env)
+
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        events = _parse_ndjson(result.stdout)
+        _assert_stage_closure_invariant(events)
+        progress_events = [e for e in events if e["t"] == "progress" and e["id"] == "machine"]
+        assert len(progress_events) >= 1, f"expected at least one heartbeat during a 6s silent start: {events}"

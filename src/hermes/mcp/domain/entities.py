@@ -12,8 +12,10 @@ Invariants enforced here:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Any
 
 from hermes.capabilities.domain.ports import RiskLevel
 
@@ -35,6 +37,9 @@ class McpTool:
     trust_level: TrustLevel       # capped to server's trust_level
     risk: RiskLevel
     auto_executable: bool
+    input_schema: dict[str, Any] = field(
+        default_factory=lambda: {"type": "object", "properties": {}},
+    )
 
     @property
     def qualified_name(self) -> str:
@@ -51,6 +56,7 @@ class McpTool:
         trust_level: TrustLevel,
         read_only_hint: bool | None = None,
         destructive_hint: bool | None = None,
+        input_schema: dict[str, Any] | None = None,
     ) -> McpTool:
         """Construct with server-side risk classification."""
         classification: McpToolClassification = classify_mcp_tool(
@@ -67,6 +73,8 @@ class McpTool:
             trust_level=trust_level,
             risk=classification.risk,
             auto_executable=classification.auto_executable,
+            input_schema=(deepcopy(input_schema) if isinstance(input_schema, dict)
+                          else {"type": "object", "properties": {}}),
         )
 
 

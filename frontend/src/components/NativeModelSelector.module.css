@@ -1,0 +1,14 @@
+.root { min-width: 0; }
+.root p { margin: 8px 0; line-height: 1.5; }
+.panel { margin-top: 12px; padding: 14px; max-width: 560px; border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md); background: var(--color-surface); }
+.panel form { display: grid; gap: 8px; margin-block: 12px; }
+.panel label { font-weight: var(--weight-medium); color: var(--color-text); }
+.selectWrap { position: relative; min-width: 0; }
+.selectWrap svg { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); color: var(--color-text-muted); pointer-events: none; }
+.panel select { appearance: none; color-scheme: dark; width: 100%; min-height: 40px; padding: 9px 38px 9px 12px; font: inherit; color: var(--color-text); background: var(--color-surface-raise); border: 1px solid var(--color-border); border-radius: var(--radius-sm); cursor: pointer; }
+.panel option { color: var(--color-text); background: var(--color-surface-raise); }
+.panel select:disabled { cursor: wait; opacity: 0.6; }
+.panel button { justify-self: start; }
+.root button:active:not(:disabled) { transform: scale(0.97); }
+.root :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) { .root button:active:not(:disabled) { transform: none; } }

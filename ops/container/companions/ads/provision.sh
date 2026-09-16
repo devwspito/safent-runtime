@@ -12,6 +12,13 @@
 # State lives at $SAFENT_COMPANION_STATE (default ~/.safent/companions/ads):
 #   tls/            private CA + leaf for ads.safent.internal
 #   bearer          the /mcp bearer (0400)
+#   sso/ads-sso.key private Ed25519 half of the session-bridge SSO pair (026,
+#                   contracts/sso.md §3) — 0400, generated ONCE alongside the
+#                   bearer. The public half is handed to the companion as
+#                   ADS_SSO_PUBLIC_KEY in secrets/api.env (same channel as
+#                   ADS_MCP_TOKEN — never argv, never a log line). Only
+#                   Safent's daemon reads the private half (read-only bind at
+#                   /etc/hermes/companions/ads-sso.key, T004).
 #   secrets/api.env    ads-api/ads-worker secrets — generated ONCE, edit by
 #                      hand only to uncomment TELEGRAM_BOT_TOKEN/
 #                      TELEGRAM_OWNER_CHAT_IDS once that path is optional
@@ -20,9 +27,8 @@
 #   companions.json the file Safent's own daemon reads (read-only bind)
 #
 # vendor.env (OPTIONAL, owner-created by hand, 0600, never generated here):
-# Safent's OWN Google Ads MCC / Meta app credentials, merged into
+# Safent's OWN Google Cloud OAuth / Meta app credentials, merged into
 # broker.env on every re-provision (never overwritten if already merged):
-#   GOOGLE_ADS_DEVELOPER_TOKEN=...
 #   GOOGLE_ADS_CLIENT_ID=...
 #   GOOGLE_ADS_CLIENT_SECRET=...
 #   GOOGLE_ADS_LOGIN_CUSTOMER_ID=...
@@ -41,14 +47,31 @@
 # Publishing ghcr.io/devwspito/safent-ads (SAFENT_ADS_IMAGE's default) is
 # the OWNER's own release step, from the ads repo's CI — never done from
 # here or from a developer machine.
+#
+# --scaffold (028 T015): stop after the network/TLS/bearer/companions.json/
+# caps/pg_password steps — every one of them is local and image-independent
+# (no pull, no `podman run` of the ads image). Skips ensure_image,
+# ensure_secrets, ensure_sso_keypair, start_companion and wait_for_health,
+# so the companion's OWN service never comes up. This is what run-safent.sh
+# and the `safent` CLI now call on EVERY Safent start: the four files Safent
+# binds read-only (companions.json, ca.crt, bearer, sso/ads-sso.key) always
+# exist from first boot, so a LATER `safent companion install` only ever
+# writes into mounts that are already there — it never has to recreate
+# Safent's own container. Without --scaffold this script still runs the
+# FULL sequence (today's exact behaviour), used by `safent companion
+# install|repair` (T016) to actually bring the service up.
 set -euo pipefail
 
 readonly COMPANION_SUBNET="10.201.0.0/24"
 readonly COMPANION_GATEWAY="10.201.0.1"
+# Keep dynamically attached cores (including custom names) out of the fixed
+# product addresses. Existing networks are never removed or silently migrated.
+readonly COMPANION_DYNAMIC_RANGE="10.201.0.128/25"
 readonly COMPANION_IP="10.201.0.10"
 readonly COMPANION_PORT="8443"
 readonly COMPANION_HOST="ads.safent.internal"
 readonly COMPANION_NETWORK="safent-companions"
+readonly COMPANION_RUNTIME_VOLUME="safent-companion-runtime"
 # The image is the OWNER'S release artifact (ghcr.io/devwspito/safent-ads),
 # published by the ads team's own pipeline — never built here (no publishing
 # from a developer machine). Override for local dev with
@@ -58,11 +81,27 @@ readonly SAFENT_ADS_IMAGE="${SAFENT_ADS_IMAGE:-ghcr.io/devwspito/safent-ads:late
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="${SAFENT_COMPANION_STATE:-$HOME/.safent/companions/ads}"
-RUNTIME="$(command -v podman || command -v docker)"
+# SAFENT_PODMAN wins over PATH resolution — same rule as the `safent` CLI
+# (contracts/app-engine.md §1): the desktop app ships its OWN pinned podman
+# binary and this script must never fall back to whatever a terminal user
+# happens to have on PATH once it is invoked from the embedded CLI
+# (`safent companion install|repair`, T016).
+if [ -n "${SAFENT_PODMAN:-}" ]; then
+  RUNTIME="$SAFENT_PODMAN"
+else
+  RUNTIME="$(command -v podman || command -v docker)"
+fi
 [ -n "$RUNTIME" ] || { echo "provision.sh: need podman or docker" >&2; exit 1; }
 
-mkdir -p "$STATE/tls" "$STATE/secrets"
-chmod 0700 "$STATE" "$STATE/secrets"
+SCAFFOLD_ONLY=0
+case "${1:-}" in
+  --scaffold) SCAFFOLD_ONLY=1 ;;
+  "") ;;
+  *) echo "provision.sh: unknown argument '$1' (usage: provision.sh [--scaffold])" >&2; exit 1 ;;
+esac
+
+mkdir -p "$STATE/tls" "$STATE/secrets" "$STATE/sso"
+chmod 0700 "$STATE" "$STATE/secrets" "$STATE/sso"
 
 log() { echo "[companion:ads] $*"; }
 fail() { echo "[companion:ads] FALLO: $*" >&2; exit 1; }
@@ -79,7 +118,8 @@ ensure_network() {
     return 0
   fi
   if ! "$RUNTIME" network create "$COMPANION_NETWORK" \
-        --subnet "$COMPANION_SUBNET" --gateway "$COMPANION_GATEWAY" >/dev/null 2>&1; then
+        --subnet "$COMPANION_SUBNET" --gateway "$COMPANION_GATEWAY" \
+        --ip-range "$COMPANION_DYNAMIC_RANGE" >/dev/null 2>&1; then
     fail "'$COMPANION_SUBNET' ya está en uso por otra red de este host — libérala o el companion no se instala (nunca elegimos otra)"
   fi
   log "red '$COMPANION_NETWORK' creada ($COMPANION_SUBNET)"
@@ -102,7 +142,7 @@ ensure_tls() {
     _open_leaf_key_to_container
     return 0
   fi
-  log "generando CA privada + hoja TLS para $COMPANION_HOST…"
+  log "generando CA privada + hoja TLS para ${COMPANION_HOST}..."
   local ca_key="$STATE/tls/ca.key" ca_crt="$STATE/tls/ca.crt"
   local leaf_key="$STATE/tls/leaf.key" leaf_crt="$STATE/tls/leaf.crt"
   openssl ecparam -genkey -name prime256v1 -noout -out "$ca_key"
@@ -128,12 +168,24 @@ ensure_bearer() {
 
 # ── 4. companions.json (exact shape hermes.shell_server.companions validates) ─
 write_companions_json() {
-  local fingerprint
-  fingerprint="sha256:$(openssl x509 -in "$STATE/tls/ca.crt" -outform der | sha256sum | cut -d' ' -f1)"
+  local fingerprint fingerprint_hex registry_tmp
+  # OpenSSL is already a hard dependency for the CA and bearer.  Use it for
+  # the digest too instead of GNU sha256sum: stock macOS exposes no
+  # sha256sum on the GUI app's minimal PATH, which used to disable the Ads
+  # scaffold during an otherwise healthy first boot.
+  fingerprint_hex="$(openssl x509 -in "$STATE/tls/ca.crt" -outform der \
+    | openssl dgst -sha256 -r | awk '{print $1}')"
+  [ "${#fingerprint_hex}" -eq 64 ] \
+    && [[ "$fingerprint_hex" != *[!0-9a-fA-F]* ]] \
+    || fail "no se pudo calcular la huella SHA-256 de la CA"
+  fingerprint="sha256:$fingerprint_hex"
   # Written to a temp name first: the live file is 0444 and (when we could
   # chown it) root-owned, so `cat >` onto it would fail — rename in the
   # owner-writable $STATE dir is the only re-provision path that works.
-  cat > "$STATE/companions.json.tmp" <<JSON
+  # A previous interrupted write may leave the legacy fixed .tmp read-only.
+  # Never reopen it or follow it: stage this attempt in a fresh owned file.
+  registry_tmp="$(mktemp "$STATE/.companions.XXXXXX")"
+  cat > "$registry_tmp" <<JSON
 {"version": 1, "companions": [{
   "slug": "safent-ads",
   "url": "https://$COMPANION_HOST:$COMPANION_PORT/mcp",
@@ -150,26 +202,44 @@ JSON
   # relies on its second branch (the `:ro` bind mount), which we always
   # provide from run-safent.sh. Never fail provisioning over the chown: the
   # 0444 mode + read-only mount already carry the invariant.
-  chmod 0444 "$STATE/companions.json.tmp"
+  chmod 0444 "$registry_tmp"
   if [ "$(id -u)" -eq 0 ]; then
-    chown 0:0 "$STATE/companions.json.tmp"
+    chown 0:0 "$registry_tmp"
   elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    sudo -n chown 0:0 "$STATE/companions.json.tmp" || \
+    sudo -n chown 0:0 "$registry_tmp" || \
       log "sin privilegios para chown root:root — vale igual (bind :ro + 0444)"
   else
     log "sin sudo no interactivo — companions.json queda 0444 de tu usuario (bind :ro lo protege)"
   fi
-  mv -f "$STATE/companions.json.tmp" "$STATE/companions.json"
+  mv -f "$registry_tmp" "$STATE/companions.json"
 }
 
 # ── 5. Image — the owner's published release, pulled only if absent ─────────
 ensure_image() {
   if "$RUNTIME" image inspect "$SAFENT_ADS_IMAGE" >/dev/null 2>&1; then
     log "imagen '$SAFENT_ADS_IMAGE' ya está en local — OK"
-    return 0
+  else
+    log "descargando '$SAFENT_ADS_IMAGE'…"
+    "$RUNTIME" pull "$SAFENT_ADS_IMAGE" || fail "no se pudo descargar '$SAFENT_ADS_IMAGE'"
   fi
-  log "descargando '$SAFENT_ADS_IMAGE'…"
-  "$RUNTIME" pull "$SAFENT_ADS_IMAGE" || fail "no se pudo descargar '$SAFENT_ADS_IMAGE'"
+  record_provisioned_image
+}
+
+# Persist the EXACT image ref this run actually used — the single source of
+# truth `safent companion status/rotate/remove` reads back (CLI-10). Without
+# this, those verbs fell back to a hard-coded ghcr.io/…/safent-ads:latest that
+# could silently diverge from the image `run-safent.sh` actually provisioned
+# with (its own dev convenience picks up safent-ads:local when present) — a
+# `rotate` would then recreate ads-api against a DIFFERENT image than
+# ads-worker was already running, and an image whose alembic history doesn't
+# know the DB's current revision dies `Can't locate revision …`. Re-written on
+# EVERY provisioning run (this script runs on every `run-safent.sh`/`safent`
+# start, not just first install) so it always reflects the image actually in
+# use — `safent companion update` is still the only verb that CHOOSES a new
+# one; this merely records the choice already made.
+record_provisioned_image() {
+  printf '%s' "$SAFENT_ADS_IMAGE" > "$STATE/image.tmp"
+  mv -f "$STATE/image.tmp" "$STATE/image"
 }
 
 # ── 6. Postgres password (compose.yaml's ADS_POSTGRES_PASSWORD) ─────────────
@@ -190,7 +260,9 @@ ensure_secrets() {
   else
     log "generando secretos de ads-api/ads-worker/ads-broker (una sola vez)…"
     local keypair signing_key public_key session_secret totp_key master_key
-    keypair="$("$RUNTIME" run --rm --network none "$SAFENT_ADS_IMAGE" \
+    # -- (security review 2026-09-10, LOW finding, CWE-88): stops podman/
+    # docker from ever reading $SAFENT_ADS_IMAGE as an option.
+    keypair="$("$RUNTIME" run --rm --network none -- "$SAFENT_ADS_IMAGE" \
       python -m safent_ads.tools.gen_keys)"
     signing_key="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_SIGNING_KEY=//p')"
     public_key="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_PUBLIC_KEY=//p')"
@@ -206,6 +278,9 @@ ADS_MCP_TOKEN=$(cat "$STATE/bearer")
 ADS_SESSION_SECRET=$session_secret
 ADS_TOTP_ENC_KEY=$totp_key
 ADS_APPROVAL_SIGNING_KEY=$signing_key
+# El companion lanzado por la app es SIEMPRE del propietario único (0.2.21+
+# exige declararlo; sin esta línea ads-api muere al arrancar).
+ADS_SINGLE_OWNER_MODE=1
 # Opcional: el dueño puede activar el bot de Telegram añadiendo aquí
 # (el arranque sigue sin ellas mientras esa vía siga siendo opcional):
 # TELEGRAM_BOT_TOKEN=
@@ -227,9 +302,9 @@ EOF
   merge_vendor_credentials
 }
 
-# Vendor (Safent's own Google MCC / Meta app) credentials: owner-provided,
+# Vendor (Safent's own Google Cloud OAuth / Meta app) credentials: owner-provided,
 # never generated here. $STATE/vendor.env is written BY HAND by the owner
-# (0600, GOOGLE_ADS_*/META_* lines only) — if present, its lines are merged
+# (0600, only the explicitly supported keys below) — if present, its lines are merged
 # into broker.env, skipping any key that is already there, so re-running
 # provisioning after the owner adds the file picks it up without ever
 # duplicating or overwriting a line.
@@ -239,7 +314,7 @@ merge_vendor_credentials() {
   local line key
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      GOOGLE_ADS_*=*|META_*=*) ;;
+      GOOGLE_ADS_CLIENT_ID=*|GOOGLE_ADS_CLIENT_SECRET=*|GOOGLE_ADS_LOGIN_CUSTOMER_ID=*|META_APP_ID=*|META_APP_SECRET=*) ;;
       *) continue ;;
     esac
     key="${line%%=*}"
@@ -247,6 +322,205 @@ merge_vendor_credentials() {
     printf '%s\n' "$line" >> "$STATE/secrets/broker.env"
     log "credencial de vendor '$key' incorporada a broker.env"
   done < "$vendor"
+}
+
+# ── 7b. SSO Ed25519 keypair (026, contracts/sso.md §3) — generated ONCE,
+# alongside the bearer, with the SAME already-proven pattern as the approval
+# keypair above (`python -m safent_ads.tools.gen_keys` inside the companion
+# image, no host-side crypto dependency). The private half never leaves this
+# host: 0400 at $STATE/sso/ads-sso.key, read only by Safent's daemon via the
+# read-only bind run-safent.sh adds. The public half travels to the companion
+# through secrets/api.env — the exact same channel ADS_MCP_TOKEN already
+# uses — never argv, never a log line.
+#
+# gen_keys prints STANDARD base64 (ADS_APPROVAL_PUBLIC_KEY=<b64>); the
+# companion's Ed25519 verifier (safent_ads.iam.infrastructure.
+# ed25519_assertion_verifier.decode_ed25519_public_key) decodes ADS_SSO_
+# PUBLIC_KEY as URL-SAFE base64 (matching the assertion's own <b64url(payload)>
+# encoding, contracts/sso.md §3). `tr '+/' '-_'` converts alphabets without
+# touching the padding — cheap, host-only, no extra dependency.
+# ── 7c. SSO key placeholder (028 T015, scaffold mode) ───────────────────────
+# An EMPTY, correctly-permissioned file so the bind mount run-safent.sh/the
+# `safent` CLI add for /etc/hermes/companions/ads-sso.key always has a
+# source, even before ensure_sso_keypair ever runs (that step needs the ads
+# image, which scaffold mode deliberately never pulls). The daemon's own
+# loader (hermes.agents_os.infrastructure.companion_sso_authority) already
+# fails CLOSED and CLEAN on an empty key (Ed25519PrivateKey.from_private_
+# bytes raises ValueError -> CompanionSsoKeyUnavailableError, no crash, no
+# key material anywhere) — this placeholder is what makes that the observed
+# behaviour instead of a missing bind-mount source. `[ -e ]`, not `[ -f ]`:
+# treats a placeholder OR a real key identically for "already have a file
+# here", `ensure_sso_keypair`'s own idempotency check below distinguishes
+# "real key already generated" (non-empty) from "just the placeholder".
+ensure_sso_placeholder() {
+  if [ ! -e "$STATE/sso/ads-sso.key" ]; then
+    : > "$STATE/sso/ads-sso.key"
+    chmod 0400 "$STATE/sso/ads-sso.key"
+  fi
+  # Root-owned projection exists before image startup; an empty pin must fail
+  # closed until the actual install-derived public key replaces it atomically.
+  if [ ! -e "$STATE/sso/ads-composio-channel.pub" ]; then
+    : > "$STATE/sso/ads-composio-channel.pub"
+    chmod 0444 "$STATE/sso/ads-composio-channel.pub"
+  fi
+}
+
+ensure_sso_keypair() {
+  # -s (non-empty), not -f: a scaffold-mode placeholder (ensure_sso_
+  # placeholder above) is a zero-byte file at this exact path — it must
+  # NOT satisfy this check, or `safent companion install` would see "the
+  # key already exists" and never generate the real one (T015/T016 boundary).
+  if [ -s "$STATE/sso/ads-sso.key" ]; then
+    _sync_sso_public_key_to_broker_env
+    _ensure_composio_channel_pin
+    return 0
+  fi
+  log "generando par Ed25519 de SSO (puente de sesión, 026)…"
+  local keypair seed_std pub_std pub_urlsafe
+  # -- (LOW finding, CWE-88): see ensure_secrets's own identical comment.
+  keypair="$("$RUNTIME" run --rm --network none -- "$SAFENT_ADS_IMAGE" \
+    python -m safent_ads.tools.gen_keys)"
+  seed_std="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_SIGNING_KEY=//p')"
+  pub_std="$(printf '%s\n' "$keypair" | sed -n 's/^ADS_APPROVAL_PUBLIC_KEY=//p')"
+  [ -n "$seed_std" ] && [ -n "$pub_std" ] || \
+    fail "gen_keys no devolvió el par Ed25519 de SSO esperado"
+
+  umask 077
+  printf '%s\n' "$seed_std" > "$STATE/sso/ads-sso.key.tmp"
+  chmod 0400 "$STATE/sso/ads-sso.key.tmp"
+  mv -f "$STATE/sso/ads-sso.key.tmp" "$STATE/sso/ads-sso.key"
+
+  pub_urlsafe="$(printf '%s' "$pub_std" | tr '+/' '-_')"
+  _write_sso_public_key_to_api_env "$pub_urlsafe"
+  _ensure_single_owner_mode_in_api_env
+  _sync_sso_public_key_to_broker_env
+  _ensure_composio_channel_pin
+  log "par Ed25519 de SSO generado (0400) en $STATE/sso/ads-sso.key"
+}
+
+# Never bind macOS files containing credentials into the core: virtiofs can
+# report the calling container uid as their owner. Materialize ONLY this
+# allowlisted projection in a Linux volume, with real root ownership. A
+# directory mount also observes atomic replacements (individual file binds
+# otherwise keep the empty scaffold SSO inode forever).
+ensure_runtime_projection_volume() {
+  local identity
+  # Podman fails `volume create` on an existing name; Docker may reuse it.
+  # Never adopt an unrelated or host-backed volume, including after a race.
+  if ! identity="$("$RUNTIME" volume inspect --format '{{.Driver}}|{{len .Options}}|{{index .Labels "com.safent.component"}}' \
+      "$COMPANION_RUNTIME_VOLUME" 2>/dev/null)"; then
+    "$RUNTIME" volume create --label com.safent.component=ads-runtime-projection \
+      "$COMPANION_RUNTIME_VOLUME" >/dev/null 2>&1 || true
+    identity="$("$RUNTIME" volume inspect --format '{{.Driver}}|{{len .Options}}|{{index .Labels "com.safent.component"}}' \
+      "$COMPANION_RUNTIME_VOLUME" 2>/dev/null)" \
+      || fail "no se pudo verificar el volumen privado de Anuncios"
+  fi
+  [ "$identity" = 'local|0|ads-runtime-projection' ] \
+    || fail "el volumen de Anuncios no pertenece a esta instalacion o tiene opciones incompatibles"
+}
+
+publish_runtime_projection() {
+  local projection image
+  image="${SAFENT_IMAGE:-$SAFENT_ADS_IMAGE}"
+  "$RUNTIME" image inspect "$image" >/dev/null 2>&1 \
+    || "$RUNTIME" pull "$image" >&2 \
+    || fail "no se pudo preparar la imagen de la proyección privada"
+  ensure_runtime_projection_volume
+  projection="$(mktemp -d "$STATE/.runtime.XXXXXX")"
+  cp "$STATE/companions.json" "$projection/companions.json"
+  cp "$STATE/tls/ca.crt" "$projection/ads-ca.crt"
+  cp "$STATE/bearer" "$projection/ads.bearer"
+  cp "$STATE/sso/ads-sso.key" "$projection/ads-sso.key"
+  cp "$STATE/sso/ads-composio-channel.pub" "$projection/ads-composio-channel.pub"
+  chmod 0400 "$projection/ads.bearer" "$projection/ads-sso.key"
+  chmod 0444 "$projection/companions.json" "$projection/ads-ca.crt" "$projection/ads-composio-channel.pub"
+  if COPYFILE_DISABLE=1 tar --format ustar -C "$projection" -cf - \
+      companions.json ads-ca.crt ads.bearer ads-sso.key ads-composio-channel.pub \
+    | "$RUNTIME" run --rm -i --network none --user 0:0 --read-only \
+        --cap-drop ALL --security-opt no-new-privileges \
+        -v "$COMPANION_RUNTIME_VOLUME:/runtime" --entrypoint /bin/sh \
+        "$image" -ec '
+          umask 077
+          next="$(mktemp -d /runtime/.next.XXXXXX)"
+          trap '\''rm -f "$next/ads.bearer" "$next/ads-sso.key" "$next/ads-ca.crt" "$next/ads-composio-channel.pub" "$next/companions.json"; rmdir "$next"'\'' EXIT
+          tar --no-same-owner -xf - -C "$next"
+          chmod 0400 "$next/ads.bearer" "$next/ads-sso.key"
+          chmod 0444 "$next/companions.json" "$next/ads-ca.crt" "$next/ads-composio-channel.pub"
+          for file in ads.bearer ads-sso.key ads-ca.crt ads-composio-channel.pub companions.json; do
+            mv -f "$next/$file" "/runtime/$file"
+          done
+          chmod 0755 /runtime
+        '; then
+    rm -f "$projection/companions.json" "$projection/ads-ca.crt" \
+      "$projection/ads.bearer" "$projection/ads-sso.key" "$projection/ads-composio-channel.pub"
+    rmdir "$projection"
+  else
+    rm -f "$projection/companions.json" "$projection/ads-ca.crt" \
+      "$projection/ads.bearer" "$projection/ads-sso.key" "$projection/ads-composio-channel.pub"
+    rmdir "$projection"
+    fail "no se pudo preparar el volumen privado de Anuncios"
+  fi
+}
+
+# Idempotent single-line writer: appends ADS_SSO_PUBLIC_KEY=<value> to
+# secrets/api.env unless a line for that key already exists — mirrors
+# merge_vendor_credentials' own "skip if present" discipline so re-running
+# provisioning never duplicates or overwrites the line.
+# Idempotente: instalaciones anteriores a 0.9.34 nacieron sin
+# ADS_SINGLE_OWNER_MODE y su ads-api reiniciaba en bucle con companion 0.2.21+.
+_ensure_single_owner_mode_in_api_env() {
+  local api_env="$STATE/secrets/api.env"
+  [ -f "$api_env" ] || return 0
+  grep -q '^ADS_SINGLE_OWNER_MODE=' "$api_env" && return 0
+  printf 'ADS_SINGLE_OWNER_MODE=1\n' >> "$api_env"
+  log "api.env: añadido ADS_SINGLE_OWNER_MODE=1 (instalación anterior)"
+}
+
+_write_sso_public_key_to_api_env() {
+  local pub="$1" api_env="$STATE/secrets/api.env"
+  grep -q '^ADS_SSO_PUBLIC_KEY=' "$api_env" 2>/dev/null && return 0
+  printf 'ADS_SSO_PUBLIC_KEY=%s\n' "$pub" >> "$api_env"
+}
+
+# The broker verifies the signed Integrations lease itself. Only the PUBLIC
+# issuer key crosses this boundary; the SSO private key remains in the core.
+# Also runs on upgrades: never regenerate any existing credential or volume.
+_sync_sso_public_key_to_broker_env() {
+  local pub broker_env existing
+  broker_env="$STATE/secrets/broker.env"
+  pub="$(sed -n 's/^ADS_SSO_PUBLIC_KEY=//p' "$STATE/secrets/api.env")"
+  [ -n "$pub" ] || fail "falta la clave pública de SSO; no se puede compartir Integraciones"
+  [ "$(grep -c '^ADS_SSO_PUBLIC_KEY=' "$STATE/secrets/api.env")" = 1 ] || \
+    fail "la clave pública de SSO está duplicada; se conservan los secretos"
+  if grep -q '^ADS_SSO_PUBLIC_KEY=' "$broker_env"; then
+    existing="$(sed -n 's/^ADS_SSO_PUBLIC_KEY=//p' "$broker_env")"
+    [ "$existing" = "$pub" ] || fail "la identidad pública del broker no coincide con Safent"
+  else
+    printf 'ADS_SSO_PUBLIC_KEY=%s\n' "$pub" >> "$broker_env"
+  fi
+  if grep -q '^ADS_COMPANION_MODE=' "$broker_env"; then
+    existing="$(sed -n 's/^ADS_COMPANION_MODE=//p' "$broker_env")"
+    [ "$existing" = true ] || fail "Anuncios debe consumir Integraciones en modo companion"
+  else
+    printf 'ADS_COMPANION_MODE=true\n' >> "$broker_env"
+  fi
+  chmod 0600 "$broker_env"
+}
+
+_ensure_composio_channel_pin() {
+  # Only a deterministic PUBLIC key returns. Master key uses stdin (not argv,
+  # container environment, logging, or host mounts). Pinning here means even
+  # a compromised Ads API cannot replace the recipient and obtain the vault.
+  local pub
+  pub="$(sed -n 's/^ADS_CREDENTIAL_MASTER_KEY=//p' "$STATE/secrets/broker.env" \
+    | "$RUNTIME" run --rm -i --network none --read-only --cap-drop ALL \
+        --security-opt no-new-privileges -- "$SAFENT_ADS_IMAGE" \
+        python -m safent_ads.tools.composio_channel_key)" \
+    || fail "no se pudo fijar el destinatario privado de Integraciones"
+  [ -n "$pub" ] || fail "falta la identidad pública del canal de Integraciones"
+  printf '%s\n' "$pub" > "$STATE/sso/ads-composio-channel.pub.tmp"
+  chmod 0444 "$STATE/sso/ads-composio-channel.pub.tmp"
+  mv -f "$STATE/sso/ads-composio-channel.pub.tmp" "$STATE/sso/ads-composio-channel.pub"
 }
 
 # ── 8. caps.yaml — hard caps template, installed once, owner edits by hand ──
@@ -263,11 +537,125 @@ ensure_caps() {
   log "caps.yaml creado desde la plantilla — sin cuentas autorizadas todavía (fail-closed)"
 }
 
+# Database readiness precedes the revision guard, never the other way round.
+# A cold VM restart leaves an existing DB stopped; `exec psql` cannot read it.
+# Start ONLY that dependency without recreating it or touching its volumes.
+# API/worker/broker/migrations remain stopped until the guard passes.
+ensure_database_running() {
+  "$RUNTIME" compose -p safent-ads -f "$HERE/compose.yaml" up -d --no-recreate ads-db \
+    || fail "no se pudo reanudar la base de datos de Anuncios; sus datos se conservan"
+  local attempt=0
+  while [ "$attempt" -lt 45 ]; do
+    if "$RUNTIME" compose -p safent-ads -f "$HERE/compose.yaml" exec -T ads-db \
+      pg_isready -U ads -d ads >/dev/null 2>&1; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  fail "la base de datos de Anuncios no responde todavía; no se inician las migraciones"
+}
+
+# Startup/repair obey the same downgrade protection as update/rotate. A known
+# database revision requires a verifiable image history; an unreadable database
+# is NOT evidence of a fresh database. Only an explicitly absent version table
+# (or an empty one) is the first-install path.
+_refuse_if_image_predates_the_database() {
+  "$RUNTIME" container exists safent-ads-ads-db-1 2>/dev/null || return 0
+  local db_rev history version_table
+  version_table="$("$RUNTIME" exec safent-ads-ads-db-1 \
+    psql -U ads -d ads -tAc "SELECT to_regclass('public.alembic_version');" 2>/dev/null \
+    | tr -d '[:space:]')" \
+    || fail "no se pudo verificar la base de datos de Anuncios; no se inician las migraciones"
+  [ -n "$version_table" ] || return 0
+  db_rev="$("$RUNTIME" exec safent-ads-ads-db-1 \
+    psql -U ads -d ads -tAc 'SELECT version_num FROM alembic_version;' 2>/dev/null \
+    | tr -d '[:space:]')" \
+    || fail "no se pudo leer la revisión de Anuncios; no se inician las migraciones"
+  [ -n "$db_rev" ] || return 0
+  # -- (LOW finding, CWE-88): see ensure_secrets's own identical comment.
+  history="$("$RUNTIME" run --rm --network none -- "$SAFENT_ADS_IMAGE" alembic history 2>/dev/null || true)"
+  if [ -z "$history" ]; then
+    fail "no se pudo comprobar la compatibilidad de la imagen de Anuncios; no se inician las migraciones"
+  fi
+  if printf '%s\n' "$history" | grep -qw -- "$db_rev"; then
+    return 0
+  fi
+  fail "la imagen de Anuncios no conoce la revisión '$db_rev' ya aplicada; no se inician las migraciones ni los servicios. Se conservan los datos para usar una versión compatible"
+}
+
+# Old networks allocated every service dynamically except the API. A broker
+# could therefore acquire .10 before the API started. Only crossed reservations
+# belonging to THIS exact compose installation may be released automatically.
+# No network, core, volume, credential or foreign container is removed here.
+reconcile_reserved_addresses() {
+  local ids cid row seen ip project service config extra expected separators crossed="" index=0
+  local -a crossed_rows=()
+  local template='{{.Id}}|{{with index .NetworkSettings.Networks "safent-companions"}}{{.IPAddress}}{{end}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}'
+  template="${template//safent-companions/$COMPANION_NETWORK}"
+  ids="$("$RUNTIME" ps -a --no-trunc --format '{{.ID}}')" \
+    || fail "no se pudo verificar el inventario de red de Anuncios; no se modifica ningún contenedor"
+  for cid in $ids; do
+    [[ "$cid" =~ ^[0-9a-f]{64}$ ]] || fail "inventario de red inválido; no se modifica ningún contenedor"
+    row="$("$RUNTIME" inspect --type container --format "$template" "$cid")" \
+      || fail "no se pudo verificar un contenedor de la red; vuelve a intentar la reparación"
+    IFS='|' read -r seen ip project service config extra <<< "$row"
+    separators="${row//[^|]/}"
+    [ "$seen" = "$cid" ] && [ "${#separators}" -eq 4 ] \
+      && [ -z "$extra" ] && [[ "$row" != *$'\n'* ]] \
+      || fail "identidad de red inválida; no se modifica ningún contenedor"
+    case "$ip" in
+      10.201.0.10) expected=ads-api ;;
+      10.201.0.11) expected=ads-db ;;
+      10.201.0.12) expected=ads-broker ;;
+      10.201.0.13) expected=ads-worker ;;
+      10.201.0.14) expected=ads-migrate ;;
+      *) continue ;;
+    esac
+    [ "$project" = safent-ads ] && [ "$config" = "$HERE/compose.yaml" ] \
+      || fail "la dirección reservada $ip está ocupada por otro contenedor o núcleo; no se detiene ni se migra. Libera esa reserva antes de reparar Anuncios"
+    case "$service" in ads-api|ads-db|ads-broker|ads-worker|ads-migrate) ;;
+      *) fail "la dirección reservada $ip no pertenece a un servicio de Anuncios reconocido" ;;
+    esac
+    if [ "$service" != "$expected" ]; then
+      crossed="$crossed $cid"
+      crossed_rows+=("$row")
+    fi
+  done
+  # Complete the read-only preflight before touching any reservation. Recheck
+  # immutable IDs and exact installation ownership immediately before stop/rm.
+  for cid in $crossed; do
+    row="$("$RUNTIME" inspect --type container --format "$template" "$cid")" \
+      || fail "cambió el inventario de Anuncios; vuelve a intentar la reparación"
+    [ "$row" = "${crossed_rows[$index]}" ] \
+      || fail "cambió la reserva de red; no se modifica el contenedor"
+    index=$((index + 1))
+    IFS='|' read -r seen ip project service config extra <<< "$row"
+    [ "$seen" = "$cid" ] && [ "$project" = safent-ads ] \
+      && [ "$config" = "$HERE/compose.yaml" ] && [ -z "$extra" ] \
+      && [[ "$row" != *$'\n'* ]] \
+      || fail "cambió la identidad del contenedor; no se modifica"
+    case "$service" in ads-api|ads-db|ads-broker|ads-worker|ads-migrate) ;;
+      *) fail "cambió el servicio del contenedor; no se modifica" ;;
+    esac
+    "$RUNTIME" stop --time 30 "$cid" >/dev/null \
+      || fail "no se pudo detener el servicio con una IP cruzada; no se fuerza su eliminación"
+    "$RUNTIME" rm "$cid" >/dev/null \
+      || fail "no se pudo retirar el contenedor detenido; se conservan sus volúmenes"
+  done
+  [ -z "$crossed" ] || log "reservas de red propias reparadas; volúmenes y núcleo conservados"
+}
+
 start_companion() {
   export SAFENT_STATE="$STATE"
   export SAFENT_ADS_IMAGE
   export ADS_POSTGRES_PASSWORD
   ADS_POSTGRES_PASSWORD="$(cat "$STATE/pg_password")"
+  # EX_CONFIG distinguishes a protected network conflict from migrations or
+  # download failures. The desktop must not retry this as a transient DB error.
+  ( reconcile_reserved_addresses ) || exit 78
+  ensure_database_running
+  _refuse_if_image_predates_the_database
   "$RUNTIME" compose -p safent-ads -f "$HERE/compose.yaml" up -d
 }
 
@@ -280,11 +668,15 @@ start_companion() {
 # pins the SAN-matching hostname to the fixed companion IP without needing an
 # /etc/hosts entry on THIS host (that entry belongs to the container, not us).
 wait_for_health() {
-  local i=0 code
+  local i=0 code health_ip="$COMPANION_IP"
+  # The bridge lives INSIDE the macOS VM. Its fixed loopback publication is
+  # the host route; keep the private CA and hostname verification unchanged.
+  [ "$(uname -s)" != Darwin ] || health_ip=127.0.0.1
   while [ $i -lt 60 ]; do
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
         --cacert "$STATE/tls/ca.crt" \
-        --resolve "$COMPANION_HOST:$COMPANION_PORT:$COMPANION_IP" \
+        --noproxy "$COMPANION_HOST" \
+        --resolve "$COMPANION_HOST:$COMPANION_PORT:$health_ip" \
         "https://$COMPANION_HOST:$COMPANION_PORT/mcp/health" 2>/dev/null || true)"
     case "$code" in
       200|401) log "companion listo (/mcp/health -> $code)"; return 0 ;;
@@ -299,10 +691,20 @@ ensure_network
 ensure_tls
 ensure_bearer
 write_companions_json
-ensure_image
 ensure_pg_password
-ensure_secrets
 ensure_caps
+ensure_sso_placeholder
+
+if [ "$SCAFFOLD_ONLY" -eq 1 ]; then
+  publish_runtime_projection
+  log "andamiaje listo (red + companions.json + TLS + bearer) — companion NO arrancado (usa 'safent companion install')"
+  exit 0
+fi
+
+ensure_image
+ensure_secrets
+ensure_sso_keypair
+publish_runtime_projection
 start_companion
 wait_for_health
 log "aprovisionamiento OK — $STATE/companions.json listo para el bind read-only"

@@ -12,8 +12,9 @@
  *   confirm({ … }).then(ok => { if (ok) doThing() })
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useT } from '../lib/i18n'
 
 export interface ConfirmOptions {
   title: string
@@ -24,10 +25,6 @@ export interface ConfirmOptions {
   variant?: 'default' | 'danger'
 }
 
-interface DialogState extends ConfirmOptions {
-  resolve: (ok: boolean) => void
-}
-
 /**
  * Hook that returns [confirm, DialogNode].
  * Place <DialogNode /> anywhere in the component tree (portals to document.body).
@@ -36,19 +33,24 @@ export function useConfirmDialog(): [
   (opts: ConfirmOptions) => Promise<boolean>,
   React.ReactNode,
 ] {
-  const [state, setState] = useState<DialogState | null>(null)
+  const [state, setState] = useState<ConfirmOptions | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const pending = useRef<((approved: boolean) => void) | null>(null)
+  useEffect(() => () => { pending.current?.(false); pending.current = null }, [])
 
   const confirm = useCallback((opts: ConfirmOptions): Promise<boolean> => {
     // Capture which element triggered the dialog so we can restore focus on close
-    triggerRef.current = document.activeElement as HTMLButtonElement | null
+    if (!pending.current) triggerRef.current = document.activeElement as HTMLButtonElement | null
+    pending.current?.(false)
     return new Promise<boolean>(resolve => {
-      setState({ ...opts, resolve })
+      pending.current = resolve
+      setState(opts)
     })
   }, [])
 
   function close(ok: boolean) {
-    state?.resolve(ok)
+    pending.current?.(ok)
+    pending.current = null
     setState(null)
     // Restore focus to the element that opened the dialog
     triggerRef.current?.focus()
@@ -79,17 +81,18 @@ interface ConfirmDialogUIProps extends ConfirmOptions {
 function ConfirmDialogUI({
   title,
   description,
-  confirmLabel = 'Confirmar',
-  cancelLabel = 'Cancelar',
+  confirmLabel,
+  cancelLabel,
   variant = 'default',
   onConfirm,
   onCancel,
 }: ConfirmDialogUIProps) {
+  const t = useT()
   const dialogRef = useRef<HTMLDivElement>(null)
   const cancelBtnRef = useRef<HTMLButtonElement>(null)
   const confirmBtnRef = useRef<HTMLButtonElement>(null)
-  const descId = 'confirm-dialog-desc'
-  const titleId = 'confirm-dialog-title'
+  const descId = useId()
+  const titleId = useId()
 
   // Focus the cancel button on open (safer default for destructive confirmations)
   useEffect(() => {
@@ -100,13 +103,14 @@ function ConfirmDialogUI({
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
       if (e.key === 'Escape') {
+        e.preventDefault()
         e.stopPropagation()
         onCancel()
       }
       // Focus trap: keep Tab cycling within the dialog
       if (e.key === 'Tab') {
         const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+          'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
         )
         if (!focusable || focusable.length === 0) return
         const first = focusable[0]
@@ -148,7 +152,7 @@ function ConfirmDialogUI({
             className="cv-btn cv-btn--ghost cv-btn--sm"
             onClick={onCancel}
           >
-            {cancelLabel}
+            {cancelLabel ?? t('dialog.cancel')}
           </button>
           <button
             ref={confirmBtnRef}
@@ -156,7 +160,7 @@ function ConfirmDialogUI({
             className={`cv-btn cv-btn--sm ${variant === 'danger' ? 'cv-btn--danger cv-btn--danger-solid' : 'cv-btn--primary'}`}
             onClick={onConfirm}
           >
-            {confirmLabel}
+            {confirmLabel ?? t('dialog.confirm')}
           </button>
         </div>
       </div>

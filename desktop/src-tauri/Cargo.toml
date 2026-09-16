@@ -1,6 +1,6 @@
 [package]
 name = "safent-desktop"
-version = "0.1.0"
+version = "0.9.36"
 description = "Safent desktop — thin native-webview shell over the local Safent web UI"
 authors = ["Safent"]
 edition = "2021"
@@ -10,7 +10,32 @@ rust-version = "1.77"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+tempfile = "3"
+
+# update/ orchestrator (contracts/update.md): parse latest.json + runtime-manifest.json,
+# compare VersionSet, drive the Tauri updater plugin for the wrapper's own self-update.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+# Same crate tauri-plugin-updater itself depends on for RemoteRelease — one semver
+# implementation across the whole update path, not two that could disagree.
+semver = { version = "1", features = ["serde"] }
+tauri-plugin-updater = "2"
+# Verifies runtime-manifest.json's signature ourselves — the updater plugin
+# only knows about latest.json (contracts/update.md §2).
+minisign-verify = "0.2"
+base64 = "0.22"
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+
+# Unix-only: engine_adapter.rs lands the bootstrap secret on a dedicated fd via dup2 (app-engine.md §5).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Smaller, faster release binaries for the shipped desktop shell.
 [profile.release]

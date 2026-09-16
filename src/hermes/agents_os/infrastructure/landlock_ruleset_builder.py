@@ -118,6 +118,31 @@ _RUNTIME_RW: frozenset[AccessRight] = _RUNTIME_RX | frozenset({
     AccessRight.MAKE_SOCK, AccessRight.MAKE_FIFO, AccessRight.MAKE_SYM,
     AccessRight.REMOVE_FILE, AccessRight.REMOVE_DIR, AccessRight.TRUNCATE,
 })
+# Security review 2026-09-10 (MEDIUM finding, CWE-732): REFER used to live
+# IN `_RUNTIME_RW` itself, so `Capability.BROWSER_CONTROLLER` — a
+# deliberately tighter profile that reuses `_RUNTIME_RW` on /run, /tmp,
+# /dev, browser-sessions, and /var/lib/hermes/tmp precisely to deny
+# master.key (see that capability's own comment) — silently gained REFER
+# too: every cross-directory rename in that ruleset went from
+# unconditionally denied to allowed between any two of those (already
+# identical-rights) directories. Small in practice (a popped CDP controller
+# already had WRITE_FILE|MAKE_REG|REMOVE_FILE everywhere REFER would let it
+# move a file to), but unreviewed and unintended — REFER is now its own
+# add-on set, granted ONLY where a rule explicitly asks for it.
+#
+# MCP-04 root cause (live-verified, spec 025 matriz) is what REFER itself
+# fixes, RUNTIME-only: without it, the kernel denies EVERY rename()/link()
+# whose destination has a DIFFERENT parent directory than the source — even
+# two directories on the exact same filesystem, covered by this exact same
+# rule — with EXDEV (errno 18, "Invalid cross-device link"). `uv`'s cache-
+# population rename (`uv-cache/.tmpXXXX` -> `uv-cache/archive-v0/<hash>`) is
+# exactly that shape, and it is NOT the only one: any tool the DAEMON spawns
+# that writes-then-renames within /var/lib/hermes hits the same wall. This
+# ALSO requires landlock_loader._max_access_fs_mask to actually pass REFER
+# through for the kernel's real ABI (a separate bug: the old ABI-mask table
+# silently capped every ruleset at ABI-1's rights on any kernel it didn't
+# have an exact entry for — see that module).
+_RUNTIME_RW_REFER: frozenset[AccessRight] = _RUNTIME_RW | frozenset({AccessRight.REFER})
 
 _CAPABILITY_PATHS: dict[Capability, tuple[tuple[str, frozenset[AccessRight]], ...]] = {
     Capability.DOCUMENTS: (
@@ -384,7 +409,14 @@ _CAPABILITY_PATHS: dict[Capability, tuple[tuple[str, frozenset[AccessRight]], ..
         ("/usr", _RUNTIME_RX), ("/etc", _RUNTIME_RX), ("/bin", _RUNTIME_RX),
         ("/sbin", _RUNTIME_RX), ("/lib", _RUNTIME_RX), ("/lib64", _RUNTIME_RX),
         ("/proc", _RUNTIME_RX), ("/sys", _RUNTIME_RX), ("/var", _RUNTIME_RX),
-        ("/var/lib/hermes", _RUNTIME_RW), ("/run", _RUNTIME_RW),
+        # REFER only where the daemon actually renames across directories
+        # (MCP-04: uv-cache/.tmpXXXX -> uv-cache/archive-v0/<hash>, both
+        # under /var/lib/hermes) — /run/hermes's own tmp-then-os.replace
+        # pattern (companion-bearer staging) renames WITHIN one directory
+        # (same parent), which never needed REFER; /tmp and /dev keep the
+        # plain RW set too. Least privilege: grant REFER only where a live-
+        # verified need exists, not by symmetry.
+        ("/var/lib/hermes", _RUNTIME_RW_REFER), ("/run", _RUNTIME_RW),
         ("/tmp", _RUNTIME_RW), ("/dev", _RUNTIME_RW),
     ),
     # 2026-07-05 audit: the agent-browser CDP CONTROLLER runs as a child of the

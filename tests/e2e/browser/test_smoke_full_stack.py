@@ -38,7 +38,6 @@ def test_full_stack_smoke_time_budget() -> None:
 
     # Importación defensiva: hermes.browser debe importar sin chromium.
     import hermes.browser  # noqa: F401,PLC0415
-    import hermes.browser.application.orchestrator  # noqa: F401,PLC0415
     import hermes.browser.infrastructure.log_filter  # noqa: F401,PLC0415
     import hermes.browser.infrastructure.replay_codec  # noqa: F401,PLC0415
     import hermes.browser.infrastructure.storage_state_crypto  # noqa: F401,PLC0415

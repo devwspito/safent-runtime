@@ -65,6 +65,29 @@ describe('InboundDelegationCard', () => {
     expect(container.textContent).toContain(delegation.body)
   })
 
+  it('never repeats an uncertain admission or offers reject as if it had not started', () => {
+    act(() => root.render(React.createElement(InboundDelegationCard, {
+      delegation: { ...delegation, admission_state: 'unconfirmed' }, onResolved: vi.fn(),
+    })))
+    expect(container.textContent).toContain('No vuelvas a enviar el encargo')
+    const buttons = [...container.querySelectorAll('button')]
+    expect(buttons.every(button => button.disabled)).toBe(true)
+    act(() => buttons.forEach(button => button.dispatchEvent(new MouseEvent('click', { bubbles: true }))))
+    expect(resolveInboundDelegation).not.toHaveBeenCalled()
+  })
+
+  it('blocks approval of unverifiable requests while allowing explicit rejection', async () => {
+    resolveInboundDelegation.mockResolvedValue({ ok: true })
+    act(() => root.render(React.createElement(InboundDelegationCard, {
+      delegation: { ...delegation, admission_state: 'unverified' }, onResolved: vi.fn(),
+    })))
+    const approve = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Aprobar')!
+    expect(approve.disabled).toBe(true)
+    expect(container.textContent).toContain('autorización vigente verificable')
+    await act(async () => clickButton(container, 'Rechazar'))
+    expect(resolveInboundDelegation).toHaveBeenCalledWith('msg-1', 'reject')
+  })
+
   it('approves: calls resolveInboundDelegation(approve) and onResolved', async () => {
     resolveInboundDelegation.mockResolvedValue({ ok: true, task_id: 'task-1' })
     const onResolved = vi.fn()
@@ -98,6 +121,25 @@ describe('InboundDelegationCard', () => {
 
     expect(resolveInboundDelegation).toHaveBeenCalledWith('msg-1', 'reject')
     expect(onResolved).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not treat a negative acknowledgement as success', async () => {
+    resolveInboundDelegation.mockResolvedValue({ ok: false })
+    const onResolved = vi.fn()
+    act(() => root.render(<InboundDelegationCard delegation={delegation} onResolved={onResolved} />))
+    clickButton(container, 'Aprobar')
+    await act(async () => { await Promise.resolve() })
+    expect(onResolved).not.toHaveBeenCalled()
+    expect(sileoSuccess).not.toHaveBeenCalled()
+    expect(sileoError).toHaveBeenCalledTimes(1)
+  })
+
+  it('guards two submissions before React rerenders', async () => {
+    resolveInboundDelegation.mockReturnValue(new Promise(() => {}))
+    act(() => root.render(<InboundDelegationCard delegation={delegation} onResolved={vi.fn()} />))
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>('button')]
+    act(() => { buttons.find(b => b.textContent === 'Aprobar')!.click(); buttons.find(b => b.textContent === 'Rechazar')!.click() })
+    expect(resolveInboundDelegation).toHaveBeenCalledTimes(1)
   })
 
   it('shows an inline error and does NOT call onResolved when the API call fails', async () => {

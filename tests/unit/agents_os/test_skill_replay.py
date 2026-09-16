@@ -15,9 +15,6 @@ from hermes.agents_os.application.skill_replay import (
     ReplayFailurePolicy,
     SkillReplayer,
 )
-from hermes.agents_os.application.training_session_orchestrator import (
-    TrainingSessionOrchestrator,
-)
 from hermes.agents_os.domain.surface_kind import SurfaceKind
 
 pytestmark = pytest.mark.unit
@@ -39,23 +36,14 @@ class _FakeSurfaceAdapter:
         return True
 
 
-def _signed_session(*, surfaces: list[SurfaceKind]):
-    orch = TrainingSessionOrchestrator()
-    sess = orch.start(
+def _signed_package(compiler: SkillCompiler, *, surfaces: list[SurfaceKind]):
+    steps = [(sk, {"index": i}, f"paso {i}") for i, sk in enumerate(surfaces)]
+    return compiler.compile_from_steps(
         tenant_id=uuid4(),
-        human_user_id=uuid4(),
         skill_id="upload-invoice",
-        surface_kinds_allowed=frozenset(surfaces),
+        steps=steps,
+        version=1,
     )
-    for i, sk in enumerate(surfaces):
-        orch.capture_step(
-            session_id=sess.session_id,
-            surface_kind=sk,
-            action_payload={"index": i},
-            voice_caption=f"paso {i}",
-        )
-    orch.request_review(session_id=sess.session_id)
-    return orch.sign(session_id=sess.session_id, human_confirmed=True)
 
 
 @pytest.fixture
@@ -84,10 +72,9 @@ class TestHappyPath:
         compiler: SkillCompiler,
         browser_adapter: _FakeSurfaceAdapter,
     ) -> None:
-        sess = _signed_session(
-            surfaces=[SurfaceKind.BROWSER, SurfaceKind.BROWSER]
+        pkg = _signed_package(
+            compiler, surfaces=[SurfaceKind.BROWSER, SurfaceKind.BROWSER]
         )
-        pkg = compiler.compile(session=sess, version=1)
         replayer = SkillReplayer(
             _allow_ungated_replay=True,  # test-only: exercise direct adapter replay
             compiler=compiler,
@@ -103,14 +90,14 @@ class TestHappyPath:
         browser_adapter: _FakeSurfaceAdapter,
         desktop_adapter: _FakeSurfaceAdapter,
     ) -> None:
-        sess = _signed_session(
+        pkg = _signed_package(
+            compiler,
             surfaces=[
                 SurfaceKind.BROWSER,
                 SurfaceKind.DESKTOP_APP,
                 SurfaceKind.BROWSER,
-            ]
+            ],
         )
-        pkg = compiler.compile(session=sess, version=1)
         replayer = SkillReplayer(
             _allow_ungated_replay=True,  # test-only: exercise direct adapter replay
             compiler=compiler,
@@ -136,8 +123,7 @@ class TestSignatureGuard:
     ) -> None:
         compiler1 = SkillCompiler(signing_key=secrets.token_bytes(32))
         compiler2 = SkillCompiler(signing_key=secrets.token_bytes(32))
-        sess = _signed_session(surfaces=[SurfaceKind.BROWSER])
-        pkg = compiler1.compile(session=sess, version=1)
+        pkg = _signed_package(compiler1, surfaces=[SurfaceKind.BROWSER])
         replayer = SkillReplayer(
             _allow_ungated_replay=True,  # test-only: exercise direct adapter replay
             compiler=compiler2,  # clave distinta
@@ -155,10 +141,10 @@ class TestFailurePolicy:
         compiler: SkillCompiler,
         browser_adapter: _FakeSurfaceAdapter,
     ) -> None:
-        sess = _signed_session(
-            surfaces=[SurfaceKind.BROWSER, SurfaceKind.BROWSER, SurfaceKind.BROWSER]
+        pkg = _signed_package(
+            compiler,
+            surfaces=[SurfaceKind.BROWSER, SurfaceKind.BROWSER, SurfaceKind.BROWSER],
         )
-        pkg = compiler.compile(session=sess, version=1)
         browser_adapter.fail_indices = {1}  # falla el segundo step
         replayer = SkillReplayer(
             _allow_ungated_replay=True,  # test-only: exercise direct adapter replay
@@ -174,10 +160,10 @@ class TestFailurePolicy:
         compiler: SkillCompiler,
         browser_adapter: _FakeSurfaceAdapter,
     ) -> None:
-        sess = _signed_session(
-            surfaces=[SurfaceKind.BROWSER, SurfaceKind.BROWSER, SurfaceKind.BROWSER]
+        pkg = _signed_package(
+            compiler,
+            surfaces=[SurfaceKind.BROWSER, SurfaceKind.BROWSER, SurfaceKind.BROWSER],
         )
-        pkg = compiler.compile(session=sess, version=1)
         browser_adapter.fail_indices = {1}
         replayer = SkillReplayer(
             _allow_ungated_replay=True,  # test-only: exercise direct adapter replay
@@ -196,8 +182,7 @@ class TestMissingAdapter:
     def test_missing_adapter_raises(
         self, compiler: SkillCompiler
     ) -> None:
-        sess = _signed_session(surfaces=[SurfaceKind.BROWSER])
-        pkg = compiler.compile(session=sess, version=1)
+        pkg = _signed_package(compiler, surfaces=[SurfaceKind.BROWSER])
         replayer = SkillReplayer(
             _allow_ungated_replay=True,  # test-only: exercise direct adapter replay
             compiler=compiler,

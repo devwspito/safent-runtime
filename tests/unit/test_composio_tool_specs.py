@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 
-# ENV-DRIFT GUARD: the product image ships composio>=1.0.0-rc2, which exposes
+# ENV-DRIFT GUARD: the product image ships composio==0.13.1, which exposes
 # `composio.exceptions.ComposioError`. composio_client.py (imported transitively via
 # composio_tool_specs) imports that symbol at module load. Older host SDKs (0.7.x)
 # lack it, so the import fails on a drifted host. This is dependency drift, NOT a
@@ -24,7 +24,7 @@ _composio_exceptions = pytest.importorskip(
 if not hasattr(_composio_exceptions, "ComposioError"):
     pytest.skip(
         "composio SDK on host lacks composio.exceptions.ComposioError "
-        "(product image ships composio>=1.0.0-rc2 which has it) — env drift, "
+        "(product image ships composio==0.13.1 which has it) — env drift, "
         "not a product bug",
         allow_module_level=True,
     )

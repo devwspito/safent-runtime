@@ -168,11 +168,12 @@ class WorkQueuePort(Protocol):
         ...
 
     async def mark_failed(
-        self, item_id: UUID, *, claim_token: UUID, reason: str
+        self, item_id: UUID, *, claim_token: UUID, reason: str, retryable: bool = True
     ) -> WorkItem:
         """Transición a FAILED. Si attempts < max_attempts, re-programa a
         PENDING con backoff (available_at = now + base*2^attempts) para
-        reintento idempotente (FR-006). Si no, FAILED terminal.
+        reintento idempotente (FR-006). Si no, FAILED terminal. retryable=False
+        forces terminal FAILED without inflating the actual attempt count.
         """
         ...
 
@@ -237,6 +238,23 @@ class WorkQueuePort(Protocol):
         ...
 
 
+class AgentPauseProvenance(StrEnum):
+    """Vocabulario cerrado de procedencia para AGENT_PAUSED/AGENT_RESUMED
+    (specs/025-safent-repaso matriz-final-39eeb8e re-verificación d2eb8c6,
+    "echar el freno no tiene vocabulario de procedencia").
+
+    resume ya usaba ad hoc los strings TOTP/DEVICE_PASSWORD/HOST_CLI
+    (security_api.py, brake_release_cli.py) sin un enum formal que los
+    uniera; AUTO se reserva para un futuro disparo automático (ningún
+    llamador lo emite todavía — no hay watchdog que pause solo)."""
+
+    API = "api"
+    TOTP = "totp"
+    DEVICE_PASSWORD = "device_password"
+    HOST_CLI = "host_cli"
+    KILL_SWITCH_AUTO = "kill_switch_auto"
+
+
 @runtime_checkable
 class AgentStatePort(Protocol):
     """Kill-switch / pausa persistente (FR-022..FR-024, US3, SC-005)."""
@@ -247,14 +265,38 @@ class AgentStatePort(Protocol):
         """
         ...
 
-    async def pause(self, *, by: UUID | None, reason: str) -> None:
+    async def pause(
+        self, *, by: UUID | None, reason: str, provenance: str = ""
+    ) -> None:
         """Pausa: el loop deja de tomar trabajo e iniciar ejecuciones. La cola
         queda intacta. Transición observable y auditada (AGENT_PAUSED).
+
+        provenance (AgentPauseProvenance, opcional — 025 re-verificación
+        d2eb8c6): marcador de procedencia audit-only, simétrico al `reason`
+        de provenance que `resume` ya tenía. `reason` sigue siendo el texto
+        libre visible en `agent_runtime_state.reason`/la UI ("por qué está
+        pausado"); `provenance` es SIEMPRE uno de AgentPauseProvenance
+        ("quién/qué lo pausó") y vive solo en el payload firmado.
         """
         ...
 
-    async def resume(self, *, by: UUID | None) -> None:
-        """Reanuda sin pérdida ni duplicación. Auditada (AGENT_RESUMED)."""
+    async def resume(self, *, by: UUID | None, reason: str = "") -> None:
+        """Reanuda sin pérdida ni duplicación. Auditada (AGENT_RESUMED).
+
+        reason (security review 2026-09-10, MEDIUM finding): audit-only
+        provenance marker, e.g. "host_cli" for `safent brake release` vs ""
+        for the normal TOTP-gated UI release — so the signed AGENT_RESUMED
+        entry can distinguish "released after MFA proof in the UI" from
+        "released by whoever had a shell on the host", which it could not
+        before. Never persisted to agent_runtime_state.reason (that column
+        is "why currently PAUSED", cleared on resume — unrelated semantics).
+        """
+        ...
+
+    async def status(self) -> dict:
+        """Snapshot del freno de emergencia: {engaged, reason, changed_by,
+        changed_at}. Read-only — no authZ, no efectos. changed_by es el UUID
+        (str) del último operador que pausó/reanudó, o None."""
         ...
 
 

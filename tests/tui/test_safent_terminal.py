@@ -115,6 +115,26 @@ async def test_kill_switch_toggles_pause() -> None:
         assert app._paused is False
 
 
+async def test_terminal_approval_has_no_mfa_input_and_requires_explicit_click() -> None:
+    from unittest.mock import AsyncMock
+
+    from hermes.tui.modals.approval import ApprovalModal
+    from textual.widgets import Input
+
+    bridge = OfflineRuntimeBridge()
+    bridge.approve = AsyncMock(return_value='{"live": false}')
+    app = SafentTerminal(bridge=bridge)
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.pause()
+        app.push_screen(ApprovalModal(bridge, json.dumps({"proposal_id": "p1", "risk": "high"})))
+        await pilot.pause()
+        assert [field.id for field in app.screen.query(Input)] == ["reject-reason"]
+        bridge.approve.assert_not_awaited()
+        await pilot.click("#btn-approve")
+        await pilot.pause()
+        bridge.approve.assert_awaited_once_with("p1")
+
+
 async def test_slash_commands_navigate_and_help() -> None:
     from hermes.tui.screens.chat import ChatMessage, ChatPane
 

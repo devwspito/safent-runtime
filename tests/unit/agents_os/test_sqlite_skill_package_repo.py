@@ -14,9 +14,6 @@ from hermes.agents_os.application.skill_compiler import (
     SkillCompiler,
     SkillPackageState,
 )
-from hermes.agents_os.application.training_session_orchestrator import (
-    TrainingSessionOrchestrator,
-)
 from hermes.agents_os.domain.surface_kind import SurfaceKind
 from hermes.agents_os.infrastructure.sqlite_skill_package_repo import (
     SQLiteSkillPackageRepo,
@@ -63,25 +60,14 @@ def compiler() -> SkillCompiler:
 
 
 def _signed_package(compiler: SkillCompiler, *, version: int, tenant_id=None):
-    orch = TrainingSessionOrchestrator()
     tid = tenant_id or uuid4()
-    sess = orch.start(
+    pkg = compiler.compile_from_steps(
         tenant_id=tid,
-        human_user_id=uuid4(),
         skill_id="invoice-upload",
-        surface_kinds_allowed=frozenset(
-            {SurfaceKind.BROWSER, SurfaceKind.DESKTOP_APP}
-        ),
+        steps=[(SurfaceKind.BROWSER, {"x": version}, f"step v{version}")],
+        version=version,
     )
-    orch.capture_step(
-        session_id=sess.session_id,
-        surface_kind=SurfaceKind.BROWSER,
-        action_payload={"x": version},
-        voice_caption=f"step v{version}",
-    )
-    orch.request_review(session_id=sess.session_id)
-    sess = orch.sign(session_id=sess.session_id, human_confirmed=True)
-    return compiler.compile(session=sess, version=version), tid
+    return pkg, tid
 
 
 class TestRoundTrip:

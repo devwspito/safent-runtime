@@ -13,7 +13,7 @@ is_enabled is the INTERSECTION of the global store and the overlay:
     past the local floor).
   - A malformed overlay entry (wrong shape/type) fails CLOSED: treated as an
     explicit disable, never silently falls through into a permissive default.
-  - mfa_on_dangers has no per-agent axis in this overlay shape: always defers
+  - approval_on_dangers has no per-agent axis in this overlay shape: always defers
     to the global store.
 """
 
@@ -52,11 +52,11 @@ class TestNoOverlayFallsThroughToGlobal:
         # "write_file" has no overlay entry -> global behaviour applies.
         assert view.is_enabled("write_file") is True
 
-    def test_mfa_on_dangers_always_defers_to_global(self, tmp_path) -> None:
+    def test_approval_on_dangers_always_defers_to_global(self, tmp_path) -> None:
         store = _store(tmp_path)
-        store.set_mfa_on_dangers(False)
+        store.set_approval_on_dangers(False)
         view = store.for_agent(_AGENT_ID, {"terminal": {"enabled": True}})
-        assert view.mfa_on_dangers() is False
+        assert view.approval_on_dangers() is False
 
 
 class TestOverlayDisablesGloballyEnabledTool:

@@ -19,11 +19,16 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+from http import HTTPStatus
 from pathlib import Path
+from typing import Literal
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from hermes.integrations.composio.composio_client import (
     ComposioApiError,
@@ -31,11 +36,14 @@ from hermes.integrations.composio.composio_client import (
 )
 from hermes.shell_server.integrations.domain import IntegrationNotFound
 from hermes.shell_server.integrations.repo import SQLiteIntegrationsRepository
+from hermes.shell_server.security.owner_confirmation import require_owner_session
 from hermes.shell_server.security.secrets import SecretsVault
 
 logger = logging.getLogger(__name__)
 
 _KIND = "composio"
+_MAX_APP_SECRET_LENGTH = 4096
+_MAX_META_SETUP_BODY = 8192
 
 
 # ----------------------------------------------------------------
@@ -44,8 +52,8 @@ _KIND = "composio"
 
 
 class SetApiKeyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     api_key: str = Field(min_length=1)
-    entity_id: str = Field(default="default", min_length=1)
 
 
 class ComposioStatusResponse(BaseModel):
@@ -58,6 +66,28 @@ class ToolkitItem(BaseModel):
     slug: str
     name: str
     description: str
+    oauth_simple: bool = False
+    managed_auth_available: bool | None = None
+    setup_required: bool = False
+
+
+class AuthConfigRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    auth_config_id: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class AuthConfigResponse(BaseModel):
+    toolkit_slug: str
+    auth_config_id: str | None
+
+
+class MetaSetupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    client_id: str = Field(pattern=r"^[0-9]{5,30}$")
+    client_secret: SecretStr
+
+
+AdsToolkit = Literal["googleads", "metaads"]
 
 
 class ConnectedAccountItem(BaseModel):
@@ -65,11 +95,12 @@ class ConnectedAccountItem(BaseModel):
     toolkit_slug: str
     entity_id: str
     status: str
+    auth_config_id: str = ""
 
 
 class ConnectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     toolkit_slug: str = Field(min_length=1)
-    entity_id: str | None = None
     redirect_url: str | None = None
 
 
@@ -84,40 +115,150 @@ class ConnectResponse(BaseModel):
 # ----------------------------------------------------------------
 
 
-def create_integrations_router(db_path: Path) -> APIRouter:
+def create_integrations_router(db_path: Path) -> APIRouter:  # noqa: PLR0915 - explicit scoped endpoints
     """Create the integrations API router.
 
-    Follows the same factory pattern as create_training_router so that
-    the db_path is bound at construction time and tests can inject a
-    temp path without patching globals.
+    db_path is bound at construction time so tests can inject a temp path
+    without patching globals.
     """
     _init_schema(db_path)
     router = APIRouter(prefix="/api/v1/integrations", tags=["integrations"])
+    meta_setup_lock = asyncio.Lock()
 
     def _repo() -> SQLiteIntegrationsRepository:
         return SQLiteIntegrationsRepository(db_path=db_path, vault=SecretsVault())
+
+    async def _refresh_ads(request: Request) -> None:
+        """Push changes promptly; background renewal remains bounded/fail-closed."""
+        refresh = getattr(request.app.state, "composio_lease_refresh", None)
+        if refresh is None:
+            return
+        try:
+            await asyncio.wait_for(refresh.ensure(force=True), timeout=12)
+        except (TimeoutError, RuntimeError):
+            logger.warning("hermes.integrations.ads_refresh_pending")
 
     # ----------------------------------------------------------------
     # Store / rotate API key
     # ----------------------------------------------------------------
 
     @router.post("/composio/key", response_model=ComposioStatusResponse)
-    async def set_composio_key(body: SetApiKeyRequest) -> ComposioStatusResponse:
+    async def set_composio_key(body: SetApiKeyRequest, request: Request) -> ComposioStatusResponse:
         """Store the Composio API key (encrypted).
 
         The key is NEVER echoed back.  Only the `has_key` flag is returned.
         """
-        integration = _repo().set_credential(
+        require_owner_session(request)
+        repo = _repo()
+        previous = repo.get_or_none(kind=_KIND)
+        integration = repo.set_credential(
             kind=_KIND,
             api_key=body.api_key,
-            entity_id=body.entity_id,
+            # Existing installs retain their connections. New installs cannot
+            # collide through the historical shared entity "default".
+            entity_id=previous.entity_id if previous else f"safent-{uuid4()}",
         )
         logger.info("hermes.integrations.composio.key_stored")
+        await _refresh_ads(request)
         return ComposioStatusResponse(
             has_key=integration.has_api_key,
             enabled=integration.enabled,
             entity_id=integration.entity_id,
         )
+
+    @router.get("/composio/auth-configs/{toolkit_slug}", response_model=AuthConfigResponse)
+    async def get_auth_config(toolkit_slug: AdsToolkit, request: Request) -> AuthConfigResponse:
+        require_owner_session(request)
+        return AuthConfigResponse(
+            toolkit_slug=toolkit_slug,
+            auth_config_id=_repo().auth_config_ids().get(toolkit_slug),
+        )
+
+    @router.post("/composio/ads/prepare", response_model=dict[str, bool])
+    async def prepare_ads(request: Request) -> dict[str, bool]:
+        """Owner can prepare Ads using the stored key, never by copying it again."""
+        require_owner_session(request)
+        from hermes.shell_server.integrations.ads_setup import (  # noqa: PLC0415
+            prepare_composio_ads_configs,
+        )
+
+        readiness = await prepare_composio_ads_configs(db_path)
+        await _refresh_ads(request)
+        return readiness
+
+    @router.put("/composio/auth-configs/{toolkit_slug}", response_model=AuthConfigResponse)
+    async def select_auth_config(
+        toolkit_slug: AdsToolkit, body: AuthConfigRequest, request: Request,
+    ) -> AuthConfigResponse:
+        require_owner_session(request)
+        repo = _repo()
+        client = _build_client(repo)
+        try:
+            await client.validate_auth_config(toolkit_slug, body.auth_config_id)
+        except ComposioApiError as exc:
+            # Provider errors can contain credential-bearing SDK objects.
+            raise HTTPException(
+                409, "No se puede usar esta configuración OAuth. "
+                "Comprueba que pertenece a esta plataforma y que está activa.",
+            ) from exc
+        repo.set_auth_config(toolkit_slug=toolkit_slug, auth_config_id=body.auth_config_id)
+        await _refresh_ads(request)
+        return AuthConfigResponse(toolkit_slug=toolkit_slug, auth_config_id=body.auth_config_id)
+
+    @router.post(
+        "/composio/meta/setup", response_model=dict[str, bool],
+        openapi_extra={"requestBody": {"required": True, "content": {
+            "application/json": {"schema": MetaSetupRequest.model_json_schema()},
+        }}},
+    )
+    async def prepare_meta(request: Request) -> dict[str, bool]:
+        require_owner_session(request)
+        # Default FastAPI validation can echo the entire input (including the
+        # app secret) for a missing field. Validate privately and fail redacted.
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > _MAX_META_SETUP_BODY:
+                raise HTTPException(413, "Los datos de la aplicación son demasiado largos.")
+        try:
+            body = MetaSetupRequest.model_validate(json.loads(raw))
+        except (ValueError, TypeError):
+            raise HTTPException(
+                400, "Revisa el identificador y la clave de la aplicación.",
+            ) from None
+        secret = body.client_secret.get_secret_value()
+        if not secret.strip() or len(secret) > _MAX_APP_SECRET_LENGTH or not secret.isprintable():
+            raise HTTPException(400, "Revisa la clave de la aplicación de Meta.")
+        if meta_setup_lock.locked():
+            raise HTTPException(409, "Ya se está preparando Meta. Espera unos segundos.")
+        async with meta_setup_lock:
+            repo = _repo()
+            fingerprint = repo.credential_fingerprint()
+            if fingerprint is None:
+                raise HTTPException(409, "Conecta primero Composio en Integraciones.")
+            client = _build_client(repo)
+            try:
+                result = await asyncio.wait_for(client.prepare_meta_auth_config(
+                    client_id=body.client_id, client_secret=secret,
+                ), timeout=30)
+            except (ComposioApiError, TimeoutError):
+                raise HTTPException(
+                    409, "No se pudo preparar Meta. Revisa los datos y vuelve a intentarlo.",
+                ) from None
+            if not repo.set_auth_config_for_credential(
+                toolkit_slug="metaads", auth_config_id=result.id,
+                expected_fingerprint=fingerprint,
+            ):
+                raise HTTPException(409, "La conexión de Composio cambió. Vuelve a intentarlo.")
+        await _refresh_ads(request)
+        return {"ready": True}
+
+    @router.delete("/composio/auth-configs/{toolkit_slug}", response_model=AuthConfigResponse)
+    async def clear_auth_config(toolkit_slug: AdsToolkit, request: Request) -> AuthConfigResponse:
+        require_owner_session(request)
+        _repo().clear_auth_config(toolkit_slug=toolkit_slug)
+        await _refresh_ads(request)
+        return AuthConfigResponse(toolkit_slug=toolkit_slug, auth_config_id=None)
 
     # ----------------------------------------------------------------
     # Status
@@ -157,7 +298,11 @@ def create_integrations_router(db_path: Path) -> APIRouter:
         except ComposioApiError as exc:
             raise HTTPException(502, f"Composio error: {exc}") from exc
         return [
-            ToolkitItem(slug=t.slug, name=t.name, description=t.description)
+            ToolkitItem(
+                slug=t.slug, name=t.name, description=t.description,
+                oauth_simple=t.oauth_simple, managed_auth_available=t.managed_auth_available,
+                setup_required=t.setup_required,
+            )
             for t in toolkits
         ]
 
@@ -184,6 +329,7 @@ def create_integrations_router(db_path: Path) -> APIRouter:
                 toolkit_slug=a.toolkit_slug,
                 entity_id=a.entity_id,
                 status=a.status,
+                auth_config_id=a.auth_config_id,
             )
             for a in accounts
         ]
@@ -193,11 +339,12 @@ def create_integrations_router(db_path: Path) -> APIRouter:
     # ----------------------------------------------------------------
 
     @router.post("/composio/connect", response_model=ConnectResponse)
-    async def connect_app(body: ConnectRequest) -> ConnectResponse:
+    async def connect_app(body: ConnectRequest, request: Request) -> ConnectResponse:
         """Initiate OAuth for a toolkit; returns the redirect URL for the user."""
+        require_owner_session(request)
         repo = _repo()
         client = _build_client(repo)
-        entity_id = body.entity_id or _get_entity_id(repo)
+        entity_id = _get_entity_id(repo)
         try:
             result = await client.initiate_connection(
                 toolkit_slug=body.toolkit_slug,
@@ -205,11 +352,32 @@ def create_integrations_router(db_path: Path) -> APIRouter:
                 redirect_url=body.redirect_url,
             )
         except ComposioApiError as exc:
-            raise HTTPException(502, f"Composio error: {exc}") from exc
+            raise HTTPException(
+                HTTPStatus.CONFLICT if exc.status_code == HTTPStatus.CONFLICT else 502,
+                "No se pudo iniciar la conexión. Si falta preparar la aplicación, "
+                "debe hacerlo la administración de Safent, no cada usuario.",
+            ) from exc
         return ConnectResponse(
             connected_account_id=result.connected_account_id,
             redirect_url=result.redirect_url,
             status=result.status,
+        )
+
+    @router.get("/composio/connected/{connection_id}", response_model=ConnectedAccountItem)
+    async def get_connection(connection_id: str) -> ConnectedAccountItem:
+        repo = _repo()
+        try:
+            account = await _build_client(repo).get_connected_account(
+                connection_id, entity_id=_get_entity_id(repo),
+            )
+        except ComposioApiError as exc:
+            raise HTTPException(
+                404 if exc.status_code in {403, 404} else 502,
+                "No se puede comprobar esta conexión en tu espacio.",
+            ) from exc
+        return ConnectedAccountItem(
+            id=account.id, toolkit_slug=account.toolkit_slug, entity_id=account.entity_id,
+            status=account.status, auth_config_id=account.auth_config_id,
         )
 
     # ----------------------------------------------------------------
@@ -217,13 +385,18 @@ def create_integrations_router(db_path: Path) -> APIRouter:
     # ----------------------------------------------------------------
 
     @router.delete("/composio/connected/{connection_id}")
-    async def delete_connection(connection_id: str) -> dict:
+    async def delete_connection(connection_id: str, request: Request) -> dict:
         """Delete a connected account from Composio cloud."""
-        client = _build_client(_repo())
+        require_owner_session(request)
+        repo = _repo()
+        client = _build_client(repo)
         try:
-            await client.delete_connection(connection_id)
+            await client.delete_connection(connection_id, entity_id=_get_entity_id(repo))
         except ComposioApiError as exc:
-            raise HTTPException(502, f"Composio error: {exc}") from exc
+            raise HTTPException(
+                404 if exc.status_code in {403, 404} else 502,
+                "No se puede desconectar esta cuenta de tu espacio.",
+            ) from exc
         logger.info(
             "hermes.integrations.composio.connection_deleted",
             extra={"connection_id": connection_id},
@@ -254,7 +427,7 @@ def _build_client(repo: SQLiteIntegrationsRepository) -> ComposioClient:
             "Composio API key not configured. "
             "POST /api/v1/integrations/composio/key first.",
         )
-    return ComposioClient(api_key=api_key)
+    return ComposioClient(api_key=api_key, auth_config_ids=repo.auth_config_ids())
 
 
 def _get_entity_id(repo: SQLiteIntegrationsRepository) -> str:

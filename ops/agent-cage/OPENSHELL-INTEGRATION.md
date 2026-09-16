@@ -44,7 +44,7 @@ is the BRIDGE until OpenShell is in.
 - **Hermes/Nous brain** — the agent intelligence, persona, the "se busca la vida" loop.
 - **Broker** — consent / HITL / taint→forced-HITL / kill-switch / signed audit. Our governance.
 - **Security Center** — scan→score→gate for installs / hub skills / MCP. Our governance.
-- **Skills** — recording (content-scanned), hub, teaching. Our value.
+- **Skills** — recording (content-scanned), hub. Our value.
 - **UX** — the "stupid easy" install, the elevation UI, onboarding, control plane (local + remote).
 
 ## The seam (how they compose)

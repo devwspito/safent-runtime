@@ -184,7 +184,7 @@ class HeuristicEvolutionEngine:
             return None  # No change produced
 
         try:
-            from hermes.training.domain.skill_md_document import parse_skill_md  # noqa: PLC0415
+            from hermes.capabilities.infrastructure.skill_md_codec import parse_skill_md  # noqa: PLC0415
             parse_skill_md(proposed_md)
         except Exception as exc:  # noqa: BLE001
             logger.warning(

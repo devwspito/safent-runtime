@@ -148,8 +148,25 @@ class TestPeerCredAuth:
         assert "status" in kinds
         assert "done" in kinds
 
-    async def test_unauthorized_uid_rejected_403(self, tmp_path: Path) -> None:
-        """UID no autorizado recibe rechazo (ConnectionClosedError o HTTP 403)."""
+    async def test_unauthorized_uid_rejected_403(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """UID no autorizado recibe rechazo (ConnectionClosedError o HTTP 403).
+
+        UnixStreamSocketServer autoriza SIEMPRE os.getuid() del proceso que lo
+        construyó, además de authorized_uid explícito (docstring: "the daemon's
+        own service uid" — shell-server y daemon comparten uid en producción).
+        En este test cliente y servidor son el MISMO proceso, así que el
+        SO_PEERCRED real siempre reporta _MY_UID == os.getuid() — ese uid
+        NUNCA queda fuera de _authorized_uids pasase lo que pasase por
+        `authorized_uid=`, y la conexión "no autorizada" se aceptaba (DID NOT
+        RAISE). Simular un peer realmente ajeno requeriría un proceso corriendo
+        con otro UID real (root + setuid), fuera del alcance de un test —
+        monkeypatch de _extract_peer_uid es la forma correcta de ejercitar la
+        rama de rechazo de check_auth de forma determinista y sin privilegios.
+        """
+        import hermes.tasks.control_plane.infrastructure.unix_stream_socket as _uss
+
         broker = StreamBroker()
         task_id = uuid4()
         path = _sock_path(tmp_path)
@@ -158,6 +175,10 @@ class TestPeerCredAuth:
         server, srv_task = await _start_server(
             broker, path, authorized_uid=_FOREIGN_UID
         )
+        # El peer real (SO_PEERCRED) reporta un uid que NO está en
+        # {authorized_uid, os.getuid()} — un tercer uid, ajeno a ambos.
+        _truly_foreign_uid = _FOREIGN_UID + 1
+        monkeypatch.setattr(_uss, "_extract_peer_uid", lambda ws: _truly_foreign_uid)
 
         try:
             uri = f"ws://localhost/ws/tasks/{task_id}"

@@ -1,38 +1,42 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { listPendingApprovals } from '../api/client'
 import type { PendingApproval } from '../api/types'
 
-// The backend approval window is 600 s (10 min). Discard anything older
-// client-side so ghost cards never render even if a poll cycle lags.
-// null/absent created_at = keep (back-compat).
-export const APPROVAL_MAX_AGE_MS = 11 * 60 * 1000
-
-export function isApprovalFresh(createdAt: string | null | undefined): boolean {
-  if (!createdAt) return true
-  return Date.now() - new Date(createdAt).getTime() < APPROVAL_MAX_AGE_MS
-}
-
 /**
- * Polls the FRESH pending approvals. One freshness rule for every consumer —
- * the sidebar badge, the Sistema hub tab badge and the Seguridad list must
- * never disagree (a stale approval used to show "1" on the sidebar while
- * Seguridad said "nothing pending").
+ * Pending status belongs to the approval gate, not the browser clock.
+ * Different client-side age cutoffs used to hide valid approvals in one view
+ * while another still displayed them. All consumers now use the server list.
  */
-export function usePendingApprovals(pollMs = 6000, refreshKey: unknown = 0): PendingApproval[] {
+export function usePendingApprovals(pollMs = 6000, refreshKey: unknown = 0) {
   const [approvals, setApprovals] = useState<PendingApproval[]>([])
+  const [isLoading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+  const [revision, setRevision] = useState(0)
+  const refresh = useCallback(() => setRevision(value => value + 1), [])
   useEffect(() => {
     let alive = true
+    let inFlight = false
     const poll = () => {
+      if (inFlight) return
+      inFlight = true
       listPendingApprovals()
         .then((a) => {
           if (!alive) return
-          setApprovals((Array.isArray(a) ? a : []).filter((x) => isApprovalFresh(x.created_at)))
+          setApprovals(Array.isArray(a) ? a : [])
+          setError(false)
+          setLoading(false)
         })
-        .catch(() => { /* transient — keep last known list */ })
+        .catch(() => {
+          if (!alive) return
+          setError(true)
+          setLoading(false)
+          // Keep the last known list. An unavailable gate is not an empty one.
+        })
+        .finally(() => { inFlight = false })
     }
     poll()
     const id = setInterval(poll, pollMs)
     return () => { alive = false; clearInterval(id) }
-  }, [pollMs, refreshKey])
-  return approvals
+  }, [pollMs, refreshKey, revision])
+  return { approvals, isLoading, error, refresh }
 }

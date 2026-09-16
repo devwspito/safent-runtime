@@ -96,6 +96,17 @@ def _load_master_key() -> bytes:
     return data[:32]
 
 
+def load_master_key() -> bytes:
+    """Public accessor for the 32-byte master key — reused by callers that
+    need the RAW bytes for a deterministic, non-HKDF derivation documented
+    in a contract (026, contracts/sso.md §3: `sub = sha256(master.key ‖
+    "ads-sso-subject")`, plain SHA-256 concatenation, not a subkey). Prefer
+    `SecretsVault.derive_subkey()` for anything that is not that literal
+    contract — this function exists so that ONE derivation never gets
+    re-implemented against a second, ad-hoc load of the key file."""
+    return _load_master_key()
+
+
 # ---------------------------------------------------------------------------
 # HKDF real RFC 5869 (finding #20)
 # ---------------------------------------------------------------------------

@@ -3,19 +3,12 @@
 The concrete LLM/replay drivers (PlaywrightDriver/StagehandDriver/CdpPlaywrightDriver)
 were a parallel duplicate of hermes-agent's native browser; the agent browses via
 the native tools and live teaching uses the CDP screencast live-view. Removed.
+
+OpenShellSandboxProvider (egress sandbox del orquestador spec-002) se
+archivo en `archive/browser-spec-002` — NO-GO fase 4, parcado. Ver
+specs/025-safent-repaso/oleada-1.md §L1b.
 """
 
-from hermes.browser.infrastructure.openshell_sandbox_provider import (
-    EgressAllowEntry,
-    OpenShellGatewayNotRunningError,
-    OpenShellPolicyPushError,
-    OpenShellSandboxProvisionError,
-    OpenShellSandboxProvider,
-    OpenShellTeardownError,
-    SandboxProvisionResult,
-    build_egress_policy_yaml,
-    make_egress_approved_sites_provider,
-)
 from hermes.browser.infrastructure.agent_browser_cli import (
     AgentBrowserCli,
     AgentBrowserCommandError,
@@ -38,16 +31,6 @@ __all__ = [
     "AgentBrowserCli",
     "AgentBrowserCommandError",
     "AgentBrowserNotInstalledError",
-    # OpenShell sandbox provider
-    "EgressAllowEntry",
-    "OpenShellGatewayNotRunningError",
-    "OpenShellPolicyPushError",
-    "OpenShellSandboxProvisionError",
-    "OpenShellSandboxProvider",
-    "OpenShellTeardownError",
-    "SandboxProvisionResult",
-    "build_egress_policy_yaml",
-    "make_egress_approved_sites_provider",
     # selector registry
     "InMemorySelectorRegistry",
     "SelectorStore",

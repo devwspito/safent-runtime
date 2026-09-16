@@ -4,15 +4,14 @@ Route: WS /api/v1/watch/agent/live
 
 Purpose ("Verificar")
 ---------------------
-After teaching a skill, the operator asks the agent (via chat) to USE the skill
-and WATCHES it execute in real time. Unlike the teaching live-view
-(`training_live.py`), which drives its OWN isolated context and injects operator
-input, this view is **read-only**: it screencasts the page the AGENT is actively
-using in the shared jailed Chromium so the human can corroborate the run.
+The operator asks the agent (via chat) to run a task and WATCHES it execute in
+real time. This view is **read-only**: it screencasts the page the AGENT is
+actively using in the shared jailed Chromium so the human can corroborate the
+run — it does NOT inject input and does NOT create a context, it attaches to
+the agent's existing page.
 
-Reuses the teaching plumbing: same jailed CDP endpoint, `CdpScreencastSource`,
-JPEG-over-WS frame loop, and token auth. It does NOT inject input and does NOT
-create a context — it attaches to the agent's existing page.
+Shares its CDP endpoint, `CdpScreencastSource`, JPEG-over-WS frame loop, and
+token auth with the other live-view bridges via `live_view_support.py`.
 
 Page selection (best-effort)
 ----------------------------
@@ -32,13 +31,13 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from hermes.browser.infrastructure.cdp_screencast_source import CdpScreencastSource
-from hermes.shell_server.cowork.training_live import (
-    _cdp_url,
-    _send_frames,
-    _stop_playwright_safe,
-    _try_ensure_browser_running,
-    _verify_token,
+from hermes.shell_server.cowork.live_view_support import (
+    cdp_url,
+    send_frames,
+    stop_playwright_safe,
+    try_ensure_browser_running,
 )
+from hermes.shell_server.main import authenticate_websocket
 
 logger = logging.getLogger("hermes.shell_server.cowork.watch_live")
 
@@ -98,12 +97,11 @@ def create_watch_live_router() -> APIRouter:
 
     @router.websocket("/api/v1/watch/agent/live")
     async def watch_agent_live(websocket: WebSocket) -> None:
-        # Auth: same stable webui bearer as training_live (WS upgrades bypass the
-        # POST-only HTTP middleware), passed as ?token=.
-        webui_token: str = getattr(websocket.app.state, "shell_webui_token", "")
-        candidate: str = websocket.query_params.get("token", "")
-        if not _verify_token(candidate, webui_token):
-            await websocket.close(code=1008, reason="unauthorized")
+        # Auth: WebSocket upgrades never reach the HTTP `_require_operator_token`
+        # middleware (Starlette only runs @app.middleware("http") for scope["type"]
+        # == "http") — `authenticate_websocket` is the shared per-connection gate
+        # (same bearer check, closes 1008 before accept on failure).
+        if not await authenticate_websocket(websocket):
             return
 
         await websocket.accept()
@@ -116,9 +114,9 @@ def create_watch_live_router() -> APIRouter:
         try:
             from playwright.async_api import async_playwright  # noqa: PLC0415
 
-            await _try_ensure_browser_running()
+            await try_ensure_browser_running()
             pw = await async_playwright().start()
-            browser = await pw.chromium.connect_over_cdp(_cdp_url())
+            browser = await pw.chromium.connect_over_cdp(cdp_url())
 
             page = await _wait_for_agent_page(browser)
             if page is None:
@@ -132,7 +130,7 @@ def create_watch_live_router() -> APIRouter:
             screen_src = CdpScreencastSource(page=page)
             await screen_src.start()
 
-            send_task = asyncio.create_task(_send_frames(websocket, screen_src))
+            send_task = asyncio.create_task(send_frames(websocket, screen_src))
             await send_task
 
         except WebSocketDisconnect:
@@ -146,7 +144,7 @@ def create_watch_live_router() -> APIRouter:
                 screen_src.stop()
             # We attach to the AGENT's page — never close its context/page here.
             if pw is not None:
-                await _stop_playwright_safe(pw)
+                await stop_playwright_safe(pw)
             logger.info("hermes.watch_live.session.end")
 
     return router

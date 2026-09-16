@@ -47,6 +47,11 @@ _TENANT_PUBKEY_HEX = _TENANT_PRIVATE_KEY.public_key().public_bytes_raw().hex()
 class _FakeAssociation:
     def __init__(self, *, signing_pubkey_hex: str) -> None:
         self.signing_pubkey_hex = signing_pubkey_hex
+        self.instance_id = "instance-B"
+        self.tenant_id = "fixture-tenant"
+        self.paired_at = "2026-09-12T00:00:00+00:00"
+        self.cloud_endpoint = "https://fixture.invalid"
+        self.state = "active"
 
 
 class _FakeAssociationStore:
@@ -71,6 +76,8 @@ def _make_wiring(
     association_store: object | None = None,
 ) -> DbusRuntimeServiceWiring:
     conversation_repo = SQLiteConversationRepository(db_path=tmp_path / "state.db")
+    association_store = association_store if association_store is not None else _FakeAssociationStore()
+    association_store.db_path = tmp_path / "state.db"
     return DbusRuntimeServiceWiring(
         agent_state=InMemoryAgentState(),
         approval_gate=None,
@@ -79,7 +86,7 @@ def _make_wiring(
         conversation_repo=conversation_repo,
         tenant_id=str(uuid4()),
         association_store=(
-            association_store if association_store is not None else _FakeAssociationStore()
+            association_store
         ),
     )
 
@@ -93,6 +100,9 @@ def _envelope(message_id: str = "msg-1") -> dict:
         "from_instance_id": "instance-A",
         "to_employee_id": "bob@org.example",
         "to_agent_id": "",
+        "to_instance_id": "instance-B",
+        "kind": "request",
+        "nonce": "fixture-nonce",
         "body": "please review this for me",
         "issued_at": datetime.now(tz=UTC).isoformat(),
     }

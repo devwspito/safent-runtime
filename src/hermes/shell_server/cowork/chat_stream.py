@@ -19,10 +19,11 @@ connection works identically on uvloop and the stdlib loop, so we use it + reuse
 daemon's handshake builder + WS frame parser.
 
 Security: stream_path is derived deterministically from the validated UUID — no
-client input shapes the socket path. The endpoint is same-origin loopback + an
-unguessable task UUID (the WS endpoint was likewise unauthenticated); GET is not
-gated by the operator-token middleware (mutations-only) and /api/v1/chat is in the
-feature-guard always-allowed set. No payloads are logged.
+client input shapes the socket path. GET is gated by the operator-token
+middleware like every other /api/v1/* route; because EventSource cannot set a
+custom Authorization header, this route accepts the same bearer via a
+`?token=` query parameter instead (see main.py's `_require_operator_token`).
+/api/v1/chat is in the feature-guard always-allowed set. No payloads are logged.
 """
 
 from __future__ import annotations

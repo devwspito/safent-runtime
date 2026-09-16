@@ -1,11 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "remote-ui",
-  "description": "Safent web UI (served by the local container at http://localhost:<port>). Grants ONLY the host-clipboard bridge used by the Live/Teaching VNC view — WKWebView gates navigator.clipboard.readText behind a paste-permission prompt, so the shell reads/writes the host clipboard instead. No core permissions: the remote page gets no window/event/app control.",
+  "description": "Safent web UI: host clipboard, fixed-purpose OAuth openers, reviewed Ads setup links, display-only native update status and the native review dialog. Commands verify the live boot origin. No generic shell, navigation, window, event, host check handles or install permission.",
   "local": false,
   "remote": {
     "urls": ["http://localhost:*", "http://127.0.0.1:*"]
   },
   "windows": ["main"],
-  "permissions": ["allow-read-host-clipboard", "allow-write-host-clipboard"]
+  "permissions": ["allow-read-host-clipboard", "allow-write-host-clipboard", "allow-open-ads-oauth", "allow-open-ads-setup", "allow-open-provider-oauth", "allow-show-native-updater", "allow-get-native-update-status", "allow-pick-host-folder", "allow-read-host-folder-file", "allow-approve-host-folder-write", "allow-write-host-folder-file", "allow-get-ads-hard-caps", "allow-save-ads-hard-caps"]
 }

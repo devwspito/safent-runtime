@@ -16,7 +16,6 @@ from hermes.config_sync.applier import (
     ApplyResult,
     PolicyApplier,
     _is_authorization_error,
-    _provider_draft,
 )
 from hermes.config_sync.policy_document import (
     PolicyPayload,
@@ -114,24 +113,6 @@ class TestGap6ProviderApiKey:
         spec = ProviderSpec(alias="openai", kind="openai", default_model="gpt-4")
         assert spec.api_key is None
 
-    def test_provider_draft_includes_api_key_when_present(self) -> None:
-        """_provider_draft must include api_key when the spec carries one."""
-        spec = ProviderSpec(
-            alias="anthropic-prod",
-            kind="anthropic",
-            default_model="claude-opus-4",
-            api_key="sk-ant-secret",
-        )
-        draft = _provider_draft(spec)
-        assert "api_key" in draft
-        assert draft["api_key"] == "sk-ant-secret"
-
-    def test_provider_draft_omits_api_key_when_absent(self) -> None:
-        """_provider_draft must NOT include api_key when spec.api_key is None."""
-        spec = ProviderSpec(alias="openai", kind="openai", default_model="gpt-4")
-        draft = _provider_draft(spec)
-        assert "api_key" not in draft
-
     @pytest.mark.asyncio
     async def test_add_provider_draft_carries_api_key(self) -> None:
         """Full apply path: add_provider receives draft JSON with api_key."""
@@ -150,9 +131,7 @@ class TestGap6ProviderApiKey:
         await PolicyApplier(proxy).apply(payload, current_agents=[])
 
         add_calls = proxy.calls_for("add_provider")
-        assert len(add_calls) == 1
-        draft = json.loads(add_calls[0][0])
-        assert draft["api_key"] == "sk-live-key"
+        assert not add_calls  # upstream master credentials must not be distributed
 
     @pytest.mark.asyncio
     async def test_update_provider_draft_carries_api_key(self) -> None:
@@ -180,10 +159,7 @@ class TestGap6ProviderApiKey:
         await PolicyApplier(proxy).apply(payload, current_agents=[])
 
         update_calls = proxy.calls_for("update_provider")
-        assert len(update_calls) == 1
-        # update_provider args: (provider_id, draft_json)
-        draft = json.loads(update_calls[0][1])
-        assert draft["api_key"] == "sk-updated-key"
+        assert not update_calls  # only verified instance_gateway envelopes apply
 
     @pytest.mark.asyncio
     async def test_add_provider_without_api_key_sends_no_api_key_field(self) -> None:
@@ -196,9 +172,7 @@ class TestGap6ProviderApiKey:
         await PolicyApplier(proxy).apply(payload, current_agents=[])
 
         add_calls = proxy.calls_for("add_provider")
-        assert len(add_calls) == 1
-        draft = json.loads(add_calls[0][0])
-        assert "api_key" not in draft
+        assert not add_calls  # keyless legacy managed configuration is not a grant
 
     @pytest.mark.asyncio
     async def test_api_key_not_logged(self) -> None:

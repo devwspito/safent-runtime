@@ -106,7 +106,19 @@ class TestChatFailHard:
 
         # Inyectar control_plane stub de daemon-caído en el estado de la app.
         app.state.control_plane = _AlwaysUnavailableControlPlane()
-        return TestClient(app, raise_server_exceptions=False)
+        test_client = TestClient(app, raise_server_exceptions=False)
+        # Resource-level authz (baef171) now gates POST /api/v1/chat too: an
+        # unauthenticated request never reaches the handler, it 401s at the
+        # `_require_operator_token` middleware — before this fixture set the
+        # header, that 401 was masking the 503 fail-hard behavior this suite
+        # exists to pin. Authenticate as the operator (the daemon↔shell
+        # internal caller — same credential `test_post_chat_with_operator_token_
+        # reaches_handler` in test_api_v1_authorization.py uses) so every test
+        # below actually reaches the handler and exercises AgentUnavailable.
+        test_client.headers.update(
+            {"Authorization": f"Bearer {app.state.shell_auth_token}"}
+        )
+        return test_client
 
     def test_chat_post_returns_503_when_daemon_down(self, client: TestClient) -> None:
         """POST /api/v1/chat → 503 cuando daemon D-Bus no disponible (SC-005)."""

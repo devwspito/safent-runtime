@@ -107,9 +107,11 @@ from hermes.runtime.conversation_task_registry import (
 
 # Circuit breaker for broker-routed gated tools (install_mcp/skill_manage/...): after
 # this many failures of the SAME tool in one cycle, refuse to re-propose it (each
-# retry would otherwise mint a fresh HITL card). Stops the "retry-spam" and lets the
-# turn end so the chat message finalizes instead of streaming forever.
-_MAX_WRITE_TOOL_FAILURES = 5
+# retry would otherwise mint a fresh HITL card). ONE: every retry costs the owner a
+# fresh approval, and the observed loop (2026-09-14: skill_manage approved five times
+# in a row, each call malformed and failing) is exactly what the breaker must stop —
+# the model gets one owner-approved attempt per turn, then must report and stop.
+_MAX_WRITE_TOOL_FAILURES = 1
 
 
 def _write_result_is_failure(result: str) -> bool:
@@ -117,6 +119,10 @@ def _write_result_is_failure(result: str) -> bool:
     if not result:
         return False
     low = result[:600].lower()
+    # Waiting for the owner is not a failure: the proposal is parked, not rejected.
+    # Counting it would trip the one-strike breaker on the very first approval card.
+    if "pendiente de aprobación" in low or "pending_approval" in low:
+        return False
     return (
         '"error"' in low
         or '"success": false' in low
@@ -130,9 +136,11 @@ def _write_circuit_broken_msg(tool_name: str, count: int) -> str:
     return json.dumps(
         {
             "error": (
-                f"BLOQUEADO: '{tool_name}' ya falló {count} veces en este turno. "
-                "NO lo reintentes (ni con los mismos ni con otros argumentos): "
-                "explícale al usuario con honestidad qué falla y qué necesitas, o propón otra vía."
+                f"BLOQUEADO: '{tool_name}' ya falló {count} vez/veces en este turno tras "
+                "la aprobación del dueño. NO lo reintentes (ni con los mismos ni con otros "
+                "argumentos) y NO busques rodeos (crear habilidades, instalar conectores): "
+                "explícale al usuario con honestidad qué falló y qué necesitas, y sigue con "
+                "las herramientas ya conectadas."
             )
         },
         ensure_ascii=False,
@@ -299,10 +307,19 @@ _SYSTEM_PROMPT_CACHE: dict[tuple[int, int], str] = {}
 _MEMORY_PROMPT_CACHE: dict[str, tuple[float, str]] = {}  # key → (expires_at, value)
 _MEMORY_PROMPT_TTL_S: float = 20.0
 
-# resolve_runtime_provider cache: keyed by engine_id. TTL 30s — mirrors the
-# ActiveProviderService TTL so a provider switch takes effect within one period.
-_RUNTIME_PROVIDER_CACHE: dict[int, tuple[float, tuple]] = {}  # key → (expires_at, (rt, bare))
+# Native resolution cache: engine + selected model/provider/endpoint/key digest.
+# Managed selection is checked separately every turn, including revocation.
+_RUNTIME_PROVIDER_CACHE: dict[tuple, tuple[float, tuple]] = {}  # credential-bound identity → (expires_at, (rt, bare))
 _RUNTIME_PROVIDER_TTL_S: float = 30.0
+# Bumped by clear_runtime_provider_cache() on every provider switch. Guards a
+# write-after-clear race (specs/025-safent-repaso PROV-05): _resolve_hermes_
+# runtime() runs OUTSIDE _CACHE_LOCK (it's a blocking disk+SDK read, must not
+# hold the lock), so a cycle that started resolving BEFORE a switch can still
+# be mid-flight when clear_runtime_provider_cache() empties the dict, and
+# then write its STALE result back in AFTER the clear — re-poisoning the
+# cache with the OLD provider for a full new TTL window even though the
+# switch already landed. See _cached_resolve_hermes_runtime.
+_RUNTIME_PROVIDER_EPOCH: int = 0
 
 
 def _resolve_local_tz():
@@ -414,21 +431,60 @@ def _cached_enrich_prompt(base_prompt: str, tenant_id: "UUID") -> str:
 
 
 def _cached_resolve_hermes_runtime(engine_id: int, model_config: "ModelConfig") -> "tuple[dict, str]":
-    """Return _resolve_hermes_runtime with a 30s TTL keyed by engine_id.
+    """Cache native resolution for 30s by engine and complete selected identity.
 
     FIX D: resolving the provider reads disk / an in-memory registry. Caching
     for 30s avoids re-reading per-message while still reacting to provider
     changes within one TTL window (same as ActiveProviderService).
+
+    PROV-05: the write-back is guarded by _RUNTIME_PROVIDER_EPOCH so a slow
+    resolve that started BEFORE a concurrent provider switch cannot clobber a
+    fresher post-switch cache entry once it finally finishes — see the epoch
+    comment above _RUNTIME_PROVIDER_EPOCH for the exact race.
     """
+    import hashlib  # noqa: PLC0415
+    key_digest = hashlib.sha256((model_config.api_key or '').encode()).digest()
+    cache_key = (engine_id, model_config.model, model_config.native_provider,
+                 model_config.base_url, key_digest, model_config.managed)
     now = _time.monotonic()
     with _CACHE_LOCK:
-        entry = _RUNTIME_PROVIDER_CACHE.get(engine_id)
+        entry = _RUNTIME_PROVIDER_CACHE.get(cache_key)
+        epoch_at_read = _RUNTIME_PROVIDER_EPOCH
     if entry is not None and now < entry[0]:
         return entry[1]  # type: ignore[return-value]
     value = _resolve_hermes_runtime(model_config)
     with _CACHE_LOCK:
-        _RUNTIME_PROVIDER_CACHE[engine_id] = (now + _RUNTIME_PROVIDER_TTL_S, value)
+        if _RUNTIME_PROVIDER_EPOCH == epoch_at_read:
+            # Bound storage across rotations; never retain expired credentials.
+            for expired in [key for key, item in _RUNTIME_PROVIDER_CACHE.items() if item[0] <= now]:
+                _RUNTIME_PROVIDER_CACHE.pop(expired, None)
+            _RUNTIME_PROVIDER_CACHE[cache_key] = (now + _RUNTIME_PROVIDER_TTL_S, value)
+        # else: a switch landed while this resolve was in flight — `value` is
+        # still the RIGHT answer for THIS turn (it reflects whatever config
+        # was on disk when we started), but caching it would serve the OLD
+        # provider to the NEXT turn for up to another TTL window. Let the
+        # next call re-resolve fresh instead of trusting this stale write.
     return value
+
+
+def clear_runtime_provider_cache() -> None:
+    """Invalida _RUNTIME_PROVIDER_CACHE — llamar tras cualquier mutación de
+    provider (configure_native_provider, set_active_provider, add/update con
+    set_active) para que el PRÓXIMO chat resuelva el provider fresco en vez de
+    servir hasta 30s el runtime (api_key/base_url/provider) del switch
+    anterior. Sin esto, un cambio de proveedor hecho más rápido que el TTL
+    parece "no surtir efecto" — el motor sigue completando contra el provider
+    viejo aunque config.yaml ya esté actualizado (bug real: ver
+    specs/025-safent-repaso, hallazgo #1).
+
+    Also bumps _RUNTIME_PROVIDER_EPOCH (PROV-05) so a resolve that was
+    already in flight when this clear happens can't re-poison the cache with
+    its stale result once it completes — see _cached_resolve_hermes_runtime.
+    """
+    global _RUNTIME_PROVIDER_EPOCH
+    with _CACHE_LOCK:
+        _RUNTIME_PROVIDER_CACHE.clear()
+        _RUNTIME_PROVIDER_EPOCH += 1
 
 
 # ---------------------------------------------------------------------------
@@ -587,41 +643,9 @@ def _build_tool_call_emitter(
         # Record real in-flight tool BEFORE emitting the frame so the registry
         # is always up-to-date by the time the frame reaches the client.
         if live_agent_id:
-            activity_agent = live_agent_id
-            activity_tool = function_name
-            # Delegación: atribuir la actividad EN VIVO al especialista del roster que
-            # mejor encaja, para que el Office muestre a ESE muñeco "trabajando"
-            # (conectado) durante la sub-tarea, no al Cerebro.
-            is_delegation = function_name == "delegate_task"
-            spec_id: str | None = None
-            if is_delegation:
-                from hermes.agents.domain.default_roster import match_specialist  # noqa: PLC0415
-                spec_text = " ".join(
-                    str(function_args.get(k, ""))
-                    for k in ("role", "goal", "context", "task", "instruction")
-                )
-                spec_id = match_specialist(spec_text)
-                if spec_id:
-                    activity_agent = spec_id
-                    activity_tool = "trabajando"
-            live_activity.record(_task_id_str, activity_agent, activity_tool)
-            if is_delegation and spec_id and spec_id != live_agent_id:
-                try:
-                    label = ""
-                    for key in ("goal", "role", "task"):
-                        raw = function_args.get(key)
-                        if raw:
-                            label = str(raw).strip()[:80]
-                            break
-                    live_activity.record_delegation(
-                        _task_id_str, from_id=live_agent_id, to_id=spec_id, label=label
-                    )
-                except Exception:  # noqa: BLE001 — a label/edge failure must never break dispatch
-                    logger.debug(
-                        "hermes.nous_engine.record_delegation_failed task=%s to=%s",
-                        _task_id_str,
-                        spec_id,
-                    )
+            # Attribution is observed identity, never a guessed specialist based
+            # on words in the prompt. Native delegate_task remains unchanged.
+            live_activity.record(_task_id_str, live_agent_id, function_name)
         chunk = TaskStreamChunk(kind=StreamChunkKind.TOOL_CALL, tool_call=descriptor)
         try:
             fut = asyncio.run_coroutine_threadsafe(
@@ -980,48 +1004,29 @@ def _resolve_hermes_runtime(model_config: ModelConfig) -> "tuple[dict, str]":
             f"Detalle: {exc}"
         ) from exc
 
-    # ── CAMINO NATIVO (el que el dueño pidió) ──────────────────────────────
-    # Si config.yaml tiene model.provider configurado (CUALQUIER provider nativo
-    # de la tabla de hermes_cli: openai-api directo, openai-codex/ChatGPT OAuth,
-    # nous, copilot, gemini…), resolvemos DIRECTO con hermes_cli leyendo
-    # .env/config.yaml/auth-store — sin el catálogo spec-016 ni el vault. Es
-    # EXACTAMENTE lo que hace `hermes --provider <id>`. requested=None hace que
-    # resolve_requested_provider lea config.yaml. Backward-compatible: si no hay
-    # model.provider (setups vault legacy), cae al camino de abajo.
-    try:
-        from hermes_cli.config import load_config  # noqa: PLC0415
-        _cfg_model = (load_config() or {}).get("model") or {}
-        _native_prov = (_cfg_model.get("provider") or "").strip()
-        _native_model = (_cfg_model.get("default") or _cfg_model.get("model") or "").strip()
-        if _native_prov and _native_prov != "auto":
-            runtime = resolve_runtime_provider(target_model=_native_model or None)
-            bare = _native_model or (
-                runtime.get("model") if isinstance(runtime, dict) else ""
-            ) or ""
-            logger.info(
-                "hermes.nous_engine.native_provider_resolved provider=%s model=%s",
-                _native_prov, bare,
-            )
-            _align_auxiliary_with_runtime(runtime, bare, fallback_provider=_native_prov)
-            return runtime, bare
-    except Exception as _nexc:  # noqa: BLE001 — el camino vault sigue disponible
-        logger.debug("hermes.nous_engine.native_resolve_skip: %r", _nexc)
-
     from hermes.providers.infrastructure.nous_provider_adapter import (  # noqa: PLC0415
         nous_request_from_model_config,
     )
 
+    # The selected snapshot is authoritative. Never re-read global config here:
+    # doing so silently overrides per-agent assignments and concurrent turns.
     req, bare = nous_request_from_model_config(model_config)
+    requested = model_config.native_provider or req.requested
+    if model_config.managed and (not model_config.api_key or not model_config.base_url):
+        raise RuntimeError('Managed provider credentials or endpoint unavailable')
     runtime = resolve_runtime_provider(
-        requested=req.requested,
+        requested=requested,
         explicit_api_key=req.explicit_api_key,
         explicit_base_url=req.explicit_base_url,
         target_model=req.target_model,
     )
-    _align_auxiliary_with_runtime(
-        runtime, bare, fallback_provider=req.requested,
-        fallback_key=req.explicit_api_key, fallback_url=req.explicit_base_url,
-    )
+    # Auxiliary routing is process-global in Hermes. Managed requests must not
+    # export their scoped credential into that shared environment.
+    if not model_config.managed:
+        _align_auxiliary_with_runtime(
+            runtime, bare, fallback_provider=requested,
+            fallback_key=req.explicit_api_key, fallback_url=req.explicit_base_url,
+        )
     return runtime, bare
 
 
@@ -1173,6 +1178,9 @@ class GovernedAIAgent:
         INVARIANTE: un WRITE NUNCA ejecuta el handler nativo de Nous.
         INVARIANTE: toda tool externa pasa por el CapabilityBroker exactamente UNA vez.
         """
+        from hermes.runtime.managed_llm_bootstrap import assert_process_admission  # noqa: PLC0415
+
+        assert_process_admission()
         nous_risk = classify_nous_tool(function_name)
 
         if nous_risk is not None:
@@ -2006,6 +2014,12 @@ class NousReasoningEngine:
         self._dbus_emit_end = emit_end
 
     def _resolve_model_config(self, agent_id: str | None = None) -> ModelConfig:
+        from hermes.runtime.managed_llm_bootstrap import assert_process_admission  # noqa: PLC0415
+
+        assert_process_admission()
+        # Consult dynamic authority even for engines constructed with an explicit
+        # personal config; a later signed assignment must govern the next turn.
+        source_cfg = self._model_config_source() if self._model_config_source is not None else None
         # Per-agent provider binding (Fase 3c): if the agent has a provider_alias,
         # resolve that specific provider before falling back to the global path.
         if agent_id and self._agent_registry is not None and self._model_config_for_alias is not None:
@@ -2013,6 +2027,8 @@ class NousReasoningEngine:
             if alias:
                 per_agent_cfg = self._model_config_for_alias(alias)
                 if per_agent_cfg is not None:
+                    if source_cfg is not None and source_cfg.managed and not per_agent_cfg.managed:
+                        raise RuntimeError('Assigned enterprise provider cannot use a personal credential')
                     logger.info(
                         "hermes.nous_engine.per_agent_provider: "
                         "agent_id=%s alias=%s model=%s",
@@ -2021,17 +2037,20 @@ class NousReasoningEngine:
                         per_agent_cfg.model,
                     )
                     return per_agent_cfg
+                agent = self._agent_registry.get_agent(agent_id)
+                if getattr(agent, 'managed_by', None) == 'cloud':
+                    raise RuntimeError('Assigned enterprise provider is unavailable')
 
+        if source_cfg is not None and source_cfg.managed:
+            return source_cfg
         if self._model_config is not None:
             return self._model_config
         # Prefer the active Hermes provider (onboarding/Settings), resolved per
         # cycle so connecting/switching a provider in the UI takes effect on the
         # next task without restarting the daemon. Fall back to env only if no
         # provider is configured and no source was wired.
-        if self._model_config_source is not None:
-            cfg = self._model_config_source()
-            if cfg is not None:
-                return cfg
+        if source_cfg is not None:
+            return source_cfg
         return ModelConfig.from_env()
 
     def _agent_provider_alias(self, agent_id: str) -> str | None:
@@ -2125,7 +2144,7 @@ class NousReasoningEngine:
             "darle comandos de terminal.\n"
             "- Chat (/chat): esta conversación.\n"
             "- Programadas (/programadas): tareas y recordatorios programados.\n"
-            "- Agentes (/agentes): tus agentes/roles y su actividad en vivo.\n"
+            "- Tareas (/tareas): encargos, estado, resultados y aprobaciones pendientes.\n"
             "- Habilidades (/skills): las skills que sabes ejecutar.\n"
             "- Integraciones (/integraciones): apps conectadas (Gmail, Google Ads…).\n"
             "- Herramientas (/mcp): servidores MCP conectados.\n"
@@ -2136,8 +2155,8 @@ class NousReasoningEngine:
             "- Memoria (/memoria): lo que recuerdas entre conversaciones; el usuario "
             "puede ver, EDITAR y borrar cada entrada ahí.\n"
             "- Coste (/coste): consumo y coste.\n"
-            "- En vivo (/en-vivo): ver a tus agentes trabajar en directo, DETENER una "
-            "tarea si algo va mal, y enseñar nuevas habilidades (pestaña Enseñar).\n"
+            "- En vivo (/en-vivo): actividad y delegaciones reales; consulta lo que "
+            "está ocurriendo y las acciones de control disponibles.\n"
             "Para LLEVAR al usuario a una sección, incluye un enlace markdown a su ruta, "
             "p.ej. [Abrir Archivos](/archivos) o [Ver tu memoria](/memoria): la app lo "
             "convierte en un botón que navega ahí de un clic. Hazlo siempre que orientes. "
@@ -2161,14 +2180,22 @@ class NousReasoningEngine:
         """Resolve the PersonaSpec for this cycle from the agent_registry.
 
         Priority: context.agent_id → active_agent_id() → engine's base persona.
-        Always returns a valid PersonaSpec (fail-soft by design — a broken
-        persona resolution must never crash the reasoning cycle).
+        Ordinary missing profiles retain the existing fallback. Retired factory
+        identities explicitly fail; they must never execute as another persona.
         """
+        from hermes.agents.domain.retired_factory import (  # noqa: PLC0415
+            FactoryAgentRetired, require_not_retired,
+        )
+
         if self._agent_registry is None:
+            require_not_retired(agent_id)
             return self._persona
         try:
             return self._agent_registry.persona_for(agent_id)
+        except FactoryAgentRetired:
+            raise
         except Exception:  # noqa: BLE001 — fail-soft
+            require_not_retired(agent_id)
             logger.warning(
                 "hermes.nous_engine.cycle_persona_fallback agent_id=%s", agent_id
             )
@@ -2203,12 +2230,14 @@ class NousReasoningEngine:
 
         cycle_agent_id: str | None = context.agent_id if hasattr(context, "agent_id") else None
 
-        model_config = self._resolve_model_config(cycle_agent_id)
+        # Authority reconciliation may wait on the cross-process DB lock.
+        # Keep SIGTERM and the generation watcher responsive during admission.
+        model_config = await asyncio.to_thread(self._resolve_model_config, cycle_agent_id)
 
         # Resolve per-cycle persona: use the agent bound to this task (from
         # DecisionContext.agent_id) or the active agent. Falls back to the
         # engine's persona (default agent) when agent_registry is absent.
-        # The registry's persona_for() is fail-soft by contract: never raises.
+        # Retired packaged identities fail explicitly; no silent default run.
         cycle_persona = self._resolve_cycle_persona(cycle_agent_id)
 
         tokenized_payload = self._tokenize_context(context)
@@ -2347,7 +2376,12 @@ class NousReasoningEngine:
         external_specs = await self._resolve_external_specs(active_agent_id)
         external_catalog = _ExternalToolCatalog(external_specs)
 
-        agent = self._build_governed_agent(
+        system_prompt = _apply_ads_chat_guidance(
+            system_prompt, safe_context.trigger, external_specs
+        )
+
+        agent = await asyncio.to_thread(
+            self._build_governed_agent,
             model_config, system_prompt, loop, tenant_id, external_catalog,
             consent_context=per_cycle_consent,
             active_agent_id=str(active_agent_id) if active_agent_id else "",
@@ -2378,7 +2412,10 @@ class NousReasoningEngine:
         # cycle warms the registry. Sync the just-registered specs into THIS agent so
         # the tools reach the model on the same cycle they were resolved. Idempotent:
         # warm cycles already have them and skip.
-        _sync_agent_tools_with_external(agent, external_specs)
+        visible_specs = _visible_external_specs(external_specs)
+        _sync_agent_tools_with_external(
+            agent, visible_specs, deferred_count=len(external_specs) - len(visible_specs),
+        )
 
         # FIX "Hermes se presenta cada mensaje": el orchestrator inyecta el
         # historial de la conversación en metadata; lo pasamos a run_conversation
@@ -2407,8 +2444,12 @@ class NousReasoningEngine:
             _snapshot_workspace() if is_chat_cycle else {}
         )
 
-        result = await loop.run_in_executor(
-            None,
+        from hermes.runtime.managed_llm_bootstrap import process_admission  # noqa: PLC0415
+        from hermes.runtime.managed_llm_lifecycle import run_admitted_native  # noqa: PLC0415
+
+        admission = process_admission()
+        result = await run_admitted_native(
+            admission,
             lambda: _run_conversation_with_cdp(
                 agent, user_message, _history, cerebro_cdp_provider,
                 stream_callback=_stream_cb,
@@ -2416,7 +2457,11 @@ class NousReasoningEngine:
                 work_item_id=_work_item_id_for_dbus,
                 active_agent_id=str(active_agent_id) if active_agent_id else "",
             ),
+            lambda: agent._inner.hard_interrupt("Runtime configuration changed"),
         )
+
+        from hermes.runtime.native_turn_result import classify_native_result  # noqa: PLC0415
+        classify_native_result(result, has_pending_proposals=bool(agent._pending_proposals))
 
         # spec streaming-dbus: flush any remaining coalesced text and emit
         # ChatStreamEnd to signal completion to the compositor.
@@ -2935,6 +2980,13 @@ class NousReasoningEngine:
         consent_context: per-cycle override que propaga el operator_id real del
         WorkItem (spec 014 inc. 3 / CTRL-13). Si None, cae al consent de clase.
         """
+        from hermes.runtime.managed_llm_bootstrap import assert_process_admission  # noqa: PLC0415
+
+        if model_config.managed:
+            _assert_managed_execution_ready(model_config)
+        assert_process_admission(managed=model_config.managed)
+        if model_config.managed and model_config.extra:
+            raise ValueError("Managed inference does not accept custom request overrides")
         effective_consent = consent_context if consent_context is not None else self._consent_context
         # FIX D — use cached variants to avoid re-reading memory/disk every message.
         enriched_prompt = _cached_enrich_prompt(system_prompt, tenant_id)
@@ -2956,8 +3008,6 @@ class NousReasoningEngine:
         _extra_knobs: dict[str, Any] = {}
         if model_config.max_tokens is not None:
             _extra_knobs["max_tokens"] = model_config.max_tokens
-        if model_config.temperature != 0.0:
-            _extra_knobs["temperature"] = model_config.temperature
         # AIAgent (Nous 0.15.1 through 0.21.1) does NOT accept a `timeout_seconds` constructor
         # kwarg — passing it raises TypeError and kills the turn. Per-request LLM
         # timeouts are ENV-driven (HERMES_API_TIMEOUT / HERMES_STREAM_STALE_TIMEOUT
@@ -2977,22 +3027,37 @@ class NousReasoningEngine:
             if model_config.max_iterations != 8
             else _NOUS_LEGACY_MAX_ITERATIONS
         )
-        # Reasoning models served WITHOUT a vLLM reasoning parser (Qwen3.x,
-        # DeepSeek-R1, GLM Thinking on a plain OpenAI-compat endpoint) emit CoT
-        # as BARE prose in message.content with no <think> tags, which neither
-        # Nous strip_think_blocks nor StreamingThinkScrubber can catch. Tell the
-        # chat template not to think. chat_template_kwargs only shapes the
-        # rendered prompt; the OpenAI tools/tool_calls schema is untouched, so
-        # tool-calling is unaffected. Mirrors skill_synthesis.py.
-        _extra_body: dict[str, Any] = {}
-        _op_extra = model_config.extra.get("extra_body") if model_config.extra else None
-        if isinstance(_op_extra, dict):
-            _extra_body.update(_op_extra)
-        _ctk = _extra_body.setdefault("chat_template_kwargs", {})
-        if isinstance(_ctk, dict) and "enable_thinking" not in _ctk:
-            _ctk["enable_thinking"] = False
-        if _extra_body:
-            _extra_knobs["request_overrides"] = {"extra_body": _extra_body}
+        # Qwen's local chat-template extension is NOT an OpenAI parameter.
+        # In particular Codex Responses rejects it with HTTP 400. Only apply
+        # that default to the native custom Chat Completions route for Qwen.
+        # Enterprise owns a closed request schema. Neither profile/tool fields
+        # nor local Qwen extensions can select a route or override its grant.
+        if not model_config.managed:
+            from copy import deepcopy  # noqa: PLC0415
+
+            _extra_body: dict[str, Any] = {}
+            _op_extra = model_config.extra.get("extra_body") if model_config.extra else None
+            if isinstance(_op_extra, dict):
+                _extra_body = deepcopy(_op_extra)
+            _custom_chat = (
+                str(rt.get("provider", "")).split(":", 1)[0] == "custom"
+                and rt.get("api_mode") == "chat_completions"
+            )
+            if _custom_chat and "qwen" in bare_model.lower():
+                _ctk = _extra_body.setdefault("chat_template_kwargs", {})
+                if isinstance(_ctk, dict):
+                    _ctk.setdefault("enable_thinking", False)
+            elif not _custom_chat:
+                # Discard local-only overrides retained from a previous model.
+                # Do not change credentials, provider routing or native reasoning.
+                _extra_body.pop("chat_template_kwargs", None)
+            if _extra_body:
+                _extra_knobs["request_overrides"] = {"extra_body": _extra_body}
+            # Temperature is a wire override, not an AIAgent constructor arg.
+            # Subscription Responses routes reject it; leave their native
+            # reasoning/sampling policy untouched.
+            if model_config.temperature != 0.0 and rt.get("api_mode") == "chat_completions":
+                _extra_knobs.setdefault("request_overrides", {})["temperature"] = model_config.temperature
         agent = GovernedAIAgent(
             model=bare_model,
             api_key=rt.get("api_key"),
@@ -3036,7 +3101,9 @@ class NousReasoningEngine:
         tool_steps: descriptores de las tool-calls emitidas en el ciclo (orden de
         ejecución), para persistirlos y reconstruir las tarjetas al recargar.
         """
-        raw_narrative = result.get("final_response") or ""
+        from hermes.runtime.native_turn_result import classify_native_result  # noqa: PLC0415
+        outcome = classify_native_result(result, has_pending_proposals=bool(agent._pending_proposals))
+        raw_narrative = (result.get("final_response") or "") if outcome == "completed" else ""
         narrative_safe = str(raw_narrative).strip()
 
         try:
@@ -3083,6 +3150,35 @@ class NousReasoningEngine:
 # ---------------------------------------------------------------------------
 # Module-level pure helpers
 # ---------------------------------------------------------------------------
+
+
+def _assert_managed_execution_ready(model_config: ModelConfig) -> None:
+    """Require current process admission and the exact authoritative binding."""
+    from hermes.runtime.managed_llm import resolve_managed_config  # noqa: PLC0415
+    from hermes.runtime.managed_llm_bootstrap import (  # noqa: PLC0415
+        assert_process_admission,
+        process_admission,
+    )
+    from hermes.runtime.managed_llm_lifecycle import LifecycleUnavailable  # noqa: PLC0415
+    from hermes.runtime.model_config import (  # noqa: PLC0415
+        MANAGED_EXECUTION_UNAVAILABLE,
+        ManagedProviderUnavailableError,
+    )
+
+    try:
+        assert_process_admission(managed=True)
+        admission = process_admission()
+        if admission is None:
+            raise LifecycleUnavailable("Corporate process bootstrap is required")
+        binding = resolve_managed_config(admission.db_path)
+        if binding is None or any(
+            getattr(model_config, field) != getattr(binding, field)
+            for field in ("managed", "model", "native_provider", "base_url", "api_key")
+        ):
+            raise ManagedProviderUnavailableError("Model does not match the Enterprise assignment")
+        assert_process_admission(admission.db_path, managed=True)
+    except LifecycleUnavailable:
+        raise ManagedProviderUnavailableError(MANAGED_EXECUTION_UNAVAILABLE) from None
 
 
 def _resolve_per_cycle_consent(
@@ -4009,7 +4105,7 @@ def register_mcp_tools_in_nous_registry(server, broker, consent_context, engine_
         qualified = tool.qualified_name
         bare = tool.name
         schema = {"name": qualified, "description": tool.description,
-                  "parameters": {"type": "object", "properties": {}}}
+                  "parameters": tool.input_schema}
         read_handler = make_mcp_broker_read_handler(
             qualified_name=qualified, bare_tool_name=bare,
             broker=broker, consent_context=consent_context,
@@ -4105,9 +4201,63 @@ def _register_external_specs_in_nous(
         _make_external_sequential_wrapper(agent, spec, nous_registry)
 
 
+def _apply_ads_chat_guidance(
+    system_prompt: str, trigger: str | None, external_specs: tuple[ToolSpec, ...]
+) -> str:
+    """Attach Ads chat guidance keyed on the FULL registered catalog (parity 2.5).
+
+    Must receive ``external_specs`` — every connected tool, BEFORE the per-turn
+    visibility narrowing (``_visible_external_specs``) — so the companion keeps
+    getting guidance every turn once installed, even when intent retrieval hides
+    it from the model's direct tool list this turn (it stays reachable via
+    tool_search/tool_call).
+    """
+    if "chat_message" not in (trigger or ""):
+        return system_prompt
+    from hermes.runtime.ads_chat_guidance import append_ads_chat_guidance  # noqa: PLC0415
+
+    return append_ads_chat_guidance(system_prompt, external_specs)
+
+
+def _visible_external_specs(specs: tuple[ToolSpec, ...]) -> tuple[ToolSpec, ...]:
+    """The subset of ``specs`` the model sees DIRECTLY this turn.
+
+    Intent retrieval (runtime ``_stamp_visible_integration``) stamps the top-K names;
+    None means nothing was narrowed. The full ``specs`` tuple is always registered and
+    gate-classified — only visibility is narrowed.
+    """
+    from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+        get_visible_external_names,
+    )
+    visible = get_visible_external_names()
+    if visible is None:
+        return specs
+    return tuple(s for s in specs if s.name in visible)
+
+
+def _ensure_bridge_tools(kept: list, deferred_count: int) -> int:
+    """Append Hermes's tool_search/tool_describe/tool_call bridge schemas when this
+    cycle has registered externals the model cannot see directly and the bridge is
+    not already present (cold daemon: agent_init assembled against an empty registry,
+    so Hermes never activated the bridge). Returns how many schemas were added."""
+    try:
+        from tools.tool_search import BRIDGE_TOOL_NAMES, bridge_tool_schemas  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 — hermes-agent absent (unit tests) → nothing to bridge
+        return 0
+    present = {
+        (t.get("function") or {}).get("name") for t in kept if isinstance(t, dict)
+    }
+    if present & set(BRIDGE_TOOL_NAMES):
+        return 0
+    schemas = bridge_tool_schemas(deferred_count)
+    kept.extend(schemas)
+    return len(schemas)
+
+
 def _sync_agent_tools_with_external(
     agent: "GovernedAIAgent",
     specs: tuple[ToolSpec, ...],
+    deferred_count: int = 0,
 ) -> None:
     """Make THIS cycle's agent expose the just-registered external ToolSpecs.
 
@@ -4191,6 +4341,7 @@ def _sync_agent_tools_with_external(
             )
             present.add(spec.name)
             added += 1
+        bridged = _ensure_bridge_tools(kept, deferred_count) if deferred_count > 0 else 0
         inner.tools = kept
         # Keep the call-time allow-list exactly in sync with what the model can see.
         inner.valid_tool_names = {
@@ -4198,11 +4349,11 @@ def _sync_agent_tools_with_external(
             for t in kept
             if isinstance(t, dict) and (t.get("function") or {}).get("name")
         }
-        if added or pruned:
+        if added or pruned or bridged:
             logger.info(
-                "hermes.nous_engine.synced_external_tools added=%d pruned=%d total=%d "
-                "(cold-start visibility + per-turn narrowing)",
-                added, pruned, len(kept),
+                "hermes.nous_engine.synced_external_tools added=%d pruned=%d bridged=%d "
+                "deferred=%d total=%d (cold-start visibility + per-turn narrowing)",
+                added, pruned, bridged, deferred_count, len(kept),
             )
     except Exception as exc:  # noqa: BLE001 — never break the cycle over tool sync
         logger.warning("hermes.nous_engine.sync_external_tools_failed: %s", exc)

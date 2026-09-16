@@ -190,7 +190,7 @@ class TestApprovalOverrideNeverBypassesMfaTierOrHigh:
     @pytest.mark.asyncio
     async def test_auto_override_cannot_bypass_mfa_tier_tool_even_if_low_risk(self) -> None:
         """Defense in depth: even in the (currently hypothetical) case where
-        an MFA-tier tool (tool_delicacy._MFA_TIER_HITL, e.g. install_mcp)
+        an MFA-tier tool (tool_delicacy._ENTERPRISE_REVIEW_TOOLS, e.g. install_mcp)
         classified as LOW risk, the approval-override widening must still be
         refused for it."""
         tool = "install_mcp"

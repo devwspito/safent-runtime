@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -9,8 +10,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from hermes.agents_os.application.audit_hash_chain import AuditHashChainSigner, AuditKind
 from hermes.agents_os.domain.ports.surface_adapter_port import CapturedAction, ReplayStatus
 from hermes.agents_os.domain.surface_kind import SurfaceKind
+from hermes.agents_os.infrastructure.sqlite_audit_repository import SqliteAuditRepository
 from hermes.capabilities.infrastructure.skill_store_adapter import SkillStoreAdapter
 from hermes.shell_server.audit_api import create_audit_router
 
@@ -105,6 +108,62 @@ class TestAudit:
         # not re-synthesised by this read-only layer.
         assert entries[0]["signature_short"] == "cafebabe"
         assert entries[0]["actor"] == "owner"
+
+
+class TestAuditPayloadRoundTrip:
+    """specs/025-safent-repaso matriz-final-39eeb8e re-verificación d2eb8c6
+    (menor nuevo): `SqliteAuditRepository.append()` signed `payload_json` into
+    the chain hash but never persisted it — the machine-readable `reason`
+    (host_cli/totp/device_password/api) survived only as free text inside
+    `description`. A paused/resumed pair must round-trip its `reason` through
+    both the raw DB row (`load_chain`) and the read-only projection
+    (`GET /api/v1/audit`).
+    """
+
+    async def test_pause_resume_reason_round_trips_through_db_and_api(
+        self, tmp_path: Path
+    ) -> None:
+        db_path = tmp_path / "audit.db"
+        signer = AuditHashChainSigner(signing_key=_FAKE_KEY)
+        repo = SqliteAuditRepository(db_path=db_path)
+
+        await signer.append_and_persist(
+            audit_kind=AuditKind.AGENT_PAUSED,
+            actor="system",
+            description="Agent paused: reverif test",
+            payload={"changed_by": None, "reason": "reverif test"},
+            audit_repo=repo,
+        )
+        await signer.append_and_persist(
+            audit_kind=AuditKind.AGENT_RESUMED,
+            actor="system",
+            description="Agent resumed (host_cli)",
+            payload={"changed_by": None, "reason": "host_cli"},
+            audit_repo=repo,
+        )
+
+        # DB round-trip: load_chain reconstructs payload_json from the row,
+        # and the hash still binds that reloaded payload (verify_chain).
+        chain = await repo.load_chain()
+        assert json.loads(chain[0].payload_json)["reason"] == "reverif test"
+        assert json.loads(chain[1].payload_json)["reason"] == "host_cli"
+        signer.verify_chain(chain)
+
+        # API round-trip: GET /api/v1/audit exposes the same payload_json.
+        app = FastAPI()
+        app.include_router(create_audit_router(db_path))
+        client = TestClient(app)
+        r = client.get("/api/v1/audit")
+        assert r.status_code == 200
+        entries = {e["audit_kind"]: e for e in r.json()}
+        assert (
+            json.loads(entries["agent_paused"]["payload_json"])["reason"]
+            == "reverif test"
+        )
+        assert (
+            json.loads(entries["agent_resumed"]["payload_json"])["reason"]
+            == "host_cli"
+        )
 
 
 class TestSkills:

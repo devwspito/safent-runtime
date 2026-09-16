@@ -1,113 +1,25 @@
-/**
- * SkillDetailsModal — shows the SKILL.md instructions for an installed skill.
- * Opened via "Ver" button on each skill row.
- */
-
-import { createPortal } from 'react-dom'
-import { useEffect, useRef } from 'react'
+import { useRef } from 'react'
+import { Dialog } from '@base-ui/react/dialog'
 import { X } from 'lucide-react'
 import type { SkillDetails } from '../api/types'
 import Badge from './Badge'
+import { Button } from './ui/Button'
+import styles from './SecurityModal.module.css'
 
-interface SkillDetailsModalProps {
-  details: SkillDetails
-  onClose(): void
-}
-
-export default function SkillDetailsModal({ details, onClose }: SkillDetailsModalProps) {
-  const dialogRef = useRef<HTMLDivElement>(null)
-  const closeBtnRef = useRef<HTMLButtonElement>(null)
-
-  const titleId = 'skill-details-modal-title'
-
-  useEffect(() => {
-    closeBtnRef.current?.focus()
-  }, [])
-
-  useEffect(() => {
-    function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        e.stopPropagation()
-        onClose()
-        return
-      }
-      if (e.key === 'Tab') {
-        const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
-          'button, input, [tabindex]:not([tabindex="-1"])',
-        )
-        if (!focusable || focusable.length === 0) return
-        const first = focusable[0]
-        const last = focusable[focusable.length - 1]
-        if (e.shiftKey) {
-          if (document.activeElement === first) { e.preventDefault(); last.focus() }
-        } else {
-          if (document.activeElement === last) { e.preventDefault(); first.focus() }
-        }
-      }
-    }
-    document.addEventListener('keydown', handleKey, true)
-    return () => document.removeEventListener('keydown', handleKey, true)
-  }, [onClose])
-
-  const name = details.skill_name ?? details.package_id
-  const version = details.version ? `v${details.version}` : ''
-  const state = details.state ?? ''
-
-  return createPortal(
-    <div
-      className="mfa-modal-backdrop"
-      role="presentation"
-      onClick={e => { if (e.target === e.currentTarget) onClose() }}
-    >
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        className="skill-details-modal"
-      >
-        <div className="mfa-modal__header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-2)', flex: 1, minWidth: 0 }}>
-            <h2 id={titleId} className="mfa-modal__title" style={{ flex: 1, minWidth: 0 }}>
-              {name}
-            </h2>
-            {version && <Badge variant="neutral">{version}</Badge>}
-            {state && <Badge variant="accent">{state}</Badge>}
-          </div>
-          <button
-            ref={closeBtnRef}
-            type="button"
-            className="mfa-modal__close"
-            aria-label="Cerrar"
-            onClick={onClose}
-          >
-            <X size={16} aria-hidden="true" />
-          </button>
+/** Untrusted skill instructions are displayed as text, never interpreted. */
+export default function SkillDetailsModal({ details, onClose }: { details: SkillDetails; onClose(): void }) {
+  const close = useRef<HTMLButtonElement>(null)
+  const returnFocus = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  return <Dialog.Root open onOpenChange={open => { if (!open) onClose() }}>
+    <Dialog.Portal><Dialog.Backdrop className={styles.backdrop} />
+      <Dialog.Popup className={styles.popup} initialFocus={close} finalFocus={returnFocus}>
+        <header className={styles.header}><Dialog.Title>{details.skill_name ?? details.package_id}</Dialog.Title><button ref={close} className={styles.close} aria-label="Cerrar" onClick={onClose}><X size={16} aria-hidden /></button></header>
+        <Dialog.Description className={styles.description}>Instrucciones de la habilidad instalada. Consultarlas no ejecuta ninguna acción.</Dialog.Description>
+        <div className={styles.body}><div className={styles.badges}>{details.version && <Badge variant="neutral">v{details.version}</Badge>}{details.state && <Badge variant="accent">{details.state}</Badge>}</div>
+          {details.instructions != null ? <pre className={styles.instructions}>{details.instructions}</pre> : <p className={styles.hint}>Esta habilidad no tiene instrucciones en disco.</p>}
         </div>
-
-        <div className="skill-details-modal__body">
-          {details.instructions !== null ? (
-            <pre className="skill-details-modal__instructions">
-              {details.instructions}
-            </pre>
-          ) : (
-            <p className="skill-details-modal__no-instructions">
-              Esta skill no tiene instrucciones en disco (p. ej. Composio).
-            </p>
-          )}
-        </div>
-
-        <div className="mfa-modal__actions" style={{ padding: 'var(--sp-4) var(--sp-6)', borderTop: '1px solid var(--line)' }}>
-          <button
-            type="button"
-            className="cv-btn cv-btn--secondary cv-btn--sm"
-            onClick={onClose}
-          >
-            Cerrar
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
+        <footer className={styles.footer}><Button variant="secondary" size="sm" onClick={onClose}>Cerrar</Button></footer>
+      </Dialog.Popup>
+    </Dialog.Portal>
+  </Dialog.Root>
 }

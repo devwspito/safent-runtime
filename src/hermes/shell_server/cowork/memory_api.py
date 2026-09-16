@@ -10,8 +10,9 @@ The list endpoint returns {id, target, content_truncated, entry_index} — conte
 is deliberately truncated at the D-Bus boundary as a bulk-PII guard.  The detail
 endpoint returns the full content for a single, explicitly requested entry.
 
-DELETE is idempotent (200 even when already removed). 403 on authorization
-failure. 503 when daemon is unavailable.
+DELETE 404s when the entry does not exist (never existed or already removed
+— same state, no tombstone), matching GET/PUT for the same id. 403 on
+authorization failure. 503 when daemon is unavailable.
 """
 
 from __future__ import annotations
@@ -144,7 +145,8 @@ def create_memory_router() -> APIRouter:
     async def forget_memory_entry(request: Request, entry_id: str) -> dict:
         """Forget (delete) one memory entry by its composite id '{target}:{index}'.
 
-        Idempotent: returns {ok: true} even when the entry was already removed.
+        404 when the entry does not exist (never existed or already removed —
+        same state, no tombstone; matches GET's 404 for the same id).
         403 on authorization failure; 503 when daemon is unavailable.
         """
         proxy = request.app.state.dbus_proxy
@@ -163,9 +165,11 @@ def create_memory_router() -> APIRouter:
                 },
             ) from exc
         if not result.get("ok"):
+            code = result.get("code", "delete_failed")
+            status_code = 404 if code == "not_found" else 400
             raise HTTPException(
-                status_code=400,
-                detail={"code": "delete_failed", "message": result.get("error", "unknown")},
+                status_code=status_code,
+                detail={"code": code, "message": result.get("error", "unknown")},
             )
         return result
 

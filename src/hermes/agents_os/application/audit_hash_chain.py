@@ -74,6 +74,8 @@ class AuditKind(StrEnum):
     # --- egress proxy decisions (Fix-6 / append-only) ---
     EGRESS_ALLOWED = "egress_allowed"
     EGRESS_DENIED = "egress_denied"
+    # --- spec 022 v2: governed tailnet SSH (append-only) ---
+    TAILNET_SSH_EXECUTED = "tailnet_ssh_executed"
 
 
 class AuditChainCorrupted(RuntimeError):
@@ -96,6 +98,14 @@ class AuditEntry:
     prev_entry_hash_hex: str
     signed_payload_hash_hex: str
     signature_hex: str
+    # Canonical JSON actually hashed into payload_hash_hex (specs/025-safent-repaso
+    # matriz-final-39eeb8e re-verificación d2eb8c6, "payload_json no se persiste
+    # nunca"). Defaulted for backward compatibility with call sites that build
+    # AuditEntry without it (control-plane/trigger fallbacks, tests) — those never
+    # feed a real payload through the signer anyway. Populated by
+    # AuditHashChainSigner.append(); verify_chain() re-derives payload_hash_hex
+    # from it so the hash actually binds the payload it claims to sign.
+    payload_json: str = "{}"
 
 
 def _canonicalize(payload: dict[str, Any]) -> bytes:
@@ -171,6 +181,7 @@ class AuditHashChainSigner:
             prev_entry_hash_hex=prev.hex(),
             signed_payload_hash_hex=signed_payload_hash.hex(),
             signature_hex=signature.hex(),
+            payload_json=canonical.decode("utf-8"),
         )
         self._last_hash = signed_payload_hash
         return entry
@@ -238,6 +249,21 @@ class AuditHashChainSigner:
             if not hmac.compare_digest(expected_sig.hex(), entry.signature_hex):
                 raise AuditChainCorrupted(
                     f"HMAC signature inválida en entry {entry.entry_id}"
+                )
+            # The hash must bind the payload: re-derive payload_hash_hex from the
+            # persisted payload_json instead of trusting the stored hash blindly
+            # (audit_schema.py's own contract — "permite re-verificar
+            # payload_hash_hex y reconstruir la entrada" — was unmet while
+            # payload_json went unpersisted; matriz-final-39eeb8e re-verificación
+            # d2eb8c6). Checked last so a mismatched hash chain/signature is
+            # still reported as such, not masked by this stricter check.
+            recomputed_payload_hash = hashlib.sha256(
+                entry.payload_json.encode("utf-8")
+            ).digest()
+            if recomputed_payload_hash.hex() != entry.payload_hash_hex:
+                raise AuditChainCorrupted(
+                    f"payload_json no corresponde a payload_hash_hex en entry "
+                    f"{entry.entry_id}"
                 )
             prev = recomputed
 

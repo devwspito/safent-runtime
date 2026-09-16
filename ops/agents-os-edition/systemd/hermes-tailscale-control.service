@@ -1,0 +1,59 @@
+# hermes-tailscale-control.service — root oneshot that reads the staged tailnet
+# control request, verifies the device password (connect/disconnect), and drives
+# `tailscale up`/`logout` + the `enabled` marker + status.json for the egress lane.
+#
+# This service runs as root. Security notes:
+#   - NoNewPrivileges=no: PAM verification runs directly as root; no setuid
+#     helper escalation needed. Same tradeoff as hermes-remote-access-control.
+#   - The auth key NEVER reaches argv/env — staged in a 0600 file, copied to a
+#     fresh 0600 root-owned tmpfs file for `--auth-key=file:`, shredded right
+#     after `tailscale up` returns (win or lose). The staged request file is
+#     shredded in a finally block regardless of outcome.
+#   - ProtectSystem=strict + ReadWritePaths restricts writes to only the paths
+#     this script legitimately needs.
+#   - RestrictAddressFamilies=AF_UNIX: systemctl (D-Bus/AF_UNIX) and the
+#     tailscale CLI (its own --socket=, also AF_UNIX) — no AF_INET needed here,
+#     tailscaled itself (a separate unit/uid) owns the WireGuard networking.
+
+[Unit]
+Description=Hermes — apply staged tailnet control request (privileged)
+Documentation=man:systemd.service(5)
+RefuseManualStart=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/libexec/hermes/hermes-tailscale-control
+
+User=root
+Group=root
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-tailscale-control
+
+# --------------------------------------------------------------------------
+# Hardening
+# --------------------------------------------------------------------------
+
+NoNewPrivileges=no
+
+ProtectSystem=strict
+ReadWritePaths=/run/hermes/tailscale-control /run/hermes/tailscale /var/lib/hermes/tailscale
+
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+RestrictAddressFamilies=AF_UNIX
+
+# CAP_DAC_OVERRIDE — read /etc/shadow for PAM verify (root-only, mode 000/640)
+# CAP_SYS_ADMIN    — systemctl stop hermes-tailscaled.service (talks to systemd PID 1)
+# CAP_SETUID/CAP_SETGID — PAM helpers may perform uid transitions internally
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID
+
+# [Install] intentionally omitted — triggered exclusively by the .path unit.

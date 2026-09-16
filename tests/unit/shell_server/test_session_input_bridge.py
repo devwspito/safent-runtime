@@ -25,8 +25,7 @@ from uuid import UUID
 
 import pytest
 
-from hermes.agents_os.application.teaching.input_ownership_ledger import InputOwnershipLedger
-from hermes.agents_os.application.teaching.teaching_context import InputOwner
+from hermes.agents_os.domain.input_ownership import InputOwner, InputOwnershipLedger
 from hermes.shell_server.screen_capture.fake import FakeScreenCaptureBackend
 from hermes.shell_server.session_agent.input_bridge import (
     BridgeOwnershipError,

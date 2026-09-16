@@ -15,6 +15,8 @@ Upload your staff roster in *any* format → get back a fully provisioned org wi
 
 </div>
 
+Ads development handoff: [DGX integration, 10 September 2026](INTEGRATION-2026-09-10.md).
+
 ---
 
 ## What is this?
@@ -130,7 +132,7 @@ either normal flow:
 
 - **The daemon** (`src/hermes/`, Python package `hermes`) — the reasoning engine (Nous), the security hook that gates every tool call, config-sync, the pairing client, MCP + Composio integration, and the web UI.
 - **The cage** (`ops/`, `src/hermes/security/`) — the systemd units, D-Bus policy, netns/nftables, seccomp profiles and launchers that confine every subprocess (browser included) at the kernel level.
-- **The UIs** — a React web app (chat, an "agent floor" office view, security center, skills, MCP, providers), a native desktop shell, and a terminal UI.
+- **The UIs** — a React interface (chat, tasks, files, security, skills, MCP and providers) embedded in the native desktop shell, plus the terminal UI.
 - **Delivery** — a single hardened container built from `ops/container/Containerfile` (`FROM mcr.microsoft.com/playwright`), run with `--systemd=always`. Not a VM, not a custom OS.
 
 ---
@@ -140,7 +142,7 @@ either normal flow:
 An agent that logs into your CRM is a huge attack surface. Safent's answer is defense in depth, with the kernel as the floor:
 
 1. **Model layer** — the agent refuses obvious malice.
-2. **Hook layer** — every tool call passes a security hook: a hardline-command detector, a self-jailbreak / denylist check, and the signed per-agent / per-role access scope. Sensitive actions require human approval (owner MFA locally, or a remote Enterprise approver).
+2. **Hook layer** — every tool call passes a security hook: a hardline-command detector, a self-jailbreak / denylist check, and the signed per-agent / per-role access scope. Sensitive actions require an exact human confirmation locally or an Enterprise approver; MFA belongs to Enterprise, not Community.
 3. **Kernel layer (inviolable)** — Landlock restricts the filesystem, seccomp-bpf restricts syscalls, a private network namespace routes all traffic through an **audited default-deny egress proxy**, and the browser + every launcher run under an unprivileged uid. This layer is **model-independent**: it holds even against an actively adversarial LLM.
 
 The Enterprise approval flow can *relax which human signs off* on a dangerous action (a coordinator instead of the employee) — but **nothing** relaxes the kernel floor. Not the owner, not the cloud, not a coordinator. Governance decides *who approves*; the cage decides *what is even possible*.
@@ -151,7 +153,7 @@ Policy travels only inside Ed25519-signed bundles, verified **before** any field
 
 ## 🧠 A note on honesty
 
-Autonomous browser control on a *novel* portal is genuinely hard — for every model, not just ours. Safent does the **human-in-the-loop** browser path (live-view, teach-a-flow-once, approve sensitive steps) really well; fully-autonomous, unattended operation of an unseen UI is where you should measure before you trust. We'd rather tell you that than sell you a demo that breaks on the first real form. Do it *really well* on the handful of systems you actually use, or don't promise it.
+Autonomous browser control on a *novel* portal is genuinely hard — for every model, not just ours. Safent does the **human-in-the-loop** browser path (live-view, approve sensitive steps) really well; fully-autonomous, unattended operation of an unseen UI is where you should measure before you trust. We'd rather tell you that than sell you a demo that breaks on the first real form. Do it *really well* on the handful of systems you actually use, or don't promise it.
 
 ---
 
@@ -182,7 +184,6 @@ Safent stands on an enormous amount of open-source work. We use these projects g
 
 ### The web UI
 - **[React](https://react.dev)**, **[Vite](https://vitejs.dev)**, **[TypeScript](https://www.typescriptlang.org)**, **[Vitest](https://vitest.dev)**.
-- **[Three.js](https://threejs.org)** + **[react-force-graph](https://github.com/vasturiano/react-force-graph)** — the 3D agent-swarm view.
 - **[Recharts](https://recharts.org)**, **[lucide-react](https://lucide.dev)**, **[marked](https://marked.js.org)**, **[DOMPurify](https://github.com/cure53/DOMPurify)**, **[Motion](https://motion.dev)**, **[qrcode.react](https://github.com/zpao/qrcode.react)**.
 
 ### The cage & platform

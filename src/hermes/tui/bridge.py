@@ -99,10 +99,10 @@ class RuntimeBridge:
         return bool(await self.call("resume"))
 
     # -- HITL -------------------------------------------------------------
-    async def approve(self, proposal_id: str, totp: str = "") -> str:
+    async def approve(self, proposal_id: str) -> str:
         # The owner's TOTP is forwarded to the daemon gate (single MFA enforcement
         # point for ALL surfaces — web/QML/TUI). Empty string ⇒ the gate fails closed.
-        return await self.call("approve", proposal_id, totp)
+        return await self.call("approve", proposal_id)
 
     async def reject(self, proposal_id: str, reason: str) -> bool:
         return bool(await self.call("reject", proposal_id, reason))
@@ -130,12 +130,6 @@ class RuntimeBridge:
     # -- agents -----------------------------------------------------------
     async def list_agents(self) -> list[dict]:
         return (await self._json("list_agents")) or []
-
-    async def get_active_agent(self) -> str:
-        return (await self.call("get_active_agent")) or ""
-
-    async def set_active_agent(self, agent_id: str) -> bool:
-        return bool(await self.call("set_active_agent", agent_id))
 
     async def create_agent(self, draft: dict) -> dict:
         return (await self._json("create_agent", json.dumps(draft))) or {}
@@ -398,7 +392,6 @@ class OfflineRuntimeBridge(RuntimeBridge):
                 "last_audit_head": "",
             },
             "get_auto_mode": json.dumps({"enabled": False}),
-            "get_active_agent": "",
             "list_agents": json.dumps(
                 [
                     {
@@ -406,7 +399,7 @@ class OfflineRuntimeBridge(RuntimeBridge):
                         "name": "Safent",
                         "role": "Cerebro del sistema",
                         "is_default": True,
-                        "autonomy_level": "omnipotente",
+                        "autonomy_level": "balanced",
                     },
                     {
                         "id": "11111111-1111-1111-1111-111111111111",
@@ -514,7 +507,7 @@ class OfflineRuntimeBridge(RuntimeBridge):
             except RuntimeError:
                 pass
             return [tid, f"/ws/tasks/{tid}"]
-        if member_snake in ("pause", "resume", "set_active_agent", "delete_agent",
+        if member_snake in ("pause", "resume", "delete_agent",
                             "delete_provider"):
             return True
         if member_snake == "set_auto_mode":

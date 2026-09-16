@@ -106,10 +106,10 @@ def _validate_inputs(skill_name: str, toolkit_slug: str, intent_text: str) -> No
 def _resolve_signing_key(db_path: Path) -> tuple[bytes, str]:
     """Return (key_bytes, 'v2') for signing a NEW Composio skill — fail-closed.
 
-    Delegates to resolve_signing_key() from persist.py (single source of truth).
-    Raises SigningKeyError if master.key is absent — no v1 fallback.
+    Delegates to resolve_signing_key() from skill_signing_key.py (single source
+    of truth). Raises SigningKeyError if master.key is absent — no v1 fallback.
     """
-    from hermes.shell_server.training.persist import resolve_signing_key  # noqa: PLC0415
+    from hermes.shell_server.skills.skill_signing_key import resolve_signing_key  # noqa: PLC0415
 
     return resolve_signing_key(db_path)
 

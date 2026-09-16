@@ -8,9 +8,9 @@ MISMO pre-gate default-deny que timer/system_event/self_enqueue — nunca lo
 bypassa ni lo sustituye.
 
 Flujo (item 3/4 del diseño):
-  1. `submit`: `config_sync.delegation_inbox` ya VERIFICÓ la firma+anti-replay
-     de la DelegationEnvelope antes de llegar aquí — este método SOLO registra
-     la tarjeta (idempotente por message_id) para que el humano decida.
+  1. `submit`: verifica de nuevo el sobre y guarda su prueba firmada junto al
+     vínculo actual. La aprobación revalida ambos y la frescura; nunca atribuye
+     una tarjeta antigua sin prueba a la conexión actual.
   2. `approve`: SOLO tras la decisión del humano LOCAL (`approved_by` viene
      SIEMPRE del canal D-Bus autenticado — GetConnectionUnixUser / operator
      token verificado — NUNCA de la envelope ni del payload):
@@ -31,9 +31,8 @@ Flujo (item 3/4 del diseño):
           el broker vea después).
        d. revoca la autorización recién usada (de un solo uso — nunca queda
           una fila habilitada más tiempo del necesario para ESTE encolado).
-  3. `reject`: marca la tarjeta 'rejected'. NO encola nada. (El aviso de
-     rechazo a A vía /v1/outbox/result queda para una fase posterior — ver
-     diseño, item 3: "(later) result path says rejected".)
+  3. `reject`: marca la tarjeta 'rejected'. NO encola nada. La outbox existente
+     de estados publica la decisión, separada de entrega y de texto resultado.
 
 Default-deny: `approve`/`reject` son NO-OP (False/None) si la tarjeta no existe
 o ya fue resuelta — nunca se re-resuelve ni se re-encola una fila ya decidida.
@@ -49,6 +48,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from hermes.tasks.domain.ports import WorkItemKind
+from hermes.tasks.triggers.application.delegation_authority import DelegationAuthorityError
 from hermes.tasks.triggers.domain.authorized_trigger_ports import (
     AuthorizedTriggerType,
     RiskCeiling,
@@ -76,11 +76,13 @@ class DelegationApprovalService:
         trigger_repo: SqliteAuthorizedTriggerRepository,
         gate: TriggerGate,
         conversation_repo: object,
+        authority=None,
     ) -> None:
         self._pending = pending_repo
         self._trigger_repo = trigger_repo
         self._gate = gate
         self._conversations = conversation_repo
+        self._authority = authority
 
     async def submit(self, *, envelope: dict) -> str:
         """Registra una DelegationEnvelope kind=request YA VERIFICADA.
@@ -88,7 +90,24 @@ class DelegationApprovalService:
         Idempotente por message_id (ver SqlitePendingDelegationRepository.submit).
         Devuelve el status de la fila ('pending' | 'approved' | 'rejected').
         """
-        return self._pending.submit(envelope=envelope)
+        if self._authority is None:
+            raise DelegationAuthorityError("request_unverified")
+        proof = self._authority.capture(envelope)
+        return self._pending.submit(envelope=envelope, proof=proof)
+
+    def _admission_state(self, row):
+        if row.admission_state:
+            return row.admission_state
+        try:
+            self._verify(row.message_id)
+        except (PermissionError, ValueError, KeyError, AttributeError):
+            return "unverified"
+        return None
+
+    def _verify(self, message_id):
+        if self._authority is None:
+            raise DelegationAuthorityError("request_unverified")
+        self._authority.validate(message_id)
 
     def list_pending(self) -> list[dict]:
         """Metadatos de las tarjetas pendientes (CTRL-P1-5 style: sin secretos)."""
@@ -99,6 +118,7 @@ class DelegationApprovalService:
                 "body": d.body,
                 "issued_at": d.issued_at,
                 "created_at": d.created_at,
+                **({"admission_state": state} if (state := self._admission_state(d)) else {}),
             }
             for d in self._pending.list_pending()
         ]
@@ -117,7 +137,17 @@ class DelegationApprovalService:
             )
             return None
 
+        try:
+            self._verify(message_id)
+        except (PermissionError, ValueError, KeyError, AttributeError):
+            return None
         conversation_id = uuid4()
+        claim_id = self._pending.claim_approval(
+            message_id=message_id, approved_by=str(approved_by),
+            conversation_id=str(conversation_id),
+        )
+        if claim_id is None:
+            return None  # Another decision won, or earlier admission is uncertain.
         self._touch_conversation(
             conversation_id=conversation_id,
             body=row.body,
@@ -145,13 +175,21 @@ class DelegationApprovalService:
                 conversation_id=str(conversation_id),
                 target_agent_id=row.to_agent_id or None,
                 delegation_correlation_id=row.correlation_id,
+                authorization_instance_id=trigger_instance_id,
+                admission_guard=lambda: self._authority.guard(message_id),
             )
+        except DelegationAuthorityError:
+            # The guard fails before the synchronous queue insertion. Unlike a
+            # lost enqueue receipt, this is known not to have started work.
+            self._pending.release_unenqueued_claim(message_id=message_id, claim_id=claim_id)
+            return None
         finally:
             await self._trigger_repo.revoke(
                 trigger_instance_id=trigger_instance_id, admin_uuid=approved_by
             )
 
         if task_id is None:
+            self._pending.release_unenqueued_claim(message_id=message_id, claim_id=claim_id)
             # El gate rechazó pese a la autorización recién minteada — no debería
             # ocurrir en el camino feliz, pero fail-closed: no se marca 'approved'
             # sin task_id real (I1-style: nunca alucinar un éxito).
@@ -161,13 +199,16 @@ class DelegationApprovalService:
             )
             return None
 
-        self._pending.resolve(
+        resolved = self._pending.resolve(
             message_id=message_id,
             status="approved",
             resolved_by=str(approved_by),
             task_id=str(task_id),
             conversation_id=str(conversation_id),
+            claim_id=claim_id,
         )
+        if not resolved:
+            raise RuntimeError("Delegation admission receipt could not be persisted")
         logger.info(
             "hermes.triggers.delegation.approved",
             extra={
@@ -236,11 +277,13 @@ class DelegationApprovalService:
 def _sign_delegation_authorization(
     *, admin_uuid: UUID, from_employee_id: str, message_id: str
 ) -> str:
-    """HMAC-SHA256 non-repudiation binding — mismo patrón que
-    `dbus_runtime_service._sign_scheduled_task_draft` (no una firma PKI
-    completa; liga la identidad del aprobador + el contenido en el instante
-    de la aprobación). El material de clave es un label de proceso, no un
-    secreto — provee integridad de contenido, no confidencialidad.
+    """Recibo HMAC-SHA256 del contenido — mismo formato histórico que
+    `dbus_runtime_service._sign_scheduled_task_draft`.
+
+    La identidad autorizada procede del canal D-Bus autenticado y la decisión
+    queda limitada por la fila local de un solo uso. Como el material HMAC no
+    es secreto, este campo no es una firma PKI ni prueba de no repudio; sirve
+    únicamente como huella del recibo persistido.
     """
     now = datetime.now(tz=UTC).isoformat()
     payload = f"{admin_uuid}|{from_employee_id}|{message_id}|{now}".encode()

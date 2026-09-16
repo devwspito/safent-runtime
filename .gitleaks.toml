@@ -24,4 +24,10 @@ regexes = [
   # tests/integration/test_self_enqueue_depth_cap.py — dedup_key strings (not secrets)
   '''followup-mother-1''',
   '''grandchild-dedup-1''',
+  # tests/unit/ops/test_companion_provision.py — fake gen_keys output from the
+  # faked podman binary (base64 of "fake-signing-key-b64" / "fake-public-key-b64")
+  '''ZmFrZS1zaWduaW5nLWtleS1iNjQ=''',
+  '''ZmFrZS1wdWJsaWMta2V5LWI2NA==''',
+  '''tskey-abc123(-should-never-be-in-argv)?''',
+  '''tskey-secret''',
 ]

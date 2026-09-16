@@ -1,11 +1,11 @@
 /**
- * Section hubs — the sidebar stays at four clean entries (Chat, Agentes,
+ * Section hubs — the sidebar stays at four clean entries (Chat, Tareas,
  * Capacidades, Sistema); everything else lives INSIDE the two hubs as tabs
  * (owner decision). Each tab renders the existing view component as-is —
  * this file only owns tab selection.
  *
  *   Capacidades → Habilidades · Integraciones · Herramientas · En vivo
- *   Sistema     → Seguridad · Coste · Modelo de IA · Programadas · Memoria · Archivos
+ *   Sistema     → Seguridad · Coste · Modelo de IA · Memoria · Archivos
  */
 import { lazy, Suspense, useMemo } from 'react'
 import { Navigate, useSearchParams } from 'react-router-dom'
@@ -14,17 +14,16 @@ import { useFeatures } from '../hooks/useFeatures'
 import { usePendingApprovals } from '../hooks/usePendingApprovals'
 import { usePendingInboundDelegations } from '../hooks/usePendingInboundDelegations'
 import { useT, type TranslationKey } from '../lib/i18n'
-import SkillsView from './SkillsView'
-import IntegrationsView from './IntegrationsView'
-import McpView from './McpView'
-import ProvidersView from './ProvidersView'
-import SeguridadView from './SeguridadView'
-import MemoriaView from './MemoriaView'
-import ArchivosView from './ArchivosView'
 import styles from './SectionHubs.module.css'
 
-// Same two views App.tsx used to lazy-load at their standalone routes
-// (recharts / the VNC canvas aren't needed on the other tabs).
+// Configuration is loaded only when opened, not on the native app's chat path.
+const SkillsView = lazy(() => import('./SkillsView'))
+const IntegrationsView = lazy(() => import('./IntegrationsView'))
+const McpView = lazy(() => import('./McpView'))
+const ProvidersView = lazy(() => import('./ProvidersView'))
+const SeguridadView = lazy(() => import('./SeguridadView'))
+const MemoriaView = lazy(() => import('./MemoriaView'))
+const ArchivosView = lazy(() => import('./ArchivosView'))
 const UsageView = lazy(() => import('./UsageView'))
 const EnVivoView = lazy(() => import('./EnVivoView'))
 
@@ -85,7 +84,7 @@ function Hub({ tabs, ariaLabelKey, tabAlerts }: {
           ariaLabel={t(ariaLabelKey)}
         />
       </div>
-      {active?.render()}
+      <Suspense fallback={<TabFallback />}>{active?.render()}</Suspense>
     </div>
   )
 }
@@ -99,8 +98,7 @@ const CAPACIDADES_TABS: HubTab[] = [
   ) },
 ]
 
-// "Programadas" is NOT here: the recurring-tasks calendar belongs to the agents,
-// so it lives as the "Tareas" tab inside Agentes (owner decision).
+// Programadas lives in Tareas, alongside real work and Enterprise assignments.
 const SISTEMA_TABS: HubTab[] = [
   { key: 'seguridad',   labelKey: 'nav.seguridad',   render: () => <SeguridadView /> },
   { key: 'coste',       labelKey: 'nav.coste',       render: () => (
@@ -111,9 +109,9 @@ const SISTEMA_TABS: HubTab[] = [
   { key: 'archivos',    labelKey: 'nav.archivos',    render: () => <ArchivosView /> },
 ]
 
-/** View ids each hub aggregates — Layout uses this to gate the nav items. */
-export const CAPACIDADES_VIEW_IDS = CAPACIDADES_TABS.map((t) => t.key)
-export const SISTEMA_VIEW_IDS = SISTEMA_TABS.map((t) => t.key)
+// Keep the public exports for callers while their tiny definitions stay outside
+// this lazy route. Importing navigation metadata must not eagerly load every view.
+export { CAPACIDADES_VIEW_IDS, SISTEMA_VIEW_IDS } from './sectionHubIds'
 
 export function CapacidadesView() {
   return <Hub tabs={CAPACIDADES_TABS} ariaLabelKey="nav.section.capabilities" />
@@ -123,6 +121,6 @@ export function SistemaView() {
   // Same fresh-approvals + inbound-delegations sources as the sidebar badge —
   // the red count on the Seguridad tab always matches what the Seguridad list
   // actually shows (approvals section + inbound-delegations section combined).
-  const pending = usePendingApprovals().length + usePendingInboundDelegations().length
+  const pending = usePendingApprovals().approvals.length + usePendingInboundDelegations().length
   return <Hub tabs={SISTEMA_TABS} ariaLabelKey="nav.section.system" tabAlerts={{ seguridad: pending }} />
 }

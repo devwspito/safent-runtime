@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -33,6 +34,11 @@ from hermes.agents_os.domain.ports.surface_adapter_port import (
     ReplayStatus,
 )
 from hermes.agents_os.domain.surface_kind import SurfaceKind
+from hermes.integrations.composio.tool_policy import (
+    ADS_MODULE_MESSAGE,
+    ADS_MODULE_REQUIRED,
+    requires_ads_module,
+)
 
 logger = logging.getLogger("hermes.capabilities.composio_adapter")
 
@@ -40,6 +46,7 @@ logger = logging.getLogger("hermes.capabilities.composio_adapter")
 # SDK de Composio pero menor que el timeout del broker (30s) para que
 # el error sea distinguible de un broker timeout.
 _COMPOSIO_EXEC_TIMEOUT_S: float = 25.0
+_TOOL_SLUG_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]*\Z")
 
 
 class ComposioSurfaceAdapter:
@@ -106,11 +113,20 @@ class ComposioSurfaceAdapter:
             )
 
         slug = action.payload.get("slug")
-        if not slug:
+        if requires_ads_module(slug):
+            # A general-purpose approval is not an Ads budget/account grant.
+            # Check the actual SDK slug, not presentation names or tool schemas;
+            # stale/injected specs cannot bypass the Ads authorization pipeline.
             return ReplayOutcome(
                 action_id=action.action_id,
                 status=ReplayStatus.REJECTED_BY_POLICY,
-                error="ComposioSurfaceAdapter.replay: slug ausente en payload — fail-closed",
+                error=f"{ADS_MODULE_REQUIRED}: {ADS_MODULE_MESSAGE}",
+            )
+        if not isinstance(slug, str) or _TOOL_SLUG_PATTERN.fullmatch(slug) is None:
+            return ReplayOutcome(
+                action_id=action.action_id,
+                status=ReplayStatus.REJECTED_BY_POLICY,
+                error="ComposioSurfaceAdapter.replay: slug ausente o inválido — fail-closed",
             )
 
         params = dict(action.payload.get("params") or {})

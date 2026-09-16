@@ -33,7 +33,12 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
-from hermes.egress_proxy.application.ports import EgressAuditSink
+from hermes.egress_proxy.application.ports import (
+    EgressAuditSink,
+    UpstreamConnectError,
+    UpstreamConnector,
+    UpstreamInternalAddressError,
+)
 from hermes.egress_proxy.domain.host_parser import (
     HostParseError,
     parse_connect_line,
@@ -129,6 +134,30 @@ async def _open_upstream(
     raise last_exc
 
 
+class DirectUpstreamConnector:
+    """Connector por defecto — el camino directo de siempre (sin tailnet).
+
+    Resuelve DNS con el guard anti-SSRF (``_resolve_external_ips``) y
+    dialea con Happy Eyeballs (``_open_upstream``). Referencia esos símbolos
+    por nombre de módulo (no los captura en el constructor) para que los
+    tests que monkeypatchean ``proxy_handler._resolve_external_ips`` /
+    ``proxy_handler.asyncio.open_connection`` sigan funcionando sin cambios.
+    """
+
+    async def connect(
+        self, *, host: str, port: int, timeout: float
+    ) -> "tuple[asyncio.StreamReader, asyncio.StreamWriter]":
+        ips = await _resolve_external_ips(host)
+        if ips is None:
+            raise UpstreamInternalAddressError(
+                f"host resuelve a una dirección no enrutable: {host}"
+            )
+        try:
+            return await _open_upstream(ips, port, timeout)
+        except (OSError, asyncio.TimeoutError) as exc:
+            raise UpstreamConnectError(str(exc)) from exc
+
+
 class ProxyConnectionHandler:
     """Gestiona una conexión de cliente en el proxy de reenvío."""
 
@@ -137,9 +166,15 @@ class ProxyConnectionHandler:
         *,
         policy_engine: EgressPolicyEngine,
         audit_sink: EgressAuditSink,
+        upstream_connector: UpstreamConnector | None = None,
     ) -> None:
         self._policy = policy_engine
         self._audit = audit_sink
+        # Fix-022 (upstream selector): defaults to the direct path — an
+        # injected UpstreamRouter (built in __main__.py from the MagicDNS
+        # suffix file) additionally routes tailnet-suffixed hosts through
+        # tailscaled's loopback CONNECT proxy. See tailnet_connector.py.
+        self._upstream: UpstreamConnector = upstream_connector or DirectUpstreamConnector()
 
     async def handle(
         self,
@@ -339,21 +374,23 @@ class ProxyConnectionHandler:
             return
 
         # Open upstream to the VERIFIED SNI host (not the CONNECT host, which may differ).
-        # Anti-pivot: refuse if the host resolves to an internal IP (SSRF via the proxy).
+        # Fix-022: the upstream selector (self._upstream) transparently routes hosts
+        # under the tailnet's MagicDNS suffix through tailscaled's loopback CONNECT
+        # proxy; anything else takes the direct path with its anti-pivot IP check
+        # (refuses if the host resolves to an internal address — SSRF via the proxy).
         upstream_host = sni_host
-        safe_ips = await _resolve_external_ips(upstream_host)
-        if safe_ips is None:
+        try:
+            remote_reader, remote_writer = await self._upstream.connect(
+                host=upstream_host, port=target.port, timeout=_CONNECT_TIMEOUT_S
+            )
+        except UpstreamInternalAddressError:
             logger.warning(
                 "hermes.egress_proxy.upstream_internal_blocked",
                 extra={"domain": upstream_host, "session_id": client_ip, "source": "sni"},
             )
             _safe_close(writer)
             return
-        try:
-            remote_reader, remote_writer = await _open_upstream(
-                safe_ips, target.port, _CONNECT_TIMEOUT_S
-            )
-        except (OSError, asyncio.TimeoutError) as exc:
+        except UpstreamConnectError as exc:
             logger.warning(
                 "hermes.egress_proxy.upstream_connect_failed",
                 extra={
@@ -402,8 +439,13 @@ class ProxyConnectionHandler:
             )
             return
 
-        safe_ips = await _resolve_external_ips(target.host)
-        if safe_ips is None:
+        # Fix-022: same upstream selector as the SNI-enforced path — a tailnet-suffixed
+        # CONNECT host is routed through tailscaled's loopback proxy transparently.
+        try:
+            remote_reader, remote_writer = await self._upstream.connect(
+                host=target.host, port=target.port, timeout=_CONNECT_TIMEOUT_S
+            )
+        except UpstreamInternalAddressError:
             logger.warning(
                 "hermes.egress_proxy.upstream_internal_blocked",
                 extra={"domain": target.host, "session_id": client_ip, "source": "open-logged"},
@@ -411,11 +453,7 @@ class ProxyConnectionHandler:
             writer.write(_CONNECT_FORBIDDEN)
             await writer.drain()
             return
-        try:
-            remote_reader, remote_writer = await _open_upstream(
-                safe_ips, target.port, _CONNECT_TIMEOUT_S
-            )
-        except (OSError, asyncio.TimeoutError) as exc:
+        except UpstreamConnectError as exc:
             logger.warning(
                 "hermes.egress_proxy.upstream_connect_failed",
                 extra={"domain": target.host, "port": target.port, "error": str(exc)},

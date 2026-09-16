@@ -1,94 +1,33 @@
-import { useEffect, useRef, type ReactNode } from 'react'
+import { useRef, type ReactNode } from 'react'
+import { Dialog } from '@base-ui/react/dialog'
 import { X } from 'lucide-react'
-import { AnimatedDrawer } from './motion'
-import { Button } from './Button'
+import { useT } from '../../lib/i18n'
+import styles from './Drawer.module.css'
 
 export interface DrawerProps {
   open: boolean
   title: string
   onClose: () => void
   children: ReactNode
-  /** Rendered in a sticky footer row, right-aligned. */
   footer?: ReactNode
   width?: number
 }
 
-/**
- * Slide-in side panel from the right.
- * Handles: Escape key, click-outside, focus trap, body scroll lock,
- * and reduced-motion (via AnimatedDrawer).
- */
+/** Base UI owns nested focus, Escape, scroll lock and return to the trigger. */
 export function Drawer({ open, title, onClose, children, footer, width = 400 }: DrawerProps) {
-  const closeButtonRef = useRef<HTMLButtonElement>(null)
-
-  useEffect(() => {
-    if (open) requestAnimationFrame(() => closeButtonRef.current?.focus())
-  }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [open, onClose])
-
-  // Body scroll lock
-  useEffect(() => {
-    document.body.style.overflow = open ? 'hidden' : ''
-    return () => { document.body.style.overflow = '' }
-  }, [open])
-
-  // Focus trap
-  useEffect(() => {
-    if (!open) return
-    function handleTab(e: KeyboardEvent) {
-      if (e.key !== 'Tab') return
-      const el = document.querySelector('[data-drawer-panel]') as HTMLElement | null
-      if (!el) return
-      const focusable = el.querySelectorAll<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-      )
-      const first = focusable[0]
-      const last = focusable[focusable.length - 1]
-      if (e.shiftKey) {
-        if (document.activeElement === first) { e.preventDefault(); last?.focus() }
-      } else {
-        if (document.activeElement === last) { e.preventDefault(); first?.focus() }
-      }
-    }
-    document.addEventListener('keydown', handleTab)
-    return () => document.removeEventListener('keydown', handleTab)
-  }, [open])
-
-  return (
-    <AnimatedDrawer open={open} onBackdropClick={onClose} width={width} label={title}>
-      <div data-drawer-panel className="office-drawer-panel">
-        <div className="office-drawer-header">
-          <div style={{ flex: 1 }}>
-            <div className="office-drawer-title">{title}</div>
-          </div>
-          <Button
-            ref={closeButtonRef}
-            variant="ghost"
-            size="sm"
-            onClick={onClose}
-            aria-label="Cerrar panel"
-            type="button"
-          >
-            <X size={14} aria-hidden />
-          </Button>
-        </div>
-        <div className="office-drawer-body">
-          {children}
-        </div>
-        {footer ? (
-          <footer className="office-drawer-footer">
-            {footer}
-          </footer>
-        ) : null}
-      </div>
-    </AnimatedDrawer>
-  )
+  const closeButton = useRef<HTMLButtonElement>(null)
+  const t = useT()
+  return <Dialog.Root open={open} onOpenChange={value => { if (!value) onClose() }}>
+    <Dialog.Portal>
+      <Dialog.Backdrop className={styles.backdrop} />
+      <Dialog.Popup className={styles.panel} style={{ width }} initialFocus={closeButton}>
+        <header className={styles.header}>
+          <Dialog.Title className={styles.title}>{title}</Dialog.Title>
+          <Dialog.Close ref={closeButton} className="cv-btn cv-btn--ghost cv-btn--sm" aria-label={t('dialog.close')}><X size={16} aria-hidden /></Dialog.Close>
+        </header>
+        <div className={styles.body}>{children}</div>
+        {footer && <footer className={styles.footer}>{footer}</footer>}
+      </Dialog.Popup>
+    </Dialog.Portal>
+  </Dialog.Root>
 }

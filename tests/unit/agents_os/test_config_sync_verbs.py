@@ -341,8 +341,8 @@ def _empty_payload_ext(**overrides: Any) -> PolicyPayload:
 
 class TestUpdateProviderApplier:
     @pytest.mark.asyncio
-    async def test_update_provider_passes_provider_id_and_draft(self) -> None:
-        """update_provider must receive (provider_id, draft_json) — two args."""
+    async def test_legacy_unsigned_provider_update_is_not_forwarded(self) -> None:
+        """Enterprise can only configure the provider through a signed bundle."""
         existing = [
             {
                 "provider_id": "aaaa-bbbb-cccc",
@@ -359,32 +359,23 @@ class TestUpdateProviderApplier:
         result = await PolicyApplier(proxy).apply(payload, current_agents=[])
 
         update_calls = proxy.calls_for("update_provider")
-        assert len(update_calls) == 1
-        args = update_calls[0]
-        # First arg: provider_id string
-        assert args[0] == "aaaa-bbbb-cccc"
-        # Second arg: draft JSON
-        draft = json.loads(args[1])
-        assert draft["alias"] == "openai"
-        assert draft["default_model"] == "gpt-5"
+        assert update_calls == []
+        assert 'providers:instance_gateway_required' in result.failed
 
     @pytest.mark.asyncio
-    async def test_add_provider_sends_single_draft_arg(self) -> None:
-        """add_provider must receive exactly one arg (draft_json)."""
+    async def test_managed_provider_forwards_complete_signed_envelope(self) -> None:
+        """The verified daemon consumes the whole envelope, not a caller draft."""
         proxy = _FakeDbusProxy(existing_providers=[])
         payload = _empty_payload_ext(
+            llm_instance_id='test-instance',
             providers=[{"alias": "openai", "kind": "openai", "default_model": "gpt-4"}]
         )
 
-        await PolicyApplier(proxy).apply(payload, current_agents=[])
+        await PolicyApplier(proxy).apply(payload, current_agents=[], signed_bundle_json='test-signed-envelope')
 
         add_calls = proxy.calls_for("add_provider")
-        assert len(add_calls) == 1
-        args = add_calls[0]
-        # Exactly ONE arg: draft_json
-        assert len(args) == 1
-        draft = json.loads(args[0])
-        assert draft["alias"] == "openai"
+        assert add_calls == []
+        assert proxy.calls_for('apply_managed_llm_gateway') == [('test-signed-envelope',)]
 
 
 # ---------------------------------------------------------------------------

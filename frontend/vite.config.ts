@@ -13,6 +13,17 @@ export default defineConfig({
     // noVNC (@novnc/novnc) uses top-level await → needs es2022+. All target
     // browsers (modern Chrome/Safari/Firefox) support it.
     target: 'es2022',
+    // Stable framework groups keep the native shell small and cacheable. Heavy
+    // product surfaces (charts, noVNC, Ads) remain route-split automatically.
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'react-core': ['react', 'react-dom', 'react-router-dom'],
+          'ui-motion': ['@base-ui/react', 'motion', 'sileo'],
+          content: ['dompurify', 'marked'],
+        },
+      },
+    },
   },
   optimizeDeps: {
     esbuildOptions: { target: 'es2022' },

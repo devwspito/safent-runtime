@@ -25,6 +25,7 @@ from hermes.tasks.control_plane.domain.ports import (
     AgentUnavailable,
     AuthenticatedChannel,
     ConfiguredTaskView,
+    EnqueueBlockedByKillSwitch,
     EnqueueNotAuthorized,
     EnqueueResult,
     PendingTaskView,
@@ -213,13 +214,8 @@ class DbusControlPlaneAdapter:
         *,
         channel: AuthenticatedChannel,
         proposal_id: UUID,
-        mfa_factors: Any | None = None,
     ) -> str:
-        # Escalated MFA model (owner decision 2026-06-25):
-        # simple-tier → mfa_factors is None → pass empty TOTP; the gate skips MFA check.
-        # mfa-tier   → mfa_factors.totp is non-empty; the gate verifies it.
-        totp = (mfa_factors.totp if mfa_factors is not None else None) or ""
-        return await self._call_returning("call_approve", str(proposal_id), totp)
+        return await self._call_returning("call_approve", str(proposal_id))
 
     async def reject(
         self, *, channel: AuthenticatedChannel, proposal_id: UUID, reason: str
@@ -449,6 +445,12 @@ def _translate_dbus_error(exc: Exception) -> None:
         raise EnqueueNotAuthorized(
             f"UID del shell-server no autorizado por el daemon: {exc}"
         ) from exc
+
+    # 025 Top-KILL: el freno de emergencia rechaza turnos nuevos ANTES de
+    # tocar la cola — traducido a un tipo propio (NUNCA AgentUnavailable: el
+    # daemon SÍ está disponible, solo se niega mientras el freno está puesto).
+    if "freno de emergencia" in err_str or "killswitch" in err_str:
+        raise EnqueueBlockedByKillSwitch(str(exc)) from exc
 
     # Gate rejections: the daemon encodes the gate reason in the D-Bus error name as
     # org.hermes.Error.ApprovalGate.<reason> (fixed 2026-06-25: the previous code

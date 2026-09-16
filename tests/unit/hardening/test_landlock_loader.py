@@ -16,13 +16,16 @@ Tests que requieren VM (kernel real con Landlock) están marcados con
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from hermes.security.landlock_loader import (
+    LandlockOutcome,
     _access_mask_for_rules,
     _detect_abi,
+    _max_access_fs_mask,
+    apply_runtime_landlock,
     load_and_apply,
     main,
 )
@@ -93,6 +96,44 @@ class TestAccessMaskForRules:
         assert mask & (1 << 1)
 
 
+class TestMaxAccessFsMaskBeyondTheKnownAbiTable:
+    """MCP-04 root cause (spec 025 matriz, live-verified on a kernel reporting
+    abi=7 / Fedora 41): `_ABI_MAX_ACCESS_FS` only has exact entries for ABI
+    1-3. Every call site used to do `.get(abi_version, _ABI_MAX_ACCESS_FS[1])`
+    — an ABI this table has no key for (ANY current kernel) silently fell
+    through to the .get() DEFAULT, i.e. ABI 1's mask, stripping `refer`
+    (bit 13) and `truncate` (bit 14) out of EVERY ruleset regardless of what
+    a PathRule requested. Without `refer`, the kernel denies any rename()/
+    link() whose destination has a different parent directory than the
+    source with EXDEV (errno 18) — exactly `uv`'s cache-population rename
+    (`uv-cache/.tmpXXXX` -> `uv-cache/archive-v0/<hash>`) that MCP-04
+    reproduced end to end via the real API."""
+
+    def test_refer_survives_on_an_abi_beyond_the_table(self) -> None:
+        mask = _access_mask_for_rules([frozenset({"refer"})], abi_version=7)
+        assert mask & (1 << 13), "refer must not be silently stripped on abi=7"
+
+    def test_truncate_survives_on_an_abi_beyond_the_table(self) -> None:
+        mask = _access_mask_for_rules([frozenset({"truncate"})], abi_version=7)
+        assert mask & (1 << 14), "truncate must not be silently stripped on abi=7"
+
+    @pytest.mark.parametrize("abi_version", [3, 4, 5, 6, 7, 42, 100])
+    def test_mask_never_regresses_below_abi3_for_any_higher_or_unknown_abi(
+        self, abi_version: int
+    ) -> None:
+        """Landlock ABI versions are cumulative (each new ABI is a strict
+        superset of FS rights over the previous one) — an ABI this loader
+        has no name for yet must still grant at least everything ABI 3
+        does, never fall back to ABI 1's narrower mask."""
+        assert _max_access_fs_mask(abi_version) == _max_access_fs_mask(3)
+
+    def test_abi_1_and_2_are_unaffected_still_narrower(self) -> None:
+        """The fix must not WIDEN grants on genuinely older kernels — only
+        stop guessing wrong on newer ones."""
+        assert _max_access_fs_mask(1) < _max_access_fs_mask(3)
+        assert _max_access_fs_mask(2) < _max_access_fs_mask(3)
+
+
 class TestLoadAndApplyInvalidCapability:
     def test_unknown_capability_returns_exit_2(self) -> None:
         result = load_and_apply("NOT_A_REAL_CAPABILITY")
@@ -143,6 +184,73 @@ class TestLoadAndApplySuccess:
         assert result == 0
 
 
+class TestApplyRuntimeLandlockTypedOutcome:
+    """apply_runtime_landlock() must never collapse 'applied' and 'degraded' into
+    the same value — that ambiguity (both returned exit code 0) is spec 025
+    hallazgo #4. load_and_apply()'s int contract is still exercised above (CLI
+    compatibility); these cover the typed outcome callers actually branch on.
+    """
+
+    def test_applied_when_syscalls_succeed(self) -> None:
+        with patch("hermes.security.landlock_loader._detect_abi", return_value=3), \
+             patch("hermes.security.landlock_loader.apply_ruleset") as mock_apply:
+            mock_apply.return_value = None
+            result = apply_runtime_landlock("browser")
+        assert result.outcome is LandlockOutcome.APPLIED
+        assert result.applied is True
+        assert result.exit_code == 0
+
+    def test_unsupported_kernel_is_not_applied(self) -> None:
+        """abi is None (no Landlock in this kernel) must be DISTINGUISHABLE from applied."""
+        with patch("hermes.security.landlock_loader._detect_abi", return_value=None):
+            result = apply_runtime_landlock("browser")
+        assert result.outcome is LandlockOutcome.UNSUPPORTED_KERNEL
+        assert result.applied is False
+        assert result.exit_code == 0  # CLI contract unchanged: still a soft-degrade exit
+
+    def test_unsupported_arch_is_not_applied(self) -> None:
+        from hermes.security.landlock_loader import UnsupportedArchError  # noqa: PLC0415
+        with patch("hermes.security.landlock_loader._detect_abi", return_value=3), \
+             patch("hermes.security.landlock_loader.apply_ruleset",
+                   side_effect=UnsupportedArchError("rk3588")):
+            result = apply_runtime_landlock("browser")
+        assert result.outcome is LandlockOutcome.UNSUPPORTED_ARCH
+        assert result.applied is False
+        assert result.exit_code == 0
+
+    def test_blocked_by_seccomp_is_not_applied(self) -> None:
+        from hermes.security.landlock_loader import _ABI_BLOCKED  # noqa: PLC0415
+        with patch("hermes.security.landlock_loader._detect_abi", return_value=_ABI_BLOCKED):
+            result = apply_runtime_landlock("browser")
+        assert result.outcome is LandlockOutcome.BLOCKED
+        assert result.applied is False
+        assert result.exit_code == 2
+
+    def test_syscall_error_is_not_applied(self) -> None:
+        from hermes.security.landlock_loader import LandlockSyscallError  # noqa: PLC0415
+        with patch("hermes.security.landlock_loader._detect_abi", return_value=3), \
+             patch("hermes.security.landlock_loader.apply_ruleset",
+                   side_effect=LandlockSyscallError("boom")):
+            result = apply_runtime_landlock("browser")
+        assert result.outcome is LandlockOutcome.ERROR
+        assert result.applied is False
+        assert result.exit_code == 3
+
+    def test_invalid_capability_is_not_applied(self) -> None:
+        result = apply_runtime_landlock("NOT_A_REAL_CAPABILITY")
+        assert result.outcome is LandlockOutcome.INVALID_CAPABILITY
+        assert result.applied is False
+        assert result.exit_code == 2
+
+    def test_load_and_apply_int_contract_matches_typed_exit_code(self) -> None:
+        """load_and_apply() must stay a pure int-projection of apply_runtime_landlock()
+        — this is the compatibility guarantee for the browser-jail shell script."""
+        with patch("hermes.security.landlock_loader._detect_abi", return_value=None):
+            typed = apply_runtime_landlock("terminal")
+            raw = load_and_apply("terminal")
+        assert raw == typed.exit_code
+
+
 class TestMain:
     def test_no_args_returns_2(self) -> None:
         result = main([])
@@ -175,11 +283,11 @@ class TestBrowserSessionResolution:
 
         def fake_build(session_name: str) -> object:
             captured["session"] = session_name
-            from hermes.agents_os.infrastructure.landlock_ruleset_builder import (  # noqa: PLC0415
-                LandlockRulesetBuilder,
-            )
             from hermes.agents_os.application.consent_manager import (  # noqa: PLC0415
                 Capability as Cap,
+            )
+            from hermes.agents_os.infrastructure.landlock_ruleset_builder import (  # noqa: PLC0415
+                LandlockRulesetBuilder,
             )
             return LandlockRulesetBuilder(session_name=session_name).build(Cap.BROWSER)
 
@@ -195,11 +303,11 @@ class TestBrowserSessionResolution:
 
         def fake_build(session_name: str) -> object:
             captured["session"] = session_name
-            from hermes.agents_os.infrastructure.landlock_ruleset_builder import (  # noqa: PLC0415
-                LandlockRulesetBuilder,
-            )
             from hermes.agents_os.application.consent_manager import (  # noqa: PLC0415
                 Capability as Cap,
+            )
+            from hermes.agents_os.infrastructure.landlock_ruleset_builder import (  # noqa: PLC0415
+                LandlockRulesetBuilder,
             )
             return LandlockRulesetBuilder(session_name=session_name).build(Cap.BROWSER)
 

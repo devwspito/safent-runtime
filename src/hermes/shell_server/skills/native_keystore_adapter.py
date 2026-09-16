@@ -34,7 +34,7 @@ import logging
 from uuid import UUID
 
 from hermes.shell_server.security.secrets import SecretsVault
-from hermes.training.application.skill_signer import KmsSigningKeyPort, SigningKeyError
+from hermes.capabilities.application.skill_signer import KmsSigningKeyPort, SigningKeyError
 
 logger = logging.getLogger(__name__)
 

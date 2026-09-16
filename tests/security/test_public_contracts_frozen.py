@@ -1,10 +1,14 @@
 """T008 — Architectural contract: public signatures of core ports MUST NOT change.
 
 Constitution I / FR-028: BrowserPort, SelectorRegistry, StepRecorder,
-BrowserSession, StorageStatePort and ReasoningEngine.run_cycle are the
-frozen public API of the browser + reasoning bounded contexts. Any change
-to these signatures is a breaking change that requires an explicit review
-and a corresponding update to this test.
+StorageStatePort and ReasoningEngine.run_cycle are the frozen public API
+of the browser + reasoning bounded contexts. Any change to these
+signatures is a breaking change that requires an explicit review and a
+corresponding update to this test.
+
+BrowserSession (spec-002 orchestrator) was parked and archived on
+archive/browser-spec-002 (specs/025-safent-repaso/oleada-1.md §L1b);
+its frozen-contract test was removed with it.
 
 If this test goes RED it means a port signature was altered without consent.
 Fix the port — not the test — unless the change is intentional and reviewed.
@@ -22,7 +26,6 @@ from typing import Any
 
 import pytest
 
-from hermes.browser.application.session import BrowserSession
 from hermes.browser.application.step_recorder import StepRecorder
 from hermes.browser.domain.port import BrowserPort
 from hermes.browser.domain.ports.storage_state_port import StorageStatePort
@@ -217,58 +220,6 @@ class TestStepRecorderFrozen:
         sig = inspect.signature(StepRecorder.record_post)
         _assert_params(sig, ["step", "outcome", "screenshot", "dom_text"], "StepRecorder.record_post")
         _assert_kwonly(sig, {"screenshot", "dom_text"}, "StepRecorder.record_post")
-
-
-# ---------------------------------------------------------------------------
-# BrowserSession
-# ---------------------------------------------------------------------------
-
-
-class TestBrowserSessionFrozen:
-    EXPECTED_METHODS = frozenset({"open", "navigate", "act", "observe", "extract", "close"})
-
-    def test_expected_methods_present(self) -> None:
-        methods = _public_methods(BrowserSession)
-        for name in self.EXPECTED_METHODS:
-            _assert_method_exists(methods, name, "BrowserSession")
-
-    def test_init_params(self) -> None:
-        sig = inspect.signature(BrowserSession.__init__)
-        _assert_params(
-            sig,
-            ["config", "driver", "recorder", "storage_state_port", "storage_state_key"],
-            "BrowserSession.__init__",
-        )
-        _assert_kwonly(
-            sig,
-            {"config", "driver", "recorder", "storage_state_port", "storage_state_key"},
-            "BrowserSession.__init__",
-        )
-
-    def test_navigate_params(self) -> None:
-        sig = inspect.signature(BrowserSession.navigate)
-        _assert_params(sig, ["url", "intent_desc"], "BrowserSession.navigate")
-
-    def test_act_params(self) -> None:
-        sig = inspect.signature(BrowserSession.act)
-        _assert_params(
-            sig,
-            ["instruction", "risk", "fill_value", "hitl_approval_token"],
-            "BrowserSession.act",
-        )
-
-    def test_observe_params(self) -> None:
-        sig = inspect.signature(BrowserSession.observe)
-        _assert_params(sig, ["instruction"], "BrowserSession.observe")
-
-    def test_extract_params(self) -> None:
-        sig = inspect.signature(BrowserSession.extract)
-        _assert_params(sig, ["instruction", "schema"], "BrowserSession.extract")
-        _assert_kwonly(sig, {"instruction", "schema"}, "BrowserSession.extract")
-
-    def test_close_params(self) -> None:
-        sig = inspect.signature(BrowserSession.close)
-        _assert_params(sig, [], "BrowserSession.close")
 
 
 # ---------------------------------------------------------------------------

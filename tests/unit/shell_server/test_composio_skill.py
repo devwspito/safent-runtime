@@ -342,7 +342,7 @@ except Exception as _exc:  # noqa: BLE001
     _COMPOSIO_SKIP_REASON = (
         "composio SDK in this env cannot import "
         "hermes.integrations.composio.composio_client "
-        f"(baked image ships composio>=1.0): {_exc!r}"
+        f"(baked image ships composio==0.13.1): {_exc!r}"
     )
 
 

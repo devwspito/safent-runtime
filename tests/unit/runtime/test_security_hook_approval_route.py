@@ -2,7 +2,7 @@
 
 Supersedes Phase 4b's delicacy/sensitivity/irreversible eligibility calculus.
 The consult happens INSIDE the native-danger gate (Step 1.6) — it is computed
-ONLY for an action that ALREADY needs owner approval (hook_mfa_block fired),
+ONLY for an action that ALREADY needs owner approval (hook_approval_block fired),
 and its result decides WHO resolves that SAME approval:
 
   - flag OFF (default) → LOCAL, byte-identical to today's native-danger path.
@@ -42,7 +42,7 @@ pytestmark = pytest.mark.unit
 
 _TENANT_ID = "tenant-x"
 _NORMAL_TOOL = "read_file"  # NORMAL delicacy, native, never needs owner MFA
-# MOST_DELICATE by delicacy() (blocks unconditionally at hook_mfa_block) but
+# MOST_DELICATE by delicacy() (blocks unconditionally at hook_approval_block) but
 # explicitly carved OUT of the MFA tier (owner decision 2026-06-25) — a plain
 # click suffices, so it must NEVER escalate to ENTERPRISE regardless of the
 # tenant gate. Distinguishes the delicacy() axis from is_mfa_required().
@@ -131,7 +131,7 @@ class TestFlagOffStaysLocal:
         agent whose scope reports managed_by='cloud' — but
         _tenant_remote_approval_enabled() defaults False (unpaired/no license
         flag), so ENTERPRISE is never reachable: this must behave EXACTLY like
-        today's MOST_DELICATE MFA-block path (hook_mfa_block), not some new
+        today's MOST_DELICATE MFA-block path (hook_approval_block), not some new
         remote-approval path."""
         set_current_cycle_agent("agent-a")
         hook = _make_hook(_FakeAccessScopeRepo(scope=_cloud_scope()))
@@ -202,7 +202,7 @@ class TestFlagOnRoutesEnterprise:
     def test_most_delicate_but_simple_mfa_tier_tool_stays_local_even_with_flag_on(
         self,
     ) -> None:
-        """cronjob is MOST_DELICATE by delicacy() (hook_mfa_block ALWAYS fires)
+        """cronjob is MOST_DELICATE by delicacy() (hook_approval_block ALWAYS fires)
         but is explicitly carved out of the MFA tier (is_mfa_required ==
         False) — routing must follow is_mfa_required, not the coarser
         delicacy() axis, even with the tenant fully gated. The worker

@@ -41,6 +41,7 @@ from hermes.runtime.capability_tool_specs import (
     _NOUS_NATIVE_NAMES,
     _NOUS_NATIVE_DUPLICATES,
     _TOOL_SCHEMAS,
+    _TOOL_DESCRIPTIONS,
     build_capability_tool_specs,
 )
 from hermes.runtime.nous_engine import (
@@ -54,6 +55,17 @@ pytestmark = pytest.mark.unit
 
 _TENANT = UUID("20000000-0000-0000-0000-000000000001")
 _OPERATOR = UUID("20000000-0000-0000-0000-000000000002")
+
+
+def test_integration_connection_describes_real_ui_not_unregistered_llm_tool():
+    text = _TOOL_DESCRIPTIONS["connect_integration"]
+    schema_text = json.dumps(_TOOL_SCHEMAS["connect_integration"], ensure_ascii=False)
+    for description in (text, schema_text):
+        assert "configure_native_provider" not in description
+        assert "/sistema?tab=proveedores" in description
+        assert "Anuncios → Conexiones" in description
+    assert "requires HITL approval" in text
+    assert "never ask the user to paste secrets into chat" in text
 
 
 # ---------------------------------------------------------------------------

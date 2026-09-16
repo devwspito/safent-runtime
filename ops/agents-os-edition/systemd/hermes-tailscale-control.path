@@ -1,0 +1,28 @@
+# hermes-tailscale-control.path — watches for a staged tailnet control request
+# from the shell-server (User=hermes, non-root) and immediately triggers the
+# privileged control service.
+#
+# The shell-server cannot call `tailscale up`/`systemctl` directly (not root,
+# CapabilityBoundingSet=). It writes a validated request to
+# /run/hermes/tailscale-control/request.json (mode 0600, owner hermes). That
+# dir is 0700 hermes:hermes (tmpfiles), isolating the staged request from the
+# agent (which runs as hermes-sandbox, a DIFFERENT uid).
+#
+# For connect/disconnect the staged file includes the device password so the
+# root helper can PAM-verify it before acting — same ONE-password gate as
+# hermes-remote-access-control (pam/hermes-auth). The file is shredded
+# immediately after use.
+#
+# The .path unit is root-owned and starts as root, ensuring the triggered
+# service also runs as root. See specs/022-tailnet-connectivity/plan.md.
+
+[Unit]
+Description=Hermes — watch for staged tailnet control request
+Documentation=man:systemd.path(5)
+
+[Path]
+PathExists=/run/hermes/tailscale-control/request.json
+Unit=hermes-tailscale-control.service
+
+[Install]
+WantedBy=multi-user.target

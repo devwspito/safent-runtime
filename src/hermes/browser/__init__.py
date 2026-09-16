@@ -22,8 +22,6 @@ Capa diferencial de Hermes:
 Importes publicos minimos:
     from hermes.browser import (
         BrowserPort,
-        BrowserSession,
-        BrowserSessionConfig,
         Step,
         StepRisk,
         StepOutcome,
@@ -33,9 +31,12 @@ Importes publicos minimos:
         Screenshot,
         DomSnapshot,
     )
+
+Nota (2026-09-10): BrowserSession/BrowserSessionConfig (orquestador spec-002)
+se archivaron en `archive/browser-spec-002` — NO-GO fase 4, parcado. Ver
+specs/025-safent-repaso/oleada-1.md §L1b.
 """
 
-from hermes.browser.application.session import BrowserSession, BrowserSessionConfig
 from hermes.browser.domain.port import BrowserPort
 from hermes.browser.domain.selector import Selector, SelectorRegistry
 from hermes.browser.domain.snapshot import DomSnapshot, Screenshot, ScreenshotDiff
@@ -53,8 +54,6 @@ from hermes.browser.infrastructure.signed_selector_registry import (
 
 __all__ = [
     "BrowserPort",
-    "BrowserSession",
-    "BrowserSessionConfig",
     "DomSnapshot",
     "Screenshot",
     "ScreenshotDiff",

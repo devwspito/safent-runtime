@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Fake `gh` for testing publish-desktop-release.sh entirely offline.
+#
+# Env vars:
+#   FAKE_GH_ARTIFACTS_SRC   dir copied into place for `gh run download --dir D`
+#   FAKE_GH_STATE_DIR       dir holding releases/<tag>/{meta.json,assets/}
+#   FAKE_GH_UPLOAD_FAIL     if "1", `release upload` fails without copying
+#
+# Each cmd_* handler receives args starting at the first real positional
+# (the dispatcher strips the two leading words, e.g. "release" "upload").
+set -euo pipefail
+
+state_dir="${FAKE_GH_STATE_DIR:?FAKE_GH_STATE_DIR must be set}"
+
+meta_path() { printf '%s/releases/%s/meta.json' "$state_dir" "$1"; }
+assets_dir() { printf '%s/releases/%s/assets' "$state_dir" "$1"; }
+
+json_string() { python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$1"; }
+
+cmd_run_download() {
+  local dest="."
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dest="$2"; shift 2 ;;
+      --repo) shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [[ -n "${FAKE_GH_ARTIFACTS_SRC:-}" && -d "$FAKE_GH_ARTIFACTS_SRC" ]] \
+    || { echo "fake gh: FAKE_GH_ARTIFACTS_SRC not set or missing" >&2; exit 1; }
+  mkdir -p "$dest"
+  cp -R "$FAKE_GH_ARTIFACTS_SRC"/. "$dest"/
+}
+
+cmd_release_view() {
+  local tag="$1"
+  local meta; meta="$(meta_path "$tag")"
+  [[ -f "$meta" ]] || exit 1
+  cat "$meta"
+}
+
+cmd_release_create() {
+  local tag="$1"; shift
+  local target="" title="" notes_file="" draft=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --target) target="$2"; shift 2 ;;
+      --title) title="$2"; shift 2 ;;
+      --notes-file) notes_file="$2"; shift 2 ;;
+      --draft) draft=true; shift ;;
+      --repo) shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  mkdir -p "$(assets_dir "$tag")"
+  printf '{"isDraft": %s, "target": %s, "title": %s, "notesFile": %s}\n' \
+    "$draft" "$(json_string "$target")" "$(json_string "$title")" "$(json_string "$notes_file")" \
+    > "$(meta_path "$tag")"
+}
+
+cmd_release_upload() {
+  local tag="$1"; shift
+  local files=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --clobber) shift ;;
+      --repo) shift 2 ;;
+      *) files+=("$1"); shift ;;
+    esac
+  done
+  [[ "${FAKE_GH_UPLOAD_FAIL:-0}" != "1" ]] || { echo "fake gh: simulated upload failure" >&2; exit 1; }
+  local dest; dest="$(assets_dir "$tag")"
+  mkdir -p "$dest"
+  local f
+  for f in "${files[@]}"; do
+    cp "$f" "$dest"/
+  done
+}
+
+cmd_release_edit() {
+  local tag="$1"
+  local meta; meta="$(meta_path "$tag")"
+  [[ -f "$meta" ]] || { echo "fake gh: release $tag not found" >&2; exit 1; }
+  python3 - "$meta" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data["isDraft"] = False
+json.dump(data, open(path, "w"))
+PYEOF
+}
+
+case "${1:-}" in
+  run)
+    case "${2:-}" in
+      download) cmd_run_download "${@:3}" ;;
+      *) echo "fake gh: unsupported 'run ${2:-}'" >&2; exit 1 ;;
+    esac
+    ;;
+  release)
+    case "${2:-}" in
+      view) cmd_release_view "${@:3}" ;;
+      create) cmd_release_create "${@:3}" ;;
+      upload) cmd_release_upload "${@:3}" ;;
+      edit) cmd_release_edit "${@:3}" ;;
+      *) echo "fake gh: unsupported 'release ${2:-}'" >&2; exit 1 ;;
+    esac
+    ;;
+  *)
+    echo "fake gh: unsupported command '${1:-}'" >&2
+    exit 1
+    ;;
+esac

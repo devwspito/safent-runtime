@@ -49,18 +49,22 @@ from hermes.agents_os.domain.ports.surface_adapter_port import (
     SurfaceAdapterPort,
 )
 from hermes.agents_os.domain.surface_kind import SurfaceKind
-from hermes.training.application.skill_signer import (
+from hermes.capabilities.application.skill_signer import (
     KmsSigningKeyPort,
     SigningKeyError,
     SkillSigner,
 )
-from hermes.training.domain.skill_md_document import (
+from hermes.capabilities.domain.skill_md_document import (
     SkillMdDocument,
     SkillMdParseError,
-    parse_skill_md,
 )
-from hermes.training.domain.skill_package import SkillPackage
-from hermes.training.domain.skill_state import SkillState
+from hermes.capabilities.domain.skill_package import SkillPackage
+from hermes.capabilities.domain.skill_state import SkillState
+from hermes.capabilities.infrastructure.skill_md_codec import (
+    parse_skill_md,
+    serialize_skill_md,
+    skill_md_content_bytes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +314,7 @@ class SkillStoreAdapter:
         # raw input (security-review 2026-06-26). parse→serialize can normalize escape
         # sequences / quoting, so a payload that slips the raw scan but resolves on
         # serialize is caught here BEFORE signing.
-        blocking_serialized = self._content_scan_blocking(doc.serialize())
+        blocking_serialized = self._content_scan_blocking(serialize_skill_md(doc))
         if blocking_serialized:
             logger.warning(
                 "hermes.skill_store.content_blocked_serialized name=%s patterns=%s",
@@ -446,7 +450,7 @@ class SkillStoreAdapter:
         except importlib.metadata.PackageNotFoundError:
             pass
 
-        content_hash = hashlib.sha256(doc.content_bytes()).hexdigest()
+        content_hash = hashlib.sha256(skill_md_content_bytes(doc)).hexdigest()
         tenant_id = action.tenant_id or UUID(int=0)
 
         # Build a SkillPackage using the training domain model.
@@ -565,7 +569,7 @@ class SkillStoreAdapter:
         """Atomically write SKILL.md — tempfile + os.replace(), no partial writes."""
         skill_dir.mkdir(parents=True, exist_ok=True)
         target = skill_dir / "SKILL.md"
-        content = doc.serialize()
+        content = serialize_skill_md(doc)
 
         fd, tmp_path = tempfile.mkstemp(
             dir=str(skill_dir),

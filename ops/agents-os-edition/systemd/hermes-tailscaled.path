@@ -1,0 +1,14 @@
+# hermes-tailscaled.path — start tailscaled the instant the owner opts in.
+# The .service is ConditionPathExists-gated on the `enabled` marker; systemd never
+# retro-starts a condition-skipped unit, so this .path watches the marker and triggers
+# the service live (no reboot). Same mechanism as hermes-config-sync.path.
+
+[Unit]
+Description=Watch the tailnet opt-in marker and start tailscaled
+
+[Path]
+PathExists=/var/lib/hermes/tailscale/enabled
+Unit=hermes-tailscaled.service
+
+[Install]
+WantedBy=multi-user.target

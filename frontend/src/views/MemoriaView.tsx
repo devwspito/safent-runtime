@@ -18,16 +18,6 @@ import { EmptyState } from '../components/ui/EmptyState'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
-import {
-  AnimatePresence,
-  AnimatedListItem,
-  FadeIn,
-  Stagger,
-  StaggerItem,
-  HoverRow,
-  motion,
-  TWEEN,
-} from '../components/ui/motion'
 import styles from './MemoriaView.module.css'
 
 // ── State machine ─────────────────────────────────────────────────────────────
@@ -39,7 +29,7 @@ type MemoryState =
 
 type DrawerState =
   | { open: false }
-  | { open: true; item: MemoryItem; detail: MemoryEntryDetail | null; loading: boolean }
+  | { open: true; item: MemoryItem; detail: MemoryEntryDetail | null; loading: boolean; error?: boolean }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -56,10 +46,10 @@ function formatDate(iso?: string): string {
 }
 
 function entryId(item: MemoryItem): string {
-  if (item.id) return item.id
-  const target = item.target ?? ''
-  const idx = item.entry_index ?? 0
-  return target ? `${target}:${idx}` : ''
+  if (typeof item.id === 'string' && item.id.trim()) return item.id
+  const target = typeof item.target === 'string' ? item.target : ''
+  const idx = item.entry_index
+  return target && typeof idx === 'number' && Number.isInteger(idx) && idx >= 0 ? `${target}:${idx}` : ''
 }
 
 // ── Skeleton rows (mirrors final item layout) ─────────────────────────────────
@@ -108,8 +98,8 @@ function MemoryRow({ item, index, onClick }: MemoryRowProps) {
   const rowLabel = t('memoria.row.aria').replace('{n}', String(index + 1))
 
   return (
-    <HoverRow
-      className={`memory-item ${styles.memItem}`}
+    <div
+      className={styles.memItem}
       role="button"
       tabIndex={0}
       onClick={onClick}
@@ -142,7 +132,7 @@ function MemoryRow({ item, index, onClick }: MemoryRowProps) {
         className={styles.memChevron}
         aria-hidden="true"
       />
-    </HoverRow>
+    </div>
   )
 }
 
@@ -157,92 +147,131 @@ export default function MemoriaView() {
   const [editValue, setEditValue] = useState('')
   const [saving, setSaving] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const listRevision = useRef(0)
+  const detailRevision = useRef(0)
+  const alive = useRef(true)
+  const mutationId = useRef<string | null>(null)
+  const mutationSettled = useRef<Promise<unknown> | null>(null)
+  const lastQuery = useRef('')
 
   const load = useCallback(async (query = '') => {
+    const revision = ++listRevision.current
+    lastQuery.current = query
     setState({ status: 'loading' })
     try {
       const raw = query ? await searchMemory(query) : await listMemory()
-      const items = Array.isArray(raw) ? raw : []
-      setState({ status: 'success', items, query })
+      if (revision !== listRevision.current || !alive.current) return
+      if (!Array.isArray(raw) || raw.some(item => !item || typeof item !== 'object')) throw new Error('Invalid memory response')
+      setState({ status: 'success', items: raw, query })
     } catch (e) {
+      if (revision !== listRevision.current || !alive.current) return
       const msg = e instanceof ApiError ? e.message : t('memoria.err.load')
       setState({ status: 'error', message: msg })
       sileo.error({ title: msg })
     }
   }, [])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    alive.current = true
+    void load()
+    return () => { alive.current = false; listRevision.current++; detailRevision.current++ }
+  }, [load])
 
   function handleSearch() {
     void load(searchInput.trim())
   }
 
   function handleRetry() {
-    setSearchInput('')
-    void load('')
+    void load(lastQuery.current)
   }
 
   async function openDrawer(item: MemoryItem) {
+    const revision = ++detailRevision.current
     setDrawer({ open: true, item, detail: null, loading: true })
-    setEditValue(memoryContent(item))
+    setEditValue('')
     const id = entryId(item)
     if (!id) {
-      setDrawer({ open: true, item, detail: null, loading: false })
+      setDrawer({ open: true, item, detail: null, loading: false, error: true })
       return
     }
     try {
+      // Reopening the same entry waits for its already-submitted write before
+      // loading authoritative content. Never edit the pre-save snapshot.
+      if (mutationId.current === id) await mutationSettled.current?.catch(() => undefined)
+      if (revision !== detailRevision.current || !alive.current) return
       const detail = await getMemoryEntry(id)
+      if (revision !== detailRevision.current || !alive.current) return
+      if (!detail || typeof detail.content !== 'string') throw new Error('Incomplete memory detail')
       setDrawer(prev => prev.open ? { ...prev, detail, loading: false } : prev)
       // Load the FULL content into the editor (list rows are truncated).
-      setEditValue(detail.content ?? memoryContent(item))
+      setEditValue(detail.content)
     } catch {
-      setDrawer(prev => prev.open ? { ...prev, detail: null, loading: false } : prev)
+      if (revision !== detailRevision.current || !alive.current) return
+      setDrawer(prev => prev.open ? { ...prev, detail: null, loading: false, error: true } : prev)
     }
   }
 
   function closeDrawer() {
+    detailRevision.current++
     setDrawer({ open: false })
     setEditValue('')
   }
 
   async function handleSave() {
-    if (!drawer.open) return
+    if (!drawer.open || !drawer.detail || drawer.loading || drawer.error || mutationId.current) return
+    const revision = detailRevision.current
     const item = drawer.item
     const id = entryId(item)
     if (!id) { sileo.error({ title: t('memoria.err.no_edit') }); return }
     const next = editValue.trim()
     if (!next) { sileo.warning({ title: t('memoria.err.empty_content') }); return }
+    mutationId.current = id
     setSaving(true)
     try {
-      await updateMemoryEntry(id, next)
+      const operation = updateMemoryEntry(id, next)
+      mutationSettled.current = operation
+      const result = await operation
+      if (result?.ok !== true || result.updated === false) throw new Error('Memory update was not confirmed')
+      if (revision !== detailRevision.current || !alive.current) return
       sileo.success({ title: t('memoria.toast.saved') })
       // Reflect the saved value in the open drawer without a refetch.
       setDrawer(prev => prev.open
         ? { ...prev, detail: prev.detail ? { ...prev.detail, content: next } : prev.detail }
         : prev)
-      void load(searchInput.trim())
+      void load(lastQuery.current)
     } catch (e) {
+      if (revision !== detailRevision.current || !alive.current) return
       sileo.error({ title: e instanceof ApiError ? e.message : t('memoria.err.save') })
     } finally {
-      setSaving(false)
+      mutationId.current = null
+      mutationSettled.current = null
+      if (alive.current) setSaving(false)
     }
   }
 
   async function handleDelete() {
-    if (!drawer.open) return
+    if (!drawer.open || mutationId.current) return
+    const revision = detailRevision.current
     const item = drawer.item
     const id = entryId(item)
     if (!id) { sileo.error({ title: t('memoria.err.no_delete') }); return }
+    mutationId.current = id
     setDeleting(true)
     try {
-      await forgetMemoryItem(id)
+      const operation = forgetMemoryItem(id)
+      mutationSettled.current = operation
+      await operation
+      if (revision !== detailRevision.current || !alive.current) return
       sileo.success({ title: t('memoria.toast.deleted') })
       closeDrawer()
-      void load(searchInput.trim())
+      void load(lastQuery.current)
     } catch (e) {
+      if (revision !== detailRevision.current || !alive.current) return
       sileo.error({ title: e instanceof Error ? e.message : t('memoria.err.delete') })
     } finally {
-      setDeleting(false)
+      mutationId.current = null
+      mutationSettled.current = null
+      if (alive.current) setDeleting(false)
     }
   }
 
@@ -250,8 +279,7 @@ export default function MemoriaView() {
   const activeQuery = isSuccess ? state.query : ''
   const itemCount = isSuccess ? state.items.length : 0
 
-  // The list key changes when the query changes so AnimatePresence fires a
-  // cross-fade between the old and new result sets.
+  // A new query identifies a new result set; keyboard navigation is immediate.
   const listKey = isSuccess ? `q:${state.query}` : '__loading__'
 
   return (
@@ -262,10 +290,10 @@ export default function MemoriaView() {
       />
 
       <div className="view-body cv-view-body">
-        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
 
           {/* ── Search ──────────────────────────────────────────────────────── */}
-          <StaggerItem>
+          <div>
             <div className={styles.searchPanel} role="search" aria-label={t('memoria.search.aria')}>
               <div className={styles.searchRow}>
                 <div className={styles.searchInputWrap}>
@@ -284,7 +312,7 @@ export default function MemoriaView() {
                     autoComplete="off"
                     value={searchInput}
                     onChange={e => setSearchInput(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') handleSearch() }}
+                    onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) handleSearch() }}
                   />
                 </div>
                 <Button
@@ -297,10 +325,10 @@ export default function MemoriaView() {
                 </Button>
               </div>
             </div>
-          </StaggerItem>
+          </div>
 
           {/* ── Results ─────────────────────────────────────────────────────── */}
-          <StaggerItem>
+          <div>
             <section className={styles.resultsSection} aria-label={t('memoria.results.aria')}>
 
               {/* Section header */}
@@ -318,25 +346,21 @@ export default function MemoriaView() {
 
               {/* Error state */}
               {state.status === 'error' && (
-                <FadeIn>
+                <div>
                   <div role="alert" className={styles.errorState}>
                     <p className={styles.errorMessage}>{state.message}</p>
                     <Button variant="secondary" size="sm" onClick={handleRetry}>
                       {t('memoria.retry')}
                     </Button>
                   </div>
-                </FadeIn>
+                </div>
               )}
 
-              {/* AnimatePresence mode="wait" cross-fades between search result sets */}
-              <AnimatePresence mode="wait">
+              {/* Results update immediately, including keyboard-driven searches. */}
+              <>
                 {isSuccess && (
-                  <motion.div
+                  <div
                     key={listKey}
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={TWEEN}
                   >
                     {state.items.length === 0 && (
                       <EmptyState
@@ -352,27 +376,27 @@ export default function MemoriaView() {
 
                     {state.items.length > 0 && (
                       <ul className="cv-list memory-list" role="list" style={{ gap: 'var(--space-2)' }}>
-                        <AnimatePresence initial={false}>
+                        <>
                           {state.items.map((item, i) => (
-                            <AnimatedListItem key={item.id ?? i}>
+                            <li key={item.id ?? i}>
                               <MemoryRow
                                 item={item}
                                 index={i}
                                 onClick={() => void openDrawer(item)}
                               />
-                            </AnimatedListItem>
+                            </li>
                           ))}
-                        </AnimatePresence>
+                        </>
                       </ul>
                     )}
-                  </motion.div>
+                  </div>
                 )}
-              </AnimatePresence>
+              </>
 
             </section>
-          </StaggerItem>
+          </div>
 
-        </Stagger>
+        </div>
       </div>
 
       {/* ── Full-content drawer ──────────────────────────────────────────────── */}
@@ -387,9 +411,10 @@ export default function MemoriaView() {
                 variant="primary"
                 size="sm"
                 onClick={handleSave}
-                loading={saving}
+                loading={saving && mutationId.current === entryId(drawer.item)}
                 disabled={
                   drawer.loading ||
+                  !drawer.detail || drawer.error || saving ||
                   deleting ||
                   !editValue.trim() ||
                   editValue.trim() === (drawer.detail?.content ?? memoryContent(drawer.item)).trim()
@@ -404,8 +429,8 @@ export default function MemoriaView() {
                 variant="danger"
                 size="sm"
                 onClick={handleDelete}
-                loading={deleting}
-                disabled={saving}
+                loading={deleting && mutationId.current === entryId(drawer.item)}
+                disabled={saving || deleting || !entryId(drawer.item)}
                 aria-label={t('memoria.drawer.delete.aria')}
               >
                 <Trash2 size={13} aria-hidden="true" />
@@ -444,13 +469,19 @@ export default function MemoriaView() {
                 <div className="skeleton skeleton--line" style={{ width: '75%' }} />
                 <div className="skeleton skeleton--line-sm" style={{ width: '55%' }} />
               </div>
+            ) : drawer.error ? (
+              <div role="alert" className={styles.errorState}>
+                <p>{t('memoria.err.detail')}</p>
+                <Button variant="secondary" size="sm" onClick={() => void openDrawer(drawer.item)}>{t('memoria.retry')}</Button>
+              </div>
             ) : (
-              <FadeIn>
+              <div>
                 <label className="sr-only" htmlFor="memory-edit">{t('memoria.drawer.edit.label')}</label>
                 <textarea
                   id="memory-edit"
                   className={styles.editArea}
                   value={editValue}
+                  disabled={saving || deleting}
                   onChange={e => setEditValue(e.target.value)}
                   spellCheck={false}
                   aria-label={t('memoria.drawer.edit.aria')}
@@ -459,7 +490,7 @@ export default function MemoriaView() {
                 <p className={styles.editHint}>
                   {t('memoria.drawer.hint_pre')} <strong>{t('memoria.drawer.save')}</strong>{t('memoria.drawer.hint_post')}
                 </p>
-              </FadeIn>
+              </div>
             )}
 
           </div>

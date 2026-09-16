@@ -93,9 +93,9 @@ class SqliteAuditRepository:
                 INSERT OR IGNORE INTO audit_chain_entries (
                     entry_id, node_installation_id, tenant_id,
                     timestamp, actor, audit_kind, category, description,
-                    payload_hash_hex, prev_entry_hash_hex,
+                    payload_json, payload_hash_hex, prev_entry_hash_hex,
                     signed_payload_hash_hex, signature_hex, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(entry.entry_id),
@@ -106,6 +106,7 @@ class SqliteAuditRepository:
                     str(entry.audit_kind),
                     entry.category,
                     entry.description,
+                    entry.payload_json,
                     entry.payload_hash_hex,
                     entry.prev_entry_hash_hex,
                     entry.signed_payload_hash_hex,
@@ -199,8 +200,8 @@ class SqliteAuditRepository:
                 """
                     INSERT OR IGNORE INTO audit_entries_view (
                         entry_id, timestamp, actor, audit_kind,
-                        category, description, signature_short
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        category, description, signature_short, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 (
                     str(entry.entry_id),
@@ -210,6 +211,7 @@ class SqliteAuditRepository:
                     entry.category,
                     entry.description,
                     entry.signature_hex[:16] + "…",
+                    entry.payload_json,
                 ),
             )
 
@@ -236,4 +238,5 @@ def _row_to_entry(row: sqlite3.Row) -> AuditEntry:
         prev_entry_hash_hex=row["prev_entry_hash_hex"],
         signed_payload_hash_hex=row["signed_payload_hash_hex"],
         signature_hex=row["signature_hex"],
+        payload_json=row["payload_json"] if "payload_json" in row.keys() else "{}",
     )

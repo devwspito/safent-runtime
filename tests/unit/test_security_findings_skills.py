@@ -7,8 +7,12 @@ Finding #2 [LOW, functional regression]: promote_skill must work for cage-signed
     skills that exist only on disk (SkillStoreAdapter no longer writes to
     skill_packages_view, so the old SELECT returns None).
 
-Finding #3 [LOW, path traversal]: _persist_as_skill_md must validate skill_name
-    against VALID_NAME_RE before building the filesystem path.
+Finding #3 [LOW, path traversal] was in _persist_as_skill_md (training/persist.py),
+    retired with the teach-by-browser feature on 10-sep-2026 — see
+    specs/025-safent-repaso/retirada-ensenar.md. SkillStoreAdapter (the surviving
+    write path) structurally cannot regress it: SkillMdDocument.__post_init__
+    enforces VALID_NAME_RE on every parse_skill_md() call, before any filesystem
+    write (capabilities/domain/skill_md_document.py).
 """
 
 from __future__ import annotations
@@ -44,141 +48,6 @@ def _fake_vault_patch():
 def _compute_valid_hmac(*, payload_dict: dict) -> str:
     canonical = json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode()
     return hmac.new(_FAKE_KEY, canonical, hashlib.sha256).hexdigest()
-
-
-# ---------------------------------------------------------------------------
-# Finding #3 — path traversal in _persist_as_skill_md
-# ---------------------------------------------------------------------------
-
-
-class TestFinding3PathTraversal:
-    """_persist_as_skill_md must reject path-traversal skill names."""
-
-    def test_dotdot_path_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """skill_name='../evil' must raise InvalidSkillNameError, not write to parent dir."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        from hermes.shell_server.training.persist import (  # noqa: PLC0415
-            InvalidSkillNameError,
-            _persist_as_skill_md,
-        )
-
-        class _FakePkg:
-            package_id = uuid4()
-            skill_id = uuid4()
-            state = type("S", (), {"value": "validated"})()
-            signature_hex = "a" * 64
-            content_hash = ""
-            tenant_id = None
-            compiled_by_operator_id = None
-            created_at = None
-            runtime_version = ""
-            replay_script_id = None
-            voice_narrative_id = None
-            decision_rule_ids = []
-            version = 1
-            surface_kinds = []
-
-        with pytest.raises(InvalidSkillNameError):
-            _persist_as_skill_md(
-                pkg=_FakePkg(),
-                skill_name="../evil",
-                signed_at="2026-06-25T00:00:00+00:00",
-                signing_method="v2",
-            )
-
-    def test_slash_path_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        from hermes.shell_server.training.persist import (  # noqa: PLC0415
-            InvalidSkillNameError,
-            _persist_as_skill_md,
-        )
-
-        class _FakePkg:
-            package_id = uuid4()
-            skill_id = uuid4()
-            state = type("S", (), {"value": "validated"})()
-            signature_hex = "a" * 64
-            content_hash = ""
-            tenant_id = None
-            compiled_by_operator_id = None
-            created_at = None
-            runtime_version = ""
-            replay_script_id = None
-            voice_narrative_id = None
-            decision_rule_ids = []
-            version = 1
-            surface_kinds = []
-
-        with pytest.raises(InvalidSkillNameError):
-            _persist_as_skill_md(
-                pkg=_FakePkg(),
-                skill_name="skills/../../etc/passwd",
-                signed_at="2026-06-25T00:00:00+00:00",
-                signing_method="v2",
-            )
-
-    def test_uppercase_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """VALID_NAME_RE requires lowercase — SkillMdDocument enforces same rule."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        from hermes.shell_server.training.persist import (  # noqa: PLC0415
-            InvalidSkillNameError,
-            _persist_as_skill_md,
-        )
-
-        class _FakePkg:
-            package_id = uuid4()
-            skill_id = uuid4()
-            state = type("S", (), {"value": "validated"})()
-            signature_hex = "a" * 64
-            content_hash = ""
-            tenant_id = None
-            compiled_by_operator_id = None
-            created_at = None
-            runtime_version = ""
-            replay_script_id = None
-            voice_narrative_id = None
-            decision_rule_ids = []
-            version = 1
-            surface_kinds = []
-
-        with pytest.raises(InvalidSkillNameError):
-            _persist_as_skill_md(
-                pkg=_FakePkg(),
-                skill_name="MySkill",
-                signed_at="2026-06-25T00:00:00+00:00",
-                signing_method="v2",
-            )
-
-    def test_valid_name_is_accepted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A compliant lowercase name must pass the validator and write to disk."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        from hermes.shell_server.training.persist import (  # noqa: PLC0415
-            _persist_as_skill_md,
-        )
-
-        class _FakePkg:
-            package_id = uuid4()
-            skill_id = uuid4()
-            state = type("S", (), {"value": "validated"})()
-            signature_hex = "a" * 64
-            content_hash = ""
-            tenant_id = None
-            compiled_by_operator_id = None
-            created_at = None
-            runtime_version = ""
-            replay_script_id = None
-            voice_narrative_id = None
-            decision_rule_ids = []
-            version = 1
-            surface_kinds = []
-
-        _persist_as_skill_md(
-            pkg=_FakePkg(),
-            skill_name="valid-skill-name",
-            signed_at="2026-06-25T00:00:00+00:00",
-            signing_method="v2",
-        )
-        assert (tmp_path / "skills" / "valid-skill-name" / "SKILL.md").exists()
 
 
 # ---------------------------------------------------------------------------

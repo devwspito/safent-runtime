@@ -1,0 +1,75 @@
+# hermes-tailscaled.service — governed tailnet egress for the agent (userspace mode).
+#
+# INERT by default: only runs once the owner opts in (the root control helper writes the
+# `enabled` marker on connect). Runs as the low-privilege user hermes-tailscale in the HOST
+# netns, in USERSPACE-NETWORKING mode — NO /dev/net/tun, NO NET_ADMIN, NO seccomp change.
+# It exposes an HTTP-CONNECT proxy on 127.0.0.1:1055 (egress-proxy lane) and a SOCKS5 proxy
+# on 127.0.0.1:1056 (tailnet-ssh lane, raw TCP) — BOTH loopback only, reachable ONLY by the
+# host-netns egress-proxy/ssh forwarder (agent netns drop 127.0.0.0/8 + 100.64.0.0/10). So
+# the agent's access to the tailnet is forced through the audited egress allowlist — never
+# a raw route. See specs/022-tailnet-connectivity/plan.md.
+
+[Unit]
+Description=Hermes tailscaled (userspace tailnet egress — governed via the egress proxy)
+After=network-online.target
+Wants=network-online.target
+# Pull in the status-mirror sidecar together with tailscaled (it BindsTo= this
+# unit on its own side, so it stops the instant tailscaled does too — see
+# hermes-tailscale-status-watcher.service, contracts.md §2/§7).
+Wants=hermes-tailscale-status-watcher.service
+# Off until the owner opts in. systemd won't start a condition-skipped unit, so the
+# companion hermes-tailscaled.path is what makes opt-in take effect live (no reboot).
+ConditionPathExists=/var/lib/hermes/tailscale/enabled
+# Owner turned tailnet on deliberately: if tailscaled dies, bring it back.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=hermes-tailscale
+Group=hermes-tailscale
+# Userspace WireGuard (wireguard-go): no tun device, no NET_ADMIN. Both proxies bind
+# LOOPBACK only (never 0.0.0.0) — reachable solely by host-netns processes:
+#   1055 HTTP-CONNECT — hermes-egress-proxy (HTTPS/TLS tailnet FQDNs, v1 scope)
+#   1056 SOCKS5       — tailnet-ssh forwarder (raw TCP, deferred v2 scope per plan.md)
+ExecStart=/usr/sbin/tailscaled \
+  --tun=userspace-networking \
+  --outbound-http-proxy-listen=127.0.0.1:1055 \
+  --socks5-server=127.0.0.1:1056 \
+  --socket=/run/hermes/tailscale/tailscaled.sock \
+  --statedir=/var/lib/hermes/tailscale \
+  --port=41641 \
+  --verbose=0
+Restart=on-failure
+RestartSec=10
+
+# State (node key) persists across image pulls; socket + runtime under /run.
+ReadWritePaths=/var/lib/hermes/tailscale /run/hermes/tailscale
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+# AF_NETLINK: tailscaled's netmon (link/route change monitor) opens a NETLINK_ROUTE
+# socket to watch the container's OWN interface state (default route, addresses) —
+# informational only, unrelated to the fake (no-op) userspace tun/router. Verified on
+# a fresh image (2026-09-10): without it the unit crash-loops on boot ("netlinkrib:
+# address family not supported by protocol" = RestrictAddressFamilies injecting
+# EAFNOSUPPORT), so tailscaled never comes up at all — a stricter list that breaks
+# the daemon is not "more secure", it just fails the fresh-image check every time.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# Userspace mode needs no capabilities. Start empty; add only if a fresh-image test proves
+# a specific syscall is denied (verify on a REBUILT image, never a warm container).
+CapabilityBoundingSet=
+# Hide the daemon's secrets + control sockets from tailscaled (defense in depth, cross-uid).
+ProtectProc=invisible
+ProcSubset=pid
+InaccessiblePaths=-/var/lib/hermes/master.key -/var/lib/hermes/keys -/var/lib/hermes/shell-state.db -/var/lib/hermes/audit -/var/lib/hermes/hermes-home -/var/lib/hermes/composio-cache -/run/hermes/tasks.sock
+
+[Install]
+WantedBy=hermes-workspace.target

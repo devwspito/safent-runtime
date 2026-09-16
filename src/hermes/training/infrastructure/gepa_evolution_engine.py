@@ -116,7 +116,7 @@ def check_semantic_drift(
     - description similarity ratio > (1 - _MAX_DESCRIPTION_DRIFT_RATIO)
     """
     try:
-        from hermes.training.domain.skill_md_document import parse_skill_md  # noqa: PLC0415
+        from hermes.capabilities.infrastructure.skill_md_codec import parse_skill_md  # noqa: PLC0415
         doc = parse_skill_md(candidate_md)
     except Exception:  # noqa: BLE001
         return False
@@ -168,7 +168,7 @@ def apply_constraint_gates(
         return False, f"missing required sections: {missing}"
 
     try:
-        from hermes.training.domain.skill_md_document import parse_skill_md  # noqa: PLC0415
+        from hermes.capabilities.infrastructure.skill_md_codec import parse_skill_md  # noqa: PLC0415
         parse_skill_md(candidate_md)
     except Exception as exc:  # noqa: BLE001
         return False, f"parse_skill_md failed: {exc}"
@@ -271,7 +271,7 @@ class GEPAEvolutionEngine:
         from hermes.training.application.skill_evolution import (  # noqa: PLC0415
             SkillEvolutionProposal,
         )
-        from hermes.training.domain.skill_md_document import parse_skill_md  # noqa: PLC0415
+        from hermes.capabilities.infrastructure.skill_md_codec import parse_skill_md  # noqa: PLC0415
 
         try:
             original_doc = parse_skill_md(current_md)

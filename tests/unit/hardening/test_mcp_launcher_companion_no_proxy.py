@@ -54,6 +54,25 @@ class TestCompanionBypassesTheEgressProxy:
             assert f"--setenv={key}=" in block
 
     def test_no_proxy_is_not_a_caller_overridable_env_key(self) -> None:
-        allowed = _LAUNCHER.split("_ALLOWED_ENV_KEYS", 1)[1].split("})", 1)[0]
-        assert '"no_proxy"' not in allowed
-        assert '"NO_PROXY"' not in allowed
+        """MCP-05: the launcher's env gate is now a validated pattern
+        (`_is_allowed_env_key`), not a fixed frozenset — NO_PROXY is
+        explicitly deny-listed there, and no_proxy (lowercase) can never
+        match the pattern (upper-case-first) in the first place."""
+        module = _load_launcher_module()
+        assert module._is_allowed_env_key("no_proxy") is False
+        assert module._is_allowed_env_key("NO_PROXY") is False
+
+
+def _load_launcher_module():
+    import importlib.machinery
+    import importlib.util
+
+    launcher_path = Path(__file__).resolve().parents[3] / "ops/agents-os-edition/scripts/hermes-mcp-launcher"
+    loader = importlib.machinery.SourceFileLoader("hermes_mcp_launcher_no_proxy_test", str(launcher_path))
+    spec = importlib.util.spec_from_file_location(
+        "hermes_mcp_launcher_no_proxy_test", launcher_path, loader=loader
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module

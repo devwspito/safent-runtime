@@ -68,7 +68,15 @@ def _proposal(tool_name: str = "read_file") -> ToolCallProposal:
 
 
 class _SlowBroker:
-    """Broker que simula una tarea larga (sleep) para proposals específicas."""
+    """Broker que simula una tarea larga (sleep) para proposals específicas.
+
+    dispatch() debe aceptar el kwarg-set COMPLETO de CapabilityBrokerPort
+    (hitl_approval_token/work_item_id/autonomy_level/conversation_id):
+    agent_loop_orchestrator._dispatch_proposals llama SIEMPRE con los 4 —
+    un fake incompleto revienta con TypeError dentro del worker, que
+    WorkerPool.run_forever() traga en silencio (gather return_exceptions=True),
+    dejando los items huérfanos en IN_PROGRESS para siempre.
+    """
 
     def __init__(self, *, slow_proposal_ids: set[UUID], slow_delay_s: float) -> None:
         self._slow_ids = slow_proposal_ids
@@ -83,6 +91,8 @@ class _SlowBroker:
         *,
         hitl_approval_token: str | None = None,
         work_item_id: UUID | None = None,
+        autonomy_level: object | None = None,
+        conversation_id: str = "",
     ) -> ExecutionOutcome:
         pid = proposal.proposal_id
         self.dispatch_times[pid] = datetime.now(tz=UTC)
@@ -216,6 +226,8 @@ class TestLongTaskNonBlocking:
                 *,
                 hitl_approval_token: str | None = None,
                 work_item_id: UUID | None = None,
+                autonomy_level: object | None = None,
+                conversation_id: str = "",
             ) -> ExecutionOutcome:
                 pid = proposal.proposal_id
                 if work_item_id:

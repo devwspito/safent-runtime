@@ -1,0 +1,392 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-10T18:40:00Z",
+  "measured_by": "devops-engineer, T010, worktree lumen-runtime-desk2 (host: DGX, Ubuntu 24.04.4 LTS aarch64)",
+  "github_release_asset_cap_bytes": 2147483648,
+  "note": "Fuente única de verdad para desktop/scripts/stage-runtime.sh. Todo hash es sha256 del archivo EXACTO publicado en la URL indicada (recalculado a mano el 10-sep-2026, no copiado de research.md). Los digests de imagen OCI (machine_image) son los del propio registro (content-addressable: el digest ES el sha256 del blob, por eso no se descarga el blob de 932 MB para 'verificarlo' — el propio stage-runtime.sh lo verifica en el momento real de la descarga).",
+  "targets": {
+    "aarch64-apple-darwin": {
+      "compose_provider": {
+        "version": "5.5.1",
+        "source": "https://github.com/docker/compose/releases/tag/v5.5.1",
+        "license_spdx": "Apache-2.0",
+        "download": {
+          "url": "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-darwin-aarch64",
+          "sha256": "998735c9b6fe68a4f05895e6ea73d71ad06f9fc7046383ad89e47346781b6af5",
+          "size_bytes": 30532210,
+          "path": "bin/docker-compose"
+        },
+        "license": {
+          "url": "https://raw.githubusercontent.com/docker/compose/v5.5.1/LICENSE",
+          "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+          "size_bytes": 11357,
+          "path": "docker-compose-LICENSE"
+        },
+        "provenance": {
+          "url": "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-darwin-aarch64.provenance.json",
+          "sha256": "f0f902382cd708c5fa1530e6427be5b78a822b9d117ee0c676bf322f2f0ea792",
+          "size_bytes": 59908,
+          "path": "docker-compose-provenance.json"
+        },
+        "sbom": {
+          "url": "https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-darwin-aarch64.sbom.json",
+          "sha256": "aa7f8651da1cc60e89636026def175ac5a7eea44a75b7510642169c7e0df571d",
+          "size_bytes": 245107,
+          "path": "docker-compose-sbom.json"
+        }
+      },
+      "private_build": {
+        "source_commit": "8303f2e25b675ea7f82099d615c60969aec15870",
+        "source_sha256": "8a2584618a4ea0cfc3b0e95f7e07c8567b926df71fb7e8311102194b25a343b9",
+        "patch_sha256": "98a9009e247a0365aad6332857c73add6361351177eeaa3eacd2026f77a2a18b",
+        "go_version": "1.25.9",
+        "go_sha256": "9528be7329b9770631a6bd09ca2f3a73ed7332bec01d87435e75e92d8f130363",
+        "binary_sha256": "7e0a99204954942f1a1145f09a682eeb45eea543393aad9a2ee69f1b2cc10716"
+      },
+      "has_machine": true,
+      "podman_version": "6.1.1",
+      "podman_source": "containers/podman (repo renombrado a podman-container-tools/podman; la URL containers/podman redirige)",
+      "download": {
+        "kind": "macos-pkg",
+        "url": "https://github.com/podman-container-tools/podman/releases/download/v6.1.1/podman-installer-macos-arm64.pkg",
+        "sha256": "9c7b90b406681e5458d69cdb1164a589f7c9b214cab1ca6705fe375876491c09",
+        "sha256_source": "shasums oficial publicado junto al release (no autocalculado)",
+        "size_bytes": 76334314
+      },
+      "extract": {
+        "tool": "pkgutil --expand-full (macOS >=10.9; SOLO puede ejecutarse en un runner Darwin)",
+        "note": "El .pkg NO se instala (nada de 'installer -pkg ... -target /' ni contraseña de admin). stage-runtime.sh lo expande a un directorio temporal y COPIA los binarios (podman, gvproxy, vfkit) de su Payload al bundle de recursos. Tamaños/sha256 exactos de esos binarios internos los registra el propio stage-runtime.sh en su salida al ejecutarse en el runner macOS (no reproducibles desde este host Linux); la integridad de todo el contenido queda garantizada transitivamente por el sha256 del .pkg exterior, ya fijado arriba."
+      },
+      "krunkit": {
+        "download": {
+          "kind": "tarball",
+          "url": "https://github.com/libkrun/krunkit/releases/download/v1.3.2/krunkit-podman-unsigned-1.3.2.tgz",
+          "sha256": "de9ab62dd90461cd1df1e37b78e780690d75490f4bab1674cbb4a1f75b90c227",
+          "size_bytes": 6434546
+        },
+        "note": "Proveedor alternativo (libkrun/GPU) al 'applehv' (vfkit) que trae el .pkg. Se empaqueta para poder ARRANCAR una máquina libkrun preexistente adoptada (ver T024: MacBook con máquina libkrun previa) sin exigir que el dueño tenga krunkit ya instalado. 'unsigned' en el nombre: firma/notarización las añade el pipeline de firma (safent-desktop.yml), igual que el resto del bundle."
+      },
+      "machine_image": {
+        "oci_ref": "quay.io/podman/machine-os:6.1",
+        "disktype": "applehv",
+        "arch": "aarch64",
+        "manifest_digest": "sha256:aa4a0548e23e5a380162fb9bed13eb38a4eae08b6f5ae3f2a3ba10295cf268e2",
+        "blob_digest": "sha256:b71b8a4e95a4405858415c0844ea36d7835a8c0af2fc4e70f1e24983f28e00a1",
+        "blob_filename": "podman-machine.aarch64.applehv.raw.zst",
+        "size_bytes": 931934236,
+        "note": "Única imagen de máquina (aplica tanto al proveedor applehv/vfkit como a libkrun: ambos arrancan el mismo disco base en Apple Silicon). Se descarga vía la API de blobs del registro (GET /v2/podman/machine-os/blobs/<blob_digest>), sha256 verificado en el momento de la descarga contra blob_digest (garantía del propio protocolo OCI de almacenamiento direccionable por contenido)."
+      },
+      "budget": {
+        "tauri_shell_bytes_est": 12000000,
+        "podman_toolchain_bytes_est": 80000000,
+        "machine_image_bytes": 931934236,
+        "dmg_total_bytes_est_low": 1020000000,
+        "dmg_total_bytes_est_high": 1100000000,
+        "github_release_cap_bytes": 2147483648,
+        "margin_pct_est": 45
+      }
+    },
+    "x86_64-unknown-linux-gnu": {
+      "has_machine": false,
+      "podman_version": "6.1.1",
+      "podman_source": "mgoltzsche/podman-static",
+      "download": {
+        "kind": "static-tarball",
+        "url": "https://github.com/mgoltzsche/podman-static/releases/download/v6.1.1/podman-linux-amd64.tar.gz",
+        "sha256": "465a8bdd6cf27ab1bbd966bf4ddf111edd816583653c08c83e0be620ed689557",
+        "size_bytes": 34628342
+      },
+      "extract": {
+        "archive_root": null,
+        "post_extract_symlinks": [
+          {
+            "target": "bin/passt",
+            "link_name": "bin/pasta"
+          }
+        ],
+        "note": "Se extrae SOLO el subconjunto necesario para 'podman run' directo (sin systemd generators/quadlet/completions/runc): podman, crun, conmon, netavark, aardvark-dns, rootlessport, catatonit, fuse-overlayfs, fusermount3, passt (+ symlink pasta) y los .conf por defecto de etc/containers/. crun sustituye a runc como runtime OCI (mismo que usa el CLI 'safent' hoy); no se empaqueta runc ni quadlet (no se usan)."
+      },
+      "entries": [
+        {
+          "path": "bin/podman",
+          "sha256": "3470de59d1bb5d858cd7dcc3c71b9ba808b51c352ddc58d238f8ce28a6ca478e",
+          "size_bytes": 46538992,
+          "mode": "0755"
+        },
+        {
+          "path": "bin/crun",
+          "sha256": "37558aac0405ded3c14b643bda370761f2efb23b0a35883c57c4008cac06ea0e",
+          "size_bytes": 4111328,
+          "mode": "0755"
+        },
+        {
+          "path": "bin/fuse-overlayfs",
+          "sha256": "a4a03bd927070ec4672273874977ede8cbf21c44c30749fdc26ce3c188d232b8",
+          "size_bytes": 649984,
+          "mode": "0755"
+        },
+        {
+          "path": "bin/fusermount3",
+          "sha256": "ff2891f5381aa5bfba831604ab01b76da8664b90ce893c6def44205de9459cfc",
+          "size_bytes": 104584,
+          "mode": "0755"
+        },
+        {
+          "path": "bin/passt",
+          "sha256": "94d906f5ec1f28f61c2e958e8dcc043ca6ec64592f1898825a492a60267804da",
+          "size_bytes": 1053520,
+          "mode": "0755"
+        },
+        {
+          "path": "libexec/podman/conmon",
+          "sha256": "5363350f6e46e138015fc8aa30a7b869019740cb13107355a2b67537a86b2270",
+          "size_bytes": 1288096,
+          "mode": "0755"
+        },
+        {
+          "path": "libexec/podman/netavark",
+          "sha256": "0e7d80fb1d1678b35178beb004e66e5f28d5bdc03f53655069181a5922a47e90",
+          "size_bytes": 14124048,
+          "mode": "0755"
+        },
+        {
+          "path": "libexec/podman/aardvark-dns",
+          "sha256": "9d30be7e8a6ebc8fafc7aa70a2fc8633de5d34cd74fb425ba7955688cfb1e012",
+          "size_bytes": 3263112,
+          "mode": "0755"
+        },
+        {
+          "path": "libexec/podman/rootlessport",
+          "sha256": "37e1a82c8d1892320dd85621995e5e0709120ce14b48945c8c9c6ecb44a1a47d",
+          "size_bytes": 3829920,
+          "mode": "0755"
+        },
+        {
+          "path": "libexec/podman/catatonit",
+          "sha256": "3e341fa672d2ac97666808e6a6174b293c605936a85412e594fed9e7aff34511",
+          "size_bytes": 389232,
+          "mode": "0755"
+        },
+        {
+          "path": "etc/containers/containers.conf",
+          "sha256": "85483e0aa7178a3a9272c03c7a47e527ff60ef3003cf7731ba5db7a7ed39bc37",
+          "size_bytes": 165,
+          "mode": "0644"
+        },
+        {
+          "path": "etc/containers/policy.json",
+          "sha256": "cddfaa8e6a7e5497b67cc0dd8e8517058d0c97de91bf46fff867528415f2d946",
+          "size_bytes": 256,
+          "mode": "0644"
+        },
+        {
+          "path": "etc/containers/registries.conf",
+          "sha256": "c5b9f6ef16e746a803e56dff94ee37382721cd0695a4b980e9ca74143afa26f2",
+          "size_bytes": 509,
+          "mode": "0644"
+        },
+        {
+          "path": "etc/containers/seccomp.json",
+          "sha256": "9b755202516aee4b45d9d411ab800c20fe4f7af97166a93b7f07d5b16c1a4ecd",
+          "size_bytes": 17709,
+          "mode": "0644"
+        },
+        {
+          "path": "etc/containers/storage.conf",
+          "sha256": "322dffd5a543bb9e1ca9c67cc56999c62b746118674d004180fe60dddfc21979",
+          "size_bytes": 8099,
+          "mode": "0644"
+        }
+      ],
+      "staged_bytes_uncompressed": 75379554,
+      "containers_conf_patch": {
+        "sha256": "f62abd7247bc9a1ce7c8fe3a4974d2c4ae893571fb5021840abb237dd0157d2c",
+        "size_bytes": 297,
+        "note": "Appended by stage-runtime.sh AFTER extracting+verifying the upstream original (see this target's entries[] for containers.conf's own pinned sha256) — TWO independent, complementary transformations, both applied by _patch_containers_conf and verified together as one hash: (1) patch_containers_conf_for_bundled_helpers: helper_binaries_dir = [\"$BINDIR/../libexec/podman\", \"$BINDIR\"] under [engine], plus a new [network] section with default_rootless_network_cmd = \"pasta\". Without helper_binaries_dir, a host with any podman already installed silently uses ITS netavark/aardvark-dns/rootlessport instead of the bundled ones (confirmed on the DGX: fell back to system netavark 1.4.0 instead of the bundled 2.1.0 until this was added). $BINDIR is containers-common's own token for \"directory of the currently running podman binary\", resolved fresh at runtime — correct both here and at the app's real ~/.safent/runtime/<version>/ deploy path. Verified live on this DGX (2026-09-10): the bundled podman 6.1.1 + netavark 2.1.0 + this patched containers.conf correctly resolve the bundled pasta (passt 2026_06_11.a9c61ff) and rootless-published a real port end to end, both for a plain alpine listener and for the actual ghcr.io/devwspito/safent:0.8.42 image on port 7517 (HTTP 307 received through the mapped port) — pasta's own --map-guest-addr support was NOT the problem this pair actually has; see research.md for the full investigation. (2) patch_containers_conf_for_isolated_locks: lock_type = \"file\" under [engine] — a bundled static/musl podman and the host's own glibc podman/docker, run as the same uid, collide on ONE shared /dev/shm rootless-lock segment sized differently by each libc's pthread_mutex_t layout (reproduced live, specs/028-safent-app-nativa/verificacion-paquete-linux.md §\"Pasada 1\": \"failed to open 2048 locks in /libpod_rootless_lock_1000: numerical result out of range\"); file locks per storage tree make the collision impossible regardless of what else is installed on the host."
+      }
+    },
+    "aarch64-unknown-linux-gnu": {
+      "has_machine": false,
+      "podman_version": "6.1.1",
+      "podman_source": "mgoltzsche/podman-static",
+      "download": {
+        "kind": "static-tarball",
+        "url": "https://github.com/mgoltzsche/podman-static/releases/download/v6.1.1/podman-linux-arm64.tar.gz",
+        "sha256": "d17b17e034ee04ac416e2a8f3a46ad481ebd3ff7a62f0b90367ecdd51729f616",
+        "size_bytes": 31857193
+      },
+      "extract": {
+        "archive_root": null,
+        "post_extract_symlinks": [
+          {
+            "target": "bin/passt",
+            "link_name": "bin/pasta"
+          }
+        ],
+        "note": "Se extrae SOLO el subconjunto necesario para 'podman run' directo (sin systemd generators/quadlet/completions/runc): podman, crun, conmon, netavark, aardvark-dns, rootlessport, catatonit, fuse-overlayfs, fusermount3, passt (+ symlink pasta) y los .conf por defecto de etc/containers/. crun sustituye a runc como runtime OCI (mismo que usa el CLI 'safent' hoy); no se empaqueta runc ni quadlet (no se usan)."
+      },
+      "entries": [
+        {
+          "path": "bin/podman",
+          "sha256": "6011a8ee1c93cf5a0cb048737d3a4ff2c2ea5e4bc7fe74b239435d756b5ae753",
+          "size_bytes": 42607088,
+          "mode": "0755"
+        },
+        {
+          "path": "bin/crun",
+          "sha256": "07df5785e47f240fa2c1f7b2e5cf27095fc4b55be905e35484657cc0b8f268c4",
+          "size_bytes": 4227344,
+          "mode": "0755"
+        },
+        {
+          "path": "bin/fuse-overlayfs",
+          "sha256": "ba7dfffbe8ba836b1b69e01c5c8629e6249161710980d473f7fa07da37f22df9",
+          "size_bytes": 658184,
+          "mode": "0755"
+        },
+        {
+          "path": "bin/fusermount3",
+          "sha256": "f9ff824d181e40ef2d31bf43607a219a531587f64d663c71293515ee41bef068",
+          "size_bytes": 133160,
+          "mode": "0755"
+        },
+        {
+          "path": "bin/passt",
+          "sha256": "ffc93cd76fe2142d66c16aec1f11b4ca4051a7f3bcfe919569b8678ce5de9339",
+          "size_bytes": 1117760,
+          "mode": "0755"
+        },
+        {
+          "path": "libexec/podman/conmon",
+          "sha256": "ca423e1b17786e2e1d6a367537ea5bf36c24bc0b876b8416c5a686da93ff219f",
+          "size_bytes": 1316712,
+          "mode": "0755"
+        },
+        {
+          "path": "libexec/podman/netavark",
+          "sha256": "19b42b75ac79487f84fd1292ef92ded45c1995fe686f8db952763e0c058b073f",
+          "size_bytes": 13771496,
+          "mode": "0755"
+        },
+        {
+          "path": "libexec/podman/aardvark-dns",
+          "sha256": "5ea7740f612418dee6c35fb070b87fd8410005f176642b1251d774b3e6d4fdb0",
+          "size_bytes": 3266624,
+          "mode": "0755"
+        },
+        {
+          "path": "libexec/podman/rootlessport",
+          "sha256": "d7f6c1a53ccb569614c8de578a6eb69f74badf60893ee54a84ae909c02add5ff",
+          "size_bytes": 3604640,
+          "mode": "0755"
+        },
+        {
+          "path": "libexec/podman/catatonit",
+          "sha256": "40e0ff062ed2dca8c4b44067eb5e70cddcea0b1df9bed776a4b1a95c3c1b1a8d",
+          "size_bytes": 419376,
+          "mode": "0755"
+        },
+        {
+          "path": "etc/containers/containers.conf",
+          "sha256": "85483e0aa7178a3a9272c03c7a47e527ff60ef3003cf7731ba5db7a7ed39bc37",
+          "size_bytes": 165,
+          "mode": "0644"
+        },
+        {
+          "path": "etc/containers/policy.json",
+          "sha256": "cddfaa8e6a7e5497b67cc0dd8e8517058d0c97de91bf46fff867528415f2d946",
+          "size_bytes": 256,
+          "mode": "0644"
+        },
+        {
+          "path": "etc/containers/registries.conf",
+          "sha256": "c5b9f6ef16e746a803e56dff94ee37382721cd0695a4b980e9ca74143afa26f2",
+          "size_bytes": 509,
+          "mode": "0644"
+        },
+        {
+          "path": "etc/containers/seccomp.json",
+          "sha256": "9b755202516aee4b45d9d411ab800c20fe4f7af97166a93b7f07d5b16c1a4ecd",
+          "size_bytes": 17709,
+          "mode": "0644"
+        },
+        {
+          "path": "etc/containers/storage.conf",
+          "sha256": "322dffd5a543bb9e1ca9c67cc56999c62b746118674d004180fe60dddfc21979",
+          "size_bytes": 8099,
+          "mode": "0644"
+        }
+      ],
+      "staged_bytes_uncompressed": 71149122,
+      "containers_conf_patch": {
+        "sha256": "f62abd7247bc9a1ce7c8fe3a4974d2c4ae893571fb5021840abb237dd0157d2c",
+        "size_bytes": 297,
+        "note": "Appended by stage-runtime.sh AFTER extracting+verifying the upstream original (see this target's entries[] for containers.conf's own pinned sha256) — TWO independent, complementary transformations, both applied by _patch_containers_conf and verified together as one hash: (1) patch_containers_conf_for_bundled_helpers: helper_binaries_dir = [\"$BINDIR/../libexec/podman\", \"$BINDIR\"] under [engine], plus a new [network] section with default_rootless_network_cmd = \"pasta\". Without helper_binaries_dir, a host with any podman already installed silently uses ITS netavark/aardvark-dns/rootlessport instead of the bundled ones (confirmed on the DGX: fell back to system netavark 1.4.0 instead of the bundled 2.1.0 until this was added). $BINDIR is containers-common's own token for \"directory of the currently running podman binary\", resolved fresh at runtime — correct both here and at the app's real ~/.safent/runtime/<version>/ deploy path. Verified live on this DGX (2026-09-10): the bundled podman 6.1.1 + netavark 2.1.0 + this patched containers.conf correctly resolve the bundled pasta (passt 2026_06_11.a9c61ff) and rootless-published a real port end to end, both for a plain alpine listener and for the actual ghcr.io/devwspito/safent:0.8.42 image on port 7517 (HTTP 307 received through the mapped port) — pasta's own --map-guest-addr support was NOT the problem this pair actually has; see research.md for the full investigation. (2) patch_containers_conf_for_isolated_locks: lock_type = \"file\" under [engine] — a bundled static/musl podman and the host's own glibc podman/docker, run as the same uid, collide on ONE shared /dev/shm rootless-lock segment sized differently by each libc's pthread_mutex_t layout (reproduced live, specs/028-safent-app-nativa/verificacion-paquete-linux.md §\"Pasada 1\": \"failed to open 2048 locks in /libpod_rootless_lock_1000: numerical result out of range\"); file locks per storage tree make the collision impossible regardless of what else is installed on the host."
+      }
+    }
+  },
+  "excluded_targets": {
+    "x86_64-apple-darwin": "containers/podman v6.1.1 no publica podman-installer-macos-amd64.pkg (solo arm64 + darwin_arm64 remote-only). Consistente con contracts/update.md: 'darwin-x86_64 ausente a proposito: Mac Intel no esta servido'. No hay nada barato que empaquetar; no se intenta."
+  },
+  "excluded_bundle_formats": {
+    "appimage": "Decision (packaging review item 5, specs/028-safent-app-nativa/verificacion-paquete-linux.md): the AppImage produced by agents-autonomy/safent-desktop.yml (linuxdeploy/patchelf) rewrites the ELF RUNPATH of 6 of the 15 bundled podman-toolchain binaries (crun, fuse-overlayfs, fusermount3, passt, conmon, catatonit — measured live: +33040/+63256/+63992/+62432/+60088/+39920 bytes each) to make them relocatable, which is what AppImage's OWN distribution model requires — not tampering, not a build defect, and not something stage-runtime.sh's download-time verification can see (it verifies the PRE-packaging download). Their sha256 in targets[].entries above is the pristine, pre-AppImage-repack value, so cmd_stage_runtime's runtime verification (data-model.md RuntimeBundle: 'un binario que no verifica no se ejecuta jamas') correctly, and permanently, fails runtime_hash_mismatch for an AppImage build once that verification actually runs for real. podman/netavark/aardvark-dns/rootlessport stay byte-identical and would verify fine on their own, but a partially-verifiable bundle is not an acceptable delivery. The .deb already verifies 15/15 exact (measured live) and the .rpm shares the same non-relocating packaging model, so Linux distribution needs are already covered without AppImage. This is a deliverable-scope decision for T023 (agents-autonomy/safent-desktop.yml, a different repo/worktree) to apply: stop publishing the AppImage artifact in latest.json/the GitHub Release; .deb and .rpm only. Revisiting this later would need stage-runtime.sh (or T023 itself) to capture a SEPARATE, POST-AppImage-repack hash set and cmd_stage_runtime to pick the matching set for the bundle format it is actually running from — real added complexity for a format with no capability .deb/.rpm lack."
+  },
+  "target_key_format": "Rust target triple (matches agents-autonomy/safent-desktop.yml's build matrix): aarch64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu. x86_64-apple-darwin is a recognized-but-excluded triple (see excluded_targets).",
+  "app_files": {
+    "note": "safent CLI + host launcher + companion provisioning assets — REPO content, recomputed by stage-runtime.sh from the current checkout on every run, never hand-pinned like targets[].entries.",
+    "entries": [
+      {
+        "repo_path": "safent",
+        "flat_name": "safent",
+        "sha256": "f43ccde5a5fea16add2f98c113204f97289df3485c33c3085eabbda26f50fdae",
+        "size_bytes": 128610,
+        "mode": "0755"
+      },
+      {
+        "repo_path": "ops/container/run-safent.sh",
+        "flat_name": "run-safent.sh",
+        "sha256": "b2a2b45624ac671428efcc68195f8528e4dbeaab1aad58a8ae2278c0c6afcb58",
+        "size_bytes": 13923,
+        "mode": "0755"
+      },
+      {
+        "repo_path": "ops/container/seccomp/safent.json",
+        "flat_name": "safent.json",
+        "sha256": "cb85e123c65bd918093e770c0fe024afe77a2f8ce5bd4a970cc8126f354781bb",
+        "size_bytes": 19766,
+        "mode": "0644"
+      },
+      {
+        "repo_path": "ops/container/companions/ads/provision.sh",
+        "flat_name": "provision.sh",
+        "sha256": "f88eaa8b390b88e93a5ceeb0813193871c8cb0ff50d9f4a80e725856a475ad27",
+        "size_bytes": 24798,
+        "mode": "0755"
+      },
+      {
+        "repo_path": "ops/container/companions/ads/compose.yaml",
+        "flat_name": "compose.yaml",
+        "sha256": "502fd5789a8786c21ef758180ff11eb2070fb392c3833334c1021e321197d08d",
+        "size_bytes": 8453,
+        "mode": "0644"
+      },
+      {
+        "repo_path": "ops/container/companions/ads/caps.template.yaml",
+        "flat_name": "caps.template.yaml",
+        "sha256": "1de55a12095a22abc94b4b5a32594f55d73060b46016163a2cbe7aa8373cc94a",
+        "size_bytes": 1331,
+        "mode": "0644"
+      }
+    ]
+  },
+  "engine_image": {
+    "repo": "ghcr.io/devwspito/safent",
+    "digest": null,
+    "note": "Digest publicado del contenedor del motor (NDJSON t=facts, contracts/app-engine.md). Lo fija el pipeline de release (ops-release-publisher) antes de empaquetar — el sha256 real de la imagen que ese checkout publicó, igual que machine_image.manifest_digest arriba: un hecho humano/de release, jamás consultado en vivo aquí (MAC-03, verificacion-mac-1.md). null = todavía sin fijar para este checkout; stage-runtime.sh copia este campo (incluido null) a runtime-bundle.json, y boot.rs/selftest.rs fallan cerrado con engine_digest_missing en vez de adivinar cuando falta."
+  },
+  "companion_image": {
+    "repo": "ghcr.io/devwspito/safent-ads",
+    "digest": null,
+    "note": "Igual que engine_image — opcional; un build sin digest de compañero simplemente nunca ofrece PullCompanion (misma opcionalidad que SAFENT_COMPANION_DIGEST ya tenía)."
+  }
+}

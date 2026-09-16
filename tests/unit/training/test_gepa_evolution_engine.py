@@ -208,7 +208,7 @@ class TestGovernanceInvariant:
 
     def test_proposed_skill_md_is_parseable(self) -> None:
         """Content in the proposal must parse as a valid SKILL.md."""
-        from hermes.training.domain.skill_md_document import parse_skill_md  # noqa: PLC0415
+        from hermes.capabilities.infrastructure.skill_md_codec import parse_skill_md  # noqa: PLC0415
         p = self._make_gepa_proposal()
         doc = parse_skill_md(p.proposed_skill_md)  # type: ignore[union-attr]
         assert doc.name == "pay-invoice"

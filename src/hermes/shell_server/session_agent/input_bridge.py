@@ -71,8 +71,7 @@ import time
 from pathlib import Path
 from uuid import UUID
 
-from hermes.agents_os.application.teaching.input_ownership_ledger import InputOwnershipLedger
-from hermes.agents_os.application.teaching.teaching_context import InputOwner
+from hermes.agents_os.domain.input_ownership import InputOwner, InputOwnershipLedger
 from hermes.shell_server.mirror.input_effector_port import SeatInputEffectorPort
 from hermes.shell_server.screen_capture.service import ScreenCaptureBackend
 
@@ -283,7 +282,7 @@ class SessionInputBridge:
         from pathlib import Path as P
 
         from hermes.shell_server.screen_capture.domain import CaptureTarget
-        from hermes.shell_server.training.png_writer import encode_rgba_png
+        from hermes.shell_server.screen_capture.png_writer import encode_rgba_png
 
         frame_holder: dict = {}
 

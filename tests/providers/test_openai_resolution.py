@@ -2,8 +2,10 @@
 
 Proves that:
   - OPENAI → requested='openrouter', not 'openai-api' (the bug).
-  - No AuthError is raised when hermes_cli IS available.
-  - When hermes_cli is NOT available, the test skips gracefully.
+  - No AuthError is raised for the fixed slug (via a fake hermes_cli.runtime_provider
+    — see fake_hermes_cli_runtime_provider — since hermes_cli only ships inside the
+    hermes-agent tarball, not on PyPI or this host: ops/hermes-agent.lock).
+  - The old slug ('openai-api') DOES raise AuthError against the same fake.
 
 The critical path tested:
   ProviderKind.OPENAI → canonical_for() → nous_request_from_resolved()
@@ -15,23 +17,16 @@ The critical path tested:
 from __future__ import annotations
 
 import sys
-from pathlib import Path
+import types
+from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
-
-# Add the hermes_cli location to sys.path for this test run.
-_HERMES_CLI_VENV = Path(
-    "/home/luiscorrea-dev/Desktop/oposads-agent/.venv/lib/python3.12/site-packages"
-)
-_HERMES_CLI_AVAILABLE = _HERMES_CLI_VENV.is_dir()
 
 from hermes.providers.domain.catalog import canonical_for
 from hermes.providers.domain.ports import ResolvedModel
 from hermes.providers.infrastructure.nous_provider_adapter import nous_request_from_resolved
-from hermes.shell_server.providers.domain import ProviderKind, Provider, ProviderConnectivity
-
-from datetime import UTC, datetime
-from uuid import uuid4
+from hermes.shell_server.providers.domain import Provider, ProviderConnectivity, ProviderKind
 
 
 def _openai_provider() -> Provider:
@@ -59,6 +54,62 @@ def _openai_resolved(api_key: str = "sk-test-key") -> ResolvedModel:
     )
 
 
+_KNOWN_PROVIDER_REGISTRY_SLUGS = {
+    "openrouter", "custom", "openai", "anthropic", "gemini",
+    "bedrock", "azure-foundry", "deepseek", "zai", "kimi-for-coding",
+    "alibaba", "huggingface", "lmstudio", "nous",
+}
+
+
+@pytest.fixture()
+def fake_hermes_cli_runtime_provider(monkeypatch: pytest.MonkeyPatch):
+    """Fake stand-in for `hermes_cli.runtime_provider.resolve_runtime_provider`.
+
+    hermes_cli ships only inside the pinned hermes-agent GitHub tarball (see
+    ops/hermes-agent.lock) — it is not on PyPI and not installed on this host
+    or in CI. A prior version of this test reached into another project's
+    venv on the machine (`sys.path.insert(0, "/home/.../oposads-agent/.venv/
+    .../site-packages")`) to get a real one, and never cleaned up: that venv
+    also ships a top-level `tools/` package, which shadowed hermes-agent's
+    own `tools.memory_tool`/`tools.clarify_tool` for the rest of the pytest
+    session and broke tests/security/test_broker_gate_hardening_iter3.py.
+
+    This fake models just enough of the real contract (AuthError for a slug
+    PROVIDER_REGISTRY doesn't know) to pin the regression, is injected via
+    `monkeypatch.setitem(sys.modules, ...)` so it is undone automatically at
+    the end of THIS test only, and needs no real install anywhere.
+    """
+
+    class AuthError(Exception):
+        pass
+
+    def resolve_runtime_provider(
+        *,
+        requested: str,
+        explicit_api_key: str | None,
+        explicit_base_url: str | None,
+        target_model: str,
+    ) -> dict:
+        if requested not in _KNOWN_PROVIDER_REGISTRY_SLUGS:
+            raise AuthError(f"Unknown provider {requested!r}")
+        return {
+            "provider": requested,
+            "base_url": explicit_base_url,
+            "api_key": explicit_api_key,
+            "model": target_model,
+        }
+
+    runtime_provider_module = types.ModuleType("hermes_cli.runtime_provider")
+    runtime_provider_module.resolve_runtime_provider = resolve_runtime_provider
+    runtime_provider_module.AuthError = AuthError
+
+    hermes_cli_module = types.ModuleType("hermes_cli")
+    hermes_cli_module.runtime_provider = runtime_provider_module
+
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", runtime_provider_module)
+
+
 class TestOpenAIResolvesToValidSlug:
     def test_openai_nous_request_is_not_openai_api(self) -> None:
         """The breaking slug 'openai-api' must never be produced for OPENAI kind."""
@@ -81,57 +132,40 @@ class TestOpenAIResolvesToValidSlug:
         # Key must be present (not None) so hermes_cli uses it explicitly.
         assert req.explicit_api_key == "sk-real-key"
 
-    @pytest.mark.skipif(
-        not _HERMES_CLI_AVAILABLE,
-        reason="hermes_cli not installed in this environment",
-    )
+    @pytest.mark.usefixtures("fake_hermes_cli_runtime_provider")
     def test_openai_resolve_runtime_provider_no_auth_error(self) -> None:
-        """With hermes_cli available: resolve_runtime_provider does NOT raise AuthError.
+        """resolve_runtime_provider does NOT raise AuthError for the fixed slug.
 
         This is the end-to-end proof that the bug is dead. The old code passed
         requested='openai-api' → AuthError("Unknown provider 'openai-api'").
         The new code passes requested='openrouter' + explicit_base_url → success.
         """
-        if str(_HERMES_CLI_VENV) not in sys.path:
-            sys.path.insert(0, str(_HERMES_CLI_VENV))
-
-        try:
-            from hermes_cli.runtime_provider import (  # noqa: PLC0415
-                resolve_runtime_provider,
-            )
-        except ImportError as exc:
-            pytest.skip(f"hermes_cli.runtime_provider not importable: {exc}")
+        from hermes_cli.runtime_provider import resolve_runtime_provider  # noqa: PLC0415
 
         resolved = _openai_resolved(api_key="sk-dummy-for-resolution-test")
         req = nous_request_from_resolved(resolved)
 
-        # Must not raise AuthError
-        try:
-            rt = resolve_runtime_provider(
-                requested=req.requested,
-                explicit_api_key=req.explicit_api_key,
-                explicit_base_url=req.explicit_base_url,
+        rt = resolve_runtime_provider(
+            requested=req.requested,
+            explicit_api_key=req.explicit_api_key,
+            explicit_base_url=req.explicit_base_url,
+            target_model="gpt-4o",
+        )
+
+        assert rt["provider"] != "openai-api", (
+            f"resolve_runtime_provider returned provider='openai-api': {rt}"
+        )
+        assert rt["provider"] == "openrouter"
+
+    @pytest.mark.usefixtures("fake_hermes_cli_runtime_provider")
+    def test_openai_resolve_runtime_provider_raises_auth_error_for_old_bug(self) -> None:
+        """Pins WHY the fix matters: the old slug is not in PROVIDER_REGISTRY."""
+        from hermes_cli.runtime_provider import AuthError, resolve_runtime_provider  # noqa: PLC0415
+
+        with pytest.raises(AuthError):
+            resolve_runtime_provider(
+                requested="openai-api",
+                explicit_api_key="sk-test",
+                explicit_base_url="https://api.openai.com/v1",
                 target_model="gpt-4o",
             )
-        except Exception as exc:  # noqa: BLE001
-            # Distinguish AuthError (bug) from other errors (network, config, etc.)
-            exc_type = type(exc).__name__
-            if "AuthError" in exc_type or "Unknown provider" in str(exc):
-                pytest.fail(
-                    f"AuthError raised — the provider slug is wrong: {exc}\n"
-                    f"HermesCliRequest was: {req!r}"
-                )
-            # Other errors (no config file, network) are acceptable in test env.
-            pytest.skip(f"hermes_cli raised non-AuthError ({exc_type}): {exc}")
-        else:
-            # Verify the provider field is not an unknown slug.
-            provider_val = rt.get("provider", "")
-            assert provider_val != "openai-api", (
-                f"resolve_runtime_provider returned provider='openai-api': {rt}"
-            )
-            # Must be one of the valid provider values.
-            assert provider_val in {
-                "openrouter", "custom", "openai", "anthropic", "gemini",
-                "bedrock", "azure-foundry", "deepseek", "zai", "kimi-for-coding",
-                "alibaba", "huggingface", "lmstudio", "nous",
-            } or provider_val, f"Unexpected provider value: {provider_val!r}"

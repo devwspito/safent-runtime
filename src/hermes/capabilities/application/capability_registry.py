@@ -798,6 +798,49 @@ _REGISTRY_TABLE: Final[dict[str, ExtendedCapabilityBinding]] = {
         executor="install",
         persistent_forbidden=True,
     ),
+    # ------------------------------------------------------------------
+    # TAILNET_SSH (spec 022 v2) — governed SSH on the owner's tailnet.
+    #
+    # risk=LOW + auto_executable=True is DELIBERATE, not an oversight: the
+    # real authorization floor for these three tools is
+    # `security_hook._resolve_tailnet_ssh_consent` (Step 1.6-tailnet_ssh),
+    # which runs in the pre-tool-call hook BEFORE the broker ever sees the
+    # proposal — per-host block-and-resume card, persisted allow-list. If
+    # this binding were HIGH here, the broker's OWN risk-based HITL (Paso 4)
+    # would ALSO demand a token on every call, even to an already-approved
+    # host — exactly the "second, conflicting approval surface" rejected in
+    # specs/022-tailnet-connectivity/ssh-v2.md §"Rejected alternative:
+    # CapabilityBroker/SurfaceKind routing". Registering here only gives the
+    # ToolSpec builder (runtime/capability_tool_specs.py) and the
+    # SurfaceAdapterDispatcher a place to route the ALREADY-authorized call
+    # to TailnetSshSurfaceAdapter — zero additional gating happens here.
+    "tailnet_ssh": ExtendedCapabilityBinding(
+        tool_name="tailnet_ssh",
+        surface_kind=SurfaceKind.TAILNET_SSH,
+        required_capability=None,
+        risk=RiskLevel.LOW,
+        auto_executable=True,
+        executor="surface_adapter",
+        persistent_forbidden=False,
+    ),
+    "tailnet_file_get": ExtendedCapabilityBinding(
+        tool_name="tailnet_file_get",
+        surface_kind=SurfaceKind.TAILNET_SSH,
+        required_capability=None,
+        risk=RiskLevel.LOW,
+        auto_executable=True,
+        executor="surface_adapter",
+        persistent_forbidden=False,
+    ),
+    "tailnet_file_put": ExtendedCapabilityBinding(
+        tool_name="tailnet_file_put",
+        surface_kind=SurfaceKind.TAILNET_SSH,
+        required_capability=None,
+        risk=RiskLevel.LOW,
+        auto_executable=True,
+        executor="surface_adapter",
+        persistent_forbidden=False,
+    ),
 }
 
 

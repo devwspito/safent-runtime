@@ -1,25 +1,23 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { sileo } from 'sileo'
-import { Check, Plug, Globe } from 'lucide-react'
-import { useT } from '../lib/i18n'
+import { Check, Plug, Globe, RefreshCw, Search } from 'lucide-react'
+import { useLocale, useT, type TranslationKey } from '../lib/i18n'
+import { composioAppName } from '../lib/composio'
 import {
   getComposioStatus, listComposioConnected, listComposioApps,
   connectComposioApp, setComposioApiKey,
   getWebSearchStatus, setWebSearchKey,
+  getImageGenerationStatus, setImageGenerationKey, deleteImageGenerationKey,
   ApiError,
 } from '../api/client'
-import type { ComposioStatus, ComposioApp, WebSearchStatus } from '../api/types'
+import type { ComposioStatus, ComposioApp, ComposioConnectedAccount, WebSearchStatus, ImageGenerationStatus } from '../api/types'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
-import {
-  AnimatePresence,
-  AnimatedListItem,
-  FadeIn,
-  Stagger,
-  StaggerItem,
-} from '../components/ui/motion'
 import styles from './IntegrationsView.module.css'
+import { EnterpriseCrm } from './EnterpriseCrm'
+import AdsSetupGuide from './AdsSetupGuide'
 
 // Mirrors vanilla integrations.js load order: status first → prevents calling
 // connected/apps when Composio has no key (avoids hanging for minutes).
@@ -28,20 +26,20 @@ type ComposioState =
   | { status: 'loading' }
   | { status: 'no-key' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; info: ComposioStatus; connected: ComposioApp[]; apps: ComposioApp[] }
+  | { status: 'ready'; info: ComposioStatus; connected: ComposioConnectedAccount[]; apps: ComposioApp[]; connectedError: boolean; appsError: boolean }
 
 type ComposioAction =
   | { type: 'LOADING' }
   | { type: 'NO_KEY' }
   | { type: 'FAILED'; message: string }
-  | { type: 'READY'; info: ComposioStatus; connected: ComposioApp[]; apps: ComposioApp[] }
+  | { type: 'READY'; info: ComposioStatus; connected: ComposioConnectedAccount[]; apps: ComposioApp[]; connectedError: boolean; appsError: boolean }
 
 function composioReducer(_s: ComposioState, a: ComposioAction): ComposioState {
   switch (a.type) {
-    case 'LOADING': return { status: 'loading' }
+    case 'LOADING': return _s.status === 'ready' ? _s : { status: 'loading' }
     case 'NO_KEY': return { status: 'no-key' }
     case 'FAILED': return { status: 'error', message: a.message }
-    case 'READY': return { status: 'ready', info: a.info, connected: a.connected, apps: a.apps }
+    case 'READY': return { status: 'ready', info: a.info, connected: a.connected, apps: a.apps, connectedError: a.connectedError, appsError: a.appsError }
   }
 }
 
@@ -49,6 +47,12 @@ function composioReducer(_s: ComposioState, a: ComposioAction): ComposioState {
 type WsState =
   | { status: 'loading' }
   | { status: 'ready'; data: WebSearchStatus }
+  | { status: 'error'; message: string }
+
+// Image generation (FAL.ai) — same shape as web-search's state machine.
+type ImgState =
+  | { status: 'loading' }
+  | { status: 'ready'; data: ImageGenerationStatus }
   | { status: 'error'; message: string }
 
 function show(message: string, kind: 'ok' | 'warn' | 'error' | 'info' = 'ok') {
@@ -64,11 +68,10 @@ function AppGridSkeleton() {
   const t = useT()
   return (
     <div className={styles.skeletonGrid} aria-busy="true" aria-label={t('int.loading_apps_aria')}>
-      {Array.from({ length: 6 }, (_, i) => (
+      {Array.from({ length: 3 }, (_, i) => (
         <div
           key={i}
           className={`skeleton skeleton--card ${styles.skeletonCard}`}
-          style={{ animationDelay: `${i * 60}ms` }}
           aria-hidden="true"
         />
       ))}
@@ -77,14 +80,31 @@ function AppGridSkeleton() {
 }
 
 export default function IntegrationsView() {
+  const [params] = useSearchParams()
+  const providers = params.getAll('ads_setup')
+  const provider = providers.length === 1 ? providers[0] : null
+  return provider === 'google' || provider === 'meta' ? <AdsSetupGuide key={provider} provider={provider} /> : <IntegrationsCatalog />
+}
+
+function IntegrationsCatalog() {
   const t = useT()
+  const { locale } = useLocale()
   const [composioState, dispatch] = useReducer(composioReducer, { status: 'loading' })
   const [wsState, setWsState] = useState<WsState>({ status: 'loading' })
+  const [imgState, setImgState] = useState<ImgState>({ status: 'loading' })
   const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const composioRevision = useRef(0)
+  const webRevision = useRef(0)
+  const imgRevision = useRef(0)
+  const [refreshing, setRefreshing] = useState(false)
+  const [query, setQuery] = useState('')
 
   // Clear the reload timer on unmount so it never fires on a dead component
   useEffect(() => {
     return () => {
+      composioRevision.current++
+      webRevision.current++
+      imgRevision.current++
       if (reloadTimerRef.current !== null) clearTimeout(reloadTimerRef.current)
     }
   }, [])
@@ -100,11 +120,15 @@ export default function IntegrationsView() {
   }, [])
 
   async function loadComposio() {
+    const revision = ++composioRevision.current
+    setRefreshing(true)
     dispatch({ type: 'LOADING' })
     let status: ComposioStatus
     try {
       status = await getComposioStatus()
     } catch (e) {
+      if (revision !== composioRevision.current) return
+      setRefreshing(false)
       dispatch({
         type: 'FAILED',
         message: e instanceof ApiError ? e.message : t('int.err.composio'),
@@ -112,31 +136,39 @@ export default function IntegrationsView() {
       return
     }
 
+    if (revision !== composioRevision.current) return
     if (!status.has_key) {
+      setRefreshing(false)
       dispatch({ type: 'NO_KEY' })
       return
     }
 
-    // Connected/apps errors are surfaced individually to avoid blocking the status row.
-    // Returning [] on these is safe — we tell the user which part failed.
     const [connected, apps] = await Promise.allSettled([
       listComposioConnected(),
       listComposioApps(),
     ])
+    if (revision !== composioRevision.current) return
+    setRefreshing(false)
+    const validApps = (result: PromiseSettledResult<ComposioApp[]>): result is PromiseFulfilledResult<ComposioApp[]> => result.status === 'fulfilled' && Array.isArray(result.value) && result.value.every(app => app && typeof app.slug === 'string' && app.slug.length > 0)
     dispatch({
       type: 'READY',
       info: status,
       connected: connected.status === 'fulfilled' ? connected.value : [],
-      apps: apps.status === 'fulfilled' ? apps.value : [],
+      apps: validApps(apps) ? apps.value : [],
+      connectedError: connected.status === 'rejected',
+      appsError: !validApps(apps),
     })
   }
 
   async function loadWebSearch() {
+    const revision = ++webRevision.current
     setWsState({ status: 'loading' })
     try {
       const st = await getWebSearchStatus()
+      if (revision !== webRevision.current) return
       setWsState({ status: 'ready', data: st })
     } catch (e) {
+      if (revision !== webRevision.current) return
       setWsState({
         status: 'error',
         message: e instanceof ApiError ? e.message : t('int.err.websearch'),
@@ -144,13 +176,30 @@ export default function IntegrationsView() {
     }
   }
 
+  async function loadImageGeneration() {
+    const revision = ++imgRevision.current
+    setImgState({ status: 'loading' })
+    try {
+      const st = await getImageGenerationStatus()
+      if (revision !== imgRevision.current) return
+      setImgState({ status: 'ready', data: st })
+    } catch (e) {
+      if (revision !== imgRevision.current) return
+      setImgState({
+        status: 'error',
+        message: e instanceof ApiError ? e.message : t('int.err.imagegen'),
+      })
+    }
+  }
+
   useEffect(() => {
     loadComposio()
     loadWebSearch()
+    loadImageGeneration()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const connectedSlugs = composioState.status === 'ready'
-    ? new Set(composioState.connected.map(c => c.slug))
+    ? new Set(composioState.connected.filter(c => c.status === 'ACTIVE').map(c => c.toolkit_slug))
     : new Set<string>()
 
   return (
@@ -158,13 +207,13 @@ export default function IntegrationsView() {
       <PageHeader
         title={t('view.integraciones')}
         subtitle={t('int.subtitle')}
+        actions={<Button variant="ghost" size="sm" disabled={refreshing} onClick={() => void loadComposio()} aria-label={t('int.refresh')}><RefreshCw size={14} aria-hidden />{refreshing ? t('int.refreshing') : t('int.refresh')}</Button>}
       />
 
       <div className={`view-body ${styles.body}`}>
-        <Stagger style={{ display: 'contents' }}>
+          <EnterpriseCrm />
 
           {/* ── Web search (Brave) ─────────────────────────────────────────── */}
-          <StaggerItem>
             <section className={styles.section} aria-label={t('int.websearch.label')}>
               <h2 className={styles.sectionLabel}>{t('int.websearch.label')}</h2>
 
@@ -178,14 +227,12 @@ export default function IntegrationsView() {
               )}
 
               {wsState.status === 'error' && (
-                <FadeIn>
                   <div role="alert" className={styles.errorRow}>
                     <p className={styles.errorText}>{wsState.message}</p>
                     <Button variant="secondary" size="sm" onClick={loadWebSearch}>
                       {t('int.retry')}
                     </Button>
                   </div>
-                </FadeIn>
               )}
 
               {wsState.status === 'ready' && (
@@ -196,10 +243,40 @@ export default function IntegrationsView() {
                 />
               )}
             </section>
-          </StaggerItem>
+
+          {/* ── Image generation (FAL.ai) ─────────────────────────────────── */}
+            <section className={styles.section} aria-label={t('int.imagegen.label')}>
+              <h2 className={styles.sectionLabel}>{t('int.imagegen.label')}</h2>
+
+              {imgState.status === 'loading' && (
+                <div
+                  className="skeleton skeleton--block"
+                  style={{ height: 56, borderRadius: 'var(--radius-md)' }}
+                  aria-busy="true"
+                  aria-label={t('int.imagegen.loading_aria')}
+                />
+              )}
+
+              {imgState.status === 'error' && (
+                  <div role="alert" className={styles.errorRow}>
+                    <p className={styles.errorText}>{imgState.message}</p>
+                    <Button variant="secondary" size="sm" onClick={loadImageGeneration}>
+                      {t('int.retry')}
+                    </Button>
+                  </div>
+              )}
+
+              {imgState.status === 'ready' && (
+                <ImageGenerationCard
+                  status={imgState.data}
+                  onSaved={() => { loadImageGeneration(); show(t('int.imagegen.saved_toast'), 'ok') }}
+                  onRemoved={() => { loadImageGeneration(); show(t('int.imagegen.removed_toast'), 'ok') }}
+                  onToast={show}
+                />
+              )}
+            </section>
 
           {/* ── Composio connection status ────────────────────────────────── */}
-          <StaggerItem>
             <section className={styles.section} aria-label={t('int.connected_services.aria')}>
               <h2 className={styles.sectionLabel}>{t('int.connect_apps')}</h2>
 
@@ -223,18 +300,15 @@ export default function IntegrationsView() {
               )}
 
               {composioState.status === 'error' && (
-                <FadeIn>
                   <div role="alert" className={styles.errorRow}>
                     <p className={styles.errorText}>{composioState.message}</p>
                     <Button variant="secondary" size="sm" onClick={loadComposio}>
                       {t('int.retry')}
                     </Button>
                   </div>
-                </FadeIn>
               )}
 
               {composioState.status === 'ready' && (
-                <FadeIn>
                   <div className={styles.statusBanner} aria-label={t('int.composio.active_aria')}>
                     <Check
                       size={14}
@@ -248,13 +322,18 @@ export default function IntegrationsView() {
                       </code>
                     </span>
                   </div>
-                </FadeIn>
               )}
+              <nav className={styles.adsGuides} aria-label={locale === 'es' ? 'Configurar cuentas publicitarias' : 'Set up advertising connections'}>
+                <Link to="/capacidades?tab=integraciones&ads_setup=google">{locale === 'es' ? 'Configurar Google Ads paso a paso' : 'Set up Google Ads step by step'}</Link>
+                <Link to="/capacidades?tab=integraciones&ads_setup=meta">{locale === 'es' ? 'Configurar Meta Ads paso a paso' : 'Set up Meta Ads step by step'}</Link>
+              </nav>
+              <p className={styles.adsNote}>
+                {t('int.ads.guidance')}{' '}
+                <Link className={styles.adsLink} to="/anuncios">{t('int.ads.open')}</Link>
+              </p>
             </section>
-          </StaggerItem>
 
           {/* ── Connected apps ────────────────────────────────────────────── */}
-          <StaggerItem>
             <section className={styles.section} aria-label={t('int.connected_apps.aria')}>
               <h2 className={styles.sectionLabel}>{t('int.connected_apps.label')}</h2>
 
@@ -267,7 +346,9 @@ export default function IntegrationsView() {
               )}
 
               {composioState.status === 'ready' && (
-                composioState.connected.length === 0
+                composioState.connectedError
+                  ? <SourceError message={t('int.err.connected')} onRetry={loadComposio} busy={refreshing} />
+                  : composioState.connected.length === 0
                   ? (
                     <EmptyState
                       compact
@@ -278,23 +359,29 @@ export default function IntegrationsView() {
                   )
                   : (
                     <ul className={styles.appGrid} role="list">
-                      <AnimatePresence initial={false}>
-                        {composioState.connected.map(app => (
-                          <AnimatedListItem key={app.slug}>
-                            <AppCard app={app} isConnected />
-                          </AnimatedListItem>
+                        {composioState.connected.map(account => (
+                          <li key={account.id}>
+                            <AppCard
+                              app={composioState.apps.find(app => app.slug === account.toolkit_slug) ?? { slug: account.toolkit_slug }}
+                              connection={account}
+                              showConnectionId={composioState.connected.filter(other => other.toolkit_slug === account.toolkit_slug).length > 1}
+                            />
+                          </li>
                         ))}
-                      </AnimatePresence>
                     </ul>
                   )
               )}
             </section>
-          </StaggerItem>
 
           {/* ── Available apps ────────────────────────────────────────────── */}
-          <StaggerItem>
             <section className={styles.section} aria-label={t('int.available_apps.aria')}>
-              <h2 className={styles.sectionLabel}>{t('int.catalog.label')}</h2>
+              <div className={styles.catalogHeader}>
+                <h2 className={styles.sectionLabel}>{t('int.catalog.label')}</h2>
+                <label className={styles.searchField}>
+                  <Search size={14} aria-hidden />
+                  <input value={query} onChange={event => setQuery(event.target.value)} placeholder={t('int.search')} aria-label={t('int.search')} />
+                </label>
+              </div>
 
               {composioState.status === 'loading' && <AppGridSkeleton />}
 
@@ -305,46 +392,43 @@ export default function IntegrationsView() {
               )}
 
               {composioState.status === 'ready' && (() => {
-                const remaining = composioState.apps.filter(a => !connectedSlugs.has(a.slug))
+                if (composioState.appsError) return <SourceError message={t('int.err.catalog')} onRetry={loadComposio} busy={refreshing} />
+                const remaining = composioState.apps.filter(a => !connectedSlugs.has(a.slug) && `${a.name ?? ''} ${a.slug} ${a.description ?? ''}`.toLowerCase().includes(query.trim().toLowerCase()))
                 return remaining.length === 0
                   ? (
                     <EmptyState
                       icon={<Globe size={28} />}
-                      title={t('int.empty.all_connected.title')}
-                      description={t('int.empty.all_connected.desc')}
+                      compact
+                      title={t(query.trim() ? 'int.search.empty' : 'int.catalog.empty')}
                     />
                   )
                   : (
                     <ul className={styles.appGrid} role="list">
-                      <AnimatePresence initial={false}>
                         {remaining.map(app => (
-                          <AnimatedListItem key={app.slug}>
+                          <li key={app.slug}>
                             <AppCard
                               app={app}
-                              isConnected={false}
+                              disabled={composioState.connectedError || refreshing}
                               onConnect={async (a) => {
                                 try {
                                   const r = await connectComposioApp(a.slug)
                                   if (r?.redirect_url) {
                                     window.open(r.redirect_url, '_blank', 'noopener,noreferrer')
                                   }
-                                  show(t('int.connecting_app_toast').replace('{name}', a.name ?? a.slug), 'info')
+                                  show(t('int.connecting_app_toast').replace('{name}', composioAppName(a)), 'info')
+                                  if (reloadTimerRef.current !== null) clearTimeout(reloadTimerRef.current)
                                   reloadTimerRef.current = setTimeout(loadComposio, 3000)
                                 } catch (e) {
                                   show(e instanceof Error ? e.message : t('int.err.generic'), 'error')
                                 }
                               }}
                             />
-                          </AnimatedListItem>
+                          </li>
                         ))}
-                      </AnimatePresence>
                     </ul>
                   )
               })()}
             </section>
-          </StaggerItem>
-
-        </Stagger>
       </div>
     </>
   )
@@ -354,17 +438,34 @@ export default function IntegrationsView() {
 
 interface AppCardProps {
   app: ComposioApp
-  isConnected: boolean
-  onConnect?: (app: ComposioApp) => void
+  connection?: ComposioConnectedAccount
+  showConnectionId?: boolean
+  disabled?: boolean
+  onConnect?: (app: ComposioApp) => void | Promise<void>
 }
 
-function AppCard({ app, isConnected, onConnect }: AppCardProps) {
+function SourceError({ message, onRetry, busy }: { message: string; onRetry: () => void; busy: boolean }) {
   const t = useT()
-  const displayName =
-    app.name ??
-    (app as unknown as Record<string, unknown>).toolkit_slug as string | undefined ??
-    app.slug ??
-    '—'
+  return <div role="alert" className={styles.errorRow}><p className={styles.errorText}>{message}</p><Button variant="secondary" size="sm" onClick={onRetry} disabled={busy}>{t('int.retry')}</Button></div>
+}
+
+function connectionStatusKey(status: string): TranslationKey {
+  switch (status) {
+    case 'ACTIVE': return 'int.connected_badge'
+    case 'INITIATED': case 'INITIALIZING': return 'int.connection.pending'
+    case 'EXPIRED': return 'int.connection.expired'
+    case 'FAILED': return 'int.connection.failed'
+    case 'INACTIVE': case 'REVOKED': return 'int.connection.inactive'
+    default: return 'int.connection.unknown'
+  }
+}
+
+function AppCard({ app, connection, showConnectionId, onConnect, disabled }: AppCardProps) {
+  const t = useT()
+  const [connecting, setConnecting] = useState(false)
+  const displayName = composioAppName(app)
+  const isConnected = connection?.status === 'ACTIVE'
+  const isAds = app.slug === 'googleads' || app.slug === 'metaads'
 
   const cardClass = [
     styles.appCard,
@@ -382,6 +483,11 @@ function AppCard({ app, isConnected, onConnect }: AppCardProps) {
 
       <div className={styles.appInfo}>
         <div className={styles.appName}>{displayName}</div>
+        {connection && showConnectionId && (
+          <div className={styles.appDesc} title={connection.id}>
+            {t('int.connection.label').replace('{id}', connection.id)}
+          </div>
+        )}
         {app.description && (
           <div className={styles.appDesc} title={app.description}>
             {app.description}
@@ -390,24 +496,36 @@ function AppCard({ app, isConnected, onConnect }: AppCardProps) {
       </div>
 
       <div className={styles.appAction}>
-        {isConnected
+        {connection
           ? (
-            <span className={styles.connectedBadge}>
-              <Check size={10} aria-hidden="true" />
-              {t('int.connected_badge')}
+            <span className={isConnected ? styles.connectedBadge : styles.connectionStatus}>
+              {isConnected && <Check size={10} aria-hidden="true" />}
+              {t(connectionStatusKey(connection.status))}
             </span>
           )
+          : isAds ? null
           : (
             <Button
               variant="ghost"
               size="sm"
               aria-label={t('int.connect_aria').replace('{name}', displayName)}
-              onClick={() => onConnect?.(app)}
+              disabled={disabled || connecting}
+              loading={connecting}
+              onClick={async () => {
+                if (connecting || disabled) return
+                setConnecting(true)
+                try { await onConnect?.(app) } finally { setConnecting(false) }
+              }}
             >
               {t('int.connect_btn')}
             </Button>
           )
         }
+        {isAds && (
+          <Link className={styles.adsLink} to="/anuncios" aria-label={t('int.ads.open_aria').replace('{name}', displayName)}>
+            {t('int.ads.open')}
+          </Link>
+        )}
       </div>
     </div>
   )
@@ -426,6 +544,7 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
   const keyRef = useRef<HTMLInputElement>(null)
 
   async function handleSave() {
+    if (saving) return
     const key = keyRef.current?.value.trim() ?? ''
     if (!key) { onToast(t('int.err.enter_key'), 'warn'); return }
     setSaving(true)
@@ -444,14 +563,14 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
       <p className={styles.setupCardBody}>
         {t('int.composio.setup.body')}
       </p>
-      <p className={styles.setupCardSteps}>
+      <details className={styles.setupCardSteps}><summary>{t('int.setup.help')}</summary><p>
         {t('int.composio.setup.step1')}{' '}
         <a href="https://app.composio.dev/developers" target="_blank" rel="noopener noreferrer">
           app.composio.dev
         </a>
         {'  ·  '}{t('int.composio.setup.step2')}{'  ·  '}{t('int.composio.setup.step3_pre')}{' '}
         <strong>Settings → API Keys</strong> {t('int.composio.setup.step3_post')}
-      </p>
+      </p></details>
       <div className={styles.formInline}>
         <label className="sr-only" htmlFor="composio-apikey">{t('int.access_key.label')}</label>
         {/* Secret: password input, never echoed back */}
@@ -462,7 +581,7 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
           type="password"
           placeholder={t('int.access_key.placeholder')}
           autoComplete="new-password"
-          onKeyDown={e => { if (e.key === 'Enter') handleSave() }}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) void handleSave() }}
         />
         <Button
           variant="primary"
@@ -478,6 +597,7 @@ function ComposioSetupCard({ onSaved, onToast }: ComposioSetupCardProps) {
   )
 }
 
+
 // ── Web search (Brave) card ───────────────────────────────────────────────────
 
 interface WebSearchCardProps {
@@ -492,6 +612,7 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
   const keyRef = useRef<HTMLInputElement>(null)
 
   async function handleSave() {
+    if (saving) return
     const key = keyRef.current?.value.trim() ?? ''
     if (!key) { onToast(t('int.brave.err.enter_key'), 'warn'); return }
     setSaving(true)
@@ -511,14 +632,14 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
       <p className={styles.setupCardBody}>
         {t('int.brave.setup.body')}
       </p>
-      <p className={styles.setupCardSteps}>
+      <details className={styles.setupCardSteps}><summary>{t('int.setup.help')}</summary><p>
         {t('int.composio.setup.step1')}{' '}
         <a href="https://api.search.brave.com/app/keys" target="_blank" rel="noopener noreferrer">
           api.search.brave.com
         </a>
         {'  ·  '}{t('int.brave.setup.step2')}{'  ·  '}
         {t('int.brave.setup.step3')}
-      </p>
+      </p></details>
 
       <div
         className={[styles.wsStatus, status.brave ? styles.wsStatusActive : ''].filter(Boolean).join(' ')}
@@ -528,7 +649,7 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
         <span>
           {status.brave
             ? t('int.brave.status.active')
-            : t('int.brave.status.fallback')}
+            : t(status.ddgs_fallback ? 'int.brave.status.fallback' : 'int.brave.status.unconfigured')}
         </span>
       </div>
 
@@ -541,7 +662,7 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
           type="password"
           placeholder={t('int.brave.key.label')}
           autoComplete="new-password"
-          onKeyDown={e => { if (e.key === 'Enter') handleSave() }}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) void handleSave() }}
         />
         <Button
           variant="primary"
@@ -552,6 +673,95 @@ function WebSearchCard({ status, onSaved, onToast }: WebSearchCardProps) {
         >
           {saving ? t('int.brave.activating') : t('int.brave.activate_btn')}
         </Button>
+      </div>
+    </div>
+  )
+}
+
+// ── Image generation (FAL.ai) card ──────────────────────────────────────────────
+
+interface ImageGenerationCardProps {
+  status: ImageGenerationStatus
+  onSaved: () => void
+  onRemoved: () => void
+  onToast: (msg: string, kind: 'ok' | 'warn' | 'error') => void
+}
+
+function ImageGenerationCard({ status, onSaved, onRemoved, onToast }: ImageGenerationCardProps) {
+  const t = useT()
+  const [saving, setSaving] = useState(false)
+  const [removing, setRemoving] = useState(false)
+  const keyRef = useRef<HTMLInputElement>(null)
+  const busy = saving || removing
+
+  async function handleSave() {
+    if (busy) return
+    const key = keyRef.current?.value.trim() ?? ''
+    if (!key) { onToast(t('int.imagegen.err.enter_key'), 'warn'); return }
+    setSaving(true)
+    try {
+      await setImageGenerationKey(key)
+      if (keyRef.current) keyRef.current.value = ''
+      onSaved()
+    } catch (e) {
+      onToast(t('int.imagegen.err.save').replace('{reason}', e instanceof Error ? e.message : t('int.err.generic')), 'error')
+    } finally { setSaving(false) }
+  }
+
+  async function handleRemove() {
+    if (busy) return
+    setRemoving(true)
+    try {
+      await deleteImageGenerationKey()
+      onRemoved()
+    } catch (e) {
+      onToast(t('int.imagegen.err.remove').replace('{reason}', e instanceof Error ? e.message : t('int.err.generic')), 'error')
+    } finally { setRemoving(false) }
+  }
+
+  return (
+    <div className={styles.setupCard}>
+      <p className={styles.setupCardBody}>{t('int.imagegen.help')}</p>
+
+      <div
+        className={[styles.wsStatus, status.has_key ? styles.wsStatusActive : ''].filter(Boolean).join(' ')}
+        aria-live="polite"
+      >
+        {status.has_key && <Check size={12} aria-hidden="true" />}
+        <span>{t(status.has_key ? 'int.imagegen.status.active' : 'int.imagegen.status.inactive')}</span>
+      </div>
+
+      <div className={styles.formInline}>
+        <label className="sr-only" htmlFor="imagegen-key">{t('int.imagegen.key.label')}</label>
+        <input
+          id="imagegen-key"
+          ref={keyRef}
+          className={styles.keyInput}
+          type="password"
+          placeholder={t('int.imagegen.key.label')}
+          autoComplete="new-password"
+          onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) void handleSave() }}
+        />
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={handleSave}
+          disabled={busy}
+          loading={saving}
+        >
+          {saving ? t('int.imagegen.saving') : t('int.imagegen.save_btn')}
+        </Button>
+        {status.has_key && (
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={handleRemove}
+            disabled={busy}
+            loading={removing}
+          >
+            {removing ? t('int.imagegen.removing') : t('int.imagegen.remove_btn')}
+          </Button>
+        )}
       </div>
     </div>
   )

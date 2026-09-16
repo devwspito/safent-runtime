@@ -171,6 +171,27 @@ class TestDeleteMemoryEntry:
         r = client.delete("/api/v1/memory/memory:0")
         assert r.status_code == 503
 
+    def test_not_found_id_returns_404(self) -> None:
+        """specs/025-safent-repaso MEM-06 — a delete that deleted nothing
+        (id never existed / already gone) must 404, matching GET for the
+        same id, not report 200 success."""
+        p = MagicMock()
+        p.call_dict = AsyncMock(
+            return_value={"ok": False, "code": "not_found", "error": "memory entry not found"}
+        )
+        client = TestClient(_make_app(p))
+        r = client.delete("/api/v1/memory/noexiste:0")
+        assert r.status_code == 404
+        assert r.json()["detail"]["code"] == "not_found"
+
+    def test_genuine_delete_failure_still_400s(self) -> None:
+        p = MagicMock()
+        p.call_dict = AsyncMock(return_value={"ok": False, "error": "índice no numérico"})
+        client = TestClient(_make_app(p))
+        r = client.delete("/api/v1/memory/memory:abc")
+        assert r.status_code == 400
+        assert r.json()["detail"]["code"] == "delete_failed"
+
     def test_delete_uses_forget_verb(self) -> None:
         p = MagicMock()
         p.call_dict = AsyncMock(return_value={"ok": True})

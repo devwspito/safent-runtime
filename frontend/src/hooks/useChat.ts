@@ -8,20 +8,29 @@
  *   - The WS stream is the fast path — frame-by-frame deltas while it flows.
  *   - A 2 s polling safety-net runs whenever an assistant turn is in-flight:
  *       (a) getRuntimeStatus() → drives status text from activity[].tool so the UI
- *           shows life during long silent tool calls; clears "Reconectando…".
- *       (b) getConversation()  → detects when the daemon has written the final
- *           assistant turn to its conversation mirror; adopts it (ADOPT_FINAL) if
- *           the WS hasn't already produced a finalized renderedHtml. This guarantees
- *           the answer ALWAYS appears even if the WS missed the `done` frame.
- *   The poll is cleared on: STREAM_DONE, ADOPT_FINAL, stopStream, startNew, unmount.
+ *           shows activity only for the current task, without claiming SSE recovery.
+ *       (b) getChatTaskStatus() → recognizes the exact task's durable terminal state.
+ *       (c) getConversation() → recovers a terminal answer even if SSE missed done.
+ *   Pending backend retries stay attached. Terminal state, navigation and unmount
+ *   clear the poll; none of these recovery paths re-enqueues the user message.
  */
 
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import { postChat, openTaskStream, getConversation, getRuntimeStatus } from '../api/client'
-import type { StreamCallbacks } from '../api/client'
+import { cancelTask, postChat, openTaskStream, getConversation, getRuntimeStatus, getChatTaskStatus } from '../api/client'
+import type { StreamCallbacks, TaskTerminalStatus } from '../api/client'
 import type { StreamFrame } from '../api/types'
 import { renderMarkdown } from '../lib/markdown'
 import { toolLabel } from '../lib/toolLabels'
+
+function terminalStatus(status: unknown): TaskTerminalStatus | undefined {
+  if (status === 'complete' || status === 'completed') return 'completed'
+  if (status === 'failed' || status === 'cancelled' || status === 'rejected') return status
+  return undefined
+}
+
+function terminalMirror(detail: Awaited<ReturnType<typeof getConversation>>, taskId: string) {
+  return (detail.messages ?? []).filter(row => row.role === 'assistant' && row.task_id === taskId && terminalStatus(row.status)).pop()
+}
 
 /** Maximum chars kept in live thinkingText / activityText during streaming.
  *  The tail is sufficient for display; the final complete answer lives in renderedHtml. */
@@ -42,6 +51,18 @@ function genUUID(): string {
     const r = Math.random() * 16 | 0
     return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16)
   })
+}
+
+/** Closing a transport does not retract callbacks already queued by it. */
+function scopedCallbacks(callbacks: StreamCallbacks, isCurrent: () => boolean): StreamCallbacks {
+  return {
+    onDelta: text => { if (isCurrent()) callbacks.onDelta(text) },
+    onThinking: text => { if (isCurrent()) callbacks.onThinking(text) },
+    onToolCall: frame => { if (isCurrent()) callbacks.onToolCall(frame) },
+    onStatus: text => { if (isCurrent()) callbacks.onStatus(text) },
+    onDone: outcome => { if (isCurrent()) callbacks.onDone(outcome) },
+    onError: text => { if (isCurrent()) callbacks.onError(text) },
+  }
 }
 
 export interface ToolStep {
@@ -69,10 +90,10 @@ export type ChatMessage =
     }
 
 type ChatStatus =
-  | { phase: 'idle' }
+  | { phase: 'idle'; outcome?: 'cancelled' }
   | { phase: 'sending' }
   | { phase: 'streaming'; statusText: string }
-  | { phase: 'error'; message: string }
+  | { phase: 'error'; message: string; code?: string }
 
 interface ChatState {
   convId: string | null
@@ -89,7 +110,7 @@ type Action =
   | { type: 'STATUS_SENDING' }
   | { type: 'STATUS_STREAMING'; text: string }
   | { type: 'STATUS_IDLE' }
-  | { type: 'STATUS_ERROR'; message: string }
+  | { type: 'STATUS_ERROR'; message: string; code?: string }
   | { type: 'SET_CONV_ID'; convId: string }
   | { type: 'SET_AGENT_ID'; agentId: string }
   | { type: 'DELTA'; id: string; chunk: string }
@@ -98,16 +119,7 @@ type Action =
   | { type: 'TOOL_CALL'; id: string; step: ToolStep }
   | { type: 'STREAM_DONE'; id: string }
   | { type: 'LOAD_MESSAGES'; convId: string; messages: ChatMessage[] }
-  /**
-   * ADOPT_FINAL: the polling safety-net detected that the daemon wrote the final
-   * assistant turn to its conversation mirror, but the WS `done` frame was missed
-   * (e.g. a page refresh happened while the task was running). We inject the
-   * pre-rendered HTML into the in-flight assistant bubble and seal it.
-   *
-   * Guard: only applied when `isStreaming === true` for that message so we never
-   * overwrite a WS-finalized turn that arrived later on the same render cycle.
-   */
-  | { type: 'ADOPT_FINAL'; id: string; renderedHtml: string }
+  | { type: 'SETTLE_TASK'; id: string; outcome: TaskTerminalStatus; renderedHtml?: string }
   /**
    * BATCH_UPDATE: coalesced flush from the throttle buffer.
    * Applies accumulated thinking chunks, delta chunks, new tool steps, and the
@@ -191,7 +203,7 @@ function reducer(state: ChatState, action: Action): ChatState {
       return { ...state, status: { phase: 'idle' } }
 
     case 'STATUS_ERROR':
-      return { ...state, status: { phase: 'error', message: action.message } }
+      return { ...state, status: { phase: 'error', message: action.message, code: action.code } }
 
     case 'DELTA':
       return {
@@ -252,21 +264,23 @@ function reducer(state: ChatState, action: Action): ChatState {
     case 'LOAD_MESSAGES':
       return { ...state, convId: action.convId, agentId: state.agentId, messages: action.messages }
 
-    case 'ADOPT_FINAL':
+    case 'SETTLE_TASK': {
+      const hasNarrative = Boolean(action.renderedHtml?.trim())
       return {
         ...state,
-        // Only seal the bubble if it is still streaming — if the WS already
-        // produced a STREAM_DONE on the same tick, isStreaming is already false
-        // and we leave that renderedHtml untouched (no double-render).
-        messages: updateAssistant(state.messages, action.id, m => m.isStreaming ? {
-          ...m,
-          isStreaming: false,
-          renderedHtml: action.renderedHtml,
-          activityText: '',
-          thinkingDone: true,
-        } : m),
-        status: { phase: 'idle' },
+        messages: updateAssistant(state.messages, action.id, m => ({
+          ...m, isStreaming: false, thinkingDone: true, activityText: '',
+          renderedHtml: action.renderedHtml ?? (m.isStreaming ? renderMarkdown(m.activityText) : m.renderedHtml),
+        })),
+        // A terminal mirror narrative is already the visible warning. Do not
+        // add another assistant bubble or repeat it in the status bar.
+        status: !hasNarrative && (action.outcome === 'failed' || action.outcome === 'rejected')
+          ? { phase: 'error', message: 'Task failed', code: 'task_failed' }
+          : !hasNarrative && action.outcome === 'cancelled'
+            ? { phase: 'idle', outcome: 'cancelled' }
+            : { phase: 'idle' },
       }
+    }
 
     case 'BATCH_UPDATE': {
       // Single immutable update covering all accumulated WS frames from one flush tick.
@@ -323,6 +337,8 @@ interface UseChatReturn {
   status: ChatStatus
   /** True while re-attaching to a stream that was in-flight before a page refresh. */
   reconnecting: boolean
+  streamError: boolean
+  cancellation: 'idle' | 'requesting' | 'requested' | 'error'
   /** Sticky: the in-flight turn's task is using the browser → chat can show live view. */
   liveBrowserActive: boolean
   /** Bumped after a turn finishes (conversation persisted) → RecentsSection refetches. */
@@ -346,10 +362,26 @@ export function useChat(): UseChatReturn {
   const streamRef = useRef<{ close(): void } | null>(null)
   // Stable ref to the assistant message id currently streaming
   const activeAssistantIdRef = useRef<string | null>(null)
-  // Tracks whether the mount-restore has already run
-  const restoredRef = useRef(false)
+  // Invalidates every pending request/transport callback on navigation or stop.
+  const generation = useRef(0)
   // "reconectando…" status while re-attaching a stream after refresh
   const [reconnecting, setReconnecting] = useState(false)
+  const [streamError, setStreamError] = useState(false)
+  const [cancellation, setCancellation] = useState<UseChatReturn['cancellation']>('idle')
+  const cancelInFlight = useRef(false)
+
+  const clearConnectionState = useCallback(() => {
+    setReconnecting(false)
+    setStreamError(false)
+    setCancellation('idle')
+    cancelInFlight.current = false
+  }, [])
+
+  const receiveStatus = useCallback((message: string) => {
+    // This exact status is emitted locally by openTaskStream on EventSource.onerror.
+    setReconnecting(message === 'Reconectando con el agente…')
+    if (message !== 'Reconectando con el agente…') setStreamError(false)
+  }, [])
 
   // The "usando el navegador / Ver en vivo" chip. It is driven by the REAL jailed-
   // browser state (runtime_status.browser_live) AND-ed with a per-CONVERSATION marker
@@ -359,7 +391,7 @@ export function useChat(): UseChatReturn {
   // another conversation left a page open. A failed browser_navigate / a web_search
   // never opens a real page → browser_live=false → no chip.
   const [liveBrowserActive, setLiveBrowserActive] = useState(false)
-  // Bumped after a turn FINISHES (onDone / ADOPT_FINAL) — i.e. AFTER the daemon has
+  // Bumped after a turn FINISHES (SSE or task-state reconciliation), when the daemon has
   // persisted the conversation to the mirror — so the sidebar re-fetches and a brand-new
   // chat appears without a full reload. (The list's only other refresh trigger fires on
   // the client-side convId change, which happens pre-persist and always misses the row.)
@@ -422,135 +454,131 @@ export function useChat(): UseChatReturn {
   const currentTaskIdRef = useRef<string | null>(null)
 
   // ── Polling safety-net interval ref ──────────────────────────────────────────
-  // Cleared whenever a turn finalises (STREAM_DONE / ADOPT_FINAL / stopStream /
-  // startNew / unmount). Started whenever an assistant turn is in-flight.
+  // Cleared on terminal evidence, navigation or unmount. Cancellation acknowledgement
+  // alone is not terminal. Started whenever an assistant turn is in-flight.
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // Stable ref to the baseline finalized-assistant-message count captured when a
-  // poll is started. Using a ref avoids the stale-closure problem that would occur
-  // if we captured state.messages inside startPoll's useCallback deps array.
-  const baselineAssistantCountRef = useRef(0)
+  const pollNowRef = useRef<(() => void) | null>(null)
 
   const clearPoll = useCallback(() => {
     if (pollIntervalRef.current !== null) {
       clearInterval(pollIntervalRef.current)
       pollIntervalRef.current = null
     }
+    pollNowRef.current = null
   }, [])
 
-  /**
-   * Start the 2 s polling safety-net for the given assistant message and convId.
-   * Each tick does two things:
-   *   1. getRuntimeStatus() → drives status text from live tool activity
-   *      so the UI shows life during long silent WS gaps (e.g. browser_navigate).
-   *   2. getConversation()  → detects whether the daemon wrote the final turn to
-   *      its mirror while the WS was silent/dead; adopts it via ADOPT_FINAL.
-   *
-   * The poll does NOT replace the WS — it is a belt-and-suspenders fallback.
-   * While WS deltas are flowing, the poll's ADOPT_FINAL guard (isStreaming check
-   * inside the reducer) prevents double-rendering.
-   *
-   * baselineCount must be passed in by the caller, computed from the message list
-   * at the moment the new assistant turn begins (before ADD_ASSISTANT is dispatched),
-   * so we correctly detect when a NEW assistant message appears in the mirror.
-   */
-  const startPoll = useCallback((convId: string, baselineCount: number) => {
+  const settleTurn = useCallback((id: string, outcome: TaskTerminalStatus, renderedHtml?: string) => {
+    if (activeAssistantIdRef.current !== id) return
+    if (renderedHtml === undefined) flushPending()
+    clearFlushTimer()
     clearPoll()
-    baselineAssistantCountRef.current = baselineCount
+    streamRef.current?.close()
+    streamRef.current = null
+    activeAssistantIdRef.current = null
+    currentTaskIdRef.current = null
+    sessionStorage.removeItem(SS_TASK_ID)
+    clearConnectionState()
+    setLiveBrowserActive(false)
+    dispatch({ type: 'SETTLE_TASK', id, outcome, renderedHtml })
+    setConversationsTick(t => t + 1)
+  }, [clearPoll, flushPending, clearFlushTimer, clearConnectionState])
 
-    pollIntervalRef.current = setInterval(() => {
-      const currentAssistantId = activeAssistantIdRef.current
-      // If the stream finished via the WS path, stop polling.
-      if (currentAssistantId === null) {
-        clearPoll()
-        return
+  // DONE ends busy immediately. A single read can enrich the same bubble with
+  // its persisted terminal narrative; it never resends or appends a warning.
+  const finishFromStream = useCallback((id: string, taskId: string, convId: string, outcome: TaskTerminalStatus = 'completed') => {
+    const epoch = generation.current
+    settleTurn(id, outcome)
+    void getConversation(convId).then(detail => {
+      if (generation.current !== epoch || activeAssistantIdRef.current !== null) return
+      const row = terminalMirror(detail, taskId)
+      if (row) dispatch({ type: 'SETTLE_TASK', id, outcome, renderedHtml: renderMarkdown(row.content ?? '') })
+    }).catch(() => { /* Keep the explicit terminal status and partial text. */ })
+  }, [settleTurn])
+
+  /** Poll exact task state and its mirror together. Missing data is never
+   * terminal evidence; pending retries take precedence over old mirror rows. */
+  const startPoll = useCallback((convId: string) => {
+    clearPoll()
+    const epoch = generation.current
+    let polling = false
+    let runtimePolling = false
+    let mirrorInFlight: Promise<Awaited<ReturnType<typeof getConversation>> | undefined> | null = null
+    let confirmedActive = false
+    const poll = async () => {
+      const assistantId = activeAssistantIdRef.current
+      const taskId = currentTaskIdRef.current
+      if (!assistantId || !taskId || polling || generation.current !== epoch) return
+      polling = true
+      const isCurrent = () => generation.current === epoch && activeAssistantIdRef.current === assistantId && currentTaskIdRef.current === taskId
+      // These reads enrich the UI, but must never hold a terminal task busy.
+      // Each endpoint is single-flight independently, including focus refreshes.
+      if (!mirrorInFlight) {
+        const request = getConversation(convId).catch(() => undefined)
+        mirrorInFlight = request
+        void request.then(() => { if (mirrorInFlight === request) mirrorInFlight = null })
       }
-
-      // (1) Live tool indicator — scoped to THIS conversation's task_id.
-      //     currentTaskIdRef.current is set by the caller before startPoll so the
-      //     closure always sees the correct value via the ref (no stale capture).
-      void getRuntimeStatus()
-        .then(runtimeStatus => {
-          if (activeAssistantIdRef.current !== currentAssistantId) return
-
-          // Browser chip = REAL jailed-browser page state (backend probe) AND-ed with
-          // "this conversation used the browser". A failed browser_navigate / web_search
-          // leaves browser_live=false → no false chip; another conversation's open page
-          // does NOT light THIS chat (browserUsedRef gates it). NEVER keyed off a tool
-          // name alone.
-          setLiveBrowserActive(browserUsedRef.current && !!runtimeStatus.browser_live)
-
-          if ((runtimeStatus.active_task_count ?? 0) > 0) {
-            const thisTaskId = currentTaskIdRef.current
-            const activities = runtimeStatus.activity ?? []
-
-            // Only use an entry that belongs to THIS conversation's task.
-            // If task_id is absent (older backend), fall back to generic text —
-            // never show another conversation's tool name here.
-            const entry = thisTaskId
-              ? activities.find(a => a.task_id === thisTaskId)
-              : undefined
-
-            if (entry?.tool) {
-              const humanized = toolLabel(entry.tool)
-              if (humanized) {
-                dispatch({ type: 'STATUS_STREAMING', text: `Trabajando… (${humanized.toLowerCase()})` })
-                setReconnecting(false)
-                return
-              }
-            }
-            // Task is running but no matching entry or no humanizable tool name —
-            // show a generic pulse without leaking another task's tool.
-            dispatch({ type: 'STATUS_STREAMING', text: 'Trabajando…' })
-            setReconnecting(false)
+      const mirrorRequest = mirrorInFlight
+      if (!runtimePolling) {
+        runtimePolling = true
+        void getRuntimeStatus().then(runtime => {
+          if (!isCurrent()) return
+          setLiveBrowserActive(browserUsedRef.current && !!runtime.browser_live)
+          const entry = (runtime.activity ?? []).find(activity => activity.task_id === taskId)
+          if (entry) {
+            const label = entry.tool ? toolLabel(entry.tool) : null
+            dispatch({ type: 'STATUS_STREAMING', text: label ? `Trabajando… (${label.toLowerCase()})` : 'Trabajando…' })
           }
-        })
-        .catch(() => { /* transient — keep last text */ })
+        }).catch(() => { /* Runtime activity is not terminal evidence. */ })
+          .finally(() => { runtimePolling = false })
+      }
+      try {
+        const task = await getChatTaskStatus(taskId).catch(() => undefined)
+        if (!isCurrent()) return
+        const exactTask = task?.task_id === taskId ? task : undefined
+        const outcome = terminalStatus(exactTask?.status)
+        if (outcome) {
+          settleTurn(assistantId, outcome)
+          void mirrorRequest.then(detail => {
+            if (!detail || generation.current !== epoch || activeAssistantIdRef.current !== null) return
+            const row = terminalMirror(detail, taskId)
+            if (row) dispatch({ type: 'SETTLE_TASK', id: assistantId, outcome, renderedHtml: renderMarkdown(row.content ?? '') })
+          }).catch(() => { /* A malformed mirror cannot undo the terminal outcome. */ })
+          return
+        }
+        if (exactTask) confirmedActive = true
+        // An older server may lack the task-status route. Its explicit terminal
+        // mirror is still useful, but never override a confirmed active retry,
+        // even if a later status lookup temporarily fails.
+        if (!exactTask) {
+          void mirrorRequest.then(detail => {
+            if (!detail || !isCurrent() || confirmedActive) return
+            const row = terminalMirror(detail, taskId)
+            if (row) settleTurn(assistantId, terminalStatus(row.status)!, renderMarkdown(row.content ?? ''))
+          }).catch(() => { /* Keep polling when a legacy mirror is unavailable. */ })
+        }
+      } finally {
+        polling = false
+      }
+    }
+    pollNowRef.current = () => { void poll() }
+    pollIntervalRef.current = setInterval(() => { void poll() }, 2_000)
+  }, [clearPoll, settleTurn])
 
-      // (2) Final-answer guarantee — adopt the mirror answer if the WS missed done
-      void getConversation(convId)
-        .then(detail => {
-          if (activeAssistantIdRef.current !== currentAssistantId) return
+  useEffect(() => {
+    const refresh = () => pollNowRef.current?.()
+    const visible = () => { if (document.visibilityState === 'visible') refresh() }
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', visible)
+    return () => {
+      window.removeEventListener('focus', refresh)
+      document.removeEventListener('visibilitychange', visible)
+    }
+  }, [])
 
-          // Adopt THIS turn's mirror row ONLY once it flips to a terminal status.
-          // Keyed on the in-flight task_id (not a fragile count of assistant rows):
-          // the daemon upserts the growing answer as status='streaming' every 12
-          // deltas, and the old count heuristic adopted that IN-FLIGHT partial as
-          // "final" — sealing the live bubble mid-sentence and tearing down the
-          // stream on any turn slow enough that the WS `done` frame hadn't arrived
-          // within a 2s tick (slow LLM / long browser tool). A row with
-          // status !== 'streaming' (complete, or the ⚠ engine-error / ⏹ cancel note)
-          // is the real end of THIS turn.
-          const finalRow = (detail.messages ?? []).find(
-            m => m.role === 'assistant'
-              && m.task_id === currentTaskIdRef.current
-              && m.status !== 'streaming',
-          )
-          if (finalRow) {
-            // ADOPT_FINAL has an isStreaming guard in the reducer — if the WS already
-            // produced STREAM_DONE for this turn, the action is a no-op (no double-render).
-            dispatch({
-              type: 'ADOPT_FINAL',
-              id: currentAssistantId,
-              renderedHtml: renderMarkdown((finalRow.content ?? '').trim()),
-            })
-            setConversationsTick(t => t + 1) // turn persisted → refresh the recents list
-            streamRef.current?.close()
-            streamRef.current = null
-            activeAssistantIdRef.current = null
-            currentTaskIdRef.current = null
-            sessionStorage.removeItem(SS_TASK_ID)
-            setReconnecting(false)
-            // liveBrowserActive stays ON: the jailed browser session (and the
-            // "Ver en vivo" chip) persists for the whole conversation.
-            clearPoll()
-          }
-        })
-        .catch(() => { /* stale convId or transient error — keep polling */ })
-    }, 2_000)
-  }, [clearPoll])
-
-  const stopStream = useCallback(() => {
+  // Navigation detaches a view; it must never implicitly cancel server work.
+  const detachStream = useCallback(() => {
+    generation.current += 1
     clearPoll()
     // Flush any coalesced frames before closing so no data is silently dropped.
     flushPending()
@@ -568,30 +596,51 @@ export function useChat(): UseChatReturn {
     }
     currentTaskIdRef.current = null
     sessionStorage.removeItem(SS_TASK_ID)
-    setReconnecting(false)
-    // NOT resetting liveBrowserActive here: stopStream also runs on manual stop
-    // mid-conversation, and the live chip must persist per conversation. The
-    // reset lives in startNew/loadConversation (conversation switches).
-  }, [clearPoll, flushPending, clearFlushTimer])
+    clearConnectionState()
+    // The live-browser reset belongs to conversation navigation.
+  }, [clearPoll, flushPending, clearFlushTimer, clearConnectionState])
+
+  const stopStream = useCallback(() => {
+    const taskId = currentTaskIdRef.current
+    const assistantId = activeAssistantIdRef.current
+    // Enqueue has no cancellable task handle until the server acknowledges it.
+    if (!taskId || !assistantId || cancelInFlight.current) return
+    const epoch = generation.current
+    cancelInFlight.current = true
+    setCancellation('requesting')
+    void cancelTask(taskId).then(result => {
+      if (generation.current !== epoch || activeAssistantIdRef.current !== assistantId) return
+      if (!result.ok) throw new Error('cancel_failed')
+      // Cooperative acknowledgement is NOT a terminal state. Keep the stream and
+      // mirror attached, and do not submit the next draft automatically.
+      setCancellation('requested')
+    }).catch(() => {
+      if (generation.current !== epoch || activeAssistantIdRef.current !== assistantId) return
+      cancelInFlight.current = false
+      setCancellation('error')
+    })
+  }, [])
 
   const startNew = useCallback(() => {
-    stopStream()
+    detachStream()
     sessionStorage.removeItem(SS_CONV_ID)
     sessionStorage.removeItem(SS_TASK_ID)
     sessionStorage.removeItem(SS_AGENT_ID)
     setLiveBrowserActive(false)
     browserUsedRef.current = false  // new conversation — forget the browser marker
     dispatch({ type: 'RESET' })
-  }, [stopStream])
+  }, [detachStream])
 
   const startNewWithAgent = useCallback((agentId: string) => {
-    stopStream()
+    detachStream()
+    setLiveBrowserActive(false)
+    browserUsedRef.current = false
     sessionStorage.removeItem(SS_CONV_ID)
     sessionStorage.removeItem(SS_TASK_ID)
     sessionStorage.setItem(SS_AGENT_ID, agentId)
     dispatch({ type: 'RESET' })
     dispatch({ type: 'SET_AGENT_ID', agentId })
-  }, [stopStream])
+  }, [detachStream])
 
   // Persist convId and agentId to sessionStorage whenever they change so a refresh can restore them.
   useEffect(() => {
@@ -610,8 +659,7 @@ export function useChat(): UseChatReturn {
   // Also starts the polling safety-net so that long silent tool calls never freeze
   // the UI and the final answer is always rendered even if the WS done frame was missed.
   useEffect(() => {
-    if (restoredRef.current) return
-    restoredRef.current = true
+    const epoch = generation.current
 
     const savedConvId = sessionStorage.getItem(SS_CONV_ID)
     const savedTaskId = sessionStorage.getItem(SS_TASK_ID)
@@ -626,6 +674,7 @@ export function useChat(): UseChatReturn {
     // Load the conversation history first.
     getConversation(savedConvId)
       .then(detail => {
+        if (generation.current !== epoch) return
         // The in-flight turn's PARTIAL (status='streaming') for the task we are about
         // to reattach: do NOT render it as a finished bubble — seed it into the live
         // streaming bubble below (mirror-first: shows instantly = no blank on refresh,
@@ -633,7 +682,7 @@ export function useChat(): UseChatReturn {
         // rendered statically (the turn finished).
         const partialMsg = savedTaskId
           ? (detail.messages ?? []).find(
-              m => m.role === 'assistant' && m.task_id === savedTaskId && m.status === 'streaming',
+              m => m.role === 'assistant' && m.task_id === savedTaskId && !terminalStatus(m.status),
             )
           : undefined
         const streamingPartial: string | null = partialMsg ? (partialMsg.content ?? '') : null
@@ -643,7 +692,7 @@ export function useChat(): UseChatReturn {
             if (m.role === 'user') {
               return { type: 'user' as const, id: genUUID(), text: m.content ?? '' }
             }
-            if (m.task_id && m.task_id === savedTaskId && m.status === 'streaming') {
+            if (m.task_id && m.task_id === savedTaskId && !terminalStatus(m.status)) {
               return null
             }
             return {
@@ -710,18 +759,14 @@ export function useChat(): UseChatReturn {
           currentTaskIdRef.current = savedTaskId
           setReconnecting(true)
 
-          // Start the polling safety-net immediately after re-attachment.
-          // Baseline = all assistant messages already in history (all finalized).
-          // It will (a) drive live tool labels from runtime/status so "Reconectando…"
-          // clears within one poll tick, and (b) detect the final answer in the mirror
-          // if the WS done frame was already missed before we got here.
-          const baselineCount = messages.filter(m => m.type === 'assistant').length
-          startPoll(savedConvId, baselineCount)
+          // Read exact task state and its mirror while SSE reattaches. A runtime
+          // activity update alone never claims the SSE transport has recovered.
+          startPoll(savedConvId)
 
           // The FIRST frame of any kind proves the re-attach succeeded and the stream
           // is live again — so we're no longer "reconnecting". Clearing only on done/error
           // (below) left "Reconectando…" stuck for the whole task even while frames flowed.
-          const markConnected = () => setReconnecting(false)
+          const markConnected = () => { setReconnecting(false); setStreamError(false) }
 
           // Accumulate incoming WS frames into pendingBatchRef and schedule a
           // FLUSH_INTERVAL_MS timeout. The flush emits a single BATCH_UPDATE
@@ -735,6 +780,7 @@ export function useChat(): UseChatReturn {
 
           const callbacks: StreamCallbacks = {
             onDelta(chunk) {
+              markConnected()
               // De-dup the broker replay against the mirror partial we already seeded:
               // skip the first replaySkip chars of replayed answer deltas, keep the rest.
               if (replaySkip > 0) {
@@ -745,9 +791,10 @@ export function useChat(): UseChatReturn {
               const b = pendingBatchRef.current
               if (b && b.id === assistantMsgId) {
                 b.deltaChunk += chunk
+                b.statusText = 'Respondiendo…'
                 b.markConnected = markConnected
               } else {
-                pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: '', deltaChunk: chunk, newToolSteps: [], thinkingDone: false, statusText: null, markConnected }
+                pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: '', deltaChunk: chunk, newToolSteps: [], thinkingDone: false, statusText: 'Respondiendo…', markConnected }
               }
               scheduleBatchFlush()
             },
@@ -785,56 +832,35 @@ export function useChat(): UseChatReturn {
               scheduleBatchFlush()
             },
             onStatus(msg) {
+              const markStatus = () => receiveStatus(msg)
               const b = pendingBatchRef.current
               if (b && b.id === assistantMsgId) {
                 b.statusText = msg
-                b.markConnected = markConnected
+                b.markConnected = markStatus
               } else {
-                pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: '', deltaChunk: '', newToolSteps: [], thinkingDone: false, statusText: msg, markConnected }
+                pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: '', deltaChunk: '', newToolSteps: [], thinkingDone: false, statusText: msg, markConnected: markStatus }
               }
               scheduleBatchFlush()
             },
-            onDone() {
-              // Flush any buffered frames BEFORE finalising so no data is lost.
-              flushPending()
-              clearFlushTimer()
-              clearPoll()
-              dispatch({ type: 'STREAM_DONE', id: assistantMsgId })
-              setConversationsTick(t => t + 1) // turn persisted → refresh the recents list
-              streamRef.current = null
-              activeAssistantIdRef.current = null
-              currentTaskIdRef.current = null
-              sessionStorage.removeItem(SS_TASK_ID)
-              setReconnecting(false)
-              // Turn ended → the cycle reaps its confined-browser session
-              // (cleanup_thread_browser_session), so the chip (the agent is actively
-              // using the browser NOW) goes off, staying coherent with "En vivo".
-              setLiveBrowserActive(false)
+            onDone(outcome) {
+              finishFromStream(assistantMsgId, savedTaskId, savedConvId, outcome)
             },
             onError(_msg) {
-              // On WS error after re-attach, keep the poll running — the task may
-              // still be running and the mirror will eventually have the answer.
-              // Show a neutral "working" status rather than an error bar so the user
-              // is not alarmed while the poll continues watching for the final answer.
-              // CRITICAL: do NOT delete SS_TASK_ID here. A transient WS error (idle
-              // close, handshake gap, a 2nd refresh mid-reconnect) is NOT the task
-              // ending — the task is still running server-side. Keeping the handle
-              // lets the NEXT mount/refresh re-attach and the broker replay. The
-              // handle is cleared only on a real terminal done (onDone) or when the
-              // poll adopts the final answer (ADOPT_FINAL). Deleting it here was the
-              // bug that made "2 refreshes kill the chat until it feels like coming
-              // back": once gone, no refresh could ever reconnect.
+              // The bridge also emits error frames when attachment fails. Retain
+              // the task handle and mirror poll, but disclose the reception error.
               flushPending()
               clearFlushTimer()
-              dispatch({ type: 'STATUS_STREAMING', text: 'Trabajando…' })
-              streamRef.current = null
               setReconnecting(false)
+              setStreamError(true)
+              pollNowRef.current?.()
             },
           }
-          streamRef.current = openTaskStream(savedTaskId, callbacks)
+          streamRef.current = openTaskStream(savedTaskId, scopedCallbacks(callbacks,
+            () => generation.current === epoch && activeAssistantIdRef.current === assistantMsgId))
         }
       })
       .catch(() => {
+        if (generation.current !== epoch) return
         // Stale session — clear and start fresh.
         sessionStorage.removeItem(SS_CONV_ID)
         sessionStorage.removeItem(SS_TASK_ID)
@@ -845,15 +871,19 @@ export function useChat(): UseChatReturn {
   // Clear the poll and any pending flush timer on unmount.
   useEffect(() => {
     return () => {
+      generation.current += 1
       clearPoll()
       clearFlushTimer()
+      streamRef.current?.close()
+      streamRef.current = null
     }
   }, [clearPoll, clearFlushTimer])
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim()) return
 
-    stopStream()
+    detachStream()
+    const epoch = generation.current
 
     // Own the conversation id client-side (generate it locally before the first send)
     let convId = state.convId
@@ -882,10 +912,14 @@ export function useChat(): UseChatReturn {
         dedup_key: `chat:${Date.now()}:${Math.random().toString(36).slice(2)}`,
         ...(agentIdToSend ? { agent_id: agentIdToSend } : {}),
       })
+      if (generation.current !== epoch) return
       taskId = res.task_id
     } catch (err) {
+      if (generation.current !== epoch) return
       const msg = err instanceof Error ? err.message : 'Error al enviar'
-      dispatch({ type: 'STATUS_ERROR', message: msg })
+      const code = err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
+        ? err.code : undefined
+      dispatch({ type: 'STATUS_ERROR', message: msg, code })
       return
     }
 
@@ -895,15 +929,8 @@ export function useChat(): UseChatReturn {
     currentTaskIdRef.current = taskId
     sessionStorage.setItem(SS_TASK_ID, taskId)
 
-    // Start the safety-net poll. Baseline = finalized assistant messages already
-    // in state BEFORE we added the new in-flight bubble (ADD_ASSISTANT not yet
-    // reflected in state.messages at this point in the async callback chain, but
-    // we computed it from the snapshot at the top of sendMessage which is fine).
-    // convId is guaranteed non-null here (set above before postChat).
-    const baselineSend = state.messages.filter(
-      m => m.type === 'assistant' && !m.isStreaming,
-    ).length
-    startPoll(convId!, baselineSend)
+    // The poll remains scoped to the acknowledged task and this conversation.
+    startPoll(convId!)
 
     // Accumulate incoming WS frames into pendingBatchRef and schedule a
     // FLUSH_INTERVAL_MS timeout. The flush emits a single BATCH_UPDATE
@@ -917,15 +944,20 @@ export function useChat(): UseChatReturn {
 
     const callbacks: StreamCallbacks = {
       onDelta(chunk) {
+        setReconnecting(false)
+        setStreamError(false)
         const b = pendingBatchRef.current
         if (b && b.id === assistantMsgId) {
           b.deltaChunk += chunk
+          b.statusText = 'Respondiendo…'
         } else {
-          pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: '', deltaChunk: chunk, newToolSteps: [], thinkingDone: false, statusText: null, markConnected: null }
+          pendingBatchRef.current = { id: assistantMsgId, thinkingChunk: '', deltaChunk: chunk, newToolSteps: [], thinkingDone: false, statusText: 'Respondiendo…', markConnected: null }
         }
         scheduleBatchFlush()
       },
       onThinking(chunk) {
+        setReconnecting(false)
+        setStreamError(false)
         const b = pendingBatchRef.current
         if (b && b.id === assistantMsgId) {
           b.thinkingChunk += chunk
@@ -935,6 +967,8 @@ export function useChat(): UseChatReturn {
         scheduleBatchFlush()
       },
       onToolCall(frame: Extract<StreamFrame, { kind: 'tool_call' }>) {
+        setReconnecting(false)
+        setStreamError(false)
         // d can be the nested descriptor OR the frame itself — both shapes share tool/label/target.
         const d = frame.tool_call ?? (frame as Record<string, unknown>)
         const name = (d.tool as string | undefined) ?? (d.tool_name as string | undefined) ?? 'herramienta'
@@ -957,6 +991,7 @@ export function useChat(): UseChatReturn {
         scheduleBatchFlush()
       },
       onStatus(msg) {
+        receiveStatus(msg)
         const b = pendingBatchRef.current
         if (b && b.id === assistantMsgId) {
           b.statusText = msg
@@ -965,46 +1000,32 @@ export function useChat(): UseChatReturn {
         }
         scheduleBatchFlush()
       },
-      onDone() {
-        // Flush any buffered frames BEFORE finalising so no data is lost.
-        flushPending()
-        clearFlushTimer()
-        clearPoll()
-        dispatch({ type: 'STREAM_DONE', id: assistantMsgId })
-        setConversationsTick(t => t + 1) // turn persisted → refresh the recents list
-        streamRef.current = null
-        activeAssistantIdRef.current = null
-        currentTaskIdRef.current = null
-        sessionStorage.removeItem(SS_TASK_ID)
-        // Turn ended → the cycle reaps its confined-browser session, so the chip (the
-        // agent is actively using the browser NOW) goes off, coherent with "En vivo".
-        setLiveBrowserActive(false)
+      onDone(outcome) {
+        finishFromStream(assistantMsgId, taskId, convId!, outcome)
       },
       onError(_msg) {
-        // A terminal error frame (or transient teardown) arrived. Do NOT dispatch
-        // STATUS_ERROR and do NOT delete SS_TASK_ID: STATUS_ERROR flips the bubble's
-        // isStreaming=false, which makes the poll's ADOPT_FINAL a no-op (its guard
-        // only seals a STILL-streaming bubble) → the persisted answer/refusal is
-        // NEVER rendered = the "first attempt shows nothing, second works" bug.
-        // Keep the bubble streaming and let the 2s mirror poll adopt the final
-        // answer (success narrative, refusal, or the backend's "⚠ …" error turn).
-        // Matches the re-attach onError (the proven-good path).
+        // An error frame can describe failed reception or an intermediate attempt.
+        // Preserve partial text and the task-scoped mirror fallback; never resend.
         flushPending()
         clearFlushTimer()
-        dispatch({ type: 'STATUS_STREAMING', text: 'Trabajando…' })
-        streamRef.current = null
+        setReconnecting(false)
+        setStreamError(true)
+        pollNowRef.current?.()
       },
     }
 
-    streamRef.current = openTaskStream(taskId, callbacks)
-  }, [state.convId, stopStream, startPoll, clearPoll, flushPending, clearFlushTimer])
+    streamRef.current = openTaskStream(taskId, scopedCallbacks(callbacks,
+      () => generation.current === epoch && activeAssistantIdRef.current === assistantMsgId))
+  }, [state.convId, state.agentId, state.messages, detachStream, startPoll, finishFromStream, flushPending, clearFlushTimer, receiveStatus])
 
   const loadConversation = useCallback(async (id: string) => {
-    stopStream()
+    detachStream()
+    const epoch = generation.current
     setLiveBrowserActive(false) // switching conversations — new live context
     browserUsedRef.current = false  // new conversation — forget the browser marker
     try {
       const detail = await getConversation(id)
+      if (generation.current !== epoch) return
       // Null-guard messages + content (parity with the mount-restore path): the
       // mirror can return a null content for some message kinds; m.content used
       // raw threw inside the try and made the conversation unopenable.
@@ -1028,9 +1049,10 @@ export function useChat(): UseChatReturn {
         })
       dispatch({ type: 'LOAD_MESSAGES', convId: id, messages })
     } catch {
+      if (generation.current !== epoch) return
       dispatch({ type: 'STATUS_ERROR', message: 'No se pudo cargar la conversación.' })
     }
-  }, [stopStream])
+  }, [detachStream])
 
   return {
     convId: state.convId,
@@ -1038,6 +1060,8 @@ export function useChat(): UseChatReturn {
     messages: state.messages,
     status: state.status,
     reconnecting,
+    streamError,
+    cancellation,
     liveBrowserActive,
     conversationsTick,
     sendMessage,

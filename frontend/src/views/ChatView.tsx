@@ -14,15 +14,18 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type KeyboardEvent,
   type ChangeEvent,
+  type RefObject,
 } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
-import { GitBranch, Loader2, CheckCircle2, AlertTriangle, FileText, X, Plus, Paperclip, FolderOpen, Zap, Check, Maximize2, ChevronDown, ChevronRight, ChevronLeft } from 'lucide-react'
+import { ArrowUp, Square, GitBranch, Loader2, CheckCircle2, AlertTriangle, FileText, X, Plus, Paperclip, FolderOpen, Zap, Check, Maximize2, ChevronDown, ChevronRight, ChevronLeft } from 'lucide-react'
 import { VncFrame } from '../components/VncView'
 import type { ChatMessage, ToolStep } from '../hooks/useChat'
-import { listProviders, uploadWorkspaceFile, getRuntimeStatus, listSkills, ApiError } from '../api/client'
-import type { Provider, Skill } from '../api/types'
+import { uploadWorkspaceFile, getRuntimeStatus, listSkills } from '../api/client'
+import type { Skill } from '../api/types'
+import { useActiveProvider, type ActiveProviderState } from '../hooks/useActiveProvider'
 import {
   uploadDirectoryToBridge,
   syncBridgeToHost,
@@ -38,10 +41,12 @@ import { useT } from '../lib/i18n'
 import { toolLabel } from '../lib/toolLabels'
 import { isLiveSkill } from '../lib/skills'
 import { useFeatures } from '../hooks/useFeatures'
+import { ChatDraft, type PendingAttachment } from '../lib/chatDrafts'
 import styles from './ChatView.module.css'
 
 /** Map raw backend/stream errors to human-readable copy. */
-function humanizeError(msg: string, t: (key: Parameters<ReturnType<typeof useT>>[0]) => string): string {
+export function humanizeError(msg: string, t: (key: Parameters<ReturnType<typeof useT>>[0]) => string, code?: string): string {
+  if (code === 'kill_switch_engaged') return t('chat.err.kill_switch')
   if (/connection refused|econnrefused|network/i.test(msg)) return t('chat.err.connection')
   if (/stream_error|stream error/i.test(msg)) return t('chat.err.stream')
   if (/timeout|timed out/i.test(msg)) return t('chat.err.timeout')
@@ -67,16 +72,14 @@ function Welcome({ onSuggestion }: WelcomeProps) {
     t('chat.suggest.4'),
   ]
   return (
-    <div className={styles.welcome} role="main">
-      <div className={styles.welcomeMark} aria-hidden="true">L</div>
+    <div className={styles.welcome}>
       <h1 className={styles.welcomeTitle}>{t('chat.welcome.title')}</h1>
       <p className={styles.welcomeSubtitle}>{t('chat.welcome.subtitle')}</p>
-      <div className={styles.welcomeSuggestions} role="list" aria-label={t('chat.suggestions_aria')}>
+      <div className={styles.welcomeSuggestions} aria-label={t('chat.suggestions_aria')}>
         {suggestions.map((s) => (
           <button
             key={s}
             className={styles.suggestionPill}
-            role="listitem"
             type="button"
             onClick={() => onSuggestion(s)}
           >
@@ -284,15 +287,13 @@ function ThinkingBlock({ text, done }: ThinkingBlockProps) {
 interface UserMessageProps {
   text: string
   failed?: boolean
-  enterDelay?: number
 }
 
-const UserMessage = memo(function UserMessage({ text, failed, enterDelay = 0 }: UserMessageProps) {
+const UserMessage = memo(function UserMessage({ text, failed }: UserMessageProps) {
   const t = useT()
   return (
     <div
       className={[styles.messageRow, styles.messageRowUser].join(' ')}
-      style={{ animationDelay: `${enterDelay}ms` }}
       role="article"
       aria-label={t('chat.aria.message')}
     >
@@ -314,18 +315,16 @@ const UserMessage = memo(function UserMessage({ text, failed, enterDelay = 0 }: 
 // that would 404 (the app is mounted under /app). This is how the agent "operates
 // its own body" — it can take the user to any section with a one-click button.
 const APP_VIEW_ROUTES: ReadonlySet<string> = new Set([
-  '/chat', '/programadas', '/agentes', '/skills', '/integraciones', '/mcp',
+  '/chat', '/tareas', '/programadas', '/agentes', '/skills', '/integraciones', '/mcp',
   '/archivos', '/proveedores', '/seguridad', '/memoria', '/coste', '/en-vivo', '/ensenar',
 ])
 
 interface AssistantMessageProps {
   message: Extract<ChatMessage, { type: 'assistant' }>
-  enterDelay?: number
 }
 
 const AssistantMessage = memo(function AssistantMessage({
   message,
-  enterDelay = 0,
 }: AssistantMessageProps) {
   const { thinkingText, thinkingDone, toolSteps, activityText, renderedHtml, isStreaming } = message
   const navigate = useNavigate()
@@ -365,7 +364,6 @@ const AssistantMessage = memo(function AssistantMessage({
   return (
     <div
       className={styles.messageRow}
-      style={{ animationDelay: `${enterDelay}ms` }}
       role="article"
       aria-label={t('chat.aria.reply')}
     >
@@ -412,7 +410,7 @@ interface StatusBarProps {
 }
 
 function StatusBar({ phase, text }: StatusBarProps) {
-  if (phase === 'idle') return null
+  if (phase === 'idle' && !text) return null
   const isError = phase === 'error'
 
   return (
@@ -421,7 +419,7 @@ function StatusBar({ phase, text }: StatusBarProps) {
       role={isError ? 'alert' : 'status'}
       aria-live={isError ? 'assertive' : 'polite'}
     >
-      {!isError && <SpinnerIcon />}
+      {!isError && phase !== 'idle' && <SpinnerIcon />}
       <span>{text}</span>
     </div>
   )
@@ -448,24 +446,14 @@ function NoModelBanner() {
 
 // ── Model picker ───────────────────────────────────────────────────────────
 
-function useActiveProvider() {
-  const [provider, setProvider] = useState<Provider | null>(null)
-
-  useEffect(() => {
-    listProviders()
-      .then((data) => {
-        const arr = Array.isArray(data) ? data : []
-        setProvider(arr.find((p) => p.is_active) ?? arr[0] ?? null)
-      })
-      .catch(() => setProvider(null))
-  }, [])
-
-  return provider
+function StandaloneModelPicker() {
+  const providerState = useActiveProvider()
+  return <ModelPicker providerState={providerState} />
 }
 
-function ModelPicker() {
+function ModelPicker({ providerState }: { providerState: ActiveProviderState }) {
   const navigate = useNavigate()
-  const provider = useActiveProvider()
+  const { provider, status } = providerState
   const { allowed } = useFeatures()
   const t = useT()
 
@@ -487,7 +475,9 @@ function ModelPicker() {
     )
   }
 
-  const label = provider
+  const label = status === 'loading' ? t('chat.model.checking')
+    : status === 'error' ? t('chat.model.unavailable')
+    : provider
     ? (provider.default_model ?? provider.alias ?? provider.name ?? t('chat.model.active_fallback'))
     : t('chat.model.none')
 
@@ -552,38 +542,53 @@ function AttachmentChip({ name, uploading, error, onRemove }: AttachmentChipProp
 
 // ── Composer ───────────────────────────────────────────────────────────────
 
-interface PendingAttachment {
-  id: string
-  file: File
-  uploading: boolean
-  uploadedPath: string | null
-  error: boolean
-}
-
 interface ComposerProps {
   disabled: boolean
   isStreaming: boolean
   onSend(text: string): void
   onStop(): void
+  stopDisabled?: boolean
+  stopLabel?: string
   value: string
   onChange(v: string): void
+  inputRef?: RefObject<HTMLTextAreaElement>
+  draft?: ChatDraft
+  providerState?: ActiveProviderState
 }
 
-function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: ComposerProps) {
+export function Composer({ disabled, isStreaming, onSend, onStop, stopDisabled = false, stopLabel, value, onChange, inputRef, draft: suppliedDraft, providerState }: ComposerProps) {
   const t = useT()
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const localTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const textareaRef = inputRef ?? localTextareaRef
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const [attachments, setAttachments] = useState<PendingAttachment[]>([])
+  const submissionInFlight = useRef(false)
+  const stopHasFocus = useRef(false)
+  useLayoutEffect(() => {
+    if (!isStreaming && stopHasFocus.current) {
+      // React may reuse the stop button as Send. Return keyboard users to their
+      // draft only if they have not deliberately moved focus elsewhere.
+      const focused = document.activeElement
+      if (focused === document.body || focused?.getAttribute('data-chat-action') === 'submit') {
+        textareaRef.current?.focus()
+      }
+      stopHasFocus.current = false
+    }
+  }, [isStreaming, textareaRef])
+  const [localDraft] = useState(() => new ChatDraft('standalone'))
+  const draft = suppliedDraft ?? localDraft
+  const { attachments, selectedSkills, bridge, bridgeBusy, bridgeSyncing } = useSyncExternalStore(draft.subscribe, draft.getSnapshot)
+  const setAttachments = (value: PendingAttachment[] | ((previous: PendingAttachment[]) => PendingAttachment[])) => draft.set('attachments', value)
+  const setSelectedSkills = (value: Skill[] | ((previous: Skill[]) => Skill[])) => draft.set('selectedSkills', value)
+  const setBridge = (value: BridgeSelection | null) => draft.set('bridge', value)
+  const setBridgeBusy = (value: boolean) => draft.set('bridgeBusy', value)
+  const setBridgeSyncing = (value: boolean) => draft.set('bridgeSyncing', value)
 
   // "+" context menu: two-level (root → skills submenu). Non-exclusive.
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuView, setMenuView] = useState<'root' | 'skills'>('root')
   const [skills, setSkills] = useState<Skill[]>([])
   const [skillsLoaded, setSkillsLoaded] = useState(false)
-  const [selectedSkills, setSelectedSkills] = useState<Skill[]>([])
-  const [bridge, setBridge] = useState<BridgeSelection | null>(null)
-  const [bridgeBusy, setBridgeBusy] = useState(false)
-  const [bridgeSyncing, setBridgeSyncing] = useState(false)
+  const [skillsError, setSkillsError] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const plusBtnRef = useRef<HTMLButtonElement>(null)
 
@@ -600,11 +605,14 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
   async function enterSkillsView() {
     setMenuView('skills')
     if (!skillsLoaded) {
+      setSkillsError(false)
       try {
         const list = await listSkills()
         setSkills(Array.isArray(list) ? list : [])
-      } catch { /* fail-soft: empty picker */ }
-      setSkillsLoaded(true)
+        setSkillsLoaded(true)
+      } catch {
+        setSkillsError(true)
+      }
     }
   }
 
@@ -668,6 +676,28 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
     return () => document.removeEventListener('mousedown', onDoc)
   }, [menuOpen])
 
+  // A menu owns focus while open. Keyboard navigation is immediate, including
+  // returning focus to its trigger on Escape; never animate these operations.
+  useEffect(() => {
+    if (menuOpen) menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
+  }, [menuOpen, menuView])
+
+  function handleMenuKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      setMenuOpen(false)
+      plusBtnRef.current?.focus()
+      return
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
+    e.preventDefault()
+    const items = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
+    const current = items.indexOf(document.activeElement as HTMLButtonElement)
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1
+      : (current + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
+    items[next]?.focus()
+  }
+
   // Auto-grow textarea
   useLayoutEffect(() => {
     const el = textareaRef.current
@@ -676,12 +706,14 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`
   }, [value])
 
+  useLayoutEffect(() => { submissionInFlight.current = false }, [value, disabled])
+
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter also commits characters in IME input; that must never submit.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      if (!disabled && (value.trim() || attachments.some((a) => a.uploadedPath))) {
-        handleSend()
-      }
+      handleSend()
     }
   }
 
@@ -713,12 +745,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
               a.id === att.id ? { ...a, uploading: false, uploadedPath: result.path } : a,
             ),
           )
-        } catch (err) {
-          const msg =
-            err instanceof ApiError
-              ? err.message
-              : t('chat.err.attach').replace('{name}', att.file.name)
-          console.error(`Attachment upload failed for ${att.file.name}: ${msg}`)
+        } catch {
           setAttachments((prev) =>
             prev.map((a) =>
               a.id === att.id ? { ...a, uploading: false, error: true } : a,
@@ -734,6 +761,8 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
   }
 
   function handleSend() {
+    // Shared guard for pointer and keyboard paths: no partial attachment sends.
+    if (!canSend || submissionInFlight.current) return
     const uploadedPaths = attachments
       .filter((a) => a.uploadedPath !== null)
       .map((a) => a.uploadedPath as string)
@@ -760,6 +789,7 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
     }
 
     if (text.trim()) {
+      submissionInFlight.current = true
       onSend(text)
       setAttachments([])
       setSelectedSkills([])
@@ -769,9 +799,10 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
   }
 
   const anyUploading = attachments.some((a) => a.uploading)
+  const anyFailed = attachments.some((a) => a.error)
   const hasContext =
     attachments.some((a) => a.uploadedPath) || selectedSkills.length > 0 || bridge !== null
-  const canSend = !disabled && !anyUploading && !bridgeBusy && (value.trim() !== '' || hasContext)
+  const canSend = !disabled && !isStreaming && !anyUploading && !anyFailed && !bridgeBusy && (value.trim() !== '' || hasContext)
 
   return (
     <div className={styles.composerWrap}>
@@ -834,7 +865,11 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
 
       <div className={styles.composerBox}>
         {menuOpen && (
-          <div ref={menuRef} className={styles.plusMenu} role="menu" aria-label={t('chat.menu.aria')}>
+          <div ref={menuRef} className={styles.plusMenu} role="menu" aria-label={t('chat.menu.aria')}
+            onKeyDown={handleMenuKeyDown}
+            onBlur={e => {
+              if (e.relatedTarget && e.relatedTarget !== plusBtnRef.current && !e.currentTarget.contains(e.relatedTarget)) setMenuOpen(false)
+            }}>
             {menuView === 'root' && (
               <>
                 <button type="button" className={styles.plusItem} role="menuitem"
@@ -860,6 +895,11 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
                   <span className={styles.plusItemLabel}>{t('nav.skills')}</span>
                 </button>
                 {(() => {
+                  if (skillsError) return <div className={styles.plusEmpty} role="status">
+                    <p>{t('chat.menu.error')}</p>
+                    <button type="button" role="menuitem" className={styles.plusItem}
+                      onClick={() => void enterSkillsView()}>{t('approval.err.retry')}</button>
+                  </div>
                   if (!skillsLoaded) return <div className={styles.plusEmpty}>{t('chat.menu.loading')}</div>
                   if (skills.length === 0) return <div className={styles.plusEmpty}>{t('chat.menu.none')}</div>
                   return skills.map((sk) => {
@@ -884,10 +924,10 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
           className={styles.composerTextarea}
           placeholder={t('chat.placeholder')}
           aria-label={t('chat.aria.textarea')}
+          aria-describedby="community-composer-hint"
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          disabled={disabled}
           rows={1}
         />
         <div className={styles.composerToolbar}>
@@ -915,34 +955,42 @@ function Composer({ disabled, isStreaming, onSend, onStop, value, onChange }: Co
             <Plus size={16} />
           </button>
 
-          <ModelPicker />
+          {providerState ? <ModelPicker providerState={providerState} /> : <StandaloneModelPicker />}
 
           <div className={styles.composerToolbarRight}>
             {isStreaming ? (
               <button
                 type="button"
                 className={styles.stopBtn}
-                onClick={onStop}
-                aria-label={t('chat.aria.stop')}
+                data-chat-action="submit"
+                aria-disabled={stopDisabled}
+                onClick={() => { if (!stopDisabled) onStop() }}
+                onFocus={() => { stopHasFocus.current = true }}
+                onBlur={() => { stopHasFocus.current = false }}
+                aria-label={stopLabel ?? t('chat.aria.stop')}
+                title={stopLabel ?? t('chat.aria.stop')}
               >
-                {t('chat.stop')}
+                <Square size={13} fill="currentColor" aria-hidden="true" />
               </button>
             ) : (
               <button
                 type="button"
                 className={styles.sendBtn}
+                data-chat-action="submit"
                 onClick={handleSend}
                 disabled={!canSend}
                 aria-label={t('chat.aria.send')}
                 aria-busy={anyUploading}
+                title={anyUploading ? t('chat.uploading') : t('chat.aria.send')}
               >
-                {anyUploading ? t('chat.uploading') : t('chat.send')}
+                {anyUploading ? <Loader2 size={16} className="spin" aria-hidden="true" /> : <ArrowUp size={18} aria-hidden="true" />}
               </button>
             )}
           </div>
         </div>
       </div>
-      <p className={styles.composerFooter}>{t('chat.disclaimer')}</p>
+      {anyFailed && <p className={styles.attachmentError} role="alert">{t('chat.attach.failed')}</p>}
+      <p id="community-composer-hint" className={styles.composerFooter}>{t('chat.composer.hint')}</p>
     </div>
   )
 }
@@ -1064,46 +1112,24 @@ function LiveBrowserPanel() {
 
 export default function ChatView() {
   const t = useT()
-  const { convId, agentName, messages, status, sendMessage, stopStream, approvalRefreshTick, liveBrowserActive } =
+  const { convId, agentName, messages, status, sendMessage, stopStream, approvalRefreshTick, liveBrowserActive, draft,
+    cancellation = 'idle', streamError = false, reconnecting = false } =
     useOutletContext<ChatOutletContext>()
-  const [composerText, setComposerText] = useState('')
-  const [panelOpen, setPanelOpen] = useState(true)
-  const [showNoModel, setShowNoModel] = useState(false)
-  const [noProvider, setNoProvider] = useState(false)
+  const { text: composerText } = useSyncExternalStore(draft.subscribe, draft.getSnapshot)
+  const setComposerText = useCallback((text: string) => draft.set('text', text), [draft])
+  const [panelOpen, setPanelOpen] = useState(false)
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false)
+  const providerState = useActiveProvider()
+  const { allowed } = useFeatures()
+  const noProvider = providerState.status === 'ready' && !providerState.hasActive && allowed('proveedores')
+  const composerInputRef = useRef<HTMLTextAreaElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const userScrolledRef = useRef(false)
   const pinRef = useRef(true)
 
-  // Proactively surface "connect a model" alert
-  useEffect(() => {
-    let alive = true
-    listProviders()
-      .then((data) => {
-        const arr = Array.isArray(data) ? data : []
-        if (alive) setNoProvider(arr.length === 0)
-      })
-      .catch(() => {
-        /* transient — 409 path still covers it */
-      })
-    return () => {
-      alive = false
-    }
-  }, [])
-
   const isStreaming = status.phase === 'streaming' || status.phase === 'sending'
   const showWelcome = messages.length === 0
-
-  // Detect no-model 409
-  useEffect(() => {
-    if (status.phase === 'error') {
-      const msg = (status as { phase: 'error'; message: string }).message ?? ''
-      const isNoModel =
-        msg.includes('409') || /sin modelo|no model|no provider|no.*provider/i.test(msg)
-      setShowNoModel(isNoModel)
-    } else {
-      setShowNoModel(false)
-    }
-  }, [status])
+  const conversationTitle = messages.find(message => message.type === 'user')
 
   // Scroll pinning
   useEffect(() => {
@@ -1113,10 +1139,17 @@ export default function ChatView() {
       const nearBottom = el!.scrollTop + el!.clientHeight >= el!.scrollHeight - 80
       pinRef.current = nearBottom
       userScrolledRef.current = !nearBottom
+      setShowJumpToLatest(!nearBottom)
     }
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => el.removeEventListener('scroll', onScroll)
   }, [])
+
+  useLayoutEffect(() => {
+    userScrolledRef.current = false
+    pinRef.current = true
+    setShowJumpToLatest(false)
+  }, [convId])
 
   useLayoutEffect(() => {
     const el = bodyRef.current
@@ -1131,30 +1164,38 @@ export default function ChatView() {
       userScrolledRef.current = false
       pinRef.current = true
       setComposerText('')
-      setShowNoModel(false)
       void sendMessage(text)
     },
-    [sendMessage],
+    [sendMessage, setComposerText],
   )
 
   const handleSuggestion = useCallback(
     (text: string) => {
-      handleSend(text)
+      setComposerText(text)
+      composerInputRef.current?.focus()
     },
-    [handleSend],
+    [setComposerText],
   )
 
   const statusText =
-    status.phase === 'streaming'
+    isStreaming && cancellation === 'requesting' ? t('chat.cancel.requesting')
+      : isStreaming && cancellation === 'requested' ? t('chat.cancel.requested')
+      : isStreaming && cancellation === 'error' ? t('chat.cancel.error')
+      : isStreaming && streamError ? t('chat.stream.interrupted')
+      : isStreaming && reconnecting ? t('chat.stream.reconnecting')
+      : status.phase === 'streaming'
       ? status.statusText
       : status.phase === 'sending'
         ? t('chat.sending')
-        : status.phase === 'error' && !showNoModel
+        : status.phase === 'error'
           ? humanizeError(
               (status as { phase: 'error'; message: string }).message ?? '',
               t,
+              status.code,
             )
-          : undefined
+          : status.phase === 'idle' && status.outcome === 'cancelled'
+            ? t('chat.cancel.completed')
+            : undefined
 
   return (
     <>
@@ -1167,7 +1208,7 @@ export default function ChatView() {
                 ? t('chat.topbar.talking_to').replace('{name}', agentName)
                 : showWelcome
                   ? t('chat.topbar.new_conversation')
-                  : t('nav.chat')}
+                  : conversationTitle?.type === 'user' ? conversationTitle.text.split('\n')[0] : t('nav.chat')}
             </span>
             <button
               className={styles.topbarPanelBtn}
@@ -1191,18 +1232,16 @@ export default function ChatView() {
             {showWelcome ? (
               <Welcome onSuggestion={handleSuggestion} />
             ) : (
-              messages.map((msg, idx) =>
+              messages.map(msg =>
                 msg.type === 'user' ? (
                   <UserMessage
                     key={msg.id}
                     text={msg.text}
-                    enterDelay={Math.min(idx * 30, 180)}
                   />
                 ) : (
                   <AssistantMessage
                     key={msg.id}
                     message={msg}
-                    enterDelay={Math.min(idx * 30, 180)}
                   />
                 ),
               )
@@ -1214,25 +1253,44 @@ export default function ChatView() {
             />
           </div>
 
+          {showJumpToLatest && <button
+            className={styles.jumpToLatest}
+            type="button"
+            aria-label={t('chat.latest')}
+            onClick={() => {
+              if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+              pinRef.current = true
+              userScrolledRef.current = false
+              setShowJumpToLatest(false)
+            }}
+          ><ChevronDown size={16} aria-hidden="true" />{t('chat.latest')}</button>}
           {liveBrowserActive && <LiveBrowserPanel />}
 
-          {showNoModel || noProvider ? (
+          {noProvider && status.phase === 'idle' && !status.outcome ? (
             <NoModelBanner />
           ) : (
-            <StatusBar phase={status.phase} text={statusText} />
+            <StatusBar phase={isStreaming && (cancellation === 'error' || streamError) ? 'error' : status.phase} text={statusText} />
           )}
 
           <Composer
+            key={draft.key}
+            providerState={providerState}
+            draft={draft}
+            inputRef={composerInputRef}
             disabled={status.phase === 'sending' || status.phase === 'streaming'}
             isStreaming={isStreaming}
             onSend={handleSend}
             onStop={stopStream}
+            stopDisabled={status.phase === 'sending' || cancellation === 'requesting' || cancellation === 'requested'}
+            stopLabel={status.phase === 'sending' ? t('chat.cancel.awaiting_task')
+              : cancellation === 'requesting' || cancellation === 'requested' ? t('chat.cancel.pending')
+              : undefined}
             value={composerText}
             onChange={setComposerText}
           />
         </div>
 
-        {panelOpen && <ContextPanel onClose={() => setPanelOpen(false)} busy={status.phase === 'streaming'} />}
+        {panelOpen && <ContextPanel key={draft.key} onClose={() => setPanelOpen(false)} busy={status.phase === 'streaming'} />}
       </div>
     </>
   )

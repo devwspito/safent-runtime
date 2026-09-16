@@ -14,9 +14,6 @@ from hermes.agents_os.application.intent_router import (
     SkillNotAvailable,
 )
 from hermes.agents_os.application.skill_compiler import SkillCompiler
-from hermes.agents_os.application.training_session_orchestrator import (
-    TrainingSessionOrchestrator,
-)
 from hermes.agents_os.domain.surface_kind import SurfaceKind
 
 pytestmark = pytest.mark.unit
@@ -25,22 +22,14 @@ pytestmark = pytest.mark.unit
 def _make_signed_package(
     compiler: SkillCompiler, version: int, tenant_id=None, skill_id="invoice-upload"
 ):
-    orch = TrainingSessionOrchestrator()
     tid = tenant_id or uuid4()
-    sess = orch.start(
+    pkg = compiler.compile_from_steps(
         tenant_id=tid,
-        human_user_id=uuid4(),
         skill_id=skill_id,
-        surface_kinds_allowed=frozenset({SurfaceKind.BROWSER}),
+        steps=[(SurfaceKind.BROWSER, {"v": version}, None)],
+        version=version,
     )
-    orch.capture_step(
-        session_id=sess.session_id,
-        surface_kind=SurfaceKind.BROWSER,
-        action_payload={"v": version},
-    )
-    orch.request_review(session_id=sess.session_id)
-    sess = orch.sign(session_id=sess.session_id, human_confirmed=True)
-    return compiler.compile(session=sess, version=version), tid
+    return pkg, tid
 
 
 @pytest.fixture

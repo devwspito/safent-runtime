@@ -128,7 +128,7 @@ class JailedBrowserManager:
 
         Fast path: if the CDP port accepts, a healthy browser is already running
         — return immediately WITHOUT relaunching. This check does NOT depend on
-        self._started: callers (e.g. the vnc_proxy/training_live websocket
+        self._started: callers (e.g. the vnc_proxy/watch_live websocket
         handlers) construct a FRESH JailedBrowserManager() per request, so
         self._started is always False on that instance even though the eager
         boot-time singleton (or another instance) already launched the browser.

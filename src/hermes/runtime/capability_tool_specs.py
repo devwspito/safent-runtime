@@ -776,12 +776,84 @@ _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "description": (
                     "Composio toolkit slug for the OAuth-simple integration to connect "
                     "(e.g. 'github', 'gmail', 'slack', 'notion'). "
-                    "Only OAuth2/OAuth1 apps are supported; API-key apps use "
-                    "configure_native_provider instead."
+                    "Only OAuth2/OAuth1 simple-link apps are supported. This is "
+                    "not LLM sign-in or Ads onboarding. Configure language models "
+                    "in Sistema → Modelo de IA (/sistema?tab=proveedores), and "
+                    "Google/Meta advertising accounts in Anuncios → Conexiones."
                 ),
             },
         },
         "required": ["slug"],
+    },
+    # ------------------------------------------------------------------
+    # TAILNET_SSH (spec 022 v2) — governed SSH on the owner's tailnet.
+    # `host` must be a MagicDNS name already known to the tailnet (never an
+    # IP literal — rejected before any card, see host_resolution.resolve_host).
+    # The FIRST call to a new host surfaces an owner approval card
+    # (Step 1.6-tailnet_ssh); once approved the host is durably allow-listed.
+    # ------------------------------------------------------------------
+    "tailnet_ssh": {
+        "type": "object",
+        "properties": {
+            "host": {
+                "type": "string",
+                "description": (
+                    "MagicDNS name of the tailnet host to connect to (e.g. 'db1' or "
+                    "'db1.tailxxxx.ts.net'). Never an IP literal."
+                ),
+            },
+            "command": {
+                "type": "string",
+                "description": (
+                    "Command to run on the remote host, forwarded to the remote shell "
+                    "exactly as ssh normally does. Max 8192 characters."
+                ),
+            },
+            "timeout_s": {
+                "type": "integer",
+                "description": "Timeout in seconds for the remote command (1-300).",
+                "minimum": 1,
+                "maximum": 300,
+                "default": 30,
+            },
+            "stdin": {
+                "type": "string",
+                "description": "Optional text fed to the remote command's stdin.",
+            },
+        },
+        "required": ["host", "command"],
+    },
+    "tailnet_file_get": {
+        "type": "object",
+        "properties": {
+            "host": {
+                "type": "string",
+                "description": "MagicDNS name of the tailnet host to read the file from.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Absolute path of the remote file to read (max 5 MiB).",
+            },
+        },
+        "required": ["host", "path"],
+    },
+    "tailnet_file_put": {
+        "type": "object",
+        "properties": {
+            "host": {
+                "type": "string",
+                "description": "MagicDNS name of the tailnet host to write the file to.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Absolute path of the remote file to write.",
+            },
+            "content": {
+                "type": "string",
+                "description": "Text content to write to the remote file (max 5 MiB).",
+            },
+        },
+        "required": ["host", "path", "content"],
     },
 }
 
@@ -977,7 +1049,29 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "Only OAuth2/OAuth1 (simple-link) apps are supported. "
         "Returns a redirect_url / connect_url that the user must open in a browser "
         "to authorise the connection. "
-        "For API-key providers (OpenAI, Anthropic…) use configure_native_provider instead."
+        "This does not configure language models or advertising accounts. "
+        "For LLM credentials/sign-in use the Safent UI: Sistema → Modelo de IA "
+        "(/sistema?tab=proveedores); never ask the user to paste secrets into chat. "
+        "For Google/Meta Ads use Anuncios → Conexiones, which preserves account "
+        "scope and the advertising consent flow. Do not invent unavailable tools."
+    ),
+    "tailnet_ssh": (
+        "Run a command over SSH on a host in the owner's tailnet (spec 022 v2). "
+        "LOW risk in this classification — the real approval gate is a per-HOST "
+        "owner card shown the FIRST time this or a sibling tailnet_* tool reaches "
+        "a given host; once approved, that host flows with no further card, in any "
+        "conversation, until the owner revokes it. `host` must be a MagicDNS name "
+        "already known to the tailnet — never an IP literal."
+    ),
+    "tailnet_file_get": (
+        "Read a small remote file (max 5 MiB) over the SAME governed SSH channel as "
+        "tailnet_ssh — same per-host owner approval gate. Not a general file-transfer "
+        "tool: use for config/log inspection, not bulk transfer."
+    ),
+    "tailnet_file_put": (
+        "Write a small remote file (max 5 MiB) over the SAME governed SSH channel as "
+        "tailnet_ssh — same per-host owner approval gate. Not a general file-transfer "
+        "tool: use for config edits, not bulk transfer."
     ),
 }
 
@@ -1136,6 +1230,11 @@ def build_capability_tool_specs(
         # BROWSER: el adapter despacha por op == tool_name (navigate/click/read_url/
         # snapshot/type_). Sin esto el op llega vacío → "unknown browser op=''".
         if op_override is None and getattr(binding.surface_kind, "value", "") == "browser":
+            op_override = tool_name
+        # TAILNET_SSH (spec 022 v2): TailnetSshSurfaceAdapter.replay() dispatches
+        # by op == tool_name (tailnet_ssh/tailnet_file_get/tailnet_file_put) — same
+        # convention as BROWSER above.
+        if op_override is None and getattr(binding.surface_kind, "value", "") == "tailnet_ssh":
             op_override = tool_name
 
         if tool_risk == ToolRisk.READ_ONLY:

@@ -5,7 +5,7 @@ Escucha SOLO en 127.0.0.1:7517. Expone:
   /healthz
   /api/v1/profile                       perfil del SO (personal-desktop, etc)
   /api/v1/runtime/status                estado live del agente (D-Bus get_runtime_status)
-  /api/v1/runtime/agent-stream          SSE: floor de la Office (status + stats) en push
+  /api/v1/runtime/agent-stream          SSE: actividad real del runtime en push
 
   /api/v1/chat                          POST mensaje → encola vía ControlPlanePort
                                          Devuelve {task_id, stream_path}
@@ -18,6 +18,7 @@ Escucha SOLO en 127.0.0.1:7517. Expone:
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 from datetime import UTC, datetime
@@ -25,7 +26,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from pydantic import BaseModel, Field
 
 from hermes import __version__ as HERMES_VERSION
@@ -35,16 +36,23 @@ from hermes.shell_server.providers.domain import (
 )
 from hermes.shell_server.providers.repo import SQLiteProviderRepository
 from hermes.shell_server.security.secrets import SecretsVault
-from hermes.tasks.control_plane.domain.ports import AgentUnavailable
+from hermes.tasks.control_plane.domain.ports import AgentUnavailable, EnqueueBlockedByKillSwitch
 
 logger = logging.getLogger("hermes-shell-server")
 
-_DB_PATH = Path(
-    os.environ.get(
-        "HERMES_SHELL_DB",
-        "/var/lib/hermes/shell-state.db",
-    )
-)
+
+def _resolve_db_path() -> Path:
+    """Read HERMES_SHELL_DB at CALL time, not at module-import time.
+
+    Previously this was a module-level constant bound once, the first time
+    `hermes.shell_server.main` was imported anywhere in the process — every
+    later `create_app()` call (a second test, a differently-configured
+    instance) silently reused that FIRST value no matter what
+    `HERMES_SHELL_DB` was set to afterwards, making tests order-dependent
+    (whichever test file imported this module first "won" the DB path for
+    every other test in the run).
+    """
+    return Path(os.environ.get("HERMES_SHELL_DB", "/var/lib/hermes/shell-state.db"))
 
 
 def _healthz_payload() -> dict[str, Any]:
@@ -153,8 +161,9 @@ def _build_audit_tail_writer():
 def _build_prometheus_exporter():
     """Build a PrometheusExporterAdapter with a minimal TelemetryOptInService.
 
-    In production the TelemetryOptInService state is loaded from DB; here we
-    use a minimal in-memory instance (disabled by default per FR-061).
+    This factory currently uses an in-memory instance, disabled on every boot
+    per FR-061. Durable consent and an authenticated enable route are not wired;
+    do not infer a production DB-backed opt-in from this adapter.
 
     Signing key: derived from master.key via HKDF so it is deterministic across
     restarts (the telemetry audit chain is in-memory, but re-derives the same key
@@ -625,8 +634,66 @@ def _commitment_matches(commitment: str, presented: str) -> bool:
     return _hmac.compare_digest(digest, commitment)
 
 
+def _bearer_is_valid(token: str, *, operator_token: str, webui_token: str) -> bool:
+    """The ONLY two valid /api/v1/* bearer credentials in this process: the
+    server-side operator token (internal daemon<->shell callers) or the stable
+    webui session bearer (the owner's browser). Single source of truth shared
+    by the HTTP `_require_operator_token` middleware (below, inside
+    create_app()) AND `authenticate_websocket` — a WebSocket route re-deriving
+    this OR-of-two-constant-time-compares itself risks silently accepting a
+    weaker credential or drifting out of sync with the HTTP gate.
+    """
+    if not token:
+        return False
+    return hmac.compare_digest(token, operator_token) or hmac.compare_digest(
+        token, webui_token
+    )
+
+
+async def authenticate_websocket(websocket: WebSocket) -> bool:
+    """Per-connection authenticator for /api/v1/* WebSocket routes.
+
+    Starlette only runs `@app.middleware("http")` for `scope["type"] ==
+    "http"` — it never fires for `"websocket"` — so `_require_operator_token`
+    never sees these connections and each WS route must gate itself. This is
+    the ONE place that does it: same bearer, same `_bearer_is_valid` check the
+    HTTP gate runs, read off `app.state` (populated once in create_app()) so
+    there is no second, divergent implementation per route module.
+
+    The bearer travels as `?token=`, the SAME transport already used by the
+    two SSE routes (`/api/v1/runtime/agent-stream`,
+    `/api/v1/chat/stream/{task_id}`) — `new WebSocket(url)` has no custom-
+    header API either, so query string is the one mechanism every non-fetch
+    transport here shares; one convention, one place the frontend reads the
+    bearer from (`lib/token.ts`).
+
+    On failure, closes the socket with policy code 1008 BEFORE accepting (the
+    connection is never live while unauthenticated) and returns False —
+    callers MUST `return` immediately without calling `websocket.accept()`.
+    On success, returns True and leaves accept() to the caller (some routes,
+    e.g. the noVNC bridge, still need to negotiate their OWN subprotocol).
+    """
+    token = websocket.query_params.get("token", "")
+    operator_token = getattr(websocket.app.state, "shell_auth_token", "")
+    webui_token = getattr(websocket.app.state, "shell_webui_token", "")
+    if _bearer_is_valid(token, operator_token=operator_token, webui_token=webui_token):
+        return True
+    await websocket.close(code=1008, reason="unauthorized")
+    return False
+
+
 def create_app() -> FastAPI:
     from contextlib import asynccontextmanager  # noqa: PLC0415
+
+    # Resolved HERE, at call time — see `_resolve_db_path()` docstring. Every
+    # `_DB_PATH` reference below this point is this local, per-call binding.
+    _DB_PATH = _resolve_db_path()
+    # Establish the protected state directory before any repository can create
+    # it with the process umask. Existing unsafe directories remain rejected.
+    from hermes.security.configuration_lock import configuration_lock  # noqa: PLC0415
+
+    with configuration_lock(_DB_PATH):
+        pass
 
     audit_writer = _build_audit_tail_writer()
     prometheus_exporter = _build_prometheus_exporter()
@@ -650,9 +717,13 @@ def create_app() -> FastAPI:
 
         audit_writer.start_background()
         _egress_boot = _asyncio.create_task(_boot_apply_egress_grants())
-        yield
-        _egress_boot.cancel()
-        audit_writer.stop()
+        application.state.composio_lease_refresh.start()
+        try:
+            yield
+        finally:
+            await application.state.composio_lease_refresh.stop()
+            _egress_boot.cancel()
+            audit_writer.stop()
 
     app = FastAPI(
         title="Hermes Shell — local backend",
@@ -668,12 +739,13 @@ def create_app() -> FastAPI:
     # The control plane is reachable via the published port; with NO auth, any
     # client that reaches it is a full operator (create providers → hijack the LLM
     # backend, POST /chat → inject agent tasks, POST /approvals/{id} → auto-approve
-    # HITL, POST /mcp → spawn code). Require a per-install Bearer token (HKDF subkey
-    # of master.key, stable per-install) on every STATE-CHANGING request. The token
-    # is delivered to the same-origin webui via the injected index.html; the run
+    # HITL, POST /mcp → spawn code — and, until the resource-level fix below, GET
+    # leaked audit/memory/conversations/egress-config to anyone on the loopback).
+    # Require a per-install Bearer token (HKDF subkey of master.key, stable
+    # per-install) on EVERY /api/v1/* request, every method. The token is
+    # delivered to the same-origin webui via the injected index.html; the run
     # posture publishes on 127.0.0.1 only (network boundary). Closes the unauth
     # chain + the HITL bypass + SSRF reachability + the confused-deputy.
-    import hmac as _hmac_mod  # noqa: PLC0415
     import secrets as _secrets_mod  # noqa: PLC0415
     import time as _time_mod  # noqa: PLC0415
     from fastapi import Request as _Req  # noqa: PLC0415
@@ -758,30 +830,86 @@ def create_app() -> FastAPI:
     # working bearer across idle/sleep/restart (it re-derives identical from the
     # persistent master.key). The earlier rotating+TTL design only produced the
     # recurring "Operator Token Required" 401 after the Mac slept past the TTL.
-    # Security is unchanged: the gate still DEFAULT-DENIES uncredentialed mutating
-    # calls on the loopback boundary; the only actor that could abuse loopback is
-    # the agent, and it is netns-isolated from :7517 (the structural control).
+    # Security is unchanged: the gate still DEFAULT-DENIES uncredentialed calls on
+    # the loopback boundary (every method, not just mutating — see below); the
+    # only actor that could abuse loopback is the agent, and it is netns-isolated
+    # from :7517 (the structural control).
     def _mint_session_token() -> str:
         return _WEBUI_TOKEN
 
-    def _session_token_valid(tok: str) -> bool:
-        return _hmac_mod.compare_digest(tok, _WEBUI_TOKEN)
-
     app.state.mint_session_token = _mint_session_token
-    _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+    # ── Resource-level authorization (radiografía §4.1) ───────────────────────
+    # Before this fix the gate below only fired for POST/PUT/PATCH/DELETE, so
+    # EVERY GET under /api/v1/* — audit tail, memory, conversations, providers,
+    # egress domains, MFA status — was served to ANY loopback caller with no
+    # credential at all. Now EVERY method on EVERY /api/v1/* route requires the
+    # operator token or the webui session bearer. There is no per-route allow-
+    # list: /healthz, /metrics, the bootstrap handshake (GET / with ?k=) and the
+    # static SPA (/app/*) already live OUTSIDE /api/v1/ and are untouched by this
+    # middleware — they must stay reachable pre-auth so the owner can load the
+    # shell and present the bootstrap secret in the first place.
+    #
+    # A-07 (specs/025-safent-repaso matriz-final-39eeb8e): /openapi.json is
+    # OUTSIDE /api/v1/ too, but unlike the four surfaces above it is NOT meant
+    # to be public — it was served 200 with no bearer while every route it
+    # describes gave 401, handing the full API surface (71 GET routes + the
+    # rest) to anyone who reaches the port. docs_url/redoc_url are disabled
+    # (FastAPI never registers those routes), but are included here too so
+    # re-enabling either can't reopen this same hole silently.
+    _PROTECTED_NON_API_PATHS: frozenset[str] = frozenset({"/openapi.json", "/docs", "/redoc"})
+    #
+    # The ONE protocol-level constraint: the browser's EventSource API (used by
+    # the two SSE views) cannot set a custom Authorization header. Rather than
+    # exempting those routes from auth, they accept the SAME bearer via a
+    # `?token=` query parameter — still authenticated, just a different
+    # transport for a browser API that has none other.
+    _SSE_QUERY_TOKEN_EXACT: frozenset[str] = frozenset({"/api/v1/runtime/agent-stream"})
+    _SSE_QUERY_TOKEN_PREFIX = "/api/v1/chat/stream/"
+
+    def _is_query_token_sse_route(path: str) -> bool:
+        return path in _SSE_QUERY_TOKEN_EXACT or path.startswith(_SSE_QUERY_TOKEN_PREFIX)
+
+    # Rate-limited audit line for rejected unauthenticated /api/v1/* calls: one
+    # log line per client address per floor window, so a scripted/scanning
+    # client can't flood the journal (still rejected 401 on every hit either
+    # way — this only throttles the LOGGING, never the enforcement).
+    _unauth_log_last_at: dict[str, float] = {}
+    _UNAUTH_LOG_FLOOR_S: float = 5.0
+
+    def _log_rejected_unauthenticated(request: _Req) -> None:
+        client_addr = request.client.host if request.client else "unknown"
+        now = _time_mod.monotonic()
+        if now - _unauth_log_last_at.get(client_addr, -_UNAUTH_LOG_FLOOR_S) < _UNAUTH_LOG_FLOOR_S:
+            return
+        _unauth_log_last_at[client_addr] = now
+        logger.warning(
+            "shell_http_auth.rejected_unauthenticated",
+            extra={
+                "path": request.url.path,
+                "method": request.method,
+                "client": client_addr,
+            },
+        )
 
     @app.middleware("http")
     async def _require_operator_token(request: _Req, call_next):  # noqa: ANN001,ANN202
         path = request.url.path
-        if request.method in _MUTATING_METHODS and path.startswith("/api/v1/"):
+        if path.startswith("/api/v1/") or path in _PROTECTED_NON_API_PATHS:
             auth = request.headers.get("authorization", "")
             token = auth[7:] if auth[:7].lower() == "bearer " else ""
+            if not token and request.method == "GET" and _is_query_token_sse_route(path):
+                token = request.query_params.get("token", "")
             # Accept EITHER the server-side operator token (internal daemon↔shell
             # callers) OR the stable webui bearer (the owner's browser). Both are
-            # constant-time compared. Default-deny otherwise — an uncredentialed
-            # mutating request to the control-plane still gets a 401.
-            operator_ok = bool(token) and _hmac_mod.compare_digest(token, _AUTH_TOKEN)
-            if not (operator_ok or (token and _session_token_valid(token))):
+            # constant-time compared (`_bearer_is_valid` — the SAME check
+            # `authenticate_websocket` runs for the WS routes the HTTP middleware
+            # never reaches). Default-deny otherwise — an uncredentialed request
+            # to the control-plane, mutating or not, gets a 401.
+            if not _bearer_is_valid(
+                token, operator_token=_AUTH_TOKEN, webui_token=_WEBUI_TOKEN
+            ):
+                _log_rejected_unauthenticated(request)
                 return _JSONResp(
                     {"detail": "unauthorized: operator token required"},
                     status_code=401,
@@ -816,20 +944,7 @@ def create_app() -> FastAPI:
     from hermes.agents.infrastructure.sqlite_agent_registry import (  # noqa: PLC0415
         SqliteAgentRegistry,
     )
-    from hermes.instance.association_store import SQLiteAssociationStore  # noqa: PLC0415
-
-    # Inc 5' (2026-07-07): Community seeds only the native `default` agent —
-    # the 27 roster-* templates are never created (owner: "not seeded", not
-    # merely hidden). Mirrors FeatureGuardMiddleware's own edition read
-    # (same store/vault); a store error defaults to "community" (fail to the
-    # SMALLER surface, not the larger one).
-    try:
-        _edition = SQLiteAssociationStore(db_path=_DB_PATH, vault=vault).edition()
-    except Exception:  # noqa: BLE001
-        _edition = "community"
-    agent_registry = SqliteAgentRegistry(
-        db_path=_DB_PATH, seed_default_roster=(_edition != "community")
-    )
+    agent_registry = SqliteAgentRegistry(db_path=_DB_PATH)
     app.state.repo = repo
     app.state.vault = vault
     app.state.conv_repo = conv_repo
@@ -840,35 +955,6 @@ def create_app() -> FastAPI:
     # The real client is built lazily at first use to avoid D-Bus errors at
     # import time in non-OS environments.
     app.state.control_plane = _build_dbus_control_plane_client()
-
-    from hermes.shell_server.training.api import (
-        _get_orchestrator,
-        create_training_router,
-    )
-
-    # Wire the teaching (spec 004/US3) isolation layer. open_teaching_session
-    # opens an isolated context (agent-browser --session) and claims OPERATOR
-    # input-ownership in the ledger; the recording lifecycle (start/stop/sign) is
-    # driven by the training router itself. We pass the same orchestrator the
-    # router uses for consistency.
-    from hermes.agents_os.application.teaching.input_ownership_ledger import (
-        InputOwnershipLedger,
-    )
-    from hermes.agents_os.application.teaching.teaching_session_orchestrator import (
-        TeachingSessionOrchestrator,
-    )
-    from hermes.agents_os.infrastructure.agent_browser_teaching_context import (
-        AgentBrowserTeachingContext,
-    )
-
-    _teaching_orchestrator = TeachingSessionOrchestrator(
-        training_orchestrator=_get_orchestrator(_DB_PATH),
-        context_factory=AgentBrowserTeachingContext(),
-        ledger=InputOwnershipLedger(),
-    )
-    app.include_router(
-        create_training_router(_DB_PATH, teaching_orchestrator=_teaching_orchestrator)
-    )
 
     from hermes.shell_server.agent_browser import create_browser_router
 
@@ -904,6 +990,10 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(create_remote_access_tunnel_router())
+
+    from hermes.shell_server.tailnet.api import create_tailnet_router  # noqa: PLC0415
+
+    app.include_router(create_tailnet_router(vault=vault))
 
     from hermes.shell_server.remote_control.api import (
         create_remote_control_router,
@@ -982,7 +1072,7 @@ def create_app() -> FastAPI:
         """Real live runtime status from the daemon via D-Bus GetRuntimeStatus.
 
         Fail-soft: if the daemon is unavailable returns the idle shape with
-        available=false — never 500s, never blocks the Office view from rendering.
+        available=false — never 500s and never blocks the task activity UI.
         """
         try:
             data = await app.state.dbus_proxy.call_dict("get_runtime_status")
@@ -1127,10 +1217,13 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------
 
     @app.get("/api/v1/chat/conversations")
-    async def list_conversations(agent_id: str | None = None) -> list[dict]:
+    async def list_conversations(
+        agent_id: str | None = None, include_archived: bool = False
+    ) -> list[dict]:
         """Recientes (supervisión read-only). ?agent_id filtra por agente del
-        roster; sin él devuelve todas las conversaciones."""
-        items = conv_repo.list_summaries(agent_id=agent_id)
+        roster; sin él devuelve todas las conversaciones. Las archivadas solo
+        salen con ?include_archived=1."""
+        items = conv_repo.list_summaries(agent_id=agent_id, include_archived=include_archived)
         return [
             {
                 "conversation_id": str(c.conversation_id),
@@ -1141,6 +1234,7 @@ def create_app() -> FastAPI:
                 "last_msg_at": c.last_msg_at.isoformat(),
                 "message_count": c.message_count,
                 "agent_id": c.agent_id,
+                "archived": c.archived,
             }
             for c in items
         ]
@@ -1168,6 +1262,20 @@ def create_app() -> FastAPI:
     async def delete_conversation(conv_id: UUID) -> None:
         try:
             conv_repo.delete(conversation_id=conv_id)
+        except Exception:
+            raise HTTPException(404, "conversation not found")
+
+    @app.post("/api/v1/chat/conversations/{conv_id}/archive", status_code=204)
+    async def archive_conversation(conv_id: UUID) -> None:
+        try:
+            conv_repo.archive(conversation_id=conv_id)
+        except Exception:
+            raise HTTPException(404, "conversation not found")
+
+    @app.post("/api/v1/chat/conversations/{conv_id}/unarchive", status_code=204)
+    async def unarchive_conversation(conv_id: UUID) -> None:
+        try:
+            conv_repo.unarchive(conversation_id=conv_id)
         except Exception:
             raise HTTPException(404, "conversation not found")
 
@@ -1212,6 +1320,18 @@ def create_app() -> FastAPI:
                 conversation_id=conv_id_str,
                 agent_id=resolved_agent_id,
             )
+        except EnqueueBlockedByKillSwitch as exc:
+            logger.warning(
+                "hermes.shell_server.chat.kill_switch_engaged",
+                extra={"reason": str(exc)},
+            )
+            raise HTTPException(
+                status_code=423,
+                detail={
+                    "code": "kill_switch_engaged",
+                    "message": "El freno de emergencia está activo — libéralo desde Seguridad para enviar mensajes.",
+                },
+            ) from exc
         except AgentUnavailable as exc:
             logger.warning(
                 "hermes.shell_server.chat.agent_unavailable",
@@ -1278,12 +1398,6 @@ def create_app() -> FastAPI:
     from hermes.shell_server.cowork.chat_stream import (  # noqa: PLC0415
         create_chat_stream_router,
     )
-    from hermes.shell_server.cowork.training_live import (  # noqa: PLC0415
-        create_training_live_router,
-    )
-    from hermes.shell_server.training.api import (  # noqa: PLC0415
-        _get_orchestrator as _get_training_orchestrator,
-    )
     from hermes.shell_server.cowork.workspace_api import (  # noqa: PLC0415
         create_workspace_router,
     )
@@ -1297,32 +1411,17 @@ def create_app() -> FastAPI:
     from hermes.shell_server.egress_api import create_egress_router  # noqa: PLC0415
 
     app.include_router(create_chat_stream_router())
-    # Pass the SAME orchestrator the training router uses so the live-view captures
-    # the operator's demonstrated actions as steps (compile_and_persist reads them).
-    app.include_router(
-        create_training_live_router(orchestrator=_get_training_orchestrator(_DB_PATH))
-    )
     # Read-only live-watch of the agent's internal browser (Verificar).
     from hermes.shell_server.cowork.watch_live import (  # noqa: PLC0415
         create_watch_live_router,
     )
     app.include_router(create_watch_live_router())
     # VNC-over-WebSocket bridge → x11vnc on the jailed browser's Xvfb display. The
-    # UI's noVNC connects here for a sharp+fluid live view (En vivo → Enseñar/Actividad).
+    # UI's noVNC connects here for a sharp+fluid live view (En vivo → Actividad).
     from hermes.shell_server.cowork.vnc_proxy import (  # noqa: PLC0415
         create_vnc_proxy_router,
     )
     app.include_router(create_vnc_proxy_router())
-    # UI-driven teaching over the noVNC browser: POST /teach/start + /save record the
-    # demonstration via a CDP observer and compile the SKILL.md (same orchestrator).
-    from hermes.shell_server.cowork.teach_vnc import (  # noqa: PLC0415
-        create_teach_vnc_router,
-    )
-    app.include_router(
-        create_teach_vnc_router(
-            orchestrator=_get_training_orchestrator(_DB_PATH), db_path=_DB_PATH
-        )
-    )
     # UTF-8 copy/paste bridge for the noVNC view (CDP-based, bypasses x11vnc's broken
     # clipboard): POST /clipboard/paste inserts text into the jailed browser, /copy
     # reads its current selection. The frontend intercepts Ctrl/Cmd+V and +C.
@@ -1350,6 +1449,24 @@ def create_app() -> FastAPI:
     from hermes.shell_server.cowork.dbus_proxy import DbusRuntimeProxy  # noqa: PLC0415
 
     app.state.dbus_proxy = DbusRuntimeProxy()
+    from hermes.shell_server.composio_lease_refresh import ComposioLeaseRefresh  # noqa: PLC0415
+
+    app.state.composio_lease_refresh = ComposioLeaseRefresh(app.state.dbus_proxy)
+
+    # ------------------------------------------------------------------
+    # Ads session bridge (026, contracts/sso.md) — mint/clear the bridge
+    # cookie under /api/v1/ (existing bearer middleware gates it) and the
+    # same-origin reverse proxy at /ads/* (gated by its own cookie, T005).
+    # Registered here (before the static mount, per main.py's own ordering
+    # discipline) so /ads/* resolves before any catch-all route.
+    # ------------------------------------------------------------------
+    from hermes.shell_server.ads_bridge import (  # noqa: PLC0415
+        AdsSessionJar,
+        create_ads_bridge_router,
+    )
+
+    app.state.ads_session_jar = AdsSessionJar()
+    app.include_router(create_ads_bridge_router(_DB_PATH, vault))
 
     # ------------------------------------------------------------------
     # New REST routers: providers native, agents, skills hub, mcp,
@@ -1384,6 +1501,9 @@ def create_app() -> FastAPI:
     from hermes.shell_server.cowork.web_search_api import (  # noqa: PLC0415
         create_web_search_router,
     )
+    from hermes.shell_server.integrations.image_generation_api import (  # noqa: PLC0415
+        create_image_generation_router,
+    )
     from hermes.shell_server.cowork.notifications_api import (  # noqa: PLC0415
         create_notifications_router,
     )
@@ -1400,9 +1520,14 @@ def create_app() -> FastAPI:
     app.include_router(create_skills_hub_router(_DB_PATH))
     app.include_router(create_mcp_router())
     app.include_router(create_tasks_router())
+    from hermes.shell_server.cowork.task_dashboard_api import (  # noqa: PLC0415
+        create_task_dashboard_router,
+    )
+    app.include_router(create_task_dashboard_router())
     app.include_router(create_security_router())
     app.include_router(create_memory_router())
     app.include_router(create_web_search_router())
+    app.include_router(create_image_generation_router())
     # Notifications bell — /read-all must be registered BEFORE /{id}/read to
     # avoid FastAPI resolving POST /read-all as /{notification_id}/read with
     # notification_id="read-all".  The router factory registers them in this
@@ -1419,13 +1544,23 @@ def create_app() -> FastAPI:
     from hermes.shell_server.instance.api import create_instance_router  # noqa: PLC0415
 
     app.include_router(create_instance_router(_DB_PATH, vault))
+    from hermes.shell_server.cowork.crm_api import create_crm_router  # noqa: PLC0415
 
-    # UI-triggered update: GET reports current/latest version, POST drops a marker the
-    # host-side `safent agent` watches to apply the update (the sandbox can't self-update).
+    app.include_router(create_crm_router(_DB_PATH, vault))
+
+    # UI-triggered update: GET reports current/latest version + verified
+    # manifest digests (T005). Requesting the update/uninstall/companion
+    # actions themselves is install_requests' job (T006) — POST/GET
+    # /api/v1/system/requests, plus the /system/update and /system/uninstall
+    # POST aliases existing installs already call.
+    from hermes.shell_server.install_requests import (  # noqa: PLC0415
+        create_install_requests_router,
+    )
     from hermes.shell_server.system_update import (  # noqa: PLC0415
         create_system_update_router,
     )
     app.include_router(create_system_update_router())
+    app.include_router(create_install_requests_router())
 
 
     # ------------------------------------------------------------------
@@ -1544,7 +1679,7 @@ def create_app() -> FastAPI:
 def main() -> int:
     import uvicorn  # noqa: PLC0415
 
-    from hermes.logging_setup import configure_structured_logging  # noqa: PLC0415
+    from hermes.logging_setup import configure_structured_logging, uvicorn_log_config  # noqa: PLC0415
 
     configure_structured_logging(service="hermes-shell-server", version="0.4.0")
     # Default 127.0.0.1 (production-safe). Para VM con SLIRP hostfwd,
@@ -1558,6 +1693,7 @@ def main() -> int:
         host=host,
         port=port,
         log_level="info",
+        log_config=uvicorn_log_config(),
         # V (forensics + DoS): record HTTP footsteps (the daemon audit logs agent
         # actions, not attacker HTTP calls), cap concurrent connections, and drop
         # idle keep-alives so a connection flood can't exhaust the single-loop daemon.

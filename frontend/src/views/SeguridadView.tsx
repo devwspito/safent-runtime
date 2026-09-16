@@ -2,24 +2,22 @@
  * SeguridadView — Security, governance, and HITL approvals.
  *
  * Three sub-areas:
- *   (a) Pending HITL approvals — polled every 3 s, Approve/Deny via MfaModal.
- *   (b) Governance — MFA enrollment + security policy presets + accordion catalog.
+ *   (a) Pending HITL approvals — polled every 3 s, Approve/Deny via owner confirmation.
+ *   (b) Governance — owner confirmation + security policy presets + accordion catalog.
  *   (c) Security center — egress permissions, recent scans.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { sileo } from 'sileo'
-import { Save, CheckCircle, ShieldCheck, Globe } from 'lucide-react'
+import { Save, CheckCircle, ShieldCheck, Globe, Wifi, Terminal } from 'lucide-react'
 import { useT } from '../lib/i18n'
-import { isApprovalFresh } from '../hooks/usePendingApprovals'
+import { usePendingApprovals } from '../hooks/usePendingApprovals'
 import {
-  listPendingApprovals,
   listInboundDelegations,
-  mfaStatus,
   getPolicies,
   setPolicyPreset,
   setPolicyTools,
-  setMfaOnDangers,
+  setApprovalOnDangers,
   getSecurityScans,
   grantEgressDomain,
   revokeEgressDomain,
@@ -28,21 +26,28 @@ import {
   blockEgressDomain,
   unblockEgressDomain,
   recordInstallDecision,
+  getTailnetStatus,
+  connectTailnet,
+  disconnectTailnet,
+  getSshHosts,
+  revokeSshHost,
+  getKillSwitch,
+  engageKillSwitch,
+  releaseKillSwitch,
 } from '../api/client'
-import type { EgressMode, EgressModeResponse } from '../api/types'
+import type { EgressMode, EgressModeResponse, KillSwitchStatus } from '../api/types'
 import type {
-  PendingApproval,
   InboundDelegation,
-  MfaStatus,
   PoliciesResponse,
   PolicyCatalogEntry,
   SecurityScan,
+  TailnetStatus,
+  TailnetPeer,
+  SshHostEntry,
 } from '../api/types'
 import ApprovalCard from '../components/ApprovalCard'
 import InboundDelegationCard from '../components/InboundDelegationCard'
-import MfaEnroll from '../components/MfaEnroll'
-import MfaModal from '../components/MfaModal'
-import type { MfaFactors } from '../components/MfaModal'
+import OwnerConfirmation from '../components/OwnerConfirmation'
 import { Button } from '../components/ui/Button'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
@@ -75,23 +80,9 @@ function tNew(t: Translate, key: string, fallback: string): string {
 
 const POLL_INTERVAL_MS = 3000
 
-function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
+function ApprovalsSection() {
   const t = useT()
-  const [approvals, setApprovals] = useState<PendingApproval[]>([])
-  const [loading, setLoading] = useState(true)
-
-  const load = useCallback(async () => {
-    const data = await listPendingApprovals()
-    const fresh = Array.isArray(data) ? data.filter(a => isApprovalFresh(a.created_at)) : []
-    setApprovals(fresh)
-    setLoading(false)
-  }, [])
-
-  useEffect(() => {
-    load()
-    const timer = setInterval(load, POLL_INTERVAL_MS)
-    return () => clearInterval(timer)
-  }, [load])
+  const { approvals, isLoading: loading, error, refresh } = usePendingApprovals(POLL_INTERVAL_MS)
 
   return (
     <section className="cv-section">
@@ -101,9 +92,10 @@ function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
           <span className={s.sectionLabelCount}>{approvals.length}</span>
         )}
       </div>
+      {error && <p role="status">{t('approval.list_unavailable')}</p>}
       {loading ? (
         <ApprovalsSkeletonBlock />
-      ) : approvals.length === 0 ? (
+      ) : approvals.length === 0 && !error ? (
         <div className={s.approvalsEmptyRow} role="status">
           <CheckCircle size={15} aria-hidden="true" />
           {t('seg.approvals.empty')}
@@ -115,8 +107,7 @@ function ApprovalsSection({ mfaDisabled }: { mfaDisabled: boolean }) {
               <AnimatedListItem key={a.proposal_id}>
                 <ApprovalCard
                   approval={a}
-                  mfaDisabled={mfaDisabled}
-                  onResolved={load}
+                  onResolved={refresh}
                 />
               </AnimatedListItem>
             ))}
@@ -229,7 +220,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   network:       'Red',
   browser:       'Navegador',
   tasks:         'Tareas programadas',
-  agents:        'Agentes',
+  agents:        'Perfiles',
   providers:     'Modelos y proveedores',
   security:      'Seguridad del sistema',
 }
@@ -431,12 +422,12 @@ function ToolRow({ entry, busy, onToggle }: ToolRowProps) {
   )
 }
 
-// ── Pending MFA action ────────────────────────────────────────────────────────
+// ── Pending owner-confirmed action ────────────────────────────────────────────
 
 type PendingAction =
   | { kind: 'preset'; preset: string }
   | { kind: 'batch'; changes: Record<string, boolean> }
-  | { kind: 'mfa_dangers'; enabled: boolean }
+  | { kind: 'approval_dangers'; enabled: boolean }
 
 // ── Pending changes banner (shared by catalog + legacy tool lists) ──────────
 
@@ -478,9 +469,8 @@ function PendingChangesBanner({ count, busy, onSave, onDiscard }: PendingChanges
 
 // ── Governance section ────────────────────────────────────────────────────────
 
-function GovernanceSection() {
+export function GovernanceSection() {
   const t = useT()
-  const [mfa, setMfa] = useState<MfaStatus | null>(null)
   const [pol, setPol] = useState<PoliciesResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -490,14 +480,22 @@ function GovernanceSection() {
   const [toolPending, setToolPending] = useState<Record<string, boolean>>({})
   const hasPendingTools = Object.keys(toolPending).length > 0
 
-  const mfaDisabled = pol?.mfa_on_dangers === false
+  const approvalDisabled = pol?.approval_on_dangers === false
 
   const load = useCallback(async () => {
-    const [m, p] = await Promise.all([mfaStatus(), getPolicies()])
-    setMfa(m)
-    setPol(p)
-    setLoading(false)
-    setToolPending({})
+    setLoading(true)
+    try {
+      const p = await getPolicies()
+      setPol(p)
+    } catch {
+      // Unknown policy is not the default preset, nor a stale editable policy.
+      setPol(null)
+      setPendingPreset(null)
+      setPendingAction(null)
+    } finally {
+      setLoading(false)
+      setToolPending({})
+    }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -544,7 +542,7 @@ function GovernanceSection() {
     })
     setToolPending({})
     try {
-      await setPolicyTools(changes, '')
+      await setPolicyTools(changes)
       sileo.success({ title: t('seg.save.ok') })
       await load()
     } catch (err) {
@@ -555,12 +553,12 @@ function GovernanceSection() {
     }
   }
 
-  async function handleSign(factors: MfaFactors) {
+  async function handleSign() {
     if (!pendingAction) return
     setBusy(true)
     try {
       if (pendingAction.kind === 'preset') {
-        await setPolicyPreset(pendingAction.preset, factors.totp)
+        await setPolicyPreset(pendingAction.preset)
         sileo.success({ title: t('seg.preset.ok').replace('{preset}', pendingAction.preset) })
         setPendingPreset(null)
         setPendingAction(null)
@@ -577,7 +575,7 @@ function GovernanceSection() {
         })
         setToolPending({})
         try {
-          await setPolicyTools(pendingAction.changes, factors.totp)
+          await setPolicyTools(pendingAction.changes)
           sileo.success({ title: t('seg.save.ok') })
           setPendingAction(null)
           await load()
@@ -587,14 +585,14 @@ function GovernanceSection() {
           return
         }
 
-      } else if (pendingAction.kind === 'mfa_dangers') {
-        await setMfaOnDangers(pendingAction.enabled, factors.totp)
+      } else if (pendingAction.kind === 'approval_dangers') {
+        await setApprovalOnDangers(pendingAction.enabled)
         sileo.success({
           title: pendingAction.enabled
             ? t('seg.dangers.on.ok')
             : t('seg.dangers.off.ok'),
         })
-        setPol(prev => prev ? { ...prev, mfa_on_dangers: pendingAction.enabled } : prev)
+        setPol(prev => prev ? { ...prev, approval_on_dangers: pendingAction.enabled } : prev)
         setPendingAction(null)
       }
     } catch (err) {
@@ -607,9 +605,9 @@ function GovernanceSection() {
 
   function requestPresetSave() {
     if (!pendingPreset) return
-    if (mfaDisabled) {
+    if (approvalDisabled) {
       setBusy(true)
-      void setPolicyPreset(pendingPreset, '')
+      void setPolicyPreset(pendingPreset)
         .then(() => {
           sileo.success({ title: t('seg.preset.ok').replace('{preset}', pendingPreset) })
           setPendingPreset(null)
@@ -642,28 +640,15 @@ function GovernanceSection() {
 
   function handleSaveToolChanges() {
     if (!hasPendingTools) return
-    if (mfaDisabled) {
+    if (approvalDisabled) {
       void persistBatchDirect({ ...toolPending })
     } else {
       setPendingAction({ kind: 'batch', changes: { ...toolPending } })
     }
   }
 
-  function requestMfaDangersToggle(checked: boolean) {
-    if (mfaDisabled) {
-      setBusy(true)
-      void setMfaOnDangers(checked, '')
-        .then(() => {
-          sileo.success({ title: checked ? t('seg.dangers.on.ok') : t('seg.dangers.off.ok') })
-          setPol(prev => prev ? { ...prev, mfa_on_dangers: checked } : prev)
-        })
-        .catch(err => {
-          sileo.error({ title: t('seg.preset.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
-        })
-        .finally(() => setBusy(false))
-    } else {
-      setPendingAction({ kind: 'mfa_dangers', enabled: checked })
-    }
+  function requestApprovalDangersToggle(checked: boolean) {
+    setPendingAction({ kind: 'approval_dangers', enabled: checked })
   }
 
   function requestLegacyToolToggle(toolName: string, enabled: boolean) {
@@ -673,7 +658,14 @@ function GovernanceSection() {
   if (loading) {
     return <GovernanceSkeletonBlock />
   }
-  if (!mfa || !pol) return null
+  if (!pol) return (
+    <section className="cv-section" role="alert">
+      <p>{t('seg.policies.unavailable')}</p>
+      <Button variant="secondary" size="sm" onClick={() => void load()}>
+        {t('seg.policies.retry')}
+      </Button>
+    </section>
+  )
 
   const hasCatalog = (pol.catalog?.length ?? 0) > 0
   const currentPreset = pendingPreset ?? pol.preset
@@ -684,17 +676,17 @@ function GovernanceSection() {
   return (
     <>
       {pendingAction && (
-        <MfaModal
+        <OwnerConfirmation
           title={
             pendingAction.kind === 'preset'
-              ? t('seg.mfa_modal.preset').replace('{preset}', pendingAction.preset)
-              : pendingAction.kind === 'mfa_dangers'
+              ? t('seg.confirm.preset').replace('{preset}', pendingAction.preset)
+              : pendingAction.kind === 'approval_dangers'
               ? pendingAction.enabled
                 ? t('seg.policies.dangers.label')
-                : t('seg.mfa_modal.dangers_off')
-              : t('seg.mfa_modal.tools')
+                : t('seg.confirm.dangers_off')
+              : t('seg.confirm.tools')
           }
-          onSign={handleSign}
+          onConfirm={handleSign}
           onCancel={() => {
             setPendingAction(null)
             if (pendingAction?.kind === 'batch') {
@@ -703,19 +695,6 @@ function GovernanceSection() {
           }}
         />
       )}
-
-      {/* ── Two-step verification ── */}
-      <section className="cv-section">
-        <div className={s.sectionLabel}>{t('seg.mfa.label')}</div>
-        <div className={s.sectionCard}>
-          <p className={s['sectionCard__intro']}>
-            {mfa.enrolled
-              ? t('seg.mfa.enrolled')
-              : t('seg.mfa.not_enrolled')}
-          </p>
-          {!mfa.enrolled && <MfaEnroll onEnrolled={load} />}
-        </div>
-      </section>
 
       {/* ── Permissions ── */}
       <section className="cv-section">
@@ -732,17 +711,17 @@ function GovernanceSection() {
                 {t('seg.policies.dangers.label')}
               </span>
               <span className={s.settingsRowHint}>
-                {mfaDisabled
+                {approvalDisabled
                   ? t('seg.policies.dangers.off')
                   : t('seg.policies.dangers.on')}
               </span>
             </div>
             <ToggleSwitch
-              id="toggle-mfa-dangers"
+              id="toggle-approval-dangers"
               aria-label={t('seg.policies.dangers.label')}
-              checked={pol.mfa_on_dangers ?? true}
+              checked={pol.approval_on_dangers ?? true}
               disabled={busy}
-              onChange={requestMfaDangersToggle}
+              onChange={requestApprovalDangersToggle}
             />
           </div>
 
@@ -902,7 +881,7 @@ function GovernanceSection() {
 function GovernanceSkeletonBlock() {
   return (
     <div aria-busy="true" aria-label="Cargando gobernanza…" className="cv-section" style={{ gap: 'var(--space-6)' }}>
-      {/* MFA section skeleton */}
+      {/* Owner confirmation section skeleton */}
       <div className="cv-section">
         <div className="skeleton skeleton--line-sm" style={{ width: '80px', marginBottom: 'var(--space-3)' }} />
         <div className="skeleton skeleton--card" />
@@ -1148,14 +1127,14 @@ function EgressSection() {
     setPendingMode(next)
   }
 
-  async function handleModeSign(factors: MfaFactors) {
+  async function handleModeSign() {
     if (!pendingMode || !state) return
     const prev = state
     setState(s => s ? { ...s, mode: pendingMode } : s)
     setPendingMode(null)
     setBusy(true)
     try {
-      await setEgressMode(pendingMode, factors.totp)
+      await setEgressMode(pendingMode)
       sileo.success({
         title: pendingMode === 'allow'
           ? t('seg.allow_mode.ok')
@@ -1231,9 +1210,9 @@ function EgressSection() {
       <div className={s.sectionLabel}>{t('seg.network.label')}</div>
 
       {pendingMode && (
-        <MfaModal
+        <OwnerConfirmation
           title={pendingMode === 'allow' ? t('seg.allow_mode.ok') : t('seg.deny_mode.ok')}
-          onSign={handleModeSign}
+          onConfirm={handleModeSign}
           onCancel={() => setPendingMode(null)}
         />
       )}
@@ -1285,6 +1264,351 @@ function EgressSection() {
   )
 }
 
+// ── Tailnet section (spec 022 — governed tailnet egress) ─────────────────────
+
+function TailnetPeerRow({ peer }: { peer: TailnetPeer }) {
+  return (
+    <div className={s.egressDomainRow}>
+      <code className={s.egressDomainCode}>{peer.name}</code>
+      <span className={s.settingsRowHint}>{peer.online ? 'En línea' : 'Sin conexión'}</span>
+    </div>
+  )
+}
+
+interface TailnetConnectFormProps {
+  busy: boolean
+  onConnect: (authKey: string) => Promise<void>
+}
+
+function TailnetConnectForm({ busy, onConnect }: TailnetConnectFormProps) {
+  const [authKey, setAuthKey] = useState('')
+
+  async function handleSubmit() {
+    const key = authKey.trim()
+    if (!key) return
+    await onConnect(key)
+    setAuthKey('')
+  }
+
+  return (
+    <div className={s.domainInputRow}>
+      <input
+        id="tailnet-authkey-input"
+        className="cv-input"
+        type="password"
+        placeholder="tskey-auth-…"
+        autoComplete="off"
+        spellCheck={false}
+        value={authKey}
+        onChange={e => setAuthKey(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') { void handleSubmit() } }}
+        disabled={busy}
+        aria-label="Clave de autenticación de la tailnet"
+      />
+      <Button
+        variant="primary"
+        onClick={() => { void handleSubmit() }}
+        type="button"
+        disabled={busy || !authKey.trim()}
+      >
+        Conectar
+      </Button>
+    </div>
+  )
+}
+
+interface TailnetDisconnectFormProps {
+  busy: boolean
+  onDisconnect: (password: string) => Promise<void>
+}
+
+function TailnetDisconnectForm({ busy, onDisconnect }: TailnetDisconnectFormProps) {
+  const [password, setPassword] = useState('')
+
+  async function handleSubmit() {
+    if (!password) return
+    await onDisconnect(password)
+    setPassword('')
+  }
+
+  return (
+    <div className={s.domainInputRow}>
+      <input
+        id="tailnet-disconnect-password-input"
+        className="cv-input"
+        type="password"
+        placeholder="Contraseña del dispositivo"
+        autoComplete="current-password"
+        spellCheck={false}
+        value={password}
+        onChange={e => setPassword(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') { void handleSubmit() } }}
+        disabled={busy}
+        aria-label="Contraseña del dispositivo para desconectar la tailnet"
+      />
+      <Button
+        variant="ghost"
+        onClick={() => { void handleSubmit() }}
+        type="button"
+        disabled={busy || !password}
+      >
+        Desconectar
+      </Button>
+    </div>
+  )
+}
+
+// 025 hallazgo D: `configured` now means LOGGED IN (== online, see
+// tailnet/api.py's _read_status) — it can no longer stand in for "an attempt
+// is in flight". `last_attempt` (mirrored from the root helper's own verdict
+// via the status watcher, contracts.md §2) is what tells 'connecting'
+// (staged, no verdict yet) apart from 'failed' (verdict: key rejected) —
+// a rejected key must never read as 'connected'.
+type TailnetUiState = 'not_configured' | 'connecting' | 'failed' | 'connected'
+
+function tailnetUiState(status: TailnetStatus | null): TailnetUiState {
+  if (!status) return 'not_configured'
+  if (status.online) return 'connected'
+  if (status.last_attempt?.ok === false) return 'failed'
+  if (status.last_attempt) return 'connecting'
+  return 'not_configured'
+}
+
+const TAILNET_POLL_INTERVAL_MS = 5000
+
+export function TailnetSection() {
+  const [status, setStatus] = useState<TailnetStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(async () => {
+    const res = await getTailnetStatus()
+    setStatus(res)
+    setLoading(false)
+  }, [])
+
+  useEffect(() => {
+    void load()
+    const timer = setInterval(() => { void load() }, TAILNET_POLL_INTERVAL_MS)
+    return () => clearInterval(timer)
+  }, [load])
+
+  async function handleConnect(authKey: string) {
+    setBusy(true)
+    try {
+      await connectTailnet(authKey)
+      sileo.success({ title: 'Conexión a la tailnet en curso' })
+      await load()
+    } catch (err) {
+      sileo.error({ title: `No se pudo conectar: ${err instanceof Error ? err.message : err}` })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleDisconnect(password: string) {
+    setBusy(true)
+    try {
+      await disconnectTailnet(password)
+      sileo.success({ title: 'Desconexión de la tailnet en curso' })
+      await load()
+    } catch (err) {
+      sileo.error({ title: `No se pudo desconectar: ${err instanceof Error ? err.message : err}` })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const uiState = tailnetUiState(status)
+  // Only a genuinely established session (or one actively establishing) has
+  // anything to show a MagicDNS suffix / peer list / disconnect form for —
+  // 'failed' means the key was rejected, there is nothing connected to leave.
+  const showsSessionInfo = uiState === 'connecting' || uiState === 'connected'
+
+  return (
+    <section className="cv-section">
+      <div className={s.sectionLabel}>Tailnet</div>
+      <div className={s.sectionCard}>
+        {loading ? (
+          <div aria-busy="true" aria-label="Cargando…" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+            <div className="skeleton skeleton--block" />
+          </div>
+        ) : (
+          <>
+            <p
+              className={s['sectionCard__intro']}
+              style={uiState === 'failed' ? { color: 'var(--color-danger)' } : undefined}
+              role={uiState === 'failed' ? 'alert' : undefined}
+            >
+              {uiState === 'not_configured' && 'Conecta este agente a la tailnet del dueño para que alcance servicios internos gobernados.'}
+              {uiState === 'connecting' && 'Conectando…'}
+              {uiState === 'failed' && 'Clave rechazada — revisa la clave e inténtalo de nuevo.'}
+              {uiState === 'connected' && `Conectado como ${status?.node_name} en ${status?.tailnet}`}
+            </p>
+
+            {(uiState === 'not_configured' || uiState === 'failed') && (
+              <TailnetConnectForm busy={busy} onConnect={handleConnect} />
+            )}
+
+            {showsSessionInfo && status?.magicdns_suffix && (
+              <>
+                <div className={s.subLabel} style={{ marginTop: 'var(--space-4)' }}>
+                  Sufijo MagicDNS
+                </div>
+                <code className={s.egressDomainCode}>{status.magicdns_suffix}</code>
+                <p className={s['sectionCard__intro']} style={{ marginTop: 'var(--space-2)' }}>
+                  Los hosts de la tailnet se conceden como cualquier dominio en Egress.
+                </p>
+              </>
+            )}
+
+            {uiState === 'connected' && (
+              <>
+                <div className={s.subLabel} style={{ marginTop: 'var(--space-4)' }}>
+                  Dispositivos
+                </div>
+                {status && status.peers.length === 0 ? (
+                  <EmptyState compact icon={<Wifi size={18} />} title="Sin otros dispositivos en la tailnet" />
+                ) : (
+                  <ul className="cv-list" aria-label="Dispositivos de la tailnet">
+                    {status?.peers.map(peer => (
+                      <li key={peer.name}>
+                        <TailnetPeerRow peer={peer} />
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            )}
+
+            {showsSessionInfo && (
+              <div style={{ marginTop: 'var(--space-4)' }}>
+                <TailnetDisconnectForm busy={busy} onDisconnect={handleDisconnect} />
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </section>
+  )
+}
+
+// ── SSH allow-list (spec 022 v2 — governed SSH on the tailnet) ───────────────
+
+function formatApprovedAt(iso: string | null): string {
+  if (!iso) return 'Fecha de aprobación desconocida'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return 'Fecha de aprobación desconocida'
+  return `Aprobado el ${d.toLocaleString('es-ES', { dateStyle: 'medium', timeStyle: 'short' })}`
+}
+
+interface SshHostRowProps {
+  entry: SshHostEntry
+  busy: boolean
+  onRequestRevoke: (host: string) => void
+}
+
+function SshHostRow({ entry, busy, onRequestRevoke }: SshHostRowProps) {
+  return (
+    <div className={s.settingsRow}>
+      <div className={s.settingsRowInfo}>
+        <code className={s.egressDomainCode}>{entry.host}</code>
+        <span className={s.settingsRowHint}>{formatApprovedAt(entry.approved_at)}</span>
+      </div>
+      <Button
+        variant="ghost"
+        size="sm"
+        disabled={busy}
+        onClick={() => onRequestRevoke(entry.host)}
+      >
+        Revocar
+      </Button>
+    </div>
+  )
+}
+
+export function SshHostsSection() {
+  const [hosts, setHosts] = useState<SshHostEntry[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [pendingRevokeHost, setPendingRevokeHost] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await getSshHosts()
+      setHosts(res.hosts)
+      setLoadError(false)
+    } catch {
+      setLoadError(true)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void load() }, [load])
+
+  async function handleRevokeSign() {
+    const host = pendingRevokeHost
+    setPendingRevokeHost(null)
+    if (!host) return
+    setBusy(true)
+    try {
+      const res = await revokeSshHost(host)
+      setHosts(res.hosts)
+      sileo.success({ title: `Acceso SSH revocado a «${host}»` })
+    } catch (err) {
+      sileo.error({
+        title: `No se pudo revocar «${host}»: ${err instanceof Error ? err.message : err}`,
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="cv-section" aria-label="Equipos con SSH aprobado">
+      <div className={s.sectionLabel}>Equipos con SSH aprobado</div>
+
+      {pendingRevokeHost && (
+        <OwnerConfirmation
+          title={`Revocar el acceso SSH a «${pendingRevokeHost}»`}
+          onConfirm={handleRevokeSign}
+          onCancel={() => setPendingRevokeHost(null)}
+        />
+      )}
+
+      <div className={s.sectionCard}>
+        {loading ? (
+          <div aria-busy="true" aria-label="Cargando…" className="skeleton skeleton--block" />
+        ) : loadError ? (
+          <EmptyState
+            compact
+            icon={<Terminal size={18} />}
+            title="No se pudo cargar la lista de equipos"
+            description="Inténtalo de nuevo en unos segundos."
+          />
+        ) : hosts.length === 0 ? (
+          <EmptyState
+            compact
+            icon={<Terminal size={18} />}
+            title="Ningún equipo tiene SSH aprobado todavía"
+            description="Cuando el agente pida conectarse por SSH a un equipo de tu tailnet, te lo preguntará aquí antes de hacerlo."
+          />
+        ) : (
+          <ul className="cv-list" aria-label="Equipos con SSH aprobado">
+            {hosts.map(entry => (
+              <li key={entry.host}>
+                <SshHostRow entry={entry} busy={busy} onRequestRevoke={setPendingRevokeHost} />
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  )
+}
+
 // ── Severity badge (token-driven) ─────────────────────────────────────────────
 
 function SeverityBadge({ severity }: { severity: string }) {
@@ -1331,7 +1655,7 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
   const name = scan.name ?? scan.identifier ?? scan.scan_id ?? 'Escaneo'
   const target = scan.target ?? scan.identifier
 
-  async function handleAllow(factors: MfaFactors) {
+  async function handleAllow() {
     setBusy(true)
     try {
       await recordInstallDecision({
@@ -1342,7 +1666,7 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
         score: scan.score ?? -1,
         verdict: verdict || '',
         risks_json: '[]',
-        totp: factors.totp.trim(),
+
       })
       sileo.success({ title: 'Instalación permitida (decisión soberana, auditada). Reinténtala.' })
       setAllowed(true)
@@ -1384,9 +1708,9 @@ function ScanRow({ scan }: { scan: SecurityScan }) {
       </div>
 
       {showModal && (
-        <MfaModal
+        <OwnerConfirmation
           title={tNew(t, 'seg.scan.allow_modal_title', 'Permitir instalación')}
-          onSign={handleAllow}
+          onConfirm={handleAllow}
           onCancel={() => setShowModal(false)}
         />
       )}
@@ -1459,15 +1783,128 @@ function SecurityCenterSection() {
   )
 }
 
+// ── Kill-switch (freno de emergencia) ───────────────────────────────────────
+
+/**
+ * Emergency brake card (025 Top-KILL). Engaging needs only the operator
+ * bearer (one click, it's a brake); releasing requires owner confirmation.
+ */
+export function KillSwitchSection() {
+  const t = useT()
+  const [status, setStatus] = useState<KillSwitchStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [confirmRelease, setConfirmRelease] = useState(false)
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      setStatus(await getKillSwitch())
+    } catch {
+      setStatus(null)
+      setConfirmRelease(false)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void load() }, [load])
+
+  async function handleEngage() {
+    setBusy(true)
+    try {
+      await engageKillSwitch(tNew(t, 'seg.killswitch.default_reason', 'Freno activado por el dueño'))
+      sileo.success({ title: tNew(t, 'seg.killswitch.engaged.ok', 'Freno de emergencia activado') })
+      await load()
+    } catch (err) {
+      sileo.error({ title: t('seg.save.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleReleaseWith() {
+    setConfirmRelease(false)
+    setBusy(true)
+    try {
+      await releaseKillSwitch()
+      sileo.success({ title: tNew(t, 'seg.killswitch.released.ok', 'Freno de emergencia liberado') })
+      await load()
+    } catch (err) {
+      sileo.error({ title: t('seg.save.err').replace('{err}', err instanceof Error ? err.message : String(err)) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const engaged = !!status?.engaged
+  const releaseLabel = "Liberar freno"
+
+  return (
+    <section className="cv-section" aria-label={tNew(t, 'seg.killswitch.label', 'Freno de emergencia')}>
+      <div className={s.sectionLabel}>{tNew(t, 'seg.killswitch.label', 'Freno de emergencia')}</div>
+
+      {confirmRelease && <OwnerConfirmation
+        title="Liberar el freno de emergencia"
+        description="El agente podrá volver a ejecutar acciones dentro de sus permisos. Las aprobaciones y límites siguen activos."
+        onConfirm={handleReleaseWith}
+        onCancel={() => setConfirmRelease(false)}
+      />}
+
+      <div
+        className={s.sectionCard}
+        role={engaged ? 'alert' : undefined}
+        style={engaged ? {
+          borderColor: 'var(--color-danger)',
+          background: 'var(--color-danger-surface)',
+        } : undefined}
+      >
+        {loading ? (
+          <div aria-busy="true" aria-label="Cargando…" className="skeleton skeleton--block" />
+        ) : !status ? (
+          <div className={s.settingsRow} role="alert">
+            <div className={s.settingsRowInfo}>
+              <span className={s.settingsRowLabel}>Estado del freno desconocido</span>
+              <span className={s.settingsRowHint}>No se pudo consultar al agente. No se puede confirmar si está detenido.</span>
+            </div>
+            <Button variant="secondary" size="sm" disabled={busy} onClick={() => void load()}>Reintentar</Button>
+            <Button variant="danger-solid" size="sm" loading={busy} onClick={handleEngage}>Activar freno</Button>
+          </div>
+        ) : engaged ? (
+          <div className={s.settingsRow}>
+            <div className={s.settingsRowInfo}>
+              <span className={s.settingsRowLabel} style={{ color: 'var(--color-danger)' }}>
+                {tNew(t, 'seg.killswitch.engaged.label', 'ACTIVADO — el agente no ejecuta nada')}
+              </span>
+              <span className={s.settingsRowHint}>
+                {status?.reason || tNew(t, 'seg.killswitch.no_reason', 'Sin motivo indicado')}
+              </span>
+            </div>
+            <Button variant="secondary" size="sm" loading={busy} onClick={() => setConfirmRelease(true)}>
+              {releaseLabel}
+            </Button>
+          </div>
+        ) : (
+          <div className={s.settingsRow}>
+            <div className={s.settingsRowInfo}>
+              <span className={s.settingsRowLabel}>{tNew(t, 'seg.killswitch.idle.label', 'Todo en marcha')}</span>
+              <span className={s.settingsRowHint}>
+                {tNew(t, 'seg.killswitch.hint', 'Detiene toda ejecución de herramientas y bloquea turnos nuevos al instante.')}
+              </span>
+            </div>
+            <Button variant="danger-solid" size="sm" loading={busy} onClick={handleEngage}>
+              {tNew(t, 'seg.killswitch.engage', 'Frenar ahora')}
+            </Button>
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
 // ── SeguridadView ─────────────────────────────────────────────────────────────
 
 export default function SeguridadView() {
   const t = useT()
-  const [mfaDisabled, setMfaDisabled] = useState(false)
-
-  useEffect(() => {
-    getPolicies().then(p => setMfaDisabled(p.mfa_on_dangers === false)).catch(() => {})
-  }, [])
 
   return (
     <>
@@ -1477,10 +1914,13 @@ export default function SeguridadView() {
       />
 
       <div className="view-body cv-view-body">
-        <ApprovalsSection mfaDisabled={mfaDisabled} />
+        <KillSwitchSection />
+        <ApprovalsSection />
         <InboundDelegationsSection />
         <GovernanceSection />
         <EgressSection />
+        <TailnetSection />
+        <SshHostsSection />
         <SecurityCenterSection />
       </div>
     </>

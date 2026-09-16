@@ -1,0 +1,39 @@
+.workspace { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+.toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 16px 10px max(16px, var(--shell-header-inset, 0px)); border-bottom: 1px solid var(--color-border-subtle); }
+.toolbar h1 { display: flex; align-items: center; gap: 8px; margin: 0 auto 0 0; font-size: var(--text-sm); font-weight: 500; }
+.badge { display: inline-flex; gap: 6px; align-items: center; font-size: var(--text-xs); color: var(--color-text-muted); }
+.content { width: 100%; max-width: 900px; align-self: center; padding: 20px 24px 48px; box-sizing: border-box; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 16px; }
+.note { margin: 0; color: var(--color-text-muted); font-size: var(--text-xs); line-height: 1.6; }
+.field { display: flex; flex-direction: column; gap: 8px; width: 100%; font-size: var(--text-xs); }
+.field input, .field textarea, .field select { width: 100%; min-width: 0; box-sizing: border-box; padding: 9px 11px; color: var(--color-text); background: var(--color-bg); border: 1px solid var(--color-border-subtle); border-radius: 8px; font: inherit; font-size: var(--text-sm); }
+.field select { text-overflow: ellipsis; }
+.field textarea { resize: vertical; min-height: 60px; }
+.field small { color: var(--color-text-muted); line-height: 1.5; }
+.field :focus-visible, .scope summary:focus-visible, .row:focus-visible, .reviewLink:focus-visible { outline: 2px solid var(--color-text-muted); outline-offset: 3px; }
+.scope { width: 100%; color: var(--color-text-muted); font-size: var(--text-xs); }
+.scope summary { cursor: pointer; padding: 6px 0; }
+.scope dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 16px; }
+.scope dd { margin: 0; overflow-wrap: anywhere; }
+.empty { margin: 16px 0; color: var(--color-text-muted); font-size: var(--text-sm); }
+.campaigns { width: 100%; list-style: none; padding: 0; margin: 0; border-top: 1px solid var(--color-border-subtle); }
+.row { display: flex; width: 100%; justify-content: space-between; align-items: center; gap: 16px; padding: 13px 4px; border: 0; border-bottom: 1px solid var(--color-border-subtle); background: transparent; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+.name { min-width: 0; overflow-wrap: anywhere; font-size: var(--text-sm); }
+.row small { display: block; margin-top: 4px; color: var(--color-text-muted); font-size: var(--text-xs); }
+.amount { flex-shrink: 0; text-align: right; font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.campaignHeading h2 { margin: 0; font-size: var(--text-lg); font-weight: 500; overflow-wrap: anywhere; }
+.campaignHeading p { margin: 6px 0 0; font-size: var(--text-xs); color: var(--color-text-muted); }
+.form { width: 100%; border-top: 1px solid var(--color-border-subtle); padding-top: 20px; }
+.form h3 { margin: 0 0 16px; font-size: var(--text-sm); font-weight: 500; }
+.form fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 16px; min-width: 0; }
+.notice { width: 100%; box-sizing: border-box; border-left: 2px solid var(--color-border-subtle); padding: 4px 0 4px 14px; font-size: var(--text-sm); line-height: 1.6; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.notice p { margin: 0; }
+.notice code { overflow-wrap: anywhere; font-size: var(--text-xs); }
+.notice small { color: var(--color-text-muted); }
+.reviewLink { display: inline-flex; gap: 8px; align-items: center; color: inherit; text-underline-offset: 3px; }
+.metrics { width: 100%; font-size: var(--text-xs); }
+.metrics table { width: 100%; border-collapse: collapse; margin-top: 12px; font-variant-numeric: tabular-nums; }
+.metrics td, .metrics th { padding: 10px 4px; border-bottom: 1px solid var(--color-border-subtle); text-align: right; }
+.metrics td:first-child, .metrics th:first-child { text-align: left; }
+.metrics th { font-weight: 500; color: var(--color-text-muted); }
+@media (hover: hover) and (pointer: fine) { .row:hover { background: var(--color-bg-hover, rgba(127, 127, 127, .06)); } }
+@media (max-width: 520px) { .content { padding: 16px 14px 32px; } .badge { order: 3; width: 100%; } .row { gap: 8px; } .scope dl { grid-template-columns: 1fr; gap: 4px; } .scope dd { margin-bottom: 8px; } }

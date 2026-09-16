@@ -77,35 +77,28 @@ class TestFilesystemReplayPayload:
         from hermes.agents_os.application.skill_compiler import (  # noqa: PLC0415
             SkillCompiler,
         )
-        from hermes.agents_os.application.training_session_orchestrator import (  # noqa: PLC0415
-            TrainingSessionOrchestrator,
-        )
 
         target = tmp_path / "output.txt"
         signing_key = secrets.token_bytes(32)
         compiler = SkillCompiler(signing_key=signing_key)
 
         # Build a signed skill with one FILESYSTEM step.
-        orch = TrainingSessionOrchestrator()
-        sess = orch.start(
+        package = compiler.compile_from_steps(
             tenant_id=uuid4(),
-            human_user_id=uuid4(),
             skill_id="write-output",
-            surface_kinds_allowed=frozenset([SurfaceKind.FILESYSTEM]),
+            steps=[
+                (
+                    SurfaceKind.FILESYSTEM,
+                    {
+                        "op": "write_file",
+                        "path": str(target),
+                        "content": "replayed",
+                    },
+                    "escribir archivo",
+                )
+            ],
+            version=1,
         )
-        orch.capture_step(
-            session_id=sess.session_id,
-            surface_kind=SurfaceKind.FILESYSTEM,
-            action_payload={
-                "op": "write_file",
-                "path": str(target),
-                "content": "replayed",
-            },
-            voice_caption="escribir archivo",
-        )
-        orch.request_review(session_id=sess.session_id)
-        signed = orch.sign(session_id=sess.session_id, human_confirmed=True)
-        package = compiler.compile(session=signed, version=1)
 
         adapter = FilesystemSurfaceAdapter(
             allowed_prefixes=(str(tmp_path),)

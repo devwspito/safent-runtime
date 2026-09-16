@@ -21,9 +21,8 @@ import re
 from pathlib import Path
 from uuid import uuid4
 
-import httpx
-
 logger = logging.getLogger(__name__)
+_FRONTMATTER_PARTS = 3
 
 _SYSTEM_PROMPT = (
     "Eres el cerebro de un sistema operativo agéntico. Conviertes la demostración "
@@ -69,7 +68,7 @@ def _ensure_frontmatter_fields(content: str, name: str, description: str) -> str
     if not content.lstrip().startswith("---"):
         return f"---\nname: {slug}\ndescription: {desc_default}\nversion: 1\n---\n\n{content}"
     parts = content.split("---", 2)
-    if len(parts) < 3:
+    if len(parts) < _FRONTMATTER_PARTS:
         return content  # frontmatter malformado — no lo tocamos
     fm = parts[1]
     inject = ""
@@ -89,15 +88,15 @@ async def synthesize_skill_md(
     name: str,
     description: str,
     db_path: Path,
-    timeout: float = 90.0,
+    timeout: float = 90.0,  # noqa: ASYNC109 — passed to the native request timeout
 ) -> str:
     """Call the active provider's LLM to produce a SKILL.md document.
 
     Resolves model/api_key/base_url via the native resolver (resolve_model_config)
     so no second copy of the API key is held in the shell-server's local repo.
 
-    Raises NoActiveProvider if no provider is active, or httpx/ValueError on
-    transport/response errors (caller maps these to a friendly message).
+    Raises NoActiveProvider if no provider is active, or a safe native transport
+    error (caller maps it to a friendly message). No tools or fallback are used.
     """
     from hermes.runtime.provider_config_source import resolve_model_config  # noqa: PLC0415
 
@@ -105,47 +104,25 @@ async def synthesize_skill_md(
     if config is None:
         raise NoActiveProvider("no hay un proveedor de modelo activo")
 
-    base_url = (config.base_url or "").rstrip("/")
-    if not base_url:
-        # Cloud providers without a base_url aren't directly reachable from the
-        # shell-server; an OpenAI-compatible base_url is required.
-        raise NoActiveProvider("el proveedor activo no expone un base_url compatible")
-
-    # config.model es litellm-style ("<provider>/<model>", p.ej.
-    # "openai-api/qwen3.6-35b-a3b"). Esta es una llamada HTTP CRUDA a un endpoint
-    # OpenAI-compatible (no litellm), que espera el nombre de modelo SIN el prefijo
-    # de provider — si no, el endpoint responde 404. Quita el primer segmento.
-    endpoint_model = config.model.split("/", 1)[1] if "/" in config.model else config.model
+    from hermes.providers.infrastructure.native_text_completion import (  # noqa: PLC0415
+        complete_native_text,
+    )
 
     user_msg = (
         f"Nombre de la skill: {name}\n\n"
         f"Descripción y pasos que demostró/escribió el usuario:\n{description}\n\n"
         "Genera el SKILL.md."
     )
-    payload = {
-        "model": endpoint_model,
-        "messages": [
+    content = await complete_native_text(
+        config,
+        messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_msg},
         ],
-        "temperature": 0.3,
-        "max_tokens": 2000,
-        # Qwen3 reasons inline (no reasoning parser here) and pollutes the output.
-        # Ask vLLM to disable thinking so we get the document directly. Harmless on
-        # providers that ignore the field.
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
-    headers = {"Content-Type": "application/json"}
-    if config.api_key:
-        headers["Authorization"] = f"Bearer {config.api_key}"
-
-    async with httpx.AsyncClient(timeout=timeout) as http:
-        resp = await http.post(f"{base_url}/chat/completions", json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-
-    content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
-    content = content.strip()
+        temperature=0.3,
+        max_tokens=2000,
+        timeout=timeout,
+    )
     # The model may reason inline (Qwen has no reasoning parser). The real document
     # lives between the sentinels; pick the LARGEST block (the doc, not a prose
     # mention of the sentinel). Fall back to a frontmatter block if absent.
@@ -169,8 +146,7 @@ async def synthesize_skill_md(
         first_line = (description or name).splitlines()[0][:120] if (description or name) else name
         content = f"---\ndescription: {first_line}\n---\n{content}"
     # SkillMdDocument nativo exige name/description/version — garantízalos.
-    content = _ensure_frontmatter_fields(content, name, description)
-    return content
+    return _ensure_frontmatter_fields(content, name, description)
 
 
 async def generalize_steps_to_body(
@@ -179,7 +155,7 @@ async def generalize_steps_to_body(
     description: str,
     steps_trace: str,
     db_path: Path,
-    timeout: float = 90.0,
+    timeout: float = 90.0,  # noqa: ASYNC109 — passed to the native request timeout
 ) -> str:
     """Turn a LIVE demonstration (captured steps) into a generalizable SKILL.md body.
 
@@ -205,8 +181,7 @@ async def generalize_steps_to_body(
     # Keep only the body (drop the LLM's frontmatter — compile_and_persist owns the
     # signed frontmatter). Split on the closing '---' of the frontmatter block.
     parts = full_md.split("---", 2)
-    body = parts[2].strip() if len(parts) >= 3 else full_md.strip()
-    return body
+    return parts[2].strip() if len(parts) >= _FRONTMATTER_PARTS else full_md.strip()
 
 
 async def synthesize_and_persist(

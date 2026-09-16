@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS audit_entries_view (
   audit_kind         TEXT NOT NULL,
   category           TEXT,
   description        TEXT NOT NULL,
-  signature_short    TEXT NOT NULL
+  signature_short    TEXT NOT NULL,
+  payload_json       TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS audit_ts_idx
   ON audit_entries_view (timestamp DESC);
@@ -65,10 +66,19 @@ def _conn(db: Path) -> sqlite3.Connection:
 
 
 def init_schema(db_path: Path) -> None:
+    from hermes.agents_os.infrastructure.audit_schema import (  # noqa: PLC0415
+        ensure_payload_json_column,
+    )
+
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with _conn(db_path) as c:
         c.executescript("PRAGMA journal_mode=WAL;")
         c.executescript(_AUDIT_SCHEMA)
+        # Backward compat: an audit_entries_view created before payload_json
+        # existed in _AUDIT_SCHEMA needs an explicit ADD COLUMN — CREATE TABLE
+        # IF NOT EXISTS is a no-op against an existing table (specs/025-safent-
+        # repaso matriz-final-39eeb8e re-verificación d2eb8c6).
+        ensure_payload_json_column(c, "audit_entries_view")
     _run_skill_migrations(db_path)
 
 
@@ -91,6 +101,12 @@ class AuditEntryDTO(BaseModel):
     category: str | None
     description: str
     signature_short: str
+    # Canonical JSON payload the signed chain hashed (matriz-final-39eeb8e
+    # re-verificación d2eb8c6 — "payload_json no se persiste nunca"): carries
+    # the machine-readable provenance (reason: host_cli/totp/device_password/
+    # api) alongside the human-readable description. "{}" for rows persisted
+    # before this fix (DEFAULT '{}' — no payload_json to project).
+    payload_json: str = "{}"
 
 
 class SkillPackageDTO(BaseModel):
@@ -281,6 +297,7 @@ def create_audit_router(db_path: Path) -> APIRouter:
                 category=r["category"],
                 description=r["description"],
                 signature_short=r["signature_short"],
+                payload_json=r["payload_json"] if "payload_json" in r.keys() else "{}",
             )
             for r in rows
         ]

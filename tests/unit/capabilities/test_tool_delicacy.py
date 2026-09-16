@@ -38,7 +38,7 @@ class TestDelegateToColleagueDelicacyTier:
         assert default_enabled_equilibrado("delegate_to_colleague") is True
 
     def test_delegate_to_colleague_is_not_forced_into_mfa_hitl_tier(self) -> None:
-        """is_mfa_required is a SEPARATE hand-curated axis (_MFA_TIER_HITL) —
+        """is_mfa_required is a SEPARATE hand-curated axis (_ENTERPRISE_REVIEW_TOOLS) —
         changing delicacy() must not accidentally force TOTP on this tool."""
         assert is_mfa_required("delegate_to_colleague") is False
 

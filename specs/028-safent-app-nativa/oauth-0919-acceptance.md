@@ -1,0 +1,129 @@
+# OAuth usability follow-up — 0.9.19 / 0.9.20 candidates
+
+## Problem and changes
+
+0.9.18 opened Ads consent but not Codex device login. A separate
+`open_provider_oauth` native permission now admits only the exact official
+`https://auth.openai.com/codex/device` endpoint, from the current boot origin
+and main window. Both automatic launch and the retry link use it. The native
+Hermes token exchange and provider resolver are unchanged; a pending login
+must not be presented as successful.
+
+Integrations now includes owner-only Meta setup. The administrator registers
+the exact Composio callback in their Meta app and submits its App ID/Secret
+through Safent. The backend creates/reuses a named custom OAuth configuration
+in the existing Composio project, validates its toolkit/status, and stores only
+the configuration ID. It never saves the Meta app secret locally. Credential
+rotation uses compare-and-set to avoid linking a result to a different project.
+Provider failures and input validation are redacted; the request body is bounded.
+No generic tool-router access is enabled. Account consent remains a separate
+step in Ads and all advertising mutations remain subject to the cage.
+
+The prior image-content alias fix is included. The companion CLI fixture now
+models the public recipient pin, without weakening the production check.
+
+Native builds show an app-update action and app version in the product sidebar.
+The user's follow-up requires explicit stateful labels: “Buscar actualizaciones”
+before a check, “Buscando…” during it, and “Actualizar” only after a real check
+confirms a newer version. A successful check without an update reports “Safent
+está actualizado”. Failures must never claim either availability or success.
+
+`get_native_update_status` returns only public status/version information, with
+no check ID, signature or artifact URL. `show_native_updater` opens the existing
+host-owned recheck/confirmation flow, with no URL or install parameters. Both
+require the current main-window boot origin. Direct check/install permissions
+remain local to the bundled UI. Native mode does not poll or offer independent
+engine updates. Installation always requires the native confirmation.
+
+## Verification before publication
+
+- Frontend: 506 tests passed, including 56 footer cases; TypeScript and final
+  production build passed.
+- Native: 162 tests passed, including exact Meta help, updater caller checks
+  and public update-status projection/redaction.
+- Backend Composio/configuration/lease/security: 198 tests passed.
+- CLI installation/porcelain/backup: 192 tests passed, including the previously
+  failing recipient-pin fixtures.
+- No real campaign writes, publication, or budget changes were performed.
+
+## Real provider acceptance (not interchangeable with unit tests)
+
+Google's fresh OAuth callback completed successfully. The actual Ads database
+contains account `1677791325` as ACTIVE, EUR, Europe/Madrid, and its new OAuth
+session is `ok` without an error. Advertiser verification is a separate Google
+requirement; ACTIVE here is connection state, not a claim that ads can serve.
+
+Meta app `1063816289878236` is accessible in the user's normal Chrome profile.
+With explicit authorization, the exact callback
+`https://backend.composio.dev/api/v1/auth-apps/add` was added and Meta displayed
+“Se han guardado los cambios”. No other security toggle was changed.
+Meta then requested the user's password again before revealing the App Secret.
+That user verification, app submission through the new Safent UI, account
+consent and a real account inventory check are still pending.
+
+The official Codex device page was opened manually in Chrome to unblock login
+independently of the binary fix. It requests the user's OpenAI sign-in. A real
+approved device flow and real chat response are still pending. Never silently
+copy credentials from the host's Codex installation or switch to billable API
+credentials as a fallback.
+
+Publication and installation must be recorded once verified. Do not claim that
+the currently installed 0.9.18 contains these changes.
+
+## Updater acceptance and release channel
+
+The installed 0.9.18 app already has a native tray action, “Buscar actualizaciones
+de la app…”. Its fixed endpoint uses the GitHub latest release. At inspection,
+that release was v0.9.5: newer published builds were prereleases and therefore
+not offered by this feed. Successful candidate CI does not promote stable/latest.
+
+Tag v0.9.19 was pushed before the user's stateful-label follow-up; no desktop
+workflow was dispatched for that tag. Preserve the immutable tag and use
+v0.9.20 for the combined change instead.
+
+Publish v0.9.20 as a signed candidate first. Promotion changes the update channel
+for all users; record that decision separately and do not claim GUI acceptance
+from a successful build alone. The user specifically wants to test the updater:
+do not replace /Applications/Safent.app manually or erase their data. The first
+update must be initiated by them from the existing native tray action. The new
+sidebar action becomes available after the signed 0.9.20 update is installed.
+
+### Owner authorization and pre-update checks (2026-09-13)
+
+The owner explicitly answered “SII” to promoting 0.9.20 to the general channel
+once the signed build passes. This authorizes channel promotion before their
+manual 0.9.18 → 0.9.20 updater acceptance; do not relabel that pending GUI test
+as complete.
+
+- Source/tag: `9d4c0d0a053b1a527c273ae509a2e3bb2428098f`, `v0.9.20`.
+- Motor workflow: https://github.com/devwspito/safent-runtime/actions/runs/34775193936
+  completed successfully, including amd64, arm64 and the multi-architecture index.
+- Desktop workflow: https://github.com/devwspito/agents-autonomy/actions/runs/34775723751
+  dispatched once with engine `v0.9.20` and companion `v0.2.13`; completed
+  successfully. Both Linux builds, macOS, manifest signing and final assembly
+  passed. Windows was intentionally skipped.
+- The committed public signing key is identical between v0.9.18 and v0.9.20,
+  and its exact encoded value is present in the installed 0.9.18 executable.
+- The installed bundle passes strict/deep codesign verification for
+  `com.safent.desktop`, team `JBMBA58A8X`. No app files or macOS permissions were
+  changed during these checks. A shell write-access check from Codex is not a
+  self-updater acceptance check: macOS protects cross-team app modification.
+
+### Publication verified (2026-09-13 19:03 UTC)
+
+- All 15 release assets are present. The final updater metadata has exactly
+  `darwin-aarch64`, `linux-x86_64`, and `linux-aarch64`, each pointing at 0.9.20.
+- CI verified the actual updater artifacts against the committed public key.
+  Apple notarization returned Accepted at 18:57:27 UTC; stapling and validation
+  succeeded. The signed runtime manifest was additionally verified with Minisign
+  on DGX against the committed key. Checksums match the release asset digests.
+- Following the owner's explicit authorization, the release was promoted with
+  `draft=false`, `prerelease=false`, and `latest=true`. Release notes explicitly
+  retain the pending real-app/OAuth acceptance, rather than implying it passed.
+- GitHub's latest-release API returns `v0.9.20`. An unauthenticated request to
+  `https://github.com/devwspito/safent-runtime/releases/latest/download/latest.json`
+  independently returns version `0.9.20` and the signed Apple Silicon archive.
+- Release: https://github.com/devwspito/safent-runtime/releases/tag/v0.9.20
+- A final local Info.plist check still reports installed version 0.9.18. The
+  updater has not been clicked or installed on the user's behalf. The user must
+  initiate the first check from the Safent tray menu, then confirm installation.

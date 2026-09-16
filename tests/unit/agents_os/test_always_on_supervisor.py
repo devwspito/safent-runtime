@@ -91,14 +91,39 @@ class TestSuspendAuthorization:
     def _policy(self):
         return default_policy_for(InstallProfile.PERSONAL_DESKTOP)
 
-    def test_suspend_blocked_without_totp(self) -> None:
+    @pytest.mark.parametrize("confirmation", [None, 1, "true", {}, []])
+    def test_force_does_not_bypass_explicit_owner_confirmation(self, confirmation):
+        fake = _FakeSupervisor()
+        with pytest.raises(SuspendNotAuthorizedError):
+            AlwaysOnSupervisor(supervisor=fake).suspend_with_authorization(
+                policy=self._policy(),
+                authorizing_human_user_id=uuid4(),
+                owner_confirmation_validated=confirmation,
+                drain_completed=False,
+                force=True,
+            )
+        assert fake.suspend_called == 0
+
+    @pytest.mark.parametrize("actor", [None, "agent", "00000000-0000-0000-0000-000000000000"])
+    def test_confirmation_without_typed_owner_is_denied(self, actor):
+        fake = _FakeSupervisor()
+        with pytest.raises(SuspendNotAuthorizedError):
+            AlwaysOnSupervisor(supervisor=fake).suspend_with_authorization(
+                policy=self._policy(),
+                authorizing_human_user_id=actor,
+                owner_confirmation_validated=True,
+                drain_completed=True,
+            )
+        assert fake.suspend_called == 0
+
+    def test_suspend_blocked_without_owner_confirmation(self) -> None:
         fake = _FakeSupervisor()
         sup = AlwaysOnSupervisor(supervisor=fake)
         with pytest.raises(SuspendNotAuthorizedError):
             sup.suspend_with_authorization(
                 policy=self._policy(),
                 authorizing_human_user_id=uuid4(),
-                totp_validated=False,
+                owner_confirmation_validated=False,
                 drain_completed=True,
             )
         assert fake.suspend_called == 0
@@ -110,7 +135,7 @@ class TestSuspendAuthorization:
             sup.suspend_with_authorization(
                 policy=self._policy(),
                 authorizing_human_user_id=uuid4(),
-                totp_validated=True,
+                owner_confirmation_validated=True,
                 drain_completed=False,
             )
         assert fake.suspend_called == 0
@@ -121,7 +146,7 @@ class TestSuspendAuthorization:
         sup.suspend_with_authorization(
             policy=self._policy(),
             authorizing_human_user_id=uuid4(),
-            totp_validated=True,
+            owner_confirmation_validated=True,
             drain_completed=False,
             force=True,
         )
@@ -133,7 +158,7 @@ class TestSuspendAuthorization:
         sup.suspend_with_authorization(
             policy=self._policy(),
             authorizing_human_user_id=uuid4(),
-            totp_validated=True,
+            owner_confirmation_validated=True,
             drain_completed=True,
         )
         assert fake.suspend_called == 1

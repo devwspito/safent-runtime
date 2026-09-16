@@ -59,7 +59,7 @@ def _make_gate(db_path) -> SqliteApprovalGate:
         minter=HitlApprovalMinter(signing_key=b"k" * 32),
         signer=signer,
         audit_repo=None,
-        mfa_verifier=None,
+
     )
 
 

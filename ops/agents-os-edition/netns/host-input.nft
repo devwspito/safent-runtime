@@ -55,6 +55,14 @@ table inet hermes_host {
         # el relay del host (lumen-vz) entra al guest desde el gateway VZ. Mismo
         # modelo: el NIC del guest solo es alcanzable por el hipervisor del host.
         ip saddr 192.168.64.0/24 tcp dport 7517 accept comment "Lumen UI: host hipervisor vía Apple VZ NAT"
+        # podman machine (macOS, la app nativa de Safent): el reenvío de puertos del
+        # host lo hace gvproxy, que entra al guest desde su propia red interna
+        # (192.168.127.0/24 por defecto). Sin esta línea el paquete llega y el
+        # drop terminal lo descarta: el puerto publicado responde dentro de la VM
+        # y NO desde macOS (diagnosticado en specs/028…/diagnostico-red-macos.md).
+        # Mismo modelo que las dos anteriores: esa red sólo es alcanzable por el
+        # hipervisor del host, nunca por la LAN, y :7517 sigue exigiendo el bearer.
+        ip saddr 192.168.127.0/24 tcp dport 7517 accept comment "Safent UI: host hipervisor vía gvproxy (podman machine)"
 
         # Navegador confinado → su proxy egress. El proxy escucha en el lado HOST
         # del veth (10.200.0.1:3128), así que la conexión del navegador (netns,

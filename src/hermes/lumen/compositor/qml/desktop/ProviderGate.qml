@@ -115,7 +115,10 @@ Item {
             provider_id: gate.pick.id,
             api_key: keyField.text.trim(),
             model: modelField.text.trim(),
-            base_url: ""
+            base_url: "",
+            // Onboarding de un solo paso ("Conectado: ...") — set_active
+            // explícito (ver ProvidersApp.qml: el daemon ya no lo asume).
+            set_active: true
         }}));
     }
 

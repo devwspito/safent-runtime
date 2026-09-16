@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import dataclasses
+import enum
 import logging
 import os
 import platform
@@ -94,9 +96,41 @@ _ACCESS_FS_MAP = {
 # Access rights introduced per ABI version (cumulative max bitmask).
 _ABI_MAX_ACCESS_FS: dict[int, int] = {
     1: (1 << 13) - 1,              # bits 0–12  (no refer/truncate)
-    2: (1 << 14) - 1,              # bits 0–13
-    3: (1 << 15) - 1,              # bits 0–14
+    2: (1 << 14) - 1,              # bits 0–13  (+refer)
+    3: (1 << 15) - 1,              # bits 0–14  (+truncate)
 }
+# Highest ABI this table has an EXACT entry for. Landlock ABI versions are
+# cumulative — each newer ABI is a strict superset of the previous one's FS
+# rights (ABI 4+ only adds NON-fs rules: network bind/connect, IOCTL_DEV — see
+# the module docstring's own ABI table) — so a kernel reporting an ABI beyond
+# this MUST still get at least everything ABI 3 grants, never silently fall
+# back to ABI 1's mask.
+_ABI_MAX_KNOWN = max(_ABI_MAX_ACCESS_FS)
+
+
+def _max_access_fs_mask(abi_version: int) -> int:
+    """The FS access-rights bitmask available at *abi_version*.
+
+    MCP-04 root cause (spec 025 matriz, live-verified): every call site used
+    to do `_ABI_MAX_ACCESS_FS.get(abi_version, _ABI_MAX_ACCESS_FS[1])` — a
+    kernel reporting an ABI this table has no exact key for (ANY modern
+    kernel: Fedora 41 here reports abi=7) silently fell through to the
+    `.get()` DEFAULT, which is ABI 1's mask (bits 0–12) — REFER (bit 13) and
+    TRUNCATE (bit 14) were being masked out of every Landlock ruleset on
+    every kernel newer than the ABI-3 (6.0) days this table was last updated
+    for, REGARDLESS of what a PathRule actually requested. Without REFER, the
+    kernel denies EVERY rename/link that moves a path to a DIFFERENT parent
+    directory — even two directories covered by the exact same rule, even on
+    the exact same filesystem — with `EXDEV` (errno 18), which is exactly
+    the "Invalid cross-device link" `uv`'s cache-population rename died with
+    (`uv-cache/.tmpXXXX` -> `uv-cache/archive-v0/<hash>`, two DIFFERENT
+    parent directories under one Landlocked, single-device tree). Capping at
+    ABI 3's mask for any version ≥ 3 (instead of guessing at bits this
+    module has no name for) fixes it for real.
+    """
+    if abi_version >= _ABI_MAX_KNOWN:
+        return _ABI_MAX_ACCESS_FS[_ABI_MAX_KNOWN]
+    return _ABI_MAX_ACCESS_FS.get(abi_version, _ABI_MAX_ACCESS_FS[1])
 
 PR_SET_NO_NEW_PRIVS: int = 38
 
@@ -200,7 +234,7 @@ def _access_mask_for_rules(
 
     Las access rights que exceden el ABI se descartan (degrade silencioso).
     """
-    max_mask = _ABI_MAX_ACCESS_FS.get(abi_version, _ABI_MAX_ACCESS_FS[1])
+    max_mask = _max_access_fs_mask(abi_version)
     mask = 0
     for accesses in rules_accesses:
         for right in accesses:
@@ -282,7 +316,7 @@ def _add_path_rules(
     handled_mask: int,
     abi_version: int,
 ) -> None:
-    max_mask = _ABI_MAX_ACCESS_FS.get(abi_version, _ABI_MAX_ACCESS_FS[1])
+    max_mask = _max_access_fs_mask(abi_version)
 
     for rule in rules:
         path = str(getattr(rule, "path", ""))
@@ -370,19 +404,52 @@ def _restrict_self(nr_restrict: int, ruleset_fd: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# Typed apply outcome (spec 025 hallazgo #4) — load_and_apply's raw exit code
+# collapses "applied" and "skipped/degraded" into the SAME 0, so a caller that
+# only checks rc == 0 cannot tell confinement was actually loaded from "the
+# kernel doesn't support it, carry on". apply_runtime_landlock() below returns
+# this explicit outcome instead; load_and_apply() stays as a thin int-mapping
+# wrapper so the CLI contract used by the browser-jail shell script (which
+# only understands the process exit code) is untouched.
 # ---------------------------------------------------------------------------
 
-def load_and_apply(capability_name: str) -> int:
-    """Carga y aplica el RulesetSpec para *capability_name*.
+class LandlockOutcome(enum.Enum):
+    APPLIED = "applied"
+    UNSUPPORTED_KERNEL = "unsupported_kernel"  # abi is None: kernel has no Landlock at all
+    UNSUPPORTED_ARCH = "unsupported_arch"  # no syscall-number table for this platform.machine()
+    BLOCKED = "blocked"  # Landlock present but seccomp blocks landlock_* (V-5) — not a degrade
+    INVALID_CAPABILITY = "invalid_capability"
+    ERROR = "error"  # hard, non-degradable syscall failure
+
+
+@dataclasses.dataclass(frozen=True)
+class LandlockApplyResult:
+    """Explicit outcome of an apply attempt — never ambiguous like the raw exit code."""
+
+    outcome: LandlockOutcome
+    exit_code: int  # preserves the CLI contract documented in the module docstring
+    detail: str
+
+    @property
+    def applied(self) -> bool:
+        return self.outcome is LandlockOutcome.APPLIED
+
+
+# ---------------------------------------------------------------------------
+# Public entry points
+# ---------------------------------------------------------------------------
+
+def apply_runtime_landlock(capability_name: str) -> LandlockApplyResult:
+    """Carga y aplica el RulesetSpec para *capability_name* — resultado TIPADO.
 
     Para Capability.BROWSER lee HERMES_BROWSER_SESSION del entorno para
     resolver el path de sesión concreto en el ruleset.
 
-    Devuelve:
-        0  — éxito o degrade (Landlock ausente/kernel viejo).
-        2  — capability_name inválido.
-        3  — error duro de syscall.
+    A diferencia de load_and_apply() (que colapsa "aplicado" y "degradado" en
+    el mismo exit code 0 por compatibilidad con el contrato CLI del jail),
+    este devuelve un LandlockApplyResult.outcome explícito, para que el
+    llamador (p.ej. el propio daemon autoconfinándose, runtime/__main__.py)
+    pueda decidir fail-closed vs degrade sin ambigüedad.
     """
     from hermes.agents_os.application.consent_manager import Capability  # noqa: PLC0415
     from hermes.agents_os.infrastructure.landlock_ruleset_builder import (  # noqa: PLC0415
@@ -396,7 +463,9 @@ def load_and_apply(capability_name: str) -> int:
         logger.error(
             "landlock_loader.unknown_capability capability=%s", capability_name
         )
-        return 2
+        return LandlockApplyResult(
+            LandlockOutcome.INVALID_CAPABILITY, 2, f"unknown capability {capability_name!r}"
+        )
 
     if cap == Capability.BROWSER:
         session_name = os.environ.get("HERMES_BROWSER_SESSION", "default")
@@ -416,14 +485,16 @@ def load_and_apply(capability_name: str) -> int:
             "add_rule/restrict_self en el perfil seccomp.",
             capability_name,
         )
-        return 2
+        return LandlockApplyResult(LandlockOutcome.BLOCKED, 2, "seccomp blocks landlock_*")
     if abi is None:
         logger.warning(
             "landlock_loader.unavailable_degraded capability=%s "
             "— kernel sin Landlock; confinamiento solo via systemd-run scope",
             capability_name,
         )
-        return 0
+        return LandlockApplyResult(
+            LandlockOutcome.UNSUPPORTED_KERNEL, 0, "kernel has no Landlock support"
+        )
 
     logger.info("landlock_loader.detected_abi abi=%d capability=%s", abi, capability_name)
 
@@ -431,12 +502,29 @@ def load_and_apply(capability_name: str) -> int:
         apply_ruleset(spec, abi)
     except UnsupportedArchError as exc:
         logger.warning("landlock_loader.unsupported_arch error=%s — degrade", exc)
-        return 0
+        return LandlockApplyResult(LandlockOutcome.UNSUPPORTED_ARCH, 0, str(exc))
     except LandlockSyscallError as exc:
         logger.error("landlock_loader.syscall_error error=%s", exc)
-        return 3
+        return LandlockApplyResult(LandlockOutcome.ERROR, 3, str(exc))
 
-    return 0
+    return LandlockApplyResult(LandlockOutcome.APPLIED, 0, f"abi={abi}")
+
+
+def load_and_apply(capability_name: str) -> int:
+    """Carga y aplica el RulesetSpec para *capability_name* — contrato CLI (int).
+
+    Wrapper de compatibilidad sobre apply_runtime_landlock(): el jail
+    (hermes-browser-jail, script de shell) invoca este módulo como proceso
+    hijo vía `python3 -m hermes.security.landlock_loader <CAPABILITY>` y solo
+    entiende el exit code del proceso — este wrapper preserva exactamente el
+    contrato documentado en el docstring del módulo.
+
+    Devuelve:
+        0  — éxito o degrade (Landlock ausente/kernel viejo/arquitectura sin tabla).
+        2  — capability_name inválido, o bloqueado por seccomp.
+        3  — error duro de syscall.
+    """
+    return apply_runtime_landlock(capability_name).exit_code
 
 
 # ---------------------------------------------------------------------------

@@ -1,55 +1,55 @@
 // Prevent an extra console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// Safent desktop — a THIN native-webview shell over the local Safent web UI.
+// Safent desktop — a native Tauri shell around the embedded `safent` CLI.
 //
-// Its ONLY own screen is the install/loading animation; everything else is the web UI.
-// On a fresh machine it fires the SAME one-line curl bootstrap the user would run by
-// hand (get-safent.sh: installs the `safent` CLI, pulls the image, starts the cage,
-// installs the UI-update agent), streaming its progress to the animation. Then it asks
-// `safent url` for the local URL and loads it in the platform webview (WKWebView /
-// WebView2 / WebKitGTK). All product + container logic stays in the `safent` CLI /
+// Its ONLY own screens are the local loader's preparation/failure/reconnect
+// states (desktop/src, window_policy.rs's single window + tray); everything
+// past `engine_ready` is the product web UI, loaded from the loopback
+// origin the boot service hands the window (contract app-engine.md §5/§8).
+// `boot::start` (specs/028-safent-app-nativa, T007-T013: domain + pure
+// reconciler + the embedded-CLI adapter + the observe-plan-apply loop) owns
+// ALL bootstrap/repair logic — this file only wires Tauri plumbing (window,
+// tray, IPC commands, the host clipboard bridge, the update-availability
+// poll) around it. All product + container logic stays in the `safent` CLI /
 // the container — the shell adds none.
 
-use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
 use tauri::Manager;
 
-const BOOTSTRAP_URL: &str =
-    "https://raw.githubusercontent.com/devwspito/safent-runtime/main/get-safent.sh";
+mod dialogs;
+mod window_policy;
+use window_policy::WindowPolicy;
 
-// Diagnostic self-test (opt-in via SAFENT_SELFTEST=1): after the UI loads, run a real
-// chat round-trip INSIDE the webview and paint the verdict — proves SSE streaming works
-// in this platform's webview.
-const SELFTEST_JS: &str = r#"(async () => {
-  const b = document.createElement('div');
-  b.id = '__safent_selftest';
-  b.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:2147483647;background:#0b0d10;color:#5b8cff;font:600 18px/1.4 system-ui,sans-serif;padding:12px 16px;border-bottom:2px solid #5b8cff';
-  b.textContent = 'SSE self-test: starting…';
-  document.body.appendChild(b);
-  try {
-    const r = await fetch('/api/v1/chat', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_message:'Responde solo: pong.'})});
-    const j = await r.json().catch(() => ({}));
-    const task = j.task_id;
-    if (!task) { b.textContent = 'SSE self-test: FAIL — no task_id (http ' + r.status + ')'; b.style.color = '#ff6b6b'; return; }
-    let events = 0, deltas = 0, done = false;
-    const es = new EventSource('/api/v1/chat/stream/' + task);
-    const tick = () => { b.textContent = 'SSE self-test: streaming… task=' + task.slice(0,8) + ' events=' + events + ' deltas=' + deltas; };
-    es.onmessage = (e) => { events++; try { const d = JSON.parse(e.data); if (d.kind === 'delta' || d.delta) deltas++; if (d.kind === 'done') { done = true; es.close(); } } catch (_) {} tick(); };
-    es.onerror = () => {};
-    setTimeout(() => {
-      try { es.close(); } catch (_) {}
-      const ok = events > 0;
-      b.textContent = 'SSE self-test: ' + (ok ? 'OK' : 'FAIL') + ' — events=' + events + ' deltas=' + deltas + ' done=' + done;
-      b.style.color = ok ? '#4caf50' : '#ff6b6b';
-      b.style.borderBottomColor = ok ? '#4caf50' : '#ff6b6b';
-    }, 20000);
-  } catch (err) { b.textContent = 'SSE self-test: ERROR ' + err; b.style.color = '#ff6b6b'; }
-})();"#;
+// T014: update orchestrator (contracts/update.md) — plan/orchestrator are pure
+// resp. port-driven. The native app-only plugin is wired below; the combined
+// engine/Ads/app transaction is not activated by this shell integration.
+mod update;
 
-/// GUI apps launched from Finder / the dock inherit a MINIMAL PATH (/usr/bin:/bin:…),
-/// so the `safent` script cannot find `podman`/`docker` (installed in /opt/homebrew/bin
-/// or /usr/local/bin). Hand every child an augmented PATH covering the common locations.
+// Bootstrap engine (specs/028-safent-app-nativa, T007/T008/T009/T011): pure
+// domain + reconciler + ports/adapter + the observe-plan-apply loop — THE
+// default and only boot path (main() below).
+mod ads_caps;
+mod boot;
+mod bootstrap_control;
+mod companion_requests;
+mod diagnostics;
+mod domain;
+mod engine_adapter;
+mod folder_bridge;
+mod image_prune;
+mod ports;
+mod reconcile;
+mod selftest;
+
+/// Clipboard helpers on macOS are OS binaries; do not inherit user tools.
+#[cfg(target_os = "macos")]
+fn augmented_path() -> String {
+    engine_adapter::native_command_path(true, None)
+}
+
+/// Preserve existing Linux clipboard-helper discovery (Wayland / X11).
+#[cfg(not(target_os = "macos"))]
 fn augmented_path() -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Ok(p) = std::env::var("PATH") {
@@ -57,7 +57,15 @@ fn augmented_path() -> String {
             parts.push(p);
         }
     }
-    for p in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/podman/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+    for p in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/opt/podman/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
         parts.push(p.to_string());
     }
     if let Some(home) = std::env::var_os("HOME") {
@@ -65,92 +73,6 @@ fn augmented_path() -> String {
     }
     let sep = if cfg!(windows) { ";" } else { ":" };
     parts.join(sep)
-}
-
-/// The installed `safent` CLI path, or None if it is not installed yet.
-fn installed_safent() -> Option<String> {
-    if let Ok(b) = std::env::var("SAFENT_BIN") {
-        let b = b.trim();
-        if !b.is_empty() && std::path::Path::new(b).is_file() {
-            return Some(b.to_string());
-        }
-    }
-    for c in ["/opt/homebrew/bin/safent", "/usr/local/bin/safent", "/usr/bin/safent"] {
-        if std::path::Path::new(c).is_file() {
-            return Some(c.to_string());
-        }
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let p = std::path::Path::new(&home).join(".local/bin/safent");
-        if p.is_file() {
-            return Some(p.to_string_lossy().into_owned());
-        }
-    }
-    None
-}
-
-/// True if a container engine (podman preferred, docker accepted) is already installed.
-fn has_engine() -> bool {
-    let candidates = [
-        "/opt/podman/bin/podman",
-        "/opt/homebrew/bin/podman",
-        "/usr/local/bin/podman",
-        "/usr/bin/podman",
-        "/opt/homebrew/bin/docker",
-        "/usr/local/bin/docker",
-        "/usr/bin/docker",
-        "/Applications/Docker.app/Contents/Resources/bin/docker",
-    ];
-    candidates.iter().any(|p| std::path::Path::new(p).is_file())
-}
-
-// Install Podman on macOS from the OFFICIAL .pkg (podman.io/docs/installation → macOS
-// installer). Downloads the latest universal .pkg and installs it with ONE native admin
-// password dialog (no terminal). Fedora CoreOS VM + machine are set up later by `safent`.
-#[cfg(target_os = "macos")]
-const PODMAN_INSTALL_MAC: &str = r#"set -e
-echo "Buscando la última versión de Podman…"
-JSON="$(curl -fsSL https://api.github.com/repos/containers/podman/releases/latest)"
-URL="$(printf '%s' "$JSON" | grep -oE 'https://[^"]*podman-installer-macos-universal\.pkg' | head -1)"
-[ -n "$URL" ] || URL="$(printf '%s' "$JSON" | grep -oE 'https://[^"]*podman-installer-macos-[^"]*\.pkg' | head -1)"
-[ -n "$URL" ] || { echo "No encontré el instalador oficial de Podman."; exit 1; }
-echo "Descargando Podman…"
-curl -fsSL "$URL" -o /tmp/safent-podman.pkg
-echo "Instalando Podman (autoriza en la ventana de macOS)…"
-osascript -e 'do shell script "installer -pkg /tmp/safent-podman.pkg -target /" with administrator privileges'
-rm -f /tmp/safent-podman.pkg 2>/dev/null || true
-echo "Podman instalado."
-"#;
-
-/// Install the container engine (Podman) from the UI, then continue to load Safent.
-/// Fire-and-forget: returns immediately; progress + navigation happen via the window.
-#[tauri::command]
-fn install_podman(window: tauri::WebviewWindow) {
-    std::thread::spawn(move || {
-        #[cfg(target_os = "macos")]
-        let res = run_and_stream(&window, "/bin/sh", &["-c", PODMAN_INSTALL_MAC]);
-        #[cfg(not(target_os = "macos"))]
-        let res: Result<(), String> = Err(
-            "La instalación con un clic está disponible en macOS. En este sistema instala \
-             Podman desde https://podman.io/docs/installation y reabre Safent."
-                .to_string(),
-        );
-
-        match res {
-            Ok(()) => match ensure_and_resolve(&window) {
-                Ok(url) => match url.parse::<tauri::Url>() {
-                    Ok(parsed) => {
-                        if window.navigate(parsed).is_ok() {
-                            start_update_checker(&window);
-                        }
-                    }
-                    Err(e) => show_error(&window, &format!("URL inválida '{url}': {e}")),
-                },
-                Err(e) => show_error(&window, &e),
-            },
-            Err(e) => show_error(&window, &format!("No pude instalar Podman: {e}")),
-        }
-    });
 }
 
 // ---- host clipboard bridge (for the Live/Teaching VNC view) ----------------------------
@@ -167,18 +89,42 @@ fn install_podman(window: tauri::WebviewWindow) {
 #[cfg(not(target_os = "windows"))]
 fn clipboard_read_cmd() -> (&'static str, &'static [&'static str]) {
     #[cfg(target_os = "macos")]
-    return ("pbpaste", &[]);
+    return ("/usr/bin/pbpaste", &[]);
     #[cfg(not(target_os = "macos"))]
-    return ("sh", &["-c", "wl-paste --no-newline 2>/dev/null || xclip -selection clipboard -o 2>/dev/null"]);
+    return (
+        "sh",
+        &[
+            "-c",
+            "wl-paste --no-newline 2>/dev/null || xclip -selection clipboard -o 2>/dev/null",
+        ],
+    );
 }
 
 /// Return the platform command that sets the clipboard from stdin.
 #[cfg(not(target_os = "windows"))]
 fn clipboard_write_cmd() -> (&'static str, &'static [&'static str]) {
     #[cfg(target_os = "macos")]
-    return ("pbcopy", &[]);
+    return ("/usr/bin/pbcopy", &[]);
     #[cfg(not(target_os = "macos"))]
-    return ("sh", &["-c", "wl-copy 2>/dev/null || xclip -selection clipboard -i 2>/dev/null"]);
+    return (
+        "sh",
+        &[
+            "-c",
+            "wl-copy 2>/dev/null || xclip -selection clipboard -i 2>/dev/null",
+        ],
+    );
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod stock_clipboard_tests {
+    use super::*;
+
+    #[test]
+    fn macos_clipboard_uses_only_absolute_system_binaries() {
+        assert_eq!(clipboard_read_cmd(), ("/usr/bin/pbpaste", &[][..]));
+        assert_eq!(clipboard_write_cmd(), ("/usr/bin/pbcopy", &[][..]));
+        assert_eq!(augmented_path(), "/usr/bin:/bin:/usr/sbin:/sbin");
+    }
 }
 
 /// Apply the platform env the clipboard tools need: augmented PATH, and on macOS a UTF-8
@@ -204,7 +150,9 @@ async fn read_host_clipboard() -> Result<String, String> {
         let mut cmd = Command::new(prog);
         cmd.args(args);
         clipboard_env(&mut cmd);
-        let out = cmd.output().map_err(|e| format!("clipboard read failed: {e}"))?;
+        let out = cmd
+            .output()
+            .map_err(|e| format!("clipboard read failed: {e}"))?;
         if !out.status.success() {
             return Ok(String::new()); // empty clipboard exits non-zero on some tools — not an error
         }
@@ -219,7 +167,9 @@ async fn write_host_clipboard(text: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let _ = text;
-        return Err("host clipboard bridge unavailable on Windows — use navigator.clipboard".into());
+        return Err(
+            "host clipboard bridge unavailable on Windows — use navigator.clipboard".into(),
+        );
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -235,267 +185,120 @@ async fn write_host_clipboard(text: String) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("clipboard write failed: {e}"))?;
         if let Some(mut sin) = child.stdin.take() {
-            sin.write_all(text.as_bytes()).map_err(|e| format!("clipboard write failed: {e}"))?;
+            sin.write_all(text.as_bytes())
+                .map_err(|e| format!("clipboard write failed: {e}"))?;
         }
-        let status = child.wait().map_err(|e| format!("clipboard write failed: {e}"))?;
+        let status = child
+            .wait()
+            .map_err(|e| format!("clipboard write failed: {e}"))?;
         if status.success() {
             Ok(())
         } else {
-            Err(format!("clipboard write exited with {}", status.code().unwrap_or(-1)))
+            Err(format!(
+                "clipboard write exited with {}",
+                status.code().unwrap_or(-1)
+            ))
         }
     }
 }
 
-fn js_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('`', "\\`").replace('$', "\\$").replace('<', "\\u003c")
-}
-
-/// Push a live status line to the install animation (window.__safentProgress).
-fn progress(window: &tauri::WebviewWindow, msg: &str) {
-    let m = msg.trim();
-    if m.is_empty() {
-        return;
+/// `--selftest` / `--selftest=companion`: runs boot.rs's loop headlessly and
+/// exits — checked BEFORE `tauri::Builder` is ever touched, so this needs no
+/// display server (run over SSH on the owner's Mac). Any other argv (none,
+/// `--help`, a Tauri-internal flag) falls through to the normal windowed app.
+fn selftest_arg() -> Option<bool> {
+    match std::env::args().nth(1).as_deref() {
+        Some("--selftest") => Some(false),
+        Some("--selftest=companion") => Some(true),
+        _ => None,
     }
-    let _ = window.eval(&format!(
-        "window.__safentProgress && window.__safentProgress(`{}`);",
-        js_escape(m)
-    ));
-}
-
-/// Show a human error inside the (already-visible) loader window instead of a blank page.
-fn show_error(window: &tauri::WebviewWindow, message: &str) {
-    eprintln!("safent-desktop: {message}");
-    let _ = window.eval(&format!(
-        "window.__safentError && window.__safentError(`{}`);",
-        js_escape(message)
-    ));
-}
-
-/// Spawn a command and stream BOTH stdout+stderr, line by line, to the install animation.
-/// Err(last line) on non-zero exit. Used for the curl bootstrap.
-fn run_and_stream(window: &tauri::WebviewWindow, program: &str, args: &[&str]) -> Result<(), String> {
-    let mut child = Command::new(program)
-        .args(args)
-        .env("PATH", augmented_path())
-        .env("SAFENT_NO_BROWSER", "1") // the app shows the UI itself — don't pop the browser
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("no pude ejecutar el instalador: {e}"))?;
-
-    let mut handles = Vec::new();
-    let pipes: [Option<Box<dyn Read + Send>>; 2] = [
-        child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>),
-        child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>),
-    ];
-    for pipe in pipes {
-        if let Some(p) = pipe {
-            let w = window.clone();
-            handles.push(std::thread::spawn(move || {
-                let mut last = String::new();
-                for line in BufReader::new(p).lines().map_while(Result::ok) {
-                    if !line.trim().is_empty() {
-                        progress(&w, &line);
-                        last = line;
-                    }
-                }
-                last
-            }));
-        }
-    }
-    let status = child.wait().map_err(|e| format!("error esperando el instalador: {e}"))?;
-    let mut last = String::new();
-    for h in handles {
-        if let Ok(l) = h.join() {
-            if !l.is_empty() {
-                last = l;
-            }
-        }
-    }
-    if status.success() {
-        Ok(())
-    } else if last.is_empty() {
-        Err(format!("el instalador salió con código {}", status.code().unwrap_or(-1)))
-    } else {
-        Err(last)
-    }
-}
-
-/// Run `sh <safent> url`: stream its stderr (progress) to the animation, capture stdout,
-/// return the resolved `http://…/?k=…` URL. `safent url` also pulls/starts on its own.
-fn run_url(window: &tauri::WebviewWindow, bin: &str) -> Result<String, String> {
-    let mut child = Command::new("/bin/sh")
-        .arg(bin)
-        .arg("url")
-        .env("PATH", augmented_path())
-        .env("SAFENT_NO_BROWSER", "1") // the app shows the UI itself — don't pop the browser
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("no pude ejecutar 'safent url': {e}"))?;
-
-    let w = window.clone();
-    let stderr = child.stderr.take();
-    let stderr_handle = std::thread::spawn(move || {
-        let mut last = String::new();
-        if let Some(p) = stderr {
-            for line in BufReader::new(p).lines().map_while(Result::ok) {
-                if !line.trim().is_empty() {
-                    progress(&w, &line);
-                    last = line;
-                }
-            }
-        }
-        last
-    });
-
-    let mut out = String::new();
-    if let Some(mut p) = child.stdout.take() {
-        let _ = p.read_to_string(&mut out);
-    }
-    let status = child.wait().map_err(|e| format!("error esperando 'safent url': {e}"))?;
-    let last_err = stderr_handle.join().unwrap_or_default();
-
-    if !status.success() {
-        let detail = if last_err.is_empty() {
-            format!("código {}", status.code().unwrap_or(-1))
-        } else {
-            last_err
-        };
-        return Err(format!("'safent url' falló: {detail}"));
-    }
-
-    let url = out
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|l| l.starts_with("http"))
-        .map(str::to_string)
-        .unwrap_or_default();
-    if url.is_empty() {
-        return Err(if last_err.is_empty() {
-            "'safent url' no devolvió una URL".to_string()
-        } else {
-            format!("'safent url' no devolvió una URL: {last_err}")
-        });
-    }
-    Ok(url)
-}
-
-/// Ensure Safent is installed + running (bootstrapping via the curl on first run) and
-/// return the local web UI URL, streaming all progress to the install animation.
-fn ensure_and_resolve(window: &tauri::WebviewWindow) -> Result<String, String> {
-    if let Ok(u) = std::env::var("SAFENT_URL") {
-        let u = u.trim().to_string();
-        if !u.is_empty() {
-            return Ok(u);
-        }
-    }
-
-    let bin = match installed_safent() {
-        Some(b) => b,
-        None => {
-            // First run on a fresh machine: fire the SAME one-liner the user would run.
-            progress(window, "Instalando Safent por primera vez…");
-            run_and_stream(window, "/bin/sh", &["-c", &format!("curl -fsSL {BOOTSTRAP_URL} | sh")])?;
-            installed_safent().ok_or_else(|| {
-                "El instalador terminó pero no encuentro el comando 'safent'. Abre una \
-                 terminal y prueba: safent url"
-                    .to_string()
-            })?
-        }
-    };
-
-    run_url(window, &bin)
-}
-
-const VERSION_URL: &str = "https://raw.githubusercontent.com/devwspito/safent-runtime/main/VERSION";
-
-/// Fetch the latest published version and expose it to the web UI as
-/// `window.__safentLatestVersion`, so the footer can ALERT when a newer build exists. The
-/// sandboxed backend's own version check can be blocked by its egress cage; the desktop
-/// shell runs on the host with normal internet, so it is the reliable source. Best-effort:
-/// any failure (offline, non-version body) is silent and simply shows no alert.
-fn push_latest_version(window: &tauri::WebviewWindow) {
-    let out = Command::new("curl")
-        .args(["-fsSL", "--max-time", "10", VERSION_URL])
-        .env("PATH", augmented_path())
-        .output();
-    if let Ok(o) = out {
-        if o.status.success() {
-            let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            // Accept ONLY a short dotted-numeric string so an HTML error page or redirect
-            // body can never be injected as a "version".
-            let ok = !v.is_empty()
-                && v.len() <= 20
-                && v.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
-            if ok {
-                let _ = window.eval(&format!("window.__safentLatestVersion = `{}`;", js_escape(&v)));
-            }
-        }
-    }
-}
-
-/// After the UI has loaded, publish the latest version once (short delay to let the page
-/// settle) and then refresh it every few hours so a long-running session still learns about
-/// a new release.
-fn start_update_checker(window: &tauri::WebviewWindow) {
-    let w = window.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(12));
-        loop {
-            push_latest_version(&w);
-            std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
-        }
-    });
 }
 
 fn main() {
+    if let Some(want_companion) = selftest_arg() {
+        std::process::exit(selftest::run(want_companion));
+    }
+    let policy = WindowPolicy::new();
+
     tauri::Builder::default()
+        // Must be the first plugin registered (tauri-plugin-single-instance's own
+        // requirement) — FR-003/SC-010: a second launch focuses the one window
+        // instead of creating another, never a second Safent.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            window_policy::focus_existing(app);
+        }))
+        .manage(policy.clone())
+        .manage(folder_bridge::FolderBridge::default())
+        .manage(ads_caps::AdsCapsState::default())
+        .manage(diagnostics::DiagnosticsState::default())
+        .manage(update::native::NativeUpdater::default())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
-            install_podman,
             read_host_clipboard,
-            write_host_clipboard
+            write_host_clipboard,
+            window_policy::open_ads_oauth,
+            window_policy::open_ads_setup,
+            folder_bridge::pick_host_folder,
+            folder_bridge::read_host_folder_file,
+            folder_bridge::approve_host_folder_write,
+            folder_bridge::write_host_folder_file,
+            ads_caps::get_ads_hard_caps,
+            ads_caps::save_ads_hard_caps,
+            window_policy::open_provider_oauth,
+            window_policy::show_native_updater,
+            window_policy::get_native_update_status,
+            boot::cancel_bootstrap,
+            boot::retry_bootstrap,
+            diagnostics::export_diagnostics,
+            diagnostics::get_bootstrap_state,
+            update::native::check_native_update,
+            update::native::install_native_update
         ])
-        .setup(|app| {
+        .setup(move |app| {
             // NOTE: do NOT replace the default macOS menu. A custom menu that drops the
             // standard Edit submenu breaks keyboard routing to WKWebView entirely (no
             // typing anywhere). The Cmd+V-into-Live/Teaching paste must be solved in the
             // frontend (VncView), not by touching the menu — see the paste TODO there.
-            let window = app
-                .get_webview_window("main")
-                .expect("main window must exist (defined in tauri.conf.json)");
+            window_policy::create_main_window(app.handle(), policy.clone())?;
+            window_policy::install_tray(app.handle())?;
 
-            // Do everything OFF the main thread so the install animation stays live and the
-            // window never freezes during the (possibly minutes-long) first run.
-            std::thread::spawn(move || {
-                // No container engine yet → show the one-click "Instalar Podman" screen and
-                // wait for the button (which invokes install_podman → continues from there).
-                if std::env::var("SAFENT_URL").is_err() && !has_engine() {
-                    let _ = window.eval("window.__safentNeedsPodman && window.__safentNeedsPodman();");
-                    return;
-                }
-                match ensure_and_resolve(&window) {
-                    Ok(url) => match url.parse::<tauri::Url>() {
-                        Ok(parsed) => {
-                            if let Err(e) = window.navigate(parsed) {
-                                show_error(&window, &format!("no pude abrir '{url}': {e}"));
-                            } else {
-                                start_update_checker(&window);
-                                if std::env::var("SAFENT_SELFTEST").is_ok() {
-                                    std::thread::sleep(std::time::Duration::from_secs(7));
-                                    let _ = window.eval(SELFTEST_JS);
-                                }
-                            }
-                        }
-                        Err(e) => show_error(&window, &format!("URL inválida '{url}': {e}")),
-                    },
-                    Err(e) => show_error(&window, &e),
-                }
-            });
+            // THE boot path (specs/028-safent-app-nativa): observe -> plan -> apply ->
+            // reobserve, off the main thread, navigating the just-created "main" window
+            // to the ticketed product URL once ready (boot::navigate_to_ticket) — see
+            // that function for why it also authorizes the origin with `policy` and
+            // starts the update-availability poll itself, at the right moment.
+            boot::start(app.handle().clone());
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Safent desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building Safent desktop")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                let Some(consumer) = app.try_state::<companion_requests::CompanionRequests>()
+                else {
+                    return;
+                };
+                if consumer.exit_finished() {
+                    return;
+                }
+                api.prevent_exit();
+                if consumer.begin_exit() {
+                    app.state::<ads_caps::AdsCapsState>().begin_close();
+                    let handle = app.clone();
+                    std::thread::spawn(move || {
+                        // Do not wait on a worker/event emitter from the UI
+                        // thread. Drain before exiting or replacing this app.
+                        let consumer = handle.state::<companion_requests::CompanionRequests>();
+                        consumer.stop();
+                        // Owner-confirmed caps may be applying or restoring.
+                        // Drain normal quits; this is not force-kill recovery.
+                        handle.state::<ads_caps::AdsCapsState>().wait_idle();
+                        consumer.finish_exit();
+                        handle.exit(code.unwrap_or(0));
+                    });
+                }
+            }
+        });
 }

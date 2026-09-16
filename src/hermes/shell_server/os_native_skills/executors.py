@@ -31,7 +31,7 @@ def execute_screenshot(args: dict, *, monitor_connector: str = "") -> dict:
     from hermes.shell_server.screen_capture.mutter_source import (
         MutterScreenCastSource,
     )
-    from hermes.shell_server.training.png_writer import encode_rgba_png
+    from hermes.shell_server.screen_capture.png_writer import encode_rgba_png
 
     source = MutterScreenCastSource()
     connector = monitor_connector or source.primary_connector()

@@ -720,20 +720,28 @@ class TestRegisterExternalSpecsIdempotent:
 
 
 class TestBuildNousEngineToolsSourceWiring:
+    @pytest.fixture(autouse=True)
+    def isolate_factory_dependencies(self, monkeypatch):
+        # Test factory wiring, not access to a live vault/process profile.
+        import hermes.runtime.__main__ as main
+        import hermes.runtime.nous_engine as engine
+        from hermes.runtime.active_provider import ActiveProviderService
+
+        monkeypatch.setattr(ActiveProviderService, "resolve", lambda _self: None)
+        monkeypatch.setattr(main, "_build_model_config_for_alias", lambda _db: None)
+        monkeypatch.setattr(engine, "NousReasoningEngine", MagicMock())
+
     def test_build_nous_engine_warns_when_tools_source_is_none(self, caplog) -> None:
         """_build_nous_engine(tools_source=None) emits a LOUD warning."""
         import hermes.runtime.__main__ as m
 
         with caplog.at_level(logging.WARNING, logger="hermes-runtime"):
-            try:
-                m._build_nous_engine(
-                    broker=None,
-                    consent_context=None,
-                    tenant_id=None,
-                    tools_source=None,
-                )
-            except Exception:
-                pass  # NousAgentNotInstalledError expected if hermes-agent absent
+            m._build_nous_engine(
+                broker=None,
+                consent_context=None,
+                tenant_id=None,
+                tools_source=None,
+            )
 
         warning_msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
         assert any("nous_engine_no_tools_source" in msg for msg in warning_msgs), (
@@ -748,15 +756,12 @@ class TestBuildNousEngineToolsSourceWiring:
         import hermes.runtime.__main__ as m
 
         with caplog.at_level(logging.WARNING, logger="hermes-runtime"):
-            try:
-                m._build_nous_engine(
-                    broker=None,
-                    consent_context=None,
-                    tenant_id=None,
-                    tools_source=_source,
-                )
-            except Exception:
-                pass
+            m._build_nous_engine(
+                broker=None,
+                consent_context=None,
+                tenant_id=None,
+                tools_source=_source,
+            )
 
         warning_msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
         assert not any("nous_engine_no_tools_source" in msg for msg in warning_msgs), (

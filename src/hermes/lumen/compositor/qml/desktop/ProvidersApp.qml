@@ -103,7 +103,12 @@ Rectangle {
             provider_id: nativePid,
             api_key: nativeKeyField.text.trim(),
             model: nativeModelField ? nativeModelField.text.trim() : "",
-            base_url: ""
+            base_url: "",
+            // Esta pantalla es de un solo paso ("configurado = ya es el cerebro
+            // activo", ver el toast de "prov-native-cfg" abajo) — set_active
+            // explícito, antes el daemon lo asumía implícito para TODO configure
+            // (bug: guardar una clave de prueba en otra pantalla también activaba).
+            set_active: true
         }}));
     }
     function add() {

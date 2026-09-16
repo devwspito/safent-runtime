@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+// This file exercises request-building/response-parsing — a separate concern
+// from auth gating (covered by lib/token.test.ts and App.test.tsx) — so it
+// runs as an authenticated session throughout, matching every real load.
+vi.mock('../lib/token', () => ({
+  token: () => 'test-bearer',
+  refreshToken: async () => false,
+  getAuthStatus: () => ({ kind: 'authenticated' }),
+}))
+
 import { ApiError, listInboundDelegations, resolveInboundDelegation } from './client'
 
 function jsonResponse(body: unknown, status = 200): Response {

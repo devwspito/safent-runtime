@@ -612,9 +612,7 @@ class TestBridgeAtSpiHandlers:
 
     def _make_bridge_with_fake_atspi(self, client_mock):
         from unittest.mock import MagicMock
-        from hermes.agents_os.application.teaching.input_ownership_ledger import (
-            InputOwnershipLedger,
-        )
+        from hermes.agents_os.domain.input_ownership import InputOwnershipLedger
         from hermes.shell_server.screen_capture.fake import FakeScreenCaptureBackend
         from hermes.shell_server.session_agent.input_bridge import SessionInputBridge
 

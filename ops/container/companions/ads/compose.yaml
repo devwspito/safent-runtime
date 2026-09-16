@@ -38,10 +38,12 @@ networks:
 
 services:
   ads-db:
-    image: postgres:16-alpine
+    # Reviewed 16.15-alpine3.24 multi-architecture index; no mutable DB image.
+    image: docker.io/library/postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     restart: unless-stopped
     networks:
-      - safent-companions
+      safent-companions:
+        ipv4_address: 10.201.0.11
     environment:
       POSTGRES_USER: ads
       POSTGRES_PASSWORD: ${ADS_POSTGRES_PASSWORD:?ADS_POSTGRES_PASSWORD requerido (lo genera provision.sh)}
@@ -66,7 +68,8 @@ services:
     environment:
       ADS_DATABASE_URL: postgresql+asyncpg://ads:${ADS_POSTGRES_PASSWORD}@ads-db/ads
     networks:
-      - safent-companions
+      safent-companions:
+        ipv4_address: 10.201.0.14
     depends_on:
       ads-db:
         condition: service_healthy
@@ -108,6 +111,8 @@ services:
       - broker-sock:/run/ads-broker
       - ${SAFENT_STATE}/tls:/etc/ads-companion/tls:ro
     depends_on:
+      ads-broker:
+        condition: service_started
       ads-db:
         condition: service_healthy
       ads-migrate:
@@ -149,10 +154,13 @@ services:
       - path: ${SAFENT_STATE}/secrets/api.env
         required: true
     networks:
-      - safent-companions
+      safent-companions:
+        ipv4_address: 10.201.0.13
     volumes:
       - broker-sock:/run/ads-broker
     depends_on:
+      ads-broker:
+        condition: service_started
       ads-db:
         condition: service_healthy
       ads-migrate:
@@ -179,7 +187,8 @@ services:
       - path: ${SAFENT_STATE}/secrets/broker.env
         required: true
     networks:
-      - safent-companions
+      safent-companions:
+        ipv4_address: 10.201.0.12
     volumes:
       - broker-sock:/run/ads-broker
       # credential_store.py::EncryptedCredentialStore mkdir's

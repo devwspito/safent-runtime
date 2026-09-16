@@ -2,8 +2,8 @@
 
 Todos los consumidores que necesitan saber qué modelo usar para inferencia
 pasan por aquí. Internamente delega en `provider_config_source.resolve_model_config`
-(cascade nativo → SQL → env). El resultado se cachea 30 segundos para evitar
-lecturas repetidas de disco/DB en hot-paths (run_cycle, OsNativeDispatcher).
+(política gestionada firmada, o nativo → env en modo libre). Sólo el modo
+libre se cachea 30 segundos; gestión y revocación se verifican en cada llamada.
 
 Uso típico (DI via constructor):
 
@@ -55,15 +55,24 @@ class ActiveProviderService:
         """ModelConfig del provider activo, con caché LRU de 30 segundos.
 
         None si no hay provider configurado ni HERMES_MODEL en env.
-        Fail-soft: cualquier error interno devuelve None (loguea warning).
+        Errores de gestión propagan fail-closed; errores locales devuelven None.
         """
         now = time.monotonic()
+        # Governance is read on every cycle, including revocation. Never let a
+        # cached personal/global model bypass a newly applied managed policy.
+        from hermes.runtime.managed_llm import resolve_managed_config
+        from hermes.runtime.model_config import ManagedProviderUnavailableError
+        managed = resolve_managed_config(self._db_path)
+        if managed is not None:
+            return managed
         if self._cached is not None and (now - self._cached_at) < _CACHE_TTL_SECONDS:
             return self._cached
         try:
             if resolve_model_config is None:
                 return None
             result = resolve_model_config(self._db_path)
+        except ManagedProviderUnavailableError:
+            raise
         except Exception:  # noqa: BLE001
             logger.warning("hermes.active_provider.resolve_failed", exc_info=True)
             return None

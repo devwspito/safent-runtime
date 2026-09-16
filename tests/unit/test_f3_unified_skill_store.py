@@ -1,11 +1,18 @@
 """F3 — Unified skill store tests.
 
-Covers the five mandatory test cases:
+Covers the mandatory test cases:
   (a) skill_manage create via broker → SKILL.md written + signed v2 (not unsigned).
   (b) Unsigned/v1/manipulated skill → not loaded/executed (fail-closed).
-  (c) skill_compiler (teaching path) emits same SKILL.md + signs identically.
   (d) Both paths write to the same store + same governance gate.
   (e) Progressive loading works for signed skills.
+
+(c) — skill_compiler (teaching path) parity — removed with the dead
+``hermes.training`` GEPA subtree (unreachable from every real entrypoint;
+oleada 1 lane L1c). ``hermes.agents_os.application.skill_compiler``, the
+former teaching-path compiler, lost its ``.compile()`` when teach-by-browser
+was retired 10-sep-2026 (specs/025-safent-repaso/retirada-ensenar.md); its
+``SkillPackage``/``.verify()`` survive for skill_replay, unrelated to this
+module's own ``SkillPackage`` (capabilities.domain.skill_package).
 """
 
 from __future__ import annotations
@@ -26,27 +33,22 @@ from hermes.shell_server.skills.skill_governance_service import (
     SkillGovernanceService,
     SkillSignatureVerificationFailed,
 )
-from hermes.training.application.skill_compiler import SkillCompiler, to_skill_md
-from hermes.training.application.skill_signer import (
+from hermes.capabilities.application.skill_signer import (
     KmsSigningKeyPort,
     SignatureVerificationError,
     SkillSigner,
     verify_skill_signature,
 )
-from hermes.training.domain.decision_rule import DecisionRule, DecisionRuleSource
-from hermes.training.domain.narrative_completeness import NarrativeCompleteness
-from hermes.training.domain.skill_md_document import (
+from hermes.capabilities.domain.skill_md_document import (
     SkillMdDocument,
     SkillMdParseError,
-    parse_skill_md,
 )
-from hermes.training.domain.skill_package import SkillPackage
-from hermes.training.domain.skill_state import SkillState
-from hermes.training.domain.training_session import TrainingSession, TrainingSessionState
-from hermes.training.domain.voice_narrative import (
-    VoiceFragment,
-    VoiceFragmentState,
-    VoiceNarrative,
+from hermes.capabilities.domain.skill_package import SkillPackage
+from hermes.capabilities.domain.skill_state import SkillState
+from hermes.capabilities.infrastructure.skill_md_codec import (
+    parse_skill_md,
+    serialize_skill_md,
+    skill_md_content_bytes,
 )
 
 pytestmark = pytest.mark.unit
@@ -448,133 +450,6 @@ class TestFailClosedSignatureVerification:
 
 
 # ---------------------------------------------------------------------------
-# (c) skill_compiler teaching path emits same SKILL.md format + signs same way
-# ---------------------------------------------------------------------------
-
-
-class TestTeachingPathSkillMdConvergence:
-    def test_to_skill_md_produces_valid_skill_md_document(self) -> None:
-        narrative = VoiceNarrative(
-            narrative_id=uuid4(),
-            training_session_id=uuid4(),
-            tenant_id=uuid4(),
-            fragments=(
-                VoiceFragment(
-                    fragment_id=uuid4(),
-                    transcript="When the invoice arrives",
-                    confidence=0.9,
-                    state=VoiceFragmentState.ASSOCIATED,
-                ),
-            ),
-            completeness=NarrativeCompleteness.FULL,
-        )
-        rule = DecisionRule(
-            source=DecisionRuleSource.LLM_COMPILE_INFERRED,
-            action="click pay button",
-            confidence=0.95,
-            requires_review=False,
-            categorical_markers=(),
-        )
-
-        doc = to_skill_md(
-            skill_name="pay-invoice",
-            description="Pay an invoice via the portal",
-            narrative=narrative,
-            decision_rules=[rule],
-        )
-
-        assert doc.name == "pay-invoice"
-        assert doc.description == "Pay an invoice via the portal"
-        assert doc.version == "1"
-        assert "## When" in doc.body
-        assert "## Procedure" in doc.body
-        assert "click pay button" in doc.body
-
-    def test_to_skill_md_is_parseable(self) -> None:
-        narrative = VoiceNarrative(
-            narrative_id=uuid4(),
-            fragments=(),
-            completeness=NarrativeCompleteness.NONE,
-        )
-        doc = to_skill_md(
-            skill_name="test-skill",
-            description="A skill for testing",
-            narrative=narrative,
-            decision_rules=[],
-        )
-
-        # Roundtrip: serialize → parse → same document
-        serialized = doc.serialize()
-        reparsed = parse_skill_md(serialized)
-        assert reparsed.name == doc.name
-        assert reparsed.description == doc.description
-        assert reparsed.version == doc.version
-
-    async def test_teaching_path_content_hash_covers_skill_md_bytes(self) -> None:
-        """content_hash = SHA-256 of the SKILL.md bytes, not a random UUID."""
-        narrative = VoiceNarrative(
-            narrative_id=uuid4(),
-            fragments=(),
-            completeness=NarrativeCompleteness.NONE,
-        )
-        doc = to_skill_md(
-            skill_name="hash-test",
-            description="Hash test skill",
-            narrative=narrative,
-            decision_rules=[],
-        )
-
-        expected_hash = hashlib.sha256(doc.content_bytes()).hexdigest()
-        assert len(expected_hash) == 64
-
-        # Verify the SkillStoreAdapter also uses SHA-256 of content_bytes
-        # (testing the same derivation path)
-        import hashlib as _hl
-        actual = _hl.sha256(doc.content_bytes()).hexdigest()
-        assert actual == expected_hash
-
-    async def test_teaching_path_signs_with_skill_signer_v2(self) -> None:
-        kms = _InMemoryKms()
-        signer = SkillSigner(kms=kms)
-
-        narrative = VoiceNarrative(
-            narrative_id=uuid4(),
-            fragments=(),
-            completeness=NarrativeCompleteness.NONE,
-        )
-        doc = to_skill_md(
-            skill_name="signing-test",
-            description="Signing test skill",
-            narrative=narrative,
-            decision_rules=[],
-        )
-        content_hash = hashlib.sha256(doc.content_bytes()).hexdigest()
-
-        # Build a SkillPackage the same way SkillStoreAdapter does
-        package_id = uuid4()
-        pkg = SkillPackage(
-            package_id=package_id,
-            skill_id=uuid4(),
-            skill_version=1,
-            tenant_id=uuid4(),
-            replay_script_id=package_id,
-            voice_narrative_id=package_id,
-            decision_rule_ids=(),
-            state=SkillState.VALIDATED,
-            signature_hex="",
-            signing_key_id="",
-            runtime_version="test",
-            compiled_by_operator_id=None,
-            content_hash=content_hash,
-        )
-
-        signed = await signer.sign(package=pkg, signing_key_id=_KEY_ID)
-        # Verify roundtrip
-        await verify_skill_signature(package=signed, kms=kms)
-        assert signed.signing_key_id == _KEY_ID
-
-
-# ---------------------------------------------------------------------------
 # (d) Both paths go to the same store + same governance gate
 # ---------------------------------------------------------------------------
 
@@ -738,7 +613,7 @@ class TestSkillMdDocumentParseSerialize:
     def test_roundtrip(self) -> None:
         original = _make_skill_md_content("my-skill")
         doc = parse_skill_md(original)
-        reserialized = doc.serialize()
+        reserialized = serialize_skill_md(doc)
         reparsed = parse_skill_md(reserialized)
         assert reparsed.name == doc.name
         assert reparsed.description == doc.description
@@ -780,11 +655,11 @@ class TestSkillMdDocumentParseSerialize:
 
     def test_content_bytes_is_deterministic(self) -> None:
         doc = parse_skill_md(_make_skill_md_content("det-skill"))
-        assert doc.content_bytes() == doc.content_bytes()
+        assert skill_md_content_bytes(doc) == skill_md_content_bytes(doc)
 
     def test_different_content_produces_different_hash(self) -> None:
         doc_a = parse_skill_md(_make_skill_md_content("skill-a"))
         doc_b = parse_skill_md(_make_skill_md_content("skill-b"))
-        hash_a = hashlib.sha256(doc_a.content_bytes()).hexdigest()
-        hash_b = hashlib.sha256(doc_b.content_bytes()).hexdigest()
+        hash_a = hashlib.sha256(skill_md_content_bytes(doc_a)).hexdigest()
+        hash_b = hashlib.sha256(skill_md_content_bytes(doc_b)).hexdigest()
         assert hash_a != hash_b

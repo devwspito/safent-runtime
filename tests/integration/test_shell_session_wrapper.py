@@ -88,25 +88,32 @@ def _run_wrapper(
 
     El script se ejecuta hasta que:
     - exit 1 (runtime no active) → se captura el código de salida.
-    - exec mutter → fallará porque mutter no existe en el entorno CI;
-      el exit code será != 0 pero != 1 (error de 'command not found').
+    - exec gnome-session → fallará porque gnome-session no existe en el
+      entorno CI; el exit code será != 0 pero != 1 (error de 'command not
+      found').
 
-    Para distinguir entre exit-1-por-liveness y exit-por-mutter-no-encontrado,
-    se inyecta también un 'mutter' falso que siempre sale con código 42.
+    T013 (spec 014 inc. 1): el wrapper pasó de `exec mutter` a
+    `exec gnome-session --session=hermes-shell` (sesión GNOME real, ver
+    ops/agents-os-edition/scripts/hermes-shell-session-wrapper). Para
+    distinguir entre exit-1-por-liveness y exit-por-gnome-session-no-
+    encontrado, se inyecta un 'gnome-session' falso que siempre sale con
+    código 42.
     """
     bin_dir = _make_fake_systemctl(tmp_path, is_active_output, systemctl_exit)
 
-    # Fake mutter: si llegamos aquí, el check de liveness pasó.
-    fake_mutter = tmp_path / "mutter"
-    fake_mutter.write_text(
+    # Fake gnome-session: si llegamos aquí, el check de liveness pasó.
+    fake_gnome_session = tmp_path / "gnome-session"
+    fake_gnome_session.write_text(
         textwrap.dedent("""\
             #!/usr/bin/env bash
-            # Fake mutter: señaliza que el liveness check pasó
+            # Fake gnome-session: señaliza que el liveness check pasó
             exit 42
         """),
         encoding="utf-8",
     )
-    fake_mutter.chmod(fake_mutter.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP)
+    fake_gnome_session.chmod(
+        fake_gnome_session.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP
+    )
 
     # Fake gsettings (silencioso, no interfiere).
     fake_gsettings = tmp_path / "gsettings"
@@ -186,17 +193,23 @@ class TestShellSessionWrapperLivenessCheck:
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
 
-    def test_reaches_mutter_when_runtime_active(self, tmp_path: Path) -> None:
-        """Cuando el runtime está active, el wrapper llega a exec mutter (exit 42 del fake)."""
+    def test_reaches_gnome_session_when_runtime_active(self, tmp_path: Path) -> None:
+        """Runtime active → el wrapper llega a exec gnome-session (exit 42 del fake).
+
+        T013 (spec 014 inc. 1): el entrypoint real ahora es
+        `gnome-session --session=hermes-shell`, no `mutter` (ver comentario en
+        el propio script). Este test antes esperaba `mutter` y quedó stale
+        tras la migración a sesión GNOME real.
+        """
         result = _run_wrapper(
             tmp_path,
             is_active_output="active",
             systemctl_exit=0,  # systemd: 0 = unit is active
         )
-        # exit 42 = fake mutter fue invocado → liveness check pasó
+        # exit 42 = fake gnome-session fue invocado → liveness check pasó
         assert result.returncode == 42, (
-            f"Cuando el runtime está active, el wrapper debe llegar a exec mutter "
-            f"(exit 42 del fake); salió con {result.returncode}.\n"
+            f"Cuando el runtime está active, el wrapper debe llegar a exec "
+            f"gnome-session (exit 42 del fake); salió con {result.returncode}.\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
 

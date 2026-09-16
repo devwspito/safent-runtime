@@ -14,9 +14,6 @@ from hermes.agents_os.application.skill_compiler import (
     SkillCompiler,
     SkillPackageState,
 )
-from hermes.agents_os.application.training_session_orchestrator import (
-    TrainingSessionOrchestrator,
-)
 from hermes.agents_os.domain.surface_kind import SurfaceKind
 from hermes.agents_os.infrastructure.postgres_skill_package_repo import (
     PostgresSkillPackageRepo,
@@ -110,23 +107,14 @@ def compiler() -> SkillCompiler:
 
 
 def _signed_package(compiler, *, version, tenant_id=None):
-    orch = TrainingSessionOrchestrator()
     tid = tenant_id or uuid4()
-    sess = orch.start(
+    pkg = compiler.compile_from_steps(
         tenant_id=tid,
-        human_user_id=uuid4(),
         skill_id="invoice-upload",
-        surface_kinds_allowed=frozenset({SurfaceKind.BROWSER}),
+        steps=[(SurfaceKind.BROWSER, {"v": version}, f"v{version}")],
+        version=version,
     )
-    orch.capture_step(
-        session_id=sess.session_id,
-        surface_kind=SurfaceKind.BROWSER,
-        action_payload={"v": version},
-        voice_caption=f"v{version}",
-    )
-    orch.request_review(session_id=sess.session_id)
-    sess = orch.sign(session_id=sess.session_id, human_confirmed=True)
-    return compiler.compile(session=sess, version=version), tid
+    return pkg, tid
 
 
 class TestRoundTrip:

@@ -464,7 +464,7 @@ def _encode_jpeg(rgba: bytes, width: int, height: int, quality: int) -> bytes:
 
 
 def _encode_png(rgba: bytes, width: int, height: int) -> bytes:
-    from hermes.shell_server.training.png_writer import encode_rgba_png  # noqa: PLC0415
+    from hermes.shell_server.screen_capture.png_writer import encode_rgba_png  # noqa: PLC0415
     return encode_rgba_png(width, height, rgba)
 
 

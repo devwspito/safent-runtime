@@ -72,12 +72,11 @@ class ApprovalModal(ModalScreen[bool]):
 
             yield Static(
                 Text(
-                    "Aprobar: introduce tu código MFA (6 dígitos). Sin él no se aprueba.",
+                    "Revisa la acción antes de aprobar. Sólo autorizas esta propuesta.",
                     style=PALETTE["text_faint"],
                 ),
                 classes="modal-field",
             )
-            yield Input(placeholder="Código MFA", id="approve-totp", max_length=8)
 
             yield Static(
                 Text(
@@ -122,15 +121,8 @@ class ApprovalModal(ModalScreen[bool]):
         self.dismiss(False)
 
     async def _do_approve(self) -> None:
-        totp = self.query_one("#approve-totp", Input).value.strip()
-        if not totp:
-            self._busy = False
-            self.app.notify(
-                "Introduce tu código MFA para aprobar.", severity="warning", timeout=4
-            )
-            return
         try:
-            await self._bridge.approve(self._proposal_id, totp)
+            await self._bridge.approve(self._proposal_id)
             self.app.notify("Acción aprobada", timeout=3)
             self.dismiss(True)
         except BridgeError as exc:

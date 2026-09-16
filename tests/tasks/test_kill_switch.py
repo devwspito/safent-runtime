@@ -439,21 +439,61 @@ class TestAuditOnPauseResume:
         assert len(resumed_entries) == 1
         assert str(_OPERATOR) in resumed_entries[0].actor
 
-    async def test_audit_not_emitted_without_repo(self) -> None:
-        """Sin signer/audit_repo inyectados, SqliteAgentState funciona igual (sin crash)."""
+    async def test_host_cli_release_is_distinguishable_from_a_totp_release(self) -> None:
+        """Security review 2026-09-10 (MEDIUM finding, CWE-778/STRIDE-R):
+        before this, `safent brake release` (host access, no MFA) and a
+        TOTP-verified UI release produced the IDENTICAL AGENT_RESUMED entry
+        — an incident review could not tell them apart. `reason` is only
+        ever readable back from the persisted chain via `description`
+        (AuditEntry stores payload_hash_hex, not the raw payload — see
+        AuditHashChainSigner.append_and_persist), so that is what this
+        pins."""
+        from pathlib import Path
+        import tempfile
+
+        from hermes.agents_os.application.audit_hash_chain import (
+            AuditHashChainSigner,
+            AuditKind,
+        )
+        from hermes.agents_os.infrastructure.sqlite_audit_repository import SqliteAuditRepository
+        from hermes.tasks.infrastructure.sqlite_agent_state import SqliteAgentState
+
+        tmp = Path(tempfile.mkdtemp())
+        signer = AuditHashChainSigner(signing_key=_SIGNING_KEY)
+        audit_repo = SqliteAuditRepository(db_path=tmp / "audit.db")
+        state = SqliteAgentState(db_path=tmp / "shell-state.db", signer=signer, audit_repo=audit_repo)
+
+        await state.pause(by=_OPERATOR, reason="test")
+        await state.resume(by=_OPERATOR, reason="host_cli")
+        await state.pause(by=_OPERATOR, reason="test again")
+        await state.resume(by=_OPERATOR, reason="totp")
+        await state.pause(by=_OPERATOR, reason="test once more")
+        await state.resume(by=_OPERATOR)  # default reason="" — the normal path
+
+        chain = await audit_repo.load_chain()
+        resumed = [e for e in chain if e.audit_kind == AuditKind.AGENT_RESUMED]
+        assert len(resumed) == 3
+        assert "host_cli" in resumed[0].description
+        assert "totp" in resumed[1].description
+        assert "host_cli" not in resumed[1].description
+        assert resumed[2].description == "Agent resumed"  # no reason -> no parens
+
+    async def test_construction_without_signer_or_audit_repo_raises(self) -> None:
+        """CLI-N4 (specs/025-safent-repaso matriz-final-39eeb8e, CWE-778): a
+        SqliteAgentState built without signer/audit_repo used to work "fine"
+        (no crash) and silently drop every AGENT_PAUSED/AGENT_RESUMED audit
+        entry — `safent brake release` claimed "audited as the owner" while
+        the signed chain stayed at 0 AGENT_RESUMED. Now fail-loud: it must
+        not even construct."""
         from pathlib import Path
         import tempfile
 
         from hermes.tasks.infrastructure.sqlite_agent_state import SqliteAgentState
 
         tmp = Path(tempfile.mkdtemp())
-        # Sin signer — no debe crashear
-        state = SqliteAgentState(db_path=tmp / "shell-state.db")
 
-        await state.pause(by=_OPERATOR, reason="test")
-        assert await state.is_paused() is True
-        await state.resume(by=_OPERATOR)
-        assert await state.is_paused() is False
+        with pytest.raises(RuntimeError, match="audit_wiring_missing"):
+            SqliteAgentState(db_path=tmp / "shell-state.db", signer=None, audit_repo=None)
 
 
 # ---------------------------------------------------------------------------

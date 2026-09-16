@@ -1,0 +1,44 @@
+# hermes-tailscale-status-watcher.service — mirrors `tailscale status --json`
+# into /run/hermes/tailscale/status.json for the shell-server + egress-proxy
+# lanes (specs/022-tailnet-connectivity/contracts.md §2).
+#
+# Sidecar lifecycle: BindsTo=hermes-tailscaled.service means this unit starts
+# and stops TOGETHER with tailscaled (pulled in via that unit's Wants=). Runs
+# as hermes-tailscale — the same uid as tailscaled itself, the only uid besides
+# root that can reach its --socket — so it needs zero elevated privilege.
+
+[Unit]
+Description=Hermes — mirror tailscale status --json into status.json (022)
+Documentation=man:systemd.service(5)
+BindsTo=hermes-tailscaled.service
+After=hermes-tailscaled.service
+
+[Service]
+Type=simple
+User=hermes-tailscale
+Group=hermes-tailscale
+ExecStart=/usr/libexec/hermes/hermes-tailscale-status-watcher
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=5
+
+ReadWritePaths=/run/hermes/tailscale
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+ProtectProc=invisible
+ProcSubset=pid
+InaccessiblePaths=-/var/lib/hermes/master.key -/var/lib/hermes/keys -/var/lib/hermes/shell-state.db -/var/lib/hermes/audit -/var/lib/hermes/hermes-home -/var/lib/hermes/composio-cache -/run/hermes/tasks.sock -/run/hermes/tailscale-control
+
+# [Install] intentionally omitted — pulled in exclusively via
+# hermes-tailscaled.service's Wants=, never enabled/started independently.

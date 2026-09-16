@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — instalador simple de Safent: limpia, construye y arranca en un comando.
+# install.sh — instalador simple de Safent: construye y arranca en un comando.
 #
 # Filosofía: el instalador SOLO levanta Safent. Todo lo "custom" (modelo/proveedor,
 # agentes, MCP, skills, integraciones) se configura en la UI.
@@ -29,15 +29,17 @@ if [ "$(basename "$RUNTIME")" = podman ]; then
   fi
 fi
 
-echo "▸ 1/4 Limpieza (estado de fábrica)…"
+echo "▸ 1/4 Preparando contenedor…"
 "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || true
-"$RUNTIME" volume rm safent-data >/dev/null 2>&1 || true
-"$RUNTIME" builder prune -af >/dev/null 2>&1 || true
-"$RUNTIME" image prune -af   >/dev/null 2>&1 || true
+if [ "${SAFENT_FACTORY_RESET:-0}" = "1" ]; then
+  echo "  SAFENT_FACTORY_RESET=1: eliminando sólo el volumen safent-data"
+  "$RUNTIME" volume rm safent-data >/dev/null 2>&1 || true
+else
+  echo "  conservando datos y caché de compilación"
+fi
 
 echo "▸ 2/4 Construyendo imagen (wheel py3.12 + frontend React, dentro del contenedor)…"
-"$RUNTIME" build --build-arg FE_CACHEBUST="$(date +%s)" \
-  -f ops/container/Containerfile -t "$IMAGE" .
+"$RUNTIME" build -f ops/container/Containerfile -t "$IMAGE" .
 
 echo "▸ 3/4 Arrancando (launcher canónico endurecido)…"
 SAFENT_NAME="$NAME" ./ops/container/run-safent.sh "$IMAGE" "$PORT"

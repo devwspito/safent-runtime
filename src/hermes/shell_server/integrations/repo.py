@@ -10,6 +10,7 @@ never need to check for existence first.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sqlite3
 from datetime import UTC, datetime
@@ -30,6 +31,12 @@ CREATE TABLE IF NOT EXISTS integrations (
   entity_id          TEXT NOT NULL DEFAULT 'default',
   api_key_ciphertext BLOB,
   created_at         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS integration_auth_configs (
+  kind TEXT NOT NULL,
+  toolkit_slug TEXT NOT NULL,
+  auth_config_id TEXT NOT NULL,
+  PRIMARY KEY (kind, toolkit_slug)
 );
 """
 
@@ -119,6 +126,64 @@ class SQLiteIntegrationsRepository:
             return self.get(kind=kind)
         except IntegrationNotFound:
             return None
+
+    def auth_config_ids(self, *, kind: str = "composio") -> dict[str, str]:
+        """Non-secret, owner-selected OAuth configuration IDs for this instance."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT toolkit_slug, auth_config_id FROM integration_auth_configs WHERE kind = ?",
+                (kind,),
+            ).fetchall()
+        return {row["toolkit_slug"]: row["auth_config_id"] for row in rows}
+
+    def set_auth_config(self, *, toolkit_slug: str, auth_config_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO integration_auth_configs(kind, toolkit_slug, auth_config_id) "
+                "VALUES ('composio', ?, ?) ON CONFLICT(kind, toolkit_slug) "
+                "DO UPDATE SET auth_config_id=excluded.auth_config_id",
+                (toolkit_slug, auth_config_id),
+            )
+
+    def clear_auth_config(self, *, toolkit_slug: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM integration_auth_configs WHERE kind='composio' AND toolkit_slug=?",
+                (toolkit_slug,),
+            )
+
+    def credential_fingerprint(self, *, kind: str = "composio") -> str | None:
+        """Version marker for setup CAS; never decrypts or exports a credential."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT api_key_ciphertext, enabled FROM integrations WHERE kind=?", (kind,)
+            ).fetchone()
+        if row is None or not row["enabled"] or row["api_key_ciphertext"] is None:
+            return None
+        return hashlib.sha256(bytes(row["api_key_ciphertext"])).hexdigest()
+
+    def set_auth_config_for_credential(
+        self, *, toolkit_slug: str, auth_config_id: str, expected_fingerprint: str,
+    ) -> bool:
+        """Do not attach a slow provider result to a newly rotated project key."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT api_key_ciphertext, enabled FROM integrations WHERE kind='composio'"
+            ).fetchone()
+            if (
+                row is None or not row["enabled"] or row["api_key_ciphertext"] is None
+                or hashlib.sha256(bytes(row["api_key_ciphertext"])).hexdigest()
+                != expected_fingerprint
+            ):
+                return False
+            conn.execute(
+                "INSERT INTO integration_auth_configs(kind, toolkit_slug, auth_config_id) "
+                "VALUES ('composio', ?, ?) ON CONFLICT(kind, toolkit_slug) "
+                "DO UPDATE SET auth_config_id=excluded.auth_config_id",
+                (toolkit_slug, auth_config_id),
+            )
+        return True
 
     # ----------------------------------------------------------------
     # Secret reveal — ONLY for outbound HTTP calls to Composio

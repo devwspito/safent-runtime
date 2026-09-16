@@ -3,7 +3,6 @@
 Devuelve el equipo de agentes agrupado en departamentos, TODO desde el registro de
 agentes del daemon (agentes reales, no un catálogo externo):
   • "cerebro"      — el agente default (is_default=True), el que orquesta.
-  • Factory        — el roster de especialistas sembrado (default_roster), por departamento.
   • Custom depts   — agentes custom con un department explícito.
   • "mis-agentes"  — agentes custom sin department.
 
@@ -27,8 +26,6 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Request
 
-from hermes.agents.domain.default_roster import DEPARTMENTS
-
 if TYPE_CHECKING:
     from hermes.shell_server.security.secrets import SecretsVault
 
@@ -37,7 +34,6 @@ logger = logging.getLogger("hermes.shell_server.cowork.roster_api")
 
 def _agent_shape(a: dict[str, Any]) -> dict[str, Any]:
     dept = a.get("department")
-    is_factory = bool(dept) and dept in DEPARTMENTS
     return {
         "id": a.get("agent_id", ""),
         "name": a.get("name", ""),
@@ -45,7 +41,7 @@ def _agent_shape(a: dict[str, Any]) -> dict[str, Any]:
         "department": dept,
         "is_default": bool(a.get("is_default", False)),
         "color": a.get("color") or None,
-        "source": "factory" if is_factory else "custom",
+        "source": "custom",
     }
 
 
@@ -123,14 +119,6 @@ def _build_departments(
         departments.append(
             {"id": "cerebro", "name": "CEO", "kind": "cerebro", "agents": cerebro}
         )
-
-    # Departamentos de fábrica primero, en el orden de DEPARTMENTS.
-    for slug, (label, _color) in DEPARTMENTS.items():
-        bucket = by_dept.pop(slug, None)
-        if bucket:
-            departments.append(
-                {"id": slug, "name": label, "kind": "factory", "agents": bucket}
-            )
 
     # Departamentos custom del usuario (alfabético).
     for slug in sorted(by_dept):

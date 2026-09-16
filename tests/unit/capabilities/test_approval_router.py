@@ -2,7 +2,7 @@
 (Fase 2 Phase 4c).
 
 route() is keyed purely on the tenant gate AND `tool_delicacy.
-is_mfa_required(tool)` — the worker has no TOTP (centralized at Enterprise),
+requires_enterprise_review(tool)` — the worker has no TOTP (centralized at Enterprise),
 so an MFA-tier action on a cloud-managed, remote-approval-enabled tenant MUST
 route ENTERPRISE; every other combination stays LOCAL. HARDBLOCK is never
 produced by route() under any input combination. `approval_tier` no longer
@@ -16,7 +16,7 @@ import itertools
 import pytest
 
 from hermes.capabilities.approval_router import ApprovalRoute, route
-from hermes.capabilities.tool_delicacy import _MFA_TIER_HITL, is_mfa_required
+from hermes.capabilities.tool_delicacy import _ENTERPRISE_REVIEW_TOOLS, requires_enterprise_review
 
 pytestmark = pytest.mark.unit
 
@@ -28,8 +28,8 @@ _SIMPLE_TOOL = "send_message"
 _MFA_TOOL = "skill_manage"
 # cronjob: MOST_DELICATE by delicacy() (blocks unconditionally at the hook)
 # but explicitly carved out of the MFA tier (owner decision 2026-06-25) — a
-# plain click suffices. Distinguishes the TWO axes: delicacy() (hook_mfa_block)
-# vs is_mfa_required() (routing/approve()). Must NEVER escalate to ENTERPRISE.
+# plain click suffices. Distinguishes the TWO axes: delicacy() (hook_approval_block)
+# vs requires_enterprise_review() (routing/approve()). Must NEVER escalate to ENTERPRISE.
 _MOST_DELICATE_BUT_SIMPLE_TOOL = "cronjob"
 
 
@@ -52,9 +52,9 @@ def _route(
 
 
 def test_fixture_tools_carry_the_expected_mfa_tier() -> None:
-    assert is_mfa_required(_SIMPLE_TOOL) is False
-    assert is_mfa_required(_MFA_TOOL) is True
-    assert is_mfa_required(_MOST_DELICATE_BUT_SIMPLE_TOOL) is False
+    assert requires_enterprise_review(_SIMPLE_TOOL) is False
+    assert requires_enterprise_review(_MFA_TOOL) is True
+    assert requires_enterprise_review(_MOST_DELICATE_BUT_SIMPLE_TOOL) is False
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +113,7 @@ class TestMfaTierGating:
     def test_most_delicate_by_delicacy_but_simple_by_mfa_tier_stays_local(self) -> None:
         """cronjob is MOST_DELICATE (blocks at the hook unconditionally) but
         explicitly carved OUT of the MFA tier — routing must follow
-        is_mfa_required, NOT the coarser delicacy() axis, even fully gated."""
+        requires_enterprise_review, NOT the coarser delicacy() axis, even fully gated."""
         result = _route(
             _MOST_DELICATE_BUT_SIMPLE_TOOL,
             agent_managed_by="cloud",
@@ -195,7 +195,7 @@ class TestHardblockNeverProduced:
 
 # ---------------------------------------------------------------------------
 # Full truth table (explicit, parametrized) — belt-and-suspenders on top of
-# the targeted tests above. The routing set must equal the is_mfa_required
+# the targeted tests above. The routing set must equal the requires_enterprise_review
 # set EXACTLY under a full tenant gate.
 # ---------------------------------------------------------------------------
 
@@ -226,14 +226,14 @@ def test_full_truth_table(
     assert result is expected
 
 
-def test_routing_set_equals_is_mfa_required_set_under_full_tenant_gate() -> None:
-    """Assert the routing set == the is_mfa_required set exactly, per the
+def test_routing_set_equals_requires_enterprise_review_set_under_full_tenant_gate() -> None:
+    """Assert the routing set == the requires_enterprise_review set exactly, per the
     corrected model's invariant ("carries TOTP <=> Enterprise")."""
     sample_tools = (
         "send_message", "write_file", "read_file", "delegate_to_colleague",
-        *sorted(_MFA_TIER_HITL), "cronjob",
+        *sorted(_ENTERPRISE_REVIEW_TOOLS), "cronjob",
     )
     for tool in sample_tools:
         result = _route(tool, agent_managed_by="cloud", tenant_remote_approval_enabled=True)
-        expected = ApprovalRoute.ENTERPRISE if is_mfa_required(tool) else ApprovalRoute.LOCAL
-        assert result is expected, f"tool={tool!r} routing diverged from is_mfa_required"
+        expected = ApprovalRoute.ENTERPRISE if requires_enterprise_review(tool) else ApprovalRoute.LOCAL
+        assert result is expected, f"tool={tool!r} routing diverged from requires_enterprise_review"

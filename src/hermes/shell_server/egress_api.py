@@ -1,14 +1,13 @@
 """Egress permission elevation — the owner controls the network mode and domain lists.
 
 Security model:
-  - ALLOW mode (default): any domain is reachable EXCEPT entries in the owner's
+  - ALLOW mode: any domain is reachable EXCEPT entries in the owner's
     deny-list and the system blocklist of malicious domains. Implemented as
     ``open-logged`` in the proxy, where both lists act as blockers.
-  - DENY mode: default-deny + the owner's explicit allow-list (as before).
+  - DENY mode (default): default-deny + the owner's explicit allow-list.
 
-Changing the MODE requires owner MFA (TOTP), same bar as changing security policies.
-Adding/removing individual domains from the deny-list or allow-list does NOT require
-MFA — granular list edits are operational, not posture changes.
+All mutations require the owner's UI session; the internal daemon bearer cannot
+change mode or domain grants. Community does not use MFA.
 
 The shell-server runs as `hermes` (group hermes) → it can connect to the proxy
 control socket (root:hermes 0660) to push policy. Grants and the deny-list persist
@@ -26,11 +25,10 @@ import re
 import socket
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict
 
-from hermes.shell_server.security.mfa import MfaStore
-from hermes.shell_server.security.owner_mfa_gate import require_owner_mfa
+from hermes.shell_server.security.owner_confirmation import require_owner_session
 
 logger = logging.getLogger("hermes.shell_server.egress")
 
@@ -68,7 +66,11 @@ _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[
 
 _ALLOW_MODE = "allow"
 _DENY_MODE = "deny"
-_DEFAULT_NETWORK_MODE = _ALLOW_MODE
+# 025 Top-3: fresh installs must be egress deny-by-default per SECURITY.md — an
+# UNSET mode file resolves to DENY. An existing install with an explicit "allow"
+# or "deny" already on disk (`_MODE_PATH`) keeps that value verbatim; only the
+# absence of the file changes behavior here.
+_DEFAULT_NETWORK_MODE = _DENY_MODE
 
 
 # ---------------------------------------------------------------------------
@@ -241,8 +243,8 @@ class _DomainBody(BaseModel):
 
 
 class _ModeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     mode: str   # "allow" | "deny"
-    totp: str
 
 
 # ---------------------------------------------------------------------------
@@ -250,10 +252,10 @@ class _ModeBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def create_egress_router(mfa: MfaStore | None = None) -> APIRouter:
+def create_egress_router() -> APIRouter:
     """Router for the owner's network-mode toggle, deny-list, allow-list, and MCP grants."""
     router = APIRouter(prefix="/api/v1/egress", tags=["egress"])
-    mfa_store = mfa or MfaStore()
+    writes = APIRouter(dependencies=[Depends(require_owner_session)])
 
     # ── Network mode ────────────────────────────────────────────────────────────
 
@@ -269,14 +271,13 @@ def create_egress_router(mfa: MfaStore | None = None) -> APIRouter:
             ),
         }
 
-    @router.post("/mode")
+    @writes.post("/mode")
     async def set_mode(body: _ModeBody) -> dict:
         if body.mode not in (_ALLOW_MODE, _DENY_MODE):
             raise HTTPException(
                 status_code=422,
                 detail={"code": "invalid_mode", "message": f"mode must be 'allow' or 'deny', got {body.mode!r}"},
             )
-        require_owner_mfa(mfa_store, body.totp, action="cambiar el modo de red")
         _save_mode(body.mode)
         ok = _apply_network_mode(body.mode)
         logger.info("hermes.egress.mode_changed mode=%s pushed=%s", body.mode, ok)
@@ -284,18 +285,21 @@ def create_egress_router(mfa: MfaStore | None = None) -> APIRouter:
 
     # ── Deny-list (used in ALLOW mode) ──────────────────────────────────────────
 
-    @router.post("/deny/add")
+    @writes.post("/deny/add")
     async def deny_add(body: _DomainBody) -> dict:
         d = _normalize(body.domain)
         if not _DOMAIN_RE.match(d):
-            return {"ok": False, "error": f"dominio inválido: {body.domain!r}"}
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_domain", "message": f"dominio inválido: {body.domain!r}"},
+            )
         domains = sorted(set(_load_denylist()) | {d})
         _save_denylist(domains)
         ok = _apply_network_mode()
         logger.info("hermes.egress.deny_added domain=%s pushed=%s", d, ok)
         return {"ok": True, "domain": d, "denylist": domains, "pushed": ok}
 
-    @router.post("/deny/remove")
+    @writes.post("/deny/remove")
     async def deny_remove(body: _DomainBody) -> dict:
         d = _normalize(body.domain)
         domains = sorted(set(_load_denylist()) - {d})
@@ -316,18 +320,21 @@ def create_egress_router(mfa: MfaStore | None = None) -> APIRouter:
             "blocklist_count": _blocklist_count(),
         }
 
-    @router.post("/domains/grant")
+    @writes.post("/domains/grant")
     async def grant(body: _DomainBody) -> dict:
         d = _normalize(body.domain)
         if not _DOMAIN_RE.match(d):
-            return {"ok": False, "error": f"dominio inválido: {body.domain!r}"}
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_domain", "message": f"dominio inválido: {body.domain!r}"},
+            )
         domains = sorted(set(_load()) | {d})
         _save(domains)
         ok = _apply_network_mode()
         logger.info("hermes.egress.granted domain=%s pushed=%s", d, ok)
         return {"ok": True, "domain": d, "domains": domains, "pushed": ok}
 
-    @router.post("/domains/revoke")
+    @writes.post("/domains/revoke")
     async def revoke(body: _DomainBody) -> dict:
         d = _normalize(body.domain)
         domains = sorted(set(_load()) - {d})
@@ -343,18 +350,21 @@ def create_egress_router(mfa: MfaStore | None = None) -> APIRouter:
         domains = _load_from(_MCP_GRANTS_PATH)
         return {"domains": domains, "pushed": _push_session(_MCP_GRANT_SESSION, domains)}
 
-    @router.post("/mcp/domains/grant")
+    @writes.post("/mcp/domains/grant")
     async def grant_mcp(body: _DomainBody) -> dict:
         d = _normalize(body.domain)
         if not _DOMAIN_RE.match(d):
-            return {"ok": False, "error": f"dominio inválido: {body.domain!r}"}
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_domain", "message": f"dominio inválido: {body.domain!r}"},
+            )
         domains = sorted(set(_load_from(_MCP_GRANTS_PATH)) | {d})
         _save_to(_MCP_GRANTS_PATH, domains)
         ok = _push_session(_MCP_GRANT_SESSION, domains)
         logger.info("hermes.egress.mcp_granted domain=%s pushed=%s", d, ok)
         return {"ok": True, "domain": d, "domains": domains, "pushed": ok}
 
-    @router.post("/mcp/domains/revoke")
+    @writes.post("/mcp/domains/revoke")
     async def revoke_mcp(body: _DomainBody) -> dict:
         d = _normalize(body.domain)
         domains = sorted(set(_load_from(_MCP_GRANTS_PATH)) - {d})
@@ -363,4 +373,5 @@ def create_egress_router(mfa: MfaStore | None = None) -> APIRouter:
         logger.info("hermes.egress.mcp_revoked domain=%s pushed=%s", d, ok)
         return {"ok": True, "domain": d, "domains": domains, "pushed": ok}
 
+    router.include_router(writes)
     return router

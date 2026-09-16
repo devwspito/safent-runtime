@@ -13,8 +13,7 @@ Slash commands:
   /integraciones  — jump to the Integrations pane (Composio)
   /integrations   — alias for /integraciones
   /composio       — alias for /integraciones
-  /agentes        — jump to the Agents pane
-  /agents         — alias for /agentes
+  /perfiles       — jump to configured Profiles (legacy /agentes remains an alias)
   /tareas         — jump to the Tasks pane
   /tasks          — alias for /tareas
   /seguridad      — jump to the Security pane
@@ -93,6 +92,8 @@ _SLASH_NAV: dict[str, str] = {
     "composio": "integrations",
     "agentes": "agents",
     "agents": "agents",
+    "perfiles": "agents",
+    "profiles": "agents",
     "tareas": "tasks",
     "tasks": "tasks",
     "seguridad": "security",
@@ -258,7 +259,7 @@ class ChatPane(Vertical):
             "- `/mcp` — servidores MCP\n"
             "- `/skills` — skills del agente\n"
             "- `/integraciones` — conexiones Composio\n"
-            "- `/agentes` — agentes\n"
+            "- `/perfiles` — perfiles configurados\n"
             "- `/tareas` — actividad reciente\n"
             "- `/seguridad` — centro de seguridad\n"
             "- `/programador` — tareas programadas\n"
@@ -304,14 +305,12 @@ class ChatPane(Vertical):
 
     async def _slash_agents(self) -> str:
         agents = await self.bridge.list_agents()
-        active = await self.bridge.get_active_agent()
         rows = "\n".join(
             f"- {'♛ ' if a.get('is_default') else ''}**{a.get('name', '—')}**"
-            f"{' · activo' if str(a.get('id')) == active else ''}"
             f" — {a.get('role', '') or '—'}"
             for a in agents
         )
-        return f"**Agentes** ({len(agents)})\n\n{rows}"
+        return f"**Perfiles** ({len(agents)})\n\n{rows}"
 
     async def _slash_tasks(self) -> str:
         tasks = await self.bridge.list_recent_tasks(20)

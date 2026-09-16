@@ -10,7 +10,8 @@ must not call connect() concurrently for the same server_id.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from hermes.mcp.domain.entities import McpServer, McpTool
 from hermes.mcp.domain.value_objects import (
@@ -38,8 +39,12 @@ class McpServerManager:
                         StdioMcpClient; tests inject a fake).
     """
 
-    def __init__(self, *, client_factory: ClientFactory) -> None:
+    def __init__(
+        self, *, client_factory: ClientFactory,
+        scoped_client_factory: Callable[[ServerSlug, Transport], McpClientPort] | None = None,
+    ) -> None:
         self._client_factory = client_factory
+        self._scoped_client_factory = scoped_client_factory
         self._servers: dict[str, McpServer] = {}   # server_id str → McpServer
         self._clients: dict[str, McpClientPort] = {}  # server_id str → client
         # Camino A: callback (server, loop) disparado al conectar, para registrar
@@ -75,22 +80,33 @@ class McpServerManager:
             transport=transport,
             trust_level=trust_level,
         )
-        client = self._client_factory(transport)
+        client = (
+            self._scoped_client_factory(slug, transport)
+            if self._scoped_client_factory is not None else self._client_factory(transport)
+        )
 
         try:
             await client.initialize()
             raw_tools = await client.list_tools()
-        except Exception as exc:
+            tools = [_build_tool(t, slug, trust_level) for t in raw_tools]
+            server.mark_healthy(tools)
+        except BaseException as exc:
+            # Until registration below, only this frame owns the client. Even
+            # a cancelled handshake or malformed tool list must release stdio
+            # and the session owner. Keep close in this task (no orphan cleanup
+            # task, and no cross-task anyio cancel-scope exit).
+            try:
+                await client.close()
+            except BaseException:
+                logger.warning("hermes.mcp.manager.admission_cleanup_failed: server_id=%s", sid)
             server.mark_failed()
-            logger.error(
-                "hermes.mcp.manager.connect_failed: server_id=%s error=%s", sid, exc
-            )
+            if not isinstance(exc, Exception):
+                raise  # Preserve cancellation/SystemExit; never turn it into success.
+            logger.error("hermes.mcp.manager.connect_failed: server_id=%s", sid)
             raise McpConnectionError(
-                f"Failed to connect to MCP server {slug!r}: {exc}"
-            ) from exc
+                f"Failed to connect to MCP server {slug!r}"
+            ) from None
 
-        tools = [_build_tool(t, slug, trust_level) for t in raw_tools]
-        server.mark_healthy(tools)
         self._servers[sid] = server
         self._clients[sid] = client
         if self._on_connect is not None:
@@ -188,4 +204,5 @@ def _build_tool(raw: dict[str, Any], slug: ServerSlug, trust_level: TrustLevel) 
         trust_level=trust_level,
         read_only_hint=annotations.get("readOnlyHint"),
         destructive_hint=annotations.get("destructiveHint"),
+        input_schema=raw.get("inputSchema"),
     )

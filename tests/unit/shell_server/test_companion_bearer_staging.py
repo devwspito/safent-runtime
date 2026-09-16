@@ -15,6 +15,9 @@ a 0440 root:hermes copy on tmpfs. These tests pin both halves.
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -30,6 +33,18 @@ from hermes.shell_server.companions import (
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_STAGING_SCRIPT_PATH = _REPO_ROOT / "ops/agents-os-edition/scripts/hermes-companion-bearer"
+
+
+def _load_staging_script(module_name: str):
+    """Load the extension-less staging script as a module (no `.py` — needs
+    an explicit `SourceFileLoader`, mirrors test_tailscale_control.py)."""
+    loader = importlib.machinery.SourceFileLoader(module_name, str(_STAGING_SCRIPT_PATH))
+    spec = importlib.util.spec_from_file_location(module_name, _STAGING_SCRIPT_PATH, loader=loader)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _endpoint(bearer_ref: str) -> CompanionEndpoint:
@@ -129,3 +144,76 @@ class TestStagingIsWiredIntoTheImage:
         assert "0o440" in script
         assert '_DAEMON_GROUP = "hermes"' in script
         assert "prefer_runtime_copy=False" in script
+
+
+class TestSsoKeyStaging:
+    """ADS-02: the 026 SSO private key has the exact same unreadable-mount
+    shape as the bearer, and must be staged by the SAME script/mechanism —
+    see companion_sso_authority.py and test_companion_sso_assertion.py::
+    TestDefaultKeyPathIsTheRootStagedCopy for the daemon-side half."""
+
+    def test_runtime_sso_key_path_is_on_the_staged_tmpfs_dir(self) -> None:
+        assert (
+            companions_mod.COMPANION_RUNTIME_SSO_KEY_PATH
+            == f"{COMPANION_RUNTIME_BEARER_DIR}/ads-sso.key"
+        )
+
+    def test_mount_path_is_the_fixed_companion_secrets_directory(self) -> None:
+        assert (
+            companions_mod.COMPANION_SSO_KEY_MOUNT_PATH
+            == "/etc/hermes/companions/ads-sso.key"
+        )
+
+    def test_script_stages_the_sso_key_from_the_mount_to_the_runtime_copy(self) -> None:
+        script = (
+            _REPO_ROOT / "ops/agents-os-edition/scripts/hermes-companion-bearer"
+        ).read_text(encoding="utf-8")
+        assert "COMPANION_SSO_KEY_MOUNT_PATH" in script
+        assert "COMPANION_RUNTIME_SSO_KEY_PATH" in script
+        assert "_stage_sso_key" in script
+        assert "_stage_sso_key(gid)" in script, "must actually run from main(), not just be defined"
+
+    def test_script_end_to_end_reads_the_mount_and_calls_write_secret(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Runs the real `_stage_sso_key` against a fake mount, with
+        `_write_secret` swapped for a spy: `_write_secret`'s real body calls
+        `os.fchown(fd, 0, gid)` (root-owned copy, see `_write_secret`
+        itself), which requires CAP_CHOWN a plain test process doesn't have
+        — exactly the same reason none of the existing bearer tests call it
+        for real either. What matters here is `_stage_sso_key` reads the
+        MOUNT (not a stale copy) and hands the trimmed value + the runtime
+        path to the SAME `_write_secret` the bearer uses (0440 root:hermes,
+        pinned by test_script_writes_0440_root_group_hermes)."""
+        module = _load_staging_script("hermes_companion_bearer_sso_stage")
+
+        mount = tmp_path / "ads-sso.key"
+        mount.write_text("fake-seed-b64\n")
+        runtime_copy = tmp_path / "run" / "ads-sso.key"
+        monkeypatch.setattr(module, "COMPANION_SSO_KEY_MOUNT_PATH", str(mount))
+        monkeypatch.setattr(module, "COMPANION_RUNTIME_SSO_KEY_PATH", str(runtime_copy))
+        calls: list[tuple[str, str, int]] = []
+        monkeypatch.setattr(
+            module, "_write_secret", lambda path, value, gid: calls.append((path, value, gid))
+        )
+
+        staged = module._stage_sso_key(gid=42)  # noqa: SLF001
+
+        assert staged == 1
+        assert calls == [(str(runtime_copy), "fake-seed-b64", 42)]
+
+    def test_absent_mount_purges_a_stale_runtime_copy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        module = _load_staging_script("hermes_companion_bearer_sso_purge")
+
+        stale = tmp_path / "run" / "ads-sso.key"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("stale-seed\n")
+        monkeypatch.setattr(module, "COMPANION_SSO_KEY_MOUNT_PATH", str(tmp_path / "absent"))
+        monkeypatch.setattr(module, "COMPANION_RUNTIME_SSO_KEY_PATH", str(stale))
+
+        staged = module._stage_sso_key(gid=os.getgid())  # noqa: SLF001
+
+        assert staged == 0
+        assert not stale.exists()

@@ -12,10 +12,10 @@ from hermes.agents_os.application.audit_hash_chain import (
 )
 from hermes.agents_os.application.telemetry_opt_in import (
     NoopTelemetryExporter,
+    OwnerConfirmationRequiredError,
     TelemetryExporter,
     TelemetryOptInError,
     TelemetryOptInService,
-    TotpRequiredError,
     UnknownExporterError,
 )
 
@@ -33,50 +33,74 @@ def service(signer: AuditHashChainSigner) -> TelemetryOptInService:
 
 
 class TestDefault:
-    def test_default_is_off(
-        self, service: TelemetryOptInService
-    ) -> None:
+    def test_default_is_off(self, service: TelemetryOptInService) -> None:
         state = service.current()
         assert state.enabled is False
         assert state.exporters == frozenset()
         assert state.enabled_by_human_user_id is None
 
-    def test_should_emit_returns_false_when_off(
-        self, service: TelemetryOptInService
-    ) -> None:
-        assert (
-            service.should_emit(TelemetryExporter.PROMETHEUS_PUSH) is False
-        )
+    def test_should_emit_returns_false_when_off(self, service: TelemetryOptInService) -> None:
+        assert service.should_emit(TelemetryExporter.PROMETHEUS_PUSH) is False
 
 
 class TestEnable:
-    def test_enable_without_totp_blocked(
-        self, service: TelemetryOptInService
-    ) -> None:
-        with pytest.raises(TotpRequiredError):
+    @pytest.mark.parametrize("confirmation", [None, 1, "true", {}, []])
+    def test_truthy_or_missing_confirmation_is_not_authorization(self, service, confirmation):
+        with pytest.raises(OwnerConfirmationRequiredError):
             service.enable(
                 human_user_id=uuid4(),
-                totp_validated=False,
+                owner_confirmation_validated=confirmation,
+                exporters=frozenset({TelemetryExporter.PROMETHEUS_PUSH}),
+            )
+        assert service.current().enabled is False
+
+    @pytest.mark.parametrize("actor", [None, "agent", "00000000-0000-0000-0000-000000000000"])
+    def test_confirmation_without_typed_owner_is_denied(self, service, actor):
+        with pytest.raises(OwnerConfirmationRequiredError):
+            service.enable(
+                human_user_id=actor,
+                owner_confirmation_validated=True,
+                exporters=frozenset({TelemetryExporter.PROMETHEUS_PUSH}),
+            )
+        assert service.current().enabled is False
+
+    @pytest.mark.parametrize("exporter", ["prometheus_push", "unknown", None, 1])
+    def test_untyped_exporter_is_rejected_without_state_or_audit_change(
+        self, service, signer, exporter
+    ):
+        head = signer.head_hash_hex
+        with pytest.raises(UnknownExporterError):
+            service.enable(
+                human_user_id=uuid4(),
+                owner_confirmation_validated=True,
+                exporters=frozenset({exporter}),
+            )
+        assert service.current().enabled is False
+        assert signer.head_hash_hex == head
+
+    def test_enable_without_owner_confirmation_blocked(
+        self, service: TelemetryOptInService
+    ) -> None:
+        with pytest.raises(OwnerConfirmationRequiredError):
+            service.enable(
+                human_user_id=uuid4(),
+                owner_confirmation_validated=False,
                 exporters=frozenset({TelemetryExporter.PROMETHEUS_PUSH}),
             )
 
-    def test_enable_empty_exporters_blocked(
-        self, service: TelemetryOptInService
-    ) -> None:
+    def test_enable_empty_exporters_blocked(self, service: TelemetryOptInService) -> None:
         with pytest.raises(TelemetryOptInError):
             service.enable(
                 human_user_id=uuid4(),
-                totp_validated=True,
+                owner_confirmation_validated=True,
                 exporters=frozenset(),
             )
 
-    def test_enable_happy_path_persists(
-        self, service: TelemetryOptInService
-    ) -> None:
+    def test_enable_happy_path_persists(self, service: TelemetryOptInService) -> None:
         user = uuid4()
         state = service.enable(
             human_user_id=user,
-            totp_validated=True,
+            owner_confirmation_validated=True,
             exporters=frozenset(
                 {
                     TelemetryExporter.PROMETHEUS_PUSH,
@@ -97,25 +121,23 @@ class TestEnable:
         head_before = signer.head_hash_hex
         service.enable(
             human_user_id=uuid4(),
-            totp_validated=True,
+            owner_confirmation_validated=True,
             exporters=frozenset({TelemetryExporter.PROMETHEUS_PUSH}),
         )
         assert signer.head_hash_hex != head_before
 
 
 class TestDisable:
-    def test_disable_without_totp_allowed(
+    def test_disable_without_owner_confirmation_allowed(
         self, service: TelemetryOptInService
     ) -> None:
         service.enable(
             human_user_id=uuid4(),
-            totp_validated=True,
+            owner_confirmation_validated=True,
             exporters=frozenset({TelemetryExporter.PROMETHEUS_PUSH}),
         )
-        # FR-061: fail-safe — disable no requiere TOTP.
-        state = service.disable(
-            human_user_id=uuid4(), reason="user_revoked"
-        )
+        # FR-061: fail-safe — desactivar no exige segunda confirmación.
+        state = service.disable(human_user_id=uuid4(), reason="user_revoked")
         assert state.enabled is False
 
     def test_disable_logs_audit(
@@ -125,7 +147,7 @@ class TestDisable:
     ) -> None:
         service.enable(
             human_user_id=uuid4(),
-            totp_validated=True,
+            owner_confirmation_validated=True,
             exporters=frozenset({TelemetryExporter.PROMETHEUS_PUSH}),
         )
         head_before = signer.head_hash_hex
@@ -134,9 +156,7 @@ class TestDisable:
 
 
 class TestNoopExporter:
-    def test_emit_dropped_when_off(
-        self, service: TelemetryOptInService
-    ) -> None:
+    def test_emit_dropped_when_off(self, service: TelemetryOptInService) -> None:
         backend_calls: list[dict] = []
         exporter = NoopTelemetryExporter(
             service=service,
@@ -148,12 +168,10 @@ class TestNoopExporter:
         assert exporter.emitted_count == 0
         assert backend_calls == []
 
-    def test_emit_passes_through_when_on(
-        self, service: TelemetryOptInService
-    ) -> None:
+    def test_emit_passes_through_when_on(self, service: TelemetryOptInService) -> None:
         service.enable(
             human_user_id=uuid4(),
-            totp_validated=True,
+            owner_confirmation_validated=True,
             exporters=frozenset({TelemetryExporter.PROMETHEUS_PUSH}),
         )
         backend_calls: list[dict] = []
@@ -172,7 +190,7 @@ class TestNoopExporter:
         # ON solo para PROMETHEUS_PUSH; el de TRACES sigue OFF.
         service.enable(
             human_user_id=uuid4(),
-            totp_validated=True,
+            owner_confirmation_validated=True,
             exporters=frozenset({TelemetryExporter.PROMETHEUS_PUSH}),
         )
         trace_exporter = NoopTelemetryExporter(

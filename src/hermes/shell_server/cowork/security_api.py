@@ -28,9 +28,9 @@ Owner-approval flow (Part 2 contract):
        {
          scan_id: str,        # from step 1
          decision: "approve", # or "allow" / "allow_once" / "installed"
-         totp: str,           # owner TOTP code (required for override)
        }
-     Response: { ok: true } on success, or 401/403 on MFA failure.
+     Response: { ok: true, approval_grant?: str } after a recorded decision.
+     Overrides require the owner's UI session, not the internal daemon bearer.
   4. After a successful decision the ScanService gate records decision=ALLOWED
      so the install verb (add_mcp_server / install_hub_skill / install_package)
      sees the override in cache and proceeds.
@@ -41,18 +41,24 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from hermes.shell_server.security.mfa import MfaStore
-from hermes.shell_server.security.owner_mfa_gate import require_owner_mfa
+from hermes.shell_server.security.mcp_approval import McpApproval, mcp_approval_identifier
+from hermes.shell_server.security.owner_confirmation import (
+    issue_owner_approval,
+    require_owner_session,
+)
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
+from hermes.tasks.domain.ports import AgentPauseProvenance
 
 logger = logging.getLogger("hermes.shell_server.cowork.security_api")
 
 # Decisions that ELEVATE an install past a FAIL/WARN scan verdict (sovereign owner
-# override, modelo "todo elevable"). These require the owner's TOTP (TOTP-only model),
-# same bar as changing a security policy. A plain "deny"/"block" needs no MFA.
-_OVERRIDE_DECISIONS = frozenset({"allow", "approve", "allowed", "allow_once", "install", "installed"})
+# override, modelo "todo elevable"). These require the owner's UI session.
+# The internal daemon bearer cannot elevate an installation on its own.
+_OVERRIDE_DECISIONS = frozenset(
+    {"allow", "approve", "allowed", "allow_once", "install", "installed"}
+)
 
 
 # ------------------------------------------------------------------
@@ -66,6 +72,7 @@ class ScanInstallRequest(BaseModel):
 
 
 class RecordInstallDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     scan_id: str = Field(min_length=1)
     decision: str = Field(min_length=1, description="approve/allow or deny")
     identifier: str = ""
@@ -73,7 +80,13 @@ class RecordInstallDecisionRequest(BaseModel):
     score: int = -1
     verdict: str = ""
     risks_json: str = "[]"
-    totp: str | None = None          # required to ALLOW a FAIL/WARN scan (owner MFA)
+    mcp_approval: McpApproval | None = None
+
+
+class KillSwitchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    engaged: bool = Field(description="True = engage the brake, False = release it")
+    reason: str = Field(default="", max_length=500, description="Owner's reason, audited")
 
 
 # ------------------------------------------------------------------
@@ -81,7 +94,7 @@ class RecordInstallDecisionRequest(BaseModel):
 # ------------------------------------------------------------------
 
 
-def create_security_router() -> APIRouter:
+def create_security_router() -> APIRouter:  # noqa: PLR0915 — related REST routes
     router = APIRouter(prefix="/api/v1/security", tags=["security"])
 
     @router.get("/scans")
@@ -165,18 +178,17 @@ def create_security_router() -> APIRouter:
     ) -> dict:
         """Record an operator decision on a security scan (approve/allow or deny).
 
-        ALLOW/APPROVE on a non-PASS scan is a SOVEREIGN override → requires the owner's
-        TOTP (audited). Plain deny needs none. fail-hard on daemon unavailable.
+        ALLOW/APPROVE requires the authenticated owner UI and a recorded decision.
+        Fail hard on daemon failure; never issue a grant after a rejected write.
         """
-        if body.decision.strip().lower() in _OVERRIDE_DECISIONS:
-            require_owner_mfa(
-                MfaStore(),
-                body.totp or "",
-                action="permitir una instalación que el antivirus marcó (queda auditado)",
-            )
+        is_override = body.decision.strip().lower() in _OVERRIDE_DECISIONS
+        if is_override:
+            require_owner_session(request)
+            if body.kind == "mcp" and body.mcp_approval is None:
+                raise HTTPException(status_code=422, detail={"code": "mcp_approval_required"})
         proxy = request.app.state.dbus_proxy
         try:
-            return await proxy.call_mutator(
+            result = await proxy.call_mutator(
                 "record_install_decision",
                 body.scan_id,
                 body.decision,
@@ -188,6 +200,64 @@ def create_security_router() -> APIRouter:
             )
         except AgentUnavailable as exc:
             _raise_503(exc, "record_install_decision")
+
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            raise HTTPException(status_code=502, detail={"code": "decision_not_recorded"})
+
+        # Only a successfully recorded owner decision authorizes the follow-up.
+        if is_override and body.kind == "skill" and body.identifier:
+            grant = issue_owner_approval(
+                request, identifier=body.identifier, action="install_hub_skill"
+            )
+            result = {**result, "approval_grant": grant}
+        elif is_override and body.kind == "mcp" and body.mcp_approval is not None:
+            grant = issue_owner_approval(
+                request,
+                identifier=mcp_approval_identifier(body.mcp_approval),
+                action="install_mcp",
+            )
+            result = {**result, "approval_grant": grant}
+        return result
+
+    @router.get("/kill-switch")
+    async def get_kill_switch(request: Request) -> dict:
+        """Report known daemon state; unavailable never means running or stopped."""
+        proxy = request.app.state.dbus_proxy
+        try:
+            status = await proxy.call_dict("get_kill_switch_status")
+        except AgentUnavailable as exc:
+            _raise_503(exc, "get_kill_switch_status")
+        if not isinstance(status, dict) or type(status.get("engaged")) is not bool:
+            raise HTTPException(status_code=503, detail={"code": "kill_switch_state_unknown"})
+        return status
+
+    @router.post("/kill-switch", status_code=200)
+    async def set_kill_switch(request: Request, body: KillSwitchRequest) -> dict:
+        """Engage/release the emergency brake.
+
+        Engaging is a one-click brake behind the normal operator authentication.
+        Releasing requires the owner's UI session, never the internal daemon
+        bearer. Community does not ask for TOTP or a device password here.
+        """
+        proxy = request.app.state.dbus_proxy
+        if body.engaged:
+            try:
+                await proxy.call_bool("pause", body.reason)
+            except AgentUnavailable as exc:
+                _raise_503(exc, "kill_switch_engage")
+            return {"ok": True, "engaged": True}
+
+        require_owner_session(request)
+        release_reason = AgentPauseProvenance.API
+
+        try:
+            # Audit provenance (security review 2026-09-10, MEDIUM finding):
+            # distinguishes this owner-session UI/REST release from `safent
+            # brake release`'s "host_cli" on the signed AGENT_RESUMED entry.
+            await proxy.call_bool("resume", release_reason)
+        except AgentUnavailable as exc:
+            _raise_503(exc, "kill_switch_release")
+        return {"ok": True, "engaged": False}
 
     return router
 

@@ -99,11 +99,34 @@ CREATE TABLE IF NOT EXISTS audit_entries_view (
     audit_kind         TEXT NOT NULL,
     category           TEXT,
     description        TEXT NOT NULL,
-    signature_short    TEXT NOT NULL
+    signature_short    TEXT NOT NULL,
+    payload_json       TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS audit_ts_idx
     ON audit_entries_view (timestamp DESC);
 """
+
+# Tables that predate `payload_json` (this column landed after both tables'
+# very first CREATE TABLE shipped in some installs) need an explicit ADD
+# COLUMN — `CREATE TABLE IF NOT EXISTS` is a no-op against an existing table,
+# it never retrofits missing columns (specs/025-safent-repaso matriz-final-
+# 39eeb8e re-verificación d2eb8c6, "payload_json no se persiste nunca").
+_TABLES_NEEDING_PAYLOAD_JSON = ("audit_chain_entries", "audit_entries_view")
+
+
+def ensure_payload_json_column(conn: sqlite3.Connection, table: str) -> None:
+    """Idempotent `ALTER TABLE ... ADD COLUMN payload_json`.
+
+    Safe to call on every boot: ignores "duplicate column" (column already
+    present, the common case once a DB has been migrated once).
+    """
+    try:
+        conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{{}}'"
+        )
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
 
 
 def ensure_audit_chain_schema(conn: sqlite3.Connection) -> None:
@@ -111,7 +134,10 @@ def ensure_audit_chain_schema(conn: sqlite3.Connection) -> None:
 
     Idempotente: `CREATE TABLE/INDEX IF NOT EXISTS`. No redefine la proyección
     `audit_entries_view` de `audit_api.py` si ya existe (no-op). Re-ejecutar no
-    destruye datos ni lanza.
+    destruye datos ni lanza. Tras el DDL, retrofita `payload_json` en ambas
+    tablas si una instancia pre-existente la creó sin esa columna.
     """
     conn.executescript(_DDL_AUDIT_CHAIN_ENTRIES)
     conn.executescript(_DDL_AUDIT_ENTRIES_VIEW)
+    for table in _TABLES_NEEDING_PAYLOAD_JSON:
+        ensure_payload_json_column(conn, table)

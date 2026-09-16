@@ -123,7 +123,7 @@ def main() -> int:
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtCore import QTimer
 
-    from hermes.agents_os.application.teaching.input_ownership_ledger import InputOwnershipLedger
+    from hermes.agents_os.domain.input_ownership import InputOwnershipLedger
     from hermes.shell_server.session_agent.input_bridge import SessionInputBridge
     from hermes.lumen.compositor.compositor_app import build_application
     from hermes.lumen.compositor.seat_input_adapter import SeatInputAdapter

@@ -35,7 +35,7 @@ def exporter(telemetry: TelemetryOptInService) -> PrometheusExporterAdapter:
 def _enable_telemetry(svc: TelemetryOptInService) -> None:
     svc.enable(
         human_user_id=uuid4(),
-        totp_validated=True,
+        owner_confirmation_validated=True,
         exporters=frozenset({TelemetryExporter.PROMETHEUS_PUSH}),
     )
 
@@ -70,14 +70,8 @@ class TestGateOn:
     ) -> None:
         _enable_telemetry(telemetry)
         exporter.record_runtime_state(state="running")
-        assert (
-            exporter.runtime_state_gauge.value(labels={"state": "running"})
-            == 1.0
-        )
-        assert (
-            exporter.runtime_state_gauge.value(labels={"state": "idle"})
-            == 0.0
-        )
+        assert exporter.runtime_state_gauge.value(labels={"state": "running"}) == 1.0
+        assert exporter.runtime_state_gauge.value(labels={"state": "idle"}) == 0.0
 
     def test_ota_attempt_counter_increments_per_label(
         self,
@@ -87,9 +81,7 @@ class TestGateOn:
         _enable_telemetry(telemetry)
         exporter.record_ota_attempt(state="queued")
         exporter.record_ota_attempt(state="queued")
-        exporter.record_ota_attempt(
-            state="rejected", rejection_reason="downgrade_blocked"
-        )
+        exporter.record_ota_attempt(state="rejected", rejection_reason="downgrade_blocked")
         assert (
             exporter.ota_attempt_counter.value(
                 labels={"state": "queued", "rejection_reason": "none"}

@@ -16,7 +16,7 @@ Gate order (fail-closed — a single BLOCK from any step short-circuits):
   6. Denylist gate       — broker._check_denylist() for os_native service ops.
 
 Step 1.6 (Enterprise governance, Fase 2 Phase 4c — TOTP-keyed model): when a
-native danger needs owner approval (hook_mfa_block fired),
+native danger needs owner approval (hook_approval_block fired),
 `_compute_danger_route()` consults approval_router.route() to decide WHO
 resolves it — LOCAL (the worker's plain Approve/Deny, no TOTP, today's D-Bus
 path) for a SIMPLE-tier action, or ENTERPRISE (the tenant's centralized TOTP
@@ -450,7 +450,7 @@ def _compute_danger_route(
     Enterprise governance, Fase 2 Phase 4c — TOTP-keyed routing (supersedes
     Phase 4b's delicacy/sensitivity/irreversible eligibility calculus).
     Consulted ONLY here, at the native-danger gate, for an action that ALREADY
-    requires owner approval (hook_mfa_block fired) — this NEVER creates a new
+    requires owner approval (hook_approval_block fired) — this NEVER creates a new
     approval surface, it only decides WHO resolves the SAME approval that was
     always going to block (I-3: substitutes ONLY the owner-MFA gate, never the
     hardline/self-jailbreak/denylist floor, which runs later in Steps 2/3/6
@@ -1586,7 +1586,7 @@ def make_pre_tool_call_hook(
             row (see `_agent_is_cloud_managed`). None => today's fail-open
             behaviour for a missing scope row, unchanged.
     """
-    from hermes.capabilities.tool_delicacy import hook_mfa_block  # noqa: PLC0415
+    from hermes.capabilities.tool_delicacy import hook_approval_block  # noqa: PLC0415
     from hermes.capabilities.tool_policy import ToolPolicyStore  # noqa: PLC0415
 
     _tool_policy = ToolPolicyStore()
@@ -1659,7 +1659,7 @@ def make_pre_tool_call_hook(
             # "Using the browser" is a per-CONVERSATION consent, NOT the per-danger MFA
             # hatch of Step 1.6: the FIRST browser_* in a conversation surfaces ONE
             # approval card; once approved, the rest of that conversation drives the
-            # browser with no re-ask. Always-ask (independent of mfa_on_dangers), so the
+            # browser with no re-ask. Always-ask (independent of approval_on_dangers), so the
             # owner ALWAYS sees + gates the browser even in full-autonomy mode — this is
             # WHY it lives here and not in Step 1.6 (which the owner-preapproval
             # short-circuit clears for enabled DELICATE tools, so browser NEVER produced
@@ -1679,22 +1679,51 @@ def make_pre_tool_call_hook(
                     "hermes.security_hook.pre.browser_session_allowed tool=%s", tool_name
                 )
 
+            # Step 1.6-tailnet_ssh: per-HOST SSH consent (spec 022 v2). Mirrors the
+            # browser per-SESSION gate above — always-ask (independent of
+            # approval_on_dangers), so it lives here rather than Step 1.6. Unlike browser,
+            # the approval PERSISTS per HOST (not per conversation): the first
+            # tailnet_ssh/tailnet_file_get/tailnet_file_put call to a given host
+            # surfaces ONE card; once approved, that host is written to the owner's
+            # durable allow-list (`JsonHostAllowlistStore`) and every later call to it
+            # — in ANY conversation, forever, until the owner revokes it — flows with
+            # no card. A malformed/unknown host (not the tailnet's suffix, not a
+            # listed peer, or an IP literal) is rejected outright, no card shown.
+            if _is_tailnet_ssh_tool(tool_name):
+                tailnet_block = _resolve_tailnet_ssh_consent(
+                    tool_name, safe_args, task_id, broker, engine_loop,
+                    access_scope_repo, tenant_id,
+                )
+                if tailnet_block is not None:
+                    logger.info(
+                        "hermes.security_hook.pre.tailnet_ssh_pending tool=%s", tool_name
+                    )
+                    return _block(tailnet_block)
+                logger.info(
+                    "hermes.security_hook.pre.tailnet_ssh_allowed tool=%s", tool_name
+                )
+
             # Step 1.6: MFA-on-dangers (owner decision 2026-06-19; coherence audit fix).
-            # Gates NATIVE dangers that bypass the broker. hook_mfa_block encapsulates the
+            # Gates NATIVE dangers that bypass the broker. hook_approval_block encapsulates the
             # full decision (single source in tool_delicacy): MOST_DELICATE native
             # (skill_manage/cronjob/delegate_task) ALWAYS needs MFA — the escape hatch
             # NEVER frees self-widening; cage-escaping DELICATE (send_message/discord/ha)
-            # needs MFA only while mfa_on_dangers is ON; caged-exec / cage-contained /
+            # needs MFA only while approval_on_dangers is ON; caged-exec / cage-contained /
             # reads / capability+external tools are handled elsewhere (gateway, cage,
             # broker HITL). SECURITY gate → not swallowed: errors fail-CLOSED via the
             # outer handler; the flag accessor itself fails-safe to ON.
             # browser_* is handled by its own per-SESSION gate above (Step 1.6-browser)
             # — exclude it here so it does not ALSO go through the mfa-on-dangers path.
+            # tailnet_ssh/* likewise has its own per-HOST gate above (Step
+            # 1.6-tailnet_ssh); classify_nous_tool() already returns None for it (not
+            # native) so hook_approval_block would no-op anyway — excluded explicitly so
+            # this stays true even if it is ever added to the native catalog.
             _needs_owner_mfa = (
                 bool(tool_name)
                 and not _is_browser_session_tool(tool_name)
-                and hook_mfa_block(
-                    tool_name, mfa_on_dangers=_effective_policy.mfa_on_dangers()
+                and not _is_tailnet_ssh_tool(tool_name)
+                and hook_approval_block(
+                    tool_name, approval_on_dangers=_effective_policy.approval_on_dangers()
                 )
             )
             if _needs_owner_mfa:
@@ -1835,7 +1864,7 @@ _NATIVE_DANGER_GATE_TIMEOUT_S: float = 30.0
 # "Using the browser" is a per-CONVERSATION consent, NOT the per-danger MFA hatch:
 # the FIRST browser_* in a conversation surfaces ONE approval card; once the owner
 # approves, the rest of that conversation drives the browser (navigate/click/type)
-# with no re-ask. Always-ask — decoupled from mfa_on_dangers — so the owner ALWAYS
+# with no re-ask. Always-ask — decoupled from approval_on_dangers — so the owner ALWAYS
 # sees + gates the browser, even in full-autonomy mode. State is in-memory (daemon
 # lifetime): a restart fail-safes to re-ask, never a silent grant. Bounded so a
 # long-lived daemon cannot grow it unboundedly; eviction only forces a harmless
@@ -1882,7 +1911,7 @@ def _resolve_browser_session_consent(
     First browser_* in a conversation → ONE approval card (reuses the native
     block-and-resume gate with a per-conversation proposal key). On approve, the
     conversation is marked → later browser_* ALLOW with no card. Always-ask
-    (decoupled from mfa_on_dangers). FAIL-CLOSED via _resolve_native_danger_approval.
+    (decoupled from approval_on_dangers). FAIL-CLOSED via _resolve_native_danger_approval.
     """
     from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
         get_conversation_for_task,
@@ -1947,6 +1976,92 @@ def _resolve_browser_session_consent(
     )
     if block_msg is None:
         _mark_browser_session_approved(conv_id)
+    return block_msg
+
+
+def _is_tailnet_ssh_tool(tool_name: str) -> bool:
+    """True for tailnet_ssh/tailnet_file_get/tailnet_file_put. Single source:
+    `hermes.tailnet_ssh.tool_names` — never re-listed by hand here."""
+    from hermes.tailnet_ssh.tool_names import TAILNET_SSH_TOOL_NAMES  # noqa: PLC0415
+
+    return tool_name in TAILNET_SSH_TOOL_NAMES
+
+
+def _resolve_tailnet_ssh_consent(
+    tool_name: str, args: dict[str, Any], task_id: str, broker: Any, engine_loop: Any,
+    access_scope_repo: Any, tenant_id: str,
+) -> str | None:
+    """Per-HOST tailnet SSH consent gate (spec 022 v2). None = ALLOW, str = block.
+
+    Unlike the browser per-SESSION gate, approval here is PERSISTENT per host
+    (`JsonHostAllowlistStore`, `/var/lib/hermes/tailscale/ssh-allowlist.json`)
+    — it survives a daemon restart and covers every future conversation, not
+    just this one. A malformed/unknown host is rejected before any card is
+    shown (validation, not authorization).
+
+    Autonomous cycles (no chat conversation, no owner watching) fail-CLOSED
+    for a host that isn't ALREADY on the allow-list — deliberately the
+    OPPOSITE of the browser gate's fail-open for that case: the browser's
+    egress allowlist is a separate governing floor underneath it, tailnet_ssh
+    has none — the per-host HITL card IS the floor, so an unattended cycle
+    can never be the first to reach a brand-new host. An already-approved
+    host still flows autonomously (the owner already vetted it).
+    """
+    from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
+        get_conversation_for_task,
+        get_current_cycle_agent,
+    )
+    from hermes.tailnet_ssh.application.host_resolution import resolve_host  # noqa: PLC0415
+    from hermes.tailnet_ssh.domain.errors import (  # noqa: PLC0415
+        InvalidTailnetHostError,
+        TailnetDirectoryUnavailableError,
+        UnknownTailnetHostError,
+    )
+    from hermes.tailnet_ssh.infrastructure.json_host_allowlist_store import (  # noqa: PLC0415
+        JsonHostAllowlistStore,
+    )
+    from hermes.tailnet_ssh.infrastructure.status_json_directory import (  # noqa: PLC0415
+        StatusJsonTailnetDirectory,
+    )
+
+    try:
+        status = StatusJsonTailnetDirectory().read()
+        host = resolve_host(args.get("host", ""), status)
+    except (
+        InvalidTailnetHostError, UnknownTailnetHostError, TailnetDirectoryUnavailableError,
+    ) as exc:
+        return f"host de tailnet inválido o no reconocido: {exc}"
+
+    allowlist = JsonHostAllowlistStore()
+    if allowlist.is_allowed(host.value):
+        return None  # host ya aprobado por el dueño — fluye sin tarjeta
+
+    conv_id = get_conversation_for_task(task_id) or ""
+    if not conv_id:
+        return (
+            f"requiere aprobación del dueño para conectarse por SSH a «{host.value}» "
+            "— no hay una conversación activa donde mostrar la tarjeta, y este host "
+            "no está en la lista de permitidos."
+        )
+
+    route, sensitivity_categories = _compute_danger_route(
+        tool_name, args, access_scope_repo, tenant_id
+    )
+    block_msg = _resolve_native_danger_approval(
+        tool_name, args, broker, engine_loop,
+        conversation_id=conv_id,
+        route=route,
+        sensitivity_categories=sensitivity_categories,
+        agent_id=get_current_cycle_agent(),
+        session_key=f"tailnet-ssh\x00{host.value}",
+        justification_override=(
+            f"El agente quiere conectarse por SSH a «{host.value}» en tu tailnet y "
+            "ejecutar un comando ahí. Al aprobar, este host queda permitido para "
+            "futuras conexiones (puedes revocarlo luego en Seguridad)."
+        ),
+    )
+    if block_msg is None:
+        allowlist.allow(host.value)
     return block_msg
 
 

@@ -1,7 +1,7 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { sileo } from 'sileo'
 import { X, Terminal, Search, Wrench, ExternalLink, Megaphone, Link2, Lightbulb } from 'lucide-react'
-import { useT } from '../lib/i18n'
+import { useT, useLocale } from '../lib/i18n'
 import type { TranslationKey } from '../lib/i18n'
 import {
   listMcpServers, addMcpServer, removeMcpServer, searchMcpRegistry, scanInstall, recordSecurityDecision,
@@ -10,21 +10,19 @@ import {
 import type { McpServer, McpRegistryEntry, InstallScanResponse } from '../api/types'
 import { useConfirmDialog } from '../components/ConfirmDialog'
 import InstallScanModal from '../components/InstallScanModal'
-import type { MfaFactors } from '../components/MfaModal'
 import { panelOriginFromMcpUrl } from '../hooks/useAdsPanel'
+import { useAdsAvailability } from '../hooks/useAdsAvailability'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Button } from '../components/ui/Button'
 import { Badge as DsBadge, StatusDot } from '../components/ui/Badge'
 import type { StatusDotState } from '../components/ui/Badge'
+import { CompanionInstallAction } from '../components/CompanionInstallAction'
 import {
   AnimatePresence,
   AnimatedListItem,
   AnimatedExpanderContent,
   AnimatedChevron,
-  FadeIn,
-  Stagger,
-  StaggerItem,
   HoverRow,
   motion,
   SPRING,
@@ -215,20 +213,28 @@ export default function McpView() {
   const [pendingInstall, setPendingInstall] = useState<PendingInstall | null>(null)
   const regInputRef = useRef<HTMLInputElement>(null)
   const [confirm, ConfirmDialogNode] = useConfirmDialog()
+  const loadGeneration = useRef(0)
+  const searchGeneration = useRef(0)
+  const alive = useRef(true)
 
   function load() {
+    const request = ++loadGeneration.current
     dispatch({ type: 'LOADING' })
     listMcpServers()
       // Ruflo is a first-class Safent integration, not a user-managed tool set.
       // The backend already hides it but we filter defensively client-side too.
-      .then(servers => dispatch({ type: 'LOADED', servers: servers.filter(s => s.slug !== 'ruflo') }))
-      .catch((e: unknown) => dispatch({
+      .then(servers => {
+        if (request !== loadGeneration.current) return
+        if (!Array.isArray(servers)) throw new Error('invalid MCP list')
+        dispatch({ type: 'LOADED', servers: servers.filter(s => s.slug !== 'ruflo') })
+      })
+      .catch(() => { if (request === loadGeneration.current) dispatch({
         type: 'FAILED',
-        message: e instanceof ApiError ? e.message : t('mcp.err.load'),
-      }))
+        message: t('mcp.err.load'),
+      }) })
   }
 
-  useEffect(() => { load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { alive.current = true; load(); return () => { alive.current = false; loadGeneration.current++; searchGeneration.current++ } }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const installedIds = state.status === 'success'
     ? new Set(state.servers.map(s => s.server_id ?? s.id ?? ''))
@@ -256,7 +262,7 @@ export default function McpView() {
     }
   }
 
-  async function doAddMcpServer(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void, force = false) {
+  async function doAddMcpServer(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void, force = false, approvalGrant?: string) {
     const argv = Array.isArray(entry.argv)
       ? entry.argv
       : String(entry.argv ?? '').split(/\s+/).filter(Boolean)
@@ -267,10 +273,9 @@ export default function McpView() {
         label: entry.label ?? entry.name,
         argv,
         env: { ...collectedEnv },
-        // Owner sovereign override after a FAIL/WARN scan was approved with MFA — the
-        // daemon's add gate re-blocks FAIL/WARN unless force carries the approval.
+        // Only the one-use grant authorizes this exact owner-reviewed draft.
         force,
-      })
+      }, approvalGrant)
       const name = entry.label ?? entry.name ?? ''
       if (res && res.tool_count === 0) {
         show(t('mcp.toast.no_tools').replace('{name}', name), 'warn', 7000)
@@ -286,6 +291,7 @@ export default function McpView() {
   }
 
   async function installEntry(entry: McpRegistryEntry, collectedEnv: Record<string, string>, onDone: () => void) {
+    if (state.status !== 'success') { show(t('mcp.err.load'), 'error'); onDone(); return }
     // npx (npm) and uvx (PyPI) both resolve to a published package the content +
     // CVE scanners can fetch and statically analyze, so the verdict is REAL. Other
     // runners (local node/python3 scripts, inline commands) have no inspectable
@@ -308,8 +314,12 @@ export default function McpView() {
 
     try {
       const scan = await scanInstall('mcp', scanTarget)
+      if (!alive.current) return
+      if (!scan || !['PASS','WARN','FAIL'].includes(scan.verdict)
+        || typeof scan.scan_id !== 'string' || !scan.scan_id.trim()
+        || typeof scan.requires_owner_approval !== 'boolean') throw new Error('unverified scan')
       // WARN and FAIL always route through the approval modal so the owner can
-      // review and confirm with TOTP — no silent toast degradation.
+      // review and confirm the exact action — no silent toast degradation.
       if (scan.requires_owner_approval || scan.verdict === 'WARN' || scan.verdict === 'FAIL') {
         setPendingInstall({ scan, entry, collectedEnv, onDone })
         return
@@ -317,17 +327,18 @@ export default function McpView() {
       // PASS → proceed directly
       await doAddMcpServer(entry, collectedEnv, onDone)
     } catch {
-      // Scan endpoint unavailable — fall back to direct install
-      await doAddMcpServer(entry, collectedEnv, onDone)
+      if (!alive.current) return
+      show(t('skills.scan.unavailable'), 'error')
+      onDone()
     }
   }
 
-  async function handleScanApprove(factors: MfaFactors) {
+  async function handleScanApprove() {
     if (!pendingInstall) return
     const { scan, entry, collectedEnv, onDone } = pendingInstall
     setPendingInstall(null)
     try {
-      await recordSecurityDecision({
+      const decision = await recordSecurityDecision({
         scan_id: scan.scan_id,
         decision: 'approve',
         identifier: scan.identifier ?? entry.server_id ?? entry.id ?? '',
@@ -335,9 +346,15 @@ export default function McpView() {
         score: scan.score,
         verdict: scan.verdict,
         risks_json: JSON.stringify(scan.risks),
-        totp: factors.totp,
+        mcp_approval: {
+          operation: 'add',
+          server_id: entry.server_id ?? entry.id ?? slugify(entry.name ?? ''),
+          label: entry.label ?? entry.name,
+          argv: Array.isArray(entry.argv) ? entry.argv : String(entry.argv ?? '').split(/\s+/).filter(Boolean),
+          env: { ...collectedEnv },
+        },
       })
-      await doAddMcpServer(entry, collectedEnv, onDone, true)
+      await doAddMcpServer(entry, collectedEnv, onDone, true, decision.approval_grant)
     } catch (e) {
       show(e instanceof Error ? e.message : t('mcp.err.decision'), 'error')
       onDone()
@@ -347,15 +364,19 @@ export default function McpView() {
   async function searchRegistry() {
     const q = regInputRef.current?.value.trim() ?? ''
     if (q.length < 2) return
+    const request = ++searchGeneration.current
     setRegistryState({ status: 'loading' })
     try {
       const results = await searchMcpRegistry(q)
-      const arr = Array.isArray(results) ? results : []
+      if (request !== searchGeneration.current) return
+      if (!Array.isArray(results)) throw new Error('invalid MCP search')
+      const arr = results
       setRegistryState({ status: 'success', results: arr })
-    } catch (e) {
+    } catch {
+      if (request !== searchGeneration.current) return
       setRegistryState({
         status: 'error',
-        message: e instanceof ApiError ? e.message : t('mcp.err.registry_search'),
+        message: t('mcp.err.registry_search'),
       })
     }
   }
@@ -379,11 +400,11 @@ export default function McpView() {
         subtitle={t('mcp.subtitle')}
       />
 
-      <div className="view-body cv-view-body">
-        <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+      <div className={`view-body cv-view-body ${styles.viewBody}`}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
 
           {/* ── Active servers ──────────────────────────────────────────────── */}
-          <StaggerItem>
+          <div>
             <section className="cv-section" aria-label={t('mcp.active.aria')}>
               <h2 className={styles.sectionLabel}>{t('mcp.active')}</h2>
 
@@ -415,7 +436,7 @@ export default function McpView() {
               )}
 
               {state.status === 'error' && (
-                <FadeIn>
+                <div>
                   <div role="alert" className={styles.errorBlock}>
                     <p className={styles.errorMessage}>{state.message}</p>
                     <div>
@@ -424,7 +445,7 @@ export default function McpView() {
                       </Button>
                     </div>
                   </div>
-                </FadeIn>
+                </div>
               )}
 
               {state.status === 'success' && (
@@ -464,10 +485,10 @@ export default function McpView() {
                   )
               )}
             </section>
-          </StaggerItem>
+          </div>
 
           {/* ── Managed presets (Safent-operated MCP bridges) ────────────────── */}
-          <StaggerItem>
+          <div>
             <section className="cv-section" aria-label={t('mcp.managed.section.aria')}>
               <h2 className={styles.sectionLabel}>{t('mcp.managed.section')}</h2>
               <ul className="cv-list" role="list">
@@ -480,10 +501,10 @@ export default function McpView() {
                 </AnimatedListItem>
               </ul>
             </section>
-          </StaggerItem>
+          </div>
 
           {/* ── Suggested catalog ───────────────────────────────────────────── */}
-          <StaggerItem>
+          <div>
             <section className="cv-section" aria-label={t('mcp.suggested.aria')}>
               <h2 className={styles.sectionLabel}>{t('mcp.suggested')}</h2>
               <ul className="cv-list" role="list">
@@ -500,10 +521,10 @@ export default function McpView() {
                 </AnimatePresence>
               </ul>
             </section>
-          </StaggerItem>
+          </div>
 
           {/* ── Official registry search ─────────────────────────────────── */}
-          <StaggerItem>
+          <div>
             <section className="cv-section" aria-label={t('mcp.search.aria')}>
               <h2 className={styles.sectionLabel}>{t('mcp.search.title')}</h2>
               <div className={styles.searchBar}>
@@ -538,7 +559,7 @@ export default function McpView() {
               </p>
 
               {registryState.status === 'error' && (
-                <FadeIn>
+                <div>
                   <div role="alert" className={styles.errorBlock}>
                     <p className={styles.errorMessage}>{registryState.message}</p>
                     <div>
@@ -547,7 +568,7 @@ export default function McpView() {
                       </Button>
                     </div>
                   </div>
-                </FadeIn>
+                </div>
               )}
 
               {registryState.status === 'success' && registryState.results.length > 0 && (
@@ -574,10 +595,10 @@ export default function McpView() {
                 />
               )}
             </section>
-          </StaggerItem>
+          </div>
 
           {/* ── Manual add ──────────────────────────────────────────────────── */}
-          <StaggerItem>
+          <div>
             <section className="cv-section" aria-label={t('mcp.manual.aria')}>
               <h2 className={styles.sectionLabel}>{t('mcp.manual.aria')}</h2>
               <AddMcpForm
@@ -585,9 +606,9 @@ export default function McpView() {
                 onToast={show}
               />
             </section>
-          </StaggerItem>
+          </div>
 
-        </Stagger>
+        </div>
       </div>
     </>
   )
@@ -746,9 +767,14 @@ interface ManagedRemotePresetCardProps {
 
 function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: ManagedRemotePresetCardProps) {
   const t = useT()
+  const { locale } = useLocale()
   const [url, setUrl] = useState('')
   const [connecting, setConnecting] = useState(false)
-  const [pendingScan, setPendingScan] = useState<InstallScanResponse | null>(null)
+  const [pendingScan, setPendingScan] = useState<{ scan: InstallScanResponse; url: string } | null>(null)
+  // 029: the self-host URL is an escape hatch now, collapsed and off by
+  // default — CompanionInstallAction ("Instalar") is the default path.
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const availability = useAdsAvailability()
 
   useEffect(() => {
     if (connectedServer) return
@@ -762,10 +788,10 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
       .catch(() => undefined)
   }, [connectedServer])
 
-  async function doConnect(force: boolean) {
+  async function doConnect(force: boolean, targetUrl = url.trim(), approvalGrant?: string) {
     setConnecting(true)
     try {
-      const res = await connectManagedRemote(SAFENT_ADS_SLUG, url.trim(), force)
+      const res = await connectManagedRemote(SAFENT_ADS_SLUG, targetUrl, force, approvalGrant)
       if (res && res.tool_count === 0) {
         show(t('mcp.toast.no_tools').replace('{name}', t('mcp.managed.ads.title')), 'warn', 7000)
       } else {
@@ -791,7 +817,7 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
       if (blocked === true) {
         try {
           const scan = await scanInstall('mcp', SAFENT_ADS_SCAN_TARGET)
-          setPendingScan(scan)
+          setPendingScan({ scan, url: targetUrl })
           return
         } catch {
           show(e instanceof Error ? e.message : t('mcp.err.generic'), 'error')
@@ -813,12 +839,12 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
     void doConnect(false)
   }
 
-  async function handleScanApprove(factors: MfaFactors) {
+  async function handleScanApprove() {
     if (!pendingScan) return
-    const scan = pendingScan
+    const { scan, url: approvedUrl } = pendingScan
     setPendingScan(null)
     try {
-      await recordSecurityDecision({
+      const decision = await recordSecurityDecision({
         scan_id: scan.scan_id,
         decision: 'approve',
         identifier: scan.identifier ?? SAFENT_ADS_SCAN_TARGET,
@@ -826,12 +852,21 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
         score: scan.score,
         verdict: scan.verdict,
         risks_json: JSON.stringify(scan.risks),
-        totp: factors.totp,
+        mcp_approval: { operation: 'managed_remote', slug: SAFENT_ADS_SLUG, url: approvedUrl },
       })
-      await doConnect(true)
+      await doConnect(true, approvedUrl, decision.approval_grant)
     } catch (e) {
       show(e instanceof Error ? e.message : t('mcp.err.decision'), 'error')
     }
+  }
+
+  if (availability.status === 'managed') {
+    return <div className={styles.catalogCard}>
+      <div className={styles.catalogCardName}>Safent Ads · Enterprise</div>
+      <p className={styles.catalogCardDesc}>{locale === 'es'
+        ? 'Las asignaciones y la conexión se administran desde Enterprise. Consulta las cuentas disponibles en Anuncios.'
+        : 'Assignments and the connection are managed by Enterprise. Open Ads to inspect available accounts.'}</p>
+    </div>
   }
 
   if (connectedServer) {
@@ -842,13 +877,13 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
     <>
       {pendingScan && (
         <InstallScanModal
-          scan={pendingScan}
+          scan={pendingScan.scan}
           name={t('mcp.managed.ads.title')}
           onApprove={handleScanApprove}
           onCancel={() => setPendingScan(null)}
         />
       )}
-      <motion.div className={styles.catalogCard} whileHover={{ y: -1 }} transition={SPRING} layout>
+      <motion.div className={styles.catalogCard} transition={SPRING} layout>
         <div className={styles.catalogCardMain}>
           <span className={styles.catalogCardIcon} aria-hidden="true">
             <Megaphone size={14} />
@@ -859,36 +894,56 @@ function ManagedRemotePresetCard({ connectedServer, onConnected, onRemove }: Man
           </div>
         </div>
 
-        <div className={styles.envForm}>
-          <div className={styles.envField}>
-            <label className={styles.envLabel} htmlFor="mcp-managed-ads-url">
-              {t('mcp.managed.ads.url.label')}
-            </label>
-            <input
-              id="mcp-managed-ads-url"
-              className={styles.envInput}
-              type="url"
-              inputMode="url"
-              autoComplete="off"
-              placeholder={t('mcp.managed.ads.url.placeholder')}
-              value={url}
-              onChange={e => setUrl(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleConnectClick() }}
-            />
+        {/* Default path (029 FR-001/FR-002): one "Instalar" action, no URL, no
+            connection field — the SAME flow the sidebar's not_installed entry
+            triggers. Renders nothing while ready/loading (CompanionInstallAction
+            owns that judgment via useAdsAvailability). */}
+        <CompanionInstallAction availability={availability} />
+
+        <button
+          type="button"
+          className={styles.serverCmdToggle}
+          onClick={() => setAdvancedOpen(v => !v)}
+          aria-expanded={advancedOpen}
+          aria-label={advancedOpen ? t('mcp.managed.ads.advanced.hide') : t('mcp.managed.ads.advanced.show')}
+        >
+          <AnimatedChevron open={advancedOpen} size={10} />
+          <span>{t('mcp.managed.ads.advanced.toggle')}</span>
+        </button>
+
+        <AnimatedExpanderContent open={advancedOpen}>
+          <p className={styles.catalogCardDesc}>{t('mcp.managed.ads.advanced.hint')}</p>
+          <div className={styles.envForm}>
+            <div className={styles.envField}>
+              <label className={styles.envLabel} htmlFor="mcp-managed-ads-url">
+                {t('mcp.managed.ads.url.label')}
+              </label>
+              <input
+                id="mcp-managed-ads-url"
+                className={styles.envInput}
+                type="url"
+                inputMode="url"
+                autoComplete="off"
+                placeholder={t('mcp.managed.ads.url.placeholder')}
+                value={url}
+                onChange={e => setUrl(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleConnectClick() }}
+              />
+            </div>
+            <div className={styles.envActions}>
+              <Button
+                variant="primary"
+                size="sm"
+                type="button"
+                loading={connecting}
+                disabled={connecting}
+                onClick={handleConnectClick}
+              >
+                {connecting ? t('mcp.managed.connecting') : t('mcp.managed.connect')}
+              </Button>
+            </div>
           </div>
-          <div className={styles.envActions}>
-            <Button
-              variant="primary"
-              size="sm"
-              type="button"
-              loading={connecting}
-              disabled={connecting}
-              onClick={handleConnectClick}
-            >
-              {connecting ? t('mcp.managed.connecting') : t('mcp.managed.connect')}
-            </Button>
-          </div>
-        </div>
+        </AnimatedExpanderContent>
       </motion.div>
     </>
   )
@@ -943,7 +998,6 @@ function CatalogCard({ entry, installedIds, onInstall }: CatalogCardProps) {
   return (
     <motion.div
       className={styles.catalogCard}
-      whileHover={{ y: -1 }}
       transition={SPRING}
       layout
     >
@@ -1102,7 +1156,6 @@ function AddMcpForm({ onAdded, onToast }: AddMcpFormProps) {
   return (
     <motion.div
       className={styles.addForm}
-      whileHover={{ y: -1 }}
       transition={TWEEN_FAST}
       layout
     >

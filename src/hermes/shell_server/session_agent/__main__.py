@@ -110,7 +110,7 @@ async def _main() -> int:
         logger.error("hermes.session_input.no_mutter")
         return 1
 
-    from hermes.agents_os.application.teaching.input_ownership_ledger import InputOwnershipLedger
+    from hermes.agents_os.domain.input_ownership import InputOwnershipLedger
     from hermes.shell_server.mirror.mutter_mirror import MutterMirrorSession
     from hermes.shell_server.screen_capture.service import MutterGstBackend
 

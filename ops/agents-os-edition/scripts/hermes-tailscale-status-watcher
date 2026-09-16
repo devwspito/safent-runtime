@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+# hermes-tailscale-status-watcher — low-privilege sidecar that mirrors
+# `tailscale status --json` into /run/hermes/tailscale/status.json for the
+# shell-server and egress-proxy lanes.
+#
+# Runs as hermes-tailscale — the SAME uid as tailscaled, the only uid (besides
+# root) that can reach its --socket — so no capability is needed here at all.
+#
+# BindsTo=hermes-tailscaled.service (see the .service unit): starts when
+# tailscaled starts, dies when it dies. Writes are atomic (tmp+rename) and
+# repeat on a heartbeat interval REGARDLESS of whether anything changed, so a
+# crashed/stuck watcher is externally observable via status.json's mtime aging
+# — no separate liveness signal needed.
+#
+# Contract (specs/022-tailnet-connectivity/contracts.md §2, binding — the
+# egress lane's readers are already implemented against this exact shape).
+# Names/online ONLY — never a key, IP, tag or version fingerprint:
+#   {"node_name": str, "magicdns_suffix": str, "tailnet": str, "online": bool,
+#    "peers": [{"name": str, "online": bool}, ...],
+#    "last_attempt": {"at": str, "ok": bool, "error_kind": str|null} | absent}
+#
+# last_attempt (025 hallazgo D) is MIRRORED, not produced here — it's whatever
+# hermes-tailscale-control last wrote to last-attempt.json (no key material),
+# folded in verbatim so `configured`/`online` can genuinely mean "logged in"
+# without losing the "a connect attempt just failed" signal a reader needs.
+#
+# On any read/parse failure this tick is SKIPPED (never overwritten with a
+# guess) — the previous good document's mtime is the staleness signal, not a
+# synthetic "offline" write that could itself be wrong mid-restart.
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import random
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+logging.basicConfig(
+    format="%(levelname)s hermes-tailscale-status-watcher: %(message)s",
+    level=logging.INFO,
+    stream=sys.stderr,
+)
+logger = logging.getLogger("hermes-tailscale-status-watcher")
+
+RUNTIME_DIR = Path(os.environ.get("HERMES_TAILSCALE_RUNTIME_DIR", "/run/hermes/tailscale"))
+TS_SOCKET = Path(os.environ.get("HERMES_TAILSCALE_SOCKET", str(RUNTIME_DIR / "tailscaled.sock")))
+STATUS_FILE = RUNTIME_DIR / "status.json"
+# 025 hallazgo D: hermes-tailscale-control (root, connect/disconnect) writes
+# its own connect verdict here — WITHOUT any key material — instead of
+# touching status.json directly (this watcher is the ONLY status.json
+# writer, spec 022 contracts.md §2). Mirrored into status.json's own
+# last_attempt field below so a rejected key is distinguishable from
+# "never tried" and from "online" by the ONE file every reader polls.
+LAST_ATTEMPT_FILE = RUNTIME_DIR / "last-attempt.json"
+
+_TS_BIN = os.environ.get("HERMES_TAILSCALE_BIN", "tailscale")
+_INTERVAL_SECONDS = float(os.environ.get("HERMES_TAILSCALE_STATUS_INTERVAL", "20"))
+_JITTER_SECONDS = 3.0
+_SUBPROCESS_TIMEOUT = 10.0
+
+
+# --------------------------------------------------------------------------
+# Pure — `tailscale status --json` dict -> the contract's status.json dict.
+# No I/O, no subprocess: trivially unit-testable.
+# --------------------------------------------------------------------------
+
+
+def _short_name(host_name: object, dns_name: object) -> str:
+    if isinstance(host_name, str) and host_name:
+        return host_name
+    if isinstance(dns_name, str) and dns_name:
+        return dns_name.rstrip(".").split(".", 1)[0]
+    return ""
+
+
+def _peers(peer_map: dict) -> list[dict]:
+    peers: list[dict] = []
+    for peer in peer_map.values():
+        if not isinstance(peer, dict):
+            continue
+        name = _short_name(peer.get("HostName"), peer.get("DNSName"))
+        if not name:
+            continue
+        peers.append({"name": name, "online": bool(peer.get("Online"))})
+    peers.sort(key=lambda p: p["name"])
+    return peers
+
+
+def status_document(data: dict) -> dict:
+    """Pure transform: `tailscale status --json` -> contracts.md §2 shape."""
+    self_info = data.get("Self")
+    self_info = self_info if isinstance(self_info, dict) else {}
+    tailnet_info = data.get("CurrentTailnet")
+    tailnet_info = tailnet_info if isinstance(tailnet_info, dict) else {}
+    peer_map = data.get("Peer")
+    peer_map = peer_map if isinstance(peer_map, dict) else {}
+
+    online = data.get("BackendState") == "Running"
+    magicdns_suffix = tailnet_info.get("MagicDNSSuffix")
+    tailnet_name = tailnet_info.get("Name")
+
+    return {
+        "node_name": _short_name(self_info.get("HostName"), self_info.get("DNSName")),
+        "magicdns_suffix": magicdns_suffix if isinstance(magicdns_suffix, str) else "",
+        "tailnet": tailnet_name if isinstance(tailnet_name, str) else "",
+        "online": online,
+        # Peers from a node that is itself not Running are not trustworthy
+        # (stale cached netmap) — report none rather than guess.
+        "peers": _peers(peer_map) if online else [],
+    }
+
+
+# --------------------------------------------------------------------------
+# I/O boundary
+# --------------------------------------------------------------------------
+
+
+def _run_status() -> subprocess.CompletedProcess | None:
+    cmd = [_TS_BIN, "--socket", str(TS_SOCKET), "status", "--json"]
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=_SUBPROCESS_TIMEOUT, check=False, text=True)
+    except FileNotFoundError:
+        logger.error("tailscale binary not found on PATH")
+        return None
+    except subprocess.TimeoutExpired:
+        logger.warning("tailscale status timed out after %ss", _SUBPROCESS_TIMEOUT)
+        return None
+
+
+def _write_status_json(payload: dict) -> None:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATUS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    tmp.rename(STATUS_FILE)
+
+
+def _read_last_attempt() -> dict | None:
+    """Read hermes-tailscale-control's connect verdict (spec 022 contracts.md
+    §2's last_attempt mirror). Fail-soft: missing, corrupt, or wrong-shaped
+    -> None — status.json simply omits last_attempt that tick, same
+    "never overwrite with a guess" policy as the rest of this watcher.
+    """
+    try:
+        data = json.loads(LAST_ATTEMPT_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    at = data.get("at")
+    ok = data.get("ok")
+    if not isinstance(at, str) or not isinstance(ok, bool):
+        return None
+    error_kind = data.get("error_kind")
+    return {"at": at, "ok": ok, "error_kind": error_kind if isinstance(error_kind, str) else None}
+
+
+def refresh_once() -> bool:
+    """One heartbeat tick. Returns True iff status.json was (re)written.
+
+    Deliberately ignores the CLI's own exit code — `tailscale status --json`
+    is known to still emit a complete, valid document (e.g. BackendState:
+    "NeedsLogin") while exiting non-zero for "not logged in"; gating on
+    returncode would silently skip writing exactly the states callers most
+    need to see. Only a genuinely unusable result (no process, no parseable
+    JSON object) is skipped.
+    """
+    result = _run_status()
+    if result is None or not result.stdout:
+        logger.warning("tailscale status unavailable this tick — leaving status.json as-is")
+        return False
+    try:
+        data = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("tailscale status returned invalid JSON this tick — skipping")
+        return False
+    if not isinstance(data, dict):
+        return False
+    doc = status_document(data)
+    last_attempt = _read_last_attempt()
+    if last_attempt is not None:
+        doc["last_attempt"] = last_attempt
+    _write_status_json(doc)
+    return True
+
+
+def main() -> int:
+    logger.info("watching %s every ~%ss", TS_SOCKET, _INTERVAL_SECONDS)
+    while True:
+        try:
+            refresh_once()
+        except Exception as exc:  # noqa: BLE001 — a watcher must never die on a bad tick
+            logger.error("unexpected error refreshing status: %s", type(exc).__name__)
+        time.sleep(_INTERVAL_SECONDS + random.uniform(0, _JITTER_SECONDS))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

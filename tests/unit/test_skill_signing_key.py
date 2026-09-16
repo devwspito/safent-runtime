@@ -21,7 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from hermes.shell_server.skills.composio_skill_service import persist_composio_skill
-from hermes.shell_server.training.persist import build_signing_key, resolve_signing_key
+from hermes.shell_server.skills.skill_signing_key import build_signing_key, resolve_signing_key
 
 pytestmark = pytest.mark.unit
 
@@ -39,7 +39,7 @@ class TestResolveSigningKey:
         derivable and must not be used for signing. Absent master.key is a fatal
         misconfiguration, not a graceful degradation.
         """
-        from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
+        from hermes.capabilities.application.skill_signer import SigningKeyError  # noqa: PLC0415
 
         import hermes.shell_server.skills.native_keystore_adapter as _mod  # noqa: PLC0415
 
@@ -53,7 +53,7 @@ class TestResolveSigningKey:
         The old code returned (build_signing_key(db), 'v1') when SecretsVault
         raised. That is now a security violation — SigningKeyError must be raised.
         """
-        from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
+        from hermes.capabilities.application.skill_signer import SigningKeyError  # noqa: PLC0415
 
         import hermes.shell_server.skills.native_keystore_adapter as _mod  # noqa: PLC0415
 
@@ -108,7 +108,7 @@ class TestNativeKeyStoreAdapterAbsent:
         """NativeKeyStoreAdapter constructor must raise SigningKeyError on RuntimeError."""
         import importlib  # noqa: PLC0415
         import hermes.shell_server.skills.native_keystore_adapter as _mod  # noqa: PLC0415
-        from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
+        from hermes.capabilities.application.skill_signer import SigningKeyError  # noqa: PLC0415
 
         with patch.object(_mod, "SecretsVault", side_effect=RuntimeError("no key")):
             with pytest.raises(SigningKeyError):
@@ -163,7 +163,7 @@ class TestComposioSkillSigningMethod:
         db = tmp_path / "test.db"
 
         import hermes.shell_server.skills.native_keystore_adapter as _mod  # noqa: PLC0415
-        from hermes.training.application.skill_signer import SigningKeyError  # noqa: PLC0415
+        from hermes.capabilities.application.skill_signer import SigningKeyError  # noqa: PLC0415
 
         with patch.object(_mod, "SecretsVault", side_effect=RuntimeError("no key")):
             with pytest.raises(SigningKeyError):

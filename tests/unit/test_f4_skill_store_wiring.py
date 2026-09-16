@@ -174,7 +174,7 @@ class TestSkillStoreAdapterWiring:
         from unittest.mock import MagicMock  # noqa: PLC0415
 
         # Patch NativeKeyStoreAdapter to raise SigningKeyError
-        from hermes.training.application.skill_signer import SigningKeyError
+        from hermes.capabilities.application.skill_signer import SigningKeyError
 
         with patch(
             "hermes.runtime.__main__._build_skill_store_adapter"

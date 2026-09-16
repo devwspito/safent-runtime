@@ -117,6 +117,8 @@ class TriggerGate:
         kind: WorkItemKind = WorkItemKind.AUTONOMOUS,
         conversation_id: str | None = None,
         delegation_correlation_id: str | None = None,
+        authorization_instance_id: UUID | None = None,
+        admission_guard=None,
     ) -> UUID | None:
         """Flujo fail-closed (FR-015). Devuelve task_id o None si rechazado.
 
@@ -146,10 +148,17 @@ class TriggerGate:
             return None
 
         # Paso 1 — consulta la allow-list (NO cacheada, CTRL-P2-15)
-        trigger = await self._repo.is_authorized(
-            trigger_type=trigger_type,
-            scope_value=scope_value,
-        )
+        # A human delegation decision binds its own one-shot authorization;
+        # another concurrent decision for the same peer must not supply identity.
+        if authorization_instance_id is not None:
+            trigger = await self._repo.is_authorized(
+                trigger_type=trigger_type, scope_value=scope_value,
+                trigger_instance_id=authorization_instance_id,
+            )
+        else:
+            trigger = await self._repo.is_authorized(
+                trigger_type=trigger_type, scope_value=scope_value,
+            )
         if trigger is None:
             await self._emit_denied(trigger_type=trigger_type, scope_value=scope_value)
             return None
@@ -194,7 +203,17 @@ class TriggerGate:
         )
 
         # Paso 5 — encola (idempotente por dedup_key)
-        persisted = await self._queue.enqueue(item)
+        if admission_guard is not None:
+            guarded_enqueue = getattr(self._queue, "enqueue_guarded", None)
+            if guarded_enqueue is None:
+                raise PermissionError("Queue cannot serialize delegation admission")
+            persisted = await guarded_enqueue(item, admission_guard)
+        else:
+            persisted = await self._queue.enqueue(item)
+        if authorization_instance_id is not None and persisted.id != item.id:
+            # A legacy execution with this dedup key is not the receipt for this
+            # newly claimed human decision/conversation. Preserve uncertainty.
+            raise RuntimeError("Delegation admission conflicts with a previous execution")
 
         # Paso 6 — audit TRIGGER_ACTIVATED
         await self._emit_activated(

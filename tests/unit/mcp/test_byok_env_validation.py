@@ -101,15 +101,20 @@ class TestValidateMcpEnv:
         result = _validate(env)
         assert result == env
 
-    def test_unknown_key_raises_not_drops(self, _validate) -> None:
+    def test_denied_key_raises_not_drops(self, _validate) -> None:
+        """MCP-05: the fixed allowlist became a validated pattern + deny-
+        list — a GENERIC unrecognised name (e.g. "ARBITRARY_KEY") is now
+        legitimately accepted (that is the whole point of the fix, see
+        test_validate_mcp_env.py); what must still be refused is a name on
+        the deny-list."""
         with pytest.raises(ValueError, match="clave de env no permitida"):
-            _validate({"ARBITRARY_KEY": "value"})
+            _validate({"LD_PRELOAD": "value"})
 
-    def test_unknown_key_with_valid_key_raises(self, _validate) -> None:
+    def test_denied_key_with_valid_key_raises(self, _validate) -> None:
         with pytest.raises(ValueError, match="clave de env no permitida"):
             _validate({
                 "OD_DAEMON_URL": "http://localhost:3000",
-                "MALICIOUS_KEY": "injected",
+                "LD_PRELOAD": "injected",
             })
 
     def test_non_string_key_raises(self, _validate) -> None:
@@ -250,7 +255,10 @@ class TestAddMcpServerEnv:
         assert saved["env"]["OD_DAEMON_URL"] == "http://localhost:3000"
         assert saved["env"]["OD_API_TOKEN"] == "secret"
 
-    def test_unknown_env_key_returns_error(self, tmp_path, monkeypatch) -> None:
+    def test_denied_env_key_returns_error(self, tmp_path, monkeypatch) -> None:
+        """MCP-05: a generically-named key ("ARBITRARY_INJECT") is now
+        legitimately accepted — a DENY-LISTED one is what must still fail
+        add_mcp_server end to end."""
         monkeypatch.setenv("HERMES_MCP_CONFIG", str(tmp_path / "mcp-servers.json"))
 
         wiring = _make_wiring_with_mcp()
@@ -258,7 +266,7 @@ class TestAddMcpServerEnv:
             "server_id": "open-design",
             "label": "Open Design",
             "argv": ["npx", "-y", "open-design-mcp"],
-            "env": {"ARBITRARY_INJECT": "evil"},
+            "env": {"LD_PRELOAD": "evil"},
         }
         # Env validation happens BEFORE the security scan — no patch needed here.
         result = asyncio.run(
@@ -266,7 +274,7 @@ class TestAddMcpServerEnv:
         )
         assert result["ok"] is False
         assert "env inválido" in result["error"]
-        assert "ARBITRARY_INJECT" in result["error"]
+        assert "LD_PRELOAD" in result["error"]
 
     def test_invalid_od_daemon_url_scheme_returns_error(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("HERMES_MCP_CONFIG", str(tmp_path / "mcp-servers.json"))

@@ -44,6 +44,7 @@ _PREFIX_FEATURE_MAP: tuple[tuple[str, str], ...] = (
     ("/api/v1/skills",      "skills"),
     ("/api/v1/composio",    "skills"),
     ("/api/v1/integrations","integraciones"),
+    ("/api/v1/crm",         "integraciones"),
     ("/api/v1/tasks",       "programadas"),
     ("/api/v1/agents",      "agentes"),
     ("/api/v1/runtime/agent","agentes"),
@@ -52,9 +53,6 @@ _PREFIX_FEATURE_MAP: tuple[tuple[str, str], ...] = (
     ("/api/v1/egress",      "seguridad"),
     ("/api/v1/policies",    "seguridad"),
     ("/api/v1/approvals",   "seguridad"),
-    # MFA/2FA management is part of the Seguridad view; without this mapping the
-    # endpoint is default-denied (403) on associates and the 2FA panel can't load.
-    ("/api/v1/mfa",         "seguridad"),
     ("/api/v1/memory",      "memoria"),
     ("/api/v1/workspace",   "archivos"),
     ("/api/v1/archivos",    "archivos"),
@@ -73,6 +71,14 @@ _ALWAYS_ALLOWED_PREFIXES: frozenset[str] = frozenset({
     "/healthz",
     "/metrics",
     "/app/",
+    # 026, FR-001/Assumption 7: Ads is a first-level, always-visible sidebar
+    # entry, not a licensed/toggleable view — the session-bridge mint route
+    # AND the same-origin proxy it gates must stay reachable in every
+    # edition, exactly like chat. Gating either behind a license "view"
+    # would silently brick the iframe for associate editions that don't
+    # carry an "ads" entry in their bundle (a name this spec does not own).
+    "/api/v1/ads",
+    "/ads",
 })
 
 # Exact paths that are always allowed (e.g. the SPA root redirect).

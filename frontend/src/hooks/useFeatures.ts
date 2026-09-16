@@ -38,7 +38,7 @@ function buildSet(views: unknown): Set<string> {
 function isAllowed(views: Set<string>, viewId: string, edition: Edition): boolean {
   // Always-on view: chat (core) — never gated, any edition. Tablero was removed
   // from the product. Keep in sync with shell_server/instance/api.py:_ALL_VIEWS.
-  if (viewId === 'chat') return true
+  if (viewId === 'chat' || viewId === 'tareas') return true
   // En Vivo is a pure-UI live-watch surface, deliberately OUTSIDE the backend view
   // vocabulary (never in _ALL_VIEWS). Keep it on for Community so hiding the agents
   // module does not also remove live-view. Community-only: associate governance is

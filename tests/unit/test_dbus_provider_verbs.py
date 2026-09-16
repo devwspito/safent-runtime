@@ -88,20 +88,20 @@ def test_add_provider_executes_and_persists(tmp_path: Path) -> None:
     assert listed[0]["provider_id"] == saved["provider_id"]
 
 
-def test_managed_by_cloud_persists_and_roundtrips(tmp_path: Path) -> None:
-    """The applier stamps managed_by='cloud'; it must persist + surface in list."""
+def test_caller_cannot_self_declare_cloud_authority(tmp_path: Path) -> None:
+    """Only the signed bundle verb may create Enterprise provider bindings."""
     wiring = _make_wiring(tmp_path)
-    cloud = wiring.add_provider(
-        draft_json=_draft(alias="cloud-vllm", managed_by="cloud"),
-        sender_uid=_OPERATOR_UID,
-    )
+    with pytest.raises(PermissionError, match='signed Enterprise policy'):
+        wiring.add_provider(
+            draft_json=_draft(alias="cloud-vllm", managed_by="cloud"),
+            sender_uid=_OPERATOR_UID,
+        )
     local = wiring.add_provider(
         draft_json=_draft(alias="my-ollama"), sender_uid=_OPERATOR_UID
     )
-    assert cloud["managed_by"] == "cloud"
     assert local["managed_by"] is None
     by_alias = {p["alias"]: p for p in wiring.list_providers()}
-    assert by_alias["cloud-vllm"]["managed_by"] == "cloud"
+    assert "cloud-vllm" not in by_alias
     assert by_alias["my-ollama"]["managed_by"] is None
 
 

@@ -38,6 +38,8 @@ Covers:
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import sqlite3
 from pathlib import Path
@@ -54,6 +56,22 @@ _LAUNCHER_SCRIPT = (
 _LAUNCHER_UNIT = (
     _REPO_ROOT / "ops" / "agents-os-edition" / "systemd" / "hermes-mcp-launcher.service"
 )
+
+
+def _load_launcher_module():
+    """Load hermes-mcp-launcher (no `.py` extension — needs an explicit
+    SourceFileLoader) as an importable module, so tests exercise the REAL
+    validation function/constants instead of parsing source text."""
+    loader = importlib.machinery.SourceFileLoader(
+        "hermes_mcp_launcher_r16_test", str(_LAUNCHER_SCRIPT)
+    )
+    spec = importlib.util.spec_from_file_location(
+        "hermes_mcp_launcher_r16_test", _LAUNCHER_SCRIPT, loader=loader
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 # ---------------------------------------------------------------------------
@@ -201,43 +219,50 @@ class TestAddMcpServerAcceptsOAuthBridgeEnv:
 
 
 class TestLauncherHomeOwnership:
-    def _launcher_src(self) -> str:
-        return _LAUNCHER_SCRIPT.read_text(encoding="utf-8")
+    """MCP-05 replaced the launcher's fixed `_ALLOWED_ENV_KEYS` frozenset
+    with a validated-pattern + deny-list gate (`_is_allowed_env_key`) — these
+    now exercise the REAL function/constants (loaded from the script) instead
+    of slicing frozenset literals out of the source text, but pin the exact
+    same R16 invariants."""
+
+    def _launcher_module(self):
+        return _load_launcher_module()
 
     def test_home_not_in_allowed_env_keys(self) -> None:
         """HOME must NOT be caller-overridable — mirrors the PATH precedent.
         A regression here reopens R16's root cause #2 (the daemon's own HOME,
         an InaccessiblePath for the MCP-jailed child, silently clobbering the
         launcher's correct default)."""
-        namespace: dict = {}
-        # Import-free static check: locate the frozenset literal boundaries.
-        src = self._launcher_src()
-        start = src.index("_ALLOWED_ENV_KEYS: frozenset[str] = frozenset({")
-        end = src.index("})", start)
-        block = src[start:end]
-        assert '"HOME"' not in block, (
+        mod = self._launcher_module()
+        assert mod._is_allowed_env_key("HOME") is False, (
             "HOME must not be a caller-overridable launcher env key (R16)"
         )
 
     def test_home_in_forwarded_env_keys(self) -> None:
         """HOME must still be forwarded to the netns-jailed transient unit —
         just always from the launcher's OWN env, never the caller's."""
-        src = self._launcher_src()
-        start = src.index("_FORWARDED_ENV_KEYS: frozenset[str] = _ALLOWED_ENV_KEYS |")
-        end = src.index("})", start)
-        block = src[start:end]
-        assert '"HOME"' in block
+        mod = self._launcher_module()
+        assert "HOME" in mod._ALWAYS_FORWARDED_ENV_KEYS
 
     def test_mcp_remote_config_dir_not_forwarded(self) -> None:
         """Deliberately asymmetric (R16): validated at the D-Bus gate but NOT
         forwarded by the launcher — it falls back to $HOME/.mcp-auth, which
         is writable once HOME is launcher-pinned. Forwarding the CLOUD's
         literal (currently unwritable) value would just move the EACCES."""
-        src = self._launcher_src()
-        start = src.index("_ALLOWED_ENV_KEYS: frozenset[str] = frozenset({")
-        end = src.index("})", start)
-        block = src[start:end]
-        assert "MCP_REMOTE_CONFIG_DIR" not in block
+        mod = self._launcher_module()
+        assert mod._is_allowed_env_key("MCP_REMOTE_CONFIG_DIR") is False
+
+    def test_xdg_config_home_not_forwarded(self) -> None:
+        """Same asymmetry as MCP_REMOTE_CONFIG_DIR — see that test."""
+        mod = self._launcher_module()
+        assert mod._is_allowed_env_key("XDG_CONFIG_HOME") is False
+
+    def test_brave_api_key_shaped_secret_is_now_allowed(self) -> None:
+        """MCP-05's own fix: the form's placeholder example (BRAVE_API_KEY)
+        must be accepted at BOTH gates now, not just the daemon's — this is
+        the launcher half of that fix."""
+        mod = self._launcher_module()
+        assert mod._is_allowed_env_key("BRAVE_API_KEY") is True
 
 
 class TestLauncherUnitUsesEnvProxy:

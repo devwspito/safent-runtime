@@ -167,7 +167,7 @@ class SkillGovernanceService:
             SkillStateTransitionForbidden: si el estado actual no permite la transición.
             SkillSignatureVerificationFailed: si la firma no verifica (fail-closed).
         """
-        from hermes.training.domain.skill_state import (  # noqa: PLC0415
+        from hermes.capabilities.domain.skill_state import (  # noqa: PLC0415
             SkillState,
             SkillStateTransitionError,
             assert_transition,

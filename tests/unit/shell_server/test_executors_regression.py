@@ -55,7 +55,7 @@ def _inject_fake_recorder(recorder_stub: MagicMock) -> dict:
 def _inject_fake_png_writer() -> dict:
     fake_mod = MagicMock()
     fake_mod.encode_rgba_png = MagicMock(return_value=b"PNG")
-    return {"hermes.shell_server.training.png_writer": fake_mod}
+    return {"hermes.shell_server.screen_capture.png_writer": fake_mod}
 
 
 # ---------------------------------------------------------------------------

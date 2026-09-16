@@ -79,6 +79,7 @@ def mark_failed(
     *,
     claim_token: UUID,
     reason: str,
+    retryable: bool = True,
 ) -> WorkItem:
     """IN_PROGRESS -> FAILED (terminal) o PENDING (reintento con backoff).
 
@@ -89,8 +90,10 @@ def mark_failed(
         IllegalTransition: si estado no es IN_PROGRESS o claim_token no coincide.
     """
     _assert_in_progress_with_token(item, claim_token, "mark_failed")
+    if type(retryable) is not bool:
+        raise ValueError("retryable must be a boolean")
 
-    if item.attempts < item.max_attempts:
+    if retryable and item.attempts < item.max_attempts:
         return _reschedule_with_backoff(item, reason)
 
     # Terminal: agota reintentos. I2: limpia claim/lease.

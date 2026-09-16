@@ -13,6 +13,17 @@
 #   entirely (FR-6) — Safent starts with no --network/binds for it. Use this
 #   to keep the pre-024 self-hosted-URL path (Herramientas -> Safent Ads).
 #
+# Graceful stop: the container is started with --stop-signal=SIGRTMIN+3 (PID1
+#   is systemd; SIGTERM alone never triggers an orderly shutdown of its units)
+#   and --stop-timeout (default 30s, override with SAFENT_STOP_TIMEOUT_S) —
+#   both apply automatically to a bare `podman stop`/`restart` on this
+#   container, no extra flags needed at stop time.
+#
+# Backup/restore: not this script's job — use the `safent` CLI's own
+#   `safent backup [dir]` / `safent restore <archive> [--force]`, which stop
+#   this container cleanly, archive/restore the data volume + companion state
+#   + seccomp cache, and restart it.
+#
 # --codex-auth <path>: OPTIONAL. Bind-mounts an EXISTING, host-side OpenAI
 #   Codex CLI auth.json (from a `codex login` the owner already did on the
 #   HOST) read-only into the container at $HOME/.codex/auth.json (HOME is
@@ -38,11 +49,16 @@
 #        en su lugar" on the same card — plan.md D-A4).
 #
 # Safent Ads (MCP campaign tools, Google/Meta) is PREINSTALLED as a companion
-# (024): this script provisions it (network + CA + bearer + compose up, see
-# ops/container/companions/ads/provision.sh) BEFORE starting Safent, then
-# joins Safent to the fixed `safent-companions` network and binds the three
-# read-only files under /etc/hermes/companions.json — no URL to paste. If
-# provisioning fails (subnet/port already taken — never re-chosen, see
+# (024): this script always scaffolds it (network + CA + bearer +
+# companions.json — see ops/container/companions/ads/provision.sh
+# --scaffold, 028 T015) BEFORE starting Safent, then joins Safent to the
+# fixed `safent-companions` network and binds the four read-only files
+# under /etc/hermes/companions.json — no URL to paste. Scaffolding is local
+# and image-independent (no pull, no compose up): the companion's actual
+# SERVICE only comes up on an explicit `safent companion install|repair`
+# (T016) — Safent's own container is never recreated for that, because the
+# bind-mount sources already exist from this scaffold step. If scaffolding
+# itself fails (subnet/port already taken — never re-chosen, see
 # provision.sh), Safent still starts, just without the companion (FR-3); the
 # owner can fall back to a self-hosted MCP URL via Herramientas -> "Safent
 # Ads" -> Conectar (hermes.shell_server.managed_remote_endpoints), or skip
@@ -56,7 +72,12 @@ NO_COMPANION=0
 _positional_index=0
 
 usage() {
-  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+  # Print the leading comment block (everything up to the first non-#
+  # line after the shebang) instead of a hardcoded line range — a fixed
+  # range silently truncates usage() mid-sentence every time a note is
+  # added to the header (as happened here: item #2's stop-signal/timeout
+  # note pushed the block past the old '2,45p').
+  awk 'NR==1{next} /^#/{print; next} {exit}' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -94,7 +115,9 @@ NAME="${SAFENT_NAME:-safent}"
 # Volume follows the container name so a test container (SAFENT_NAME=next-smoke)
 # can never mount production's safent-data by accident. Override with SAFENT_VOLUME.
 VOLUME="${SAFENT_VOLUME:-${NAME}-data}"
-RUNTIME="$(command -v podman || command -v docker)"
+# SAFENT_PODMAN wins over PATH resolution — same rule as the `safent` CLI
+# (contracts/app-engine.md §1): the desktop app ships its own pinned podman.
+RUNTIME="${SAFENT_PODMAN:-$(command -v podman || command -v docker)}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SECCOMP="${SAFENT_SECCOMP:-$HERE/seccomp/safent.json}"
 
@@ -130,12 +153,10 @@ if [ "$NO_COMPANION" -eq 0 ]; then
   if [ -z "${SAFENT_ADS_IMAGE:-}" ] && "$RUNTIME" image inspect safent-ads:local >/dev/null 2>&1; then
     export SAFENT_ADS_IMAGE=safent-ads:local
   fi
-  if "$HERE/companions/ads/provision.sh"; then
+  if "$HERE/companions/ads/provision.sh" --scaffold; then
     COMPANION_RUN_ARGS=(
       --network safent-companions
-      -v "${COMPANION_STATE}/companions.json:/etc/hermes/companions.json:ro"
-      -v "${COMPANION_STATE}/tls/ca.crt:/etc/hermes/companions/ads-ca.crt:ro"
-      -v "${COMPANION_STATE}/bearer:/etc/hermes/companions/ads.bearer:ro"
+      -v "safent-companion-runtime:/etc/hermes/companions:ro"
     )
   else
     echo "run-safent.sh: companion provisioning failed — starting Safent WITHOUT it (FR-3)" >&2
@@ -208,10 +229,25 @@ SAFENT_TZ_VALUE="$(host_tz)"
 #   --shm-size=1g       Chromium needs a real /dev/shm.
 #   -v ${NAME}-data      persist /var/lib/hermes (keystore, audit, config) across
 #                       image updates (so master.key / provider keys survive pull).
+#   --stop-signal/--stop-timeout  PID1 is systemd, which needs SIGRTMIN+3 (not
+#                       SIGTERM) to begin an orderly shutdown of every unit.
+#                       STOPSIGNAL SIGRTMIN+3 is baked into the image (Containerfile),
+#                       but pinning it here too keeps `podman stop`/`restart` correct
+#                       even against an older/custom image that predates it. 30s is
+#                       generous margin over a verified clean shutdown (~6s); a
+#                       bare `podman stop $NAME` (no explicit -t) falls back to this
+#                       container-level default. Same value as the `safent` CLI's
+#                       own STOP_TIMEOUT_S — keep the two in sync.
 # NOTE: NoNewPrivileges is set PER-UNIT (the hardened units), NOT container-wide —
 # a container-level no-new-privileges breaks dbus/login setuid and the boot fails.
+STOP_TIMEOUT_S="${SAFENT_STOP_TIMEOUT_S:-30}"
+# Set ONLY the created core netns before the runtime mounts /proc/sys read-only.
+# Host/VM forwarding is untouched; the existing nft forward default-DROP cage
+# still restricts the MCP-to-companion path to its exact destination and port.
 exec "$RUNTIME" run -d --name "$NAME" --systemd=always \
+  --sysctl net.ipv4.ip_forward=1 \
   -p "127.0.0.1:${HOST_PORT}:7517" \
+  --stop-signal=SIGRTMIN+3 --stop-timeout="${STOP_TIMEOUT_S}" \
   -e "TZ=${SAFENT_TZ_VALUE}" -e "HERMES_TZ=${SAFENT_TZ_VALUE}" \
   --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add AUDIT_READ \
   --security-opt "seccomp=${SECCOMP}" \

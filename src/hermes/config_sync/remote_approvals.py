@@ -523,7 +523,6 @@ def _build_enterprise_mint_gate(db_path: Path) -> Any:
         minter=HitlApprovalMinter(signing_key=signing_key),
         signer=AuditHashChainSigner(signing_key=signing_key),
         audit_repo=None,
-        mfa_verifier=None,
     )
 
 

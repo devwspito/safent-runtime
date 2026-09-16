@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from hermes.providers.domain.canonical import CanonicalProvider, HermesCliRoute
 from hermes.providers.domain.ports import HermesCliRequest, ResolvedModel
+from hermes.shell_server.providers.native_sync import native_provider_for_endpoint
 
 
 def nous_request_from_resolved(
@@ -48,6 +49,14 @@ def nous_request_from_resolved(
     """
     canonical = resolved.canonical
     route = canonical.route
+    if (
+        resolved.base_url and canonical.litellm_prefix == "openai"
+        and native_provider_for_endpoint("openai-api", resolved.base_url) == "custom"
+    ):
+        return HermesCliRequest(
+            requested="custom", explicit_api_key=resolved.api_key,
+            explicit_base_url=resolved.base_url, target_model=target_model,
+        )
 
     if route is HermesCliRoute.REGISTERED_SLUG:
         return HermesCliRequest(
@@ -100,6 +109,15 @@ def nous_request_from_model_config(
         prefix, bare = raw.split("/", 1)
     else:
         prefix, bare = "", raw
+
+    if (
+        prefix.lower() in {"openai", "openai-api"}
+        and native_provider_for_endpoint(prefix.lower(), model_config.base_url) == "custom"
+    ):
+        return HermesCliRequest(
+            requested="custom", explicit_api_key=model_config.api_key or None,
+            explicit_base_url=model_config.base_url, target_model=bare or None,
+        ), bare
 
     canonical = _canonical_from_litellm_prefix(prefix.strip().lower())
 

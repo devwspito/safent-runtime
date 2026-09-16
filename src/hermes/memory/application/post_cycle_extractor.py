@@ -35,6 +35,8 @@ logger = logging.getLogger("hermes.memory.post_cycle_extractor")
 _MIN_CONTENT_LEN = 60   # skip turns too short to yield meaningful facts
 _MAX_PROMPT_CHARS = 2000  # cap content sent to the model (safety + cost)
 _EXTRACTION_TIMEOUT = 15.0  # seconds — short call, not a reasoning cycle
+_MIN_FACT_LEN = 5
+_MAX_FACT_LEN = 160
 
 _EXTRACTION_SYSTEM_PROMPT = (
     "You are a memory distillation assistant. "
@@ -68,7 +70,7 @@ async def maybe_extract_and_store(
     Writes to the "memory" target of TenantMemoryStore.  Silently skips when:
       - Turn is too short to be interesting.
       - No model is configured.
-      - litellm is unavailable.
+      - The selected native provider is unavailable.
       - The LLM returns NONE or an empty/malformed response.
       - TenantMemoryStore rejects the content (PII gate).
     """
@@ -88,10 +90,8 @@ async def maybe_extract_and_store(
         if not facts:
             return
         _write_facts(facts, tenant_id=tenant_id)
-    except Exception as exc:  # noqa: BLE001 — never interrupt the caller
-        logger.warning(
-            "hermes.memory.post_cycle_extractor.failed: %s", exc
-        )
+    except Exception:  # noqa: BLE001 — never interrupt the caller or expose payloads
+        logger.warning("hermes.memory.post_cycle_extractor.failed")
 
 
 # ---------------------------------------------------------------------------
@@ -118,14 +118,13 @@ async def _call_extractor(
 ) -> list[str]:
     """Make the short LLM extraction call. Returns a list of fact strings.
 
-    Uses the OpenAI SDK directly against the configured endpoint (base_url +
-    api_key + bare model name) — the same reliable path the provider connection
-    test uses. NOTE: ModelConfig exposes `.model` (NOT `.model_string`); the old
-    code read a non-existent attribute → silent AttributeError → memory was never
-    extracted (the "2 chats → 0 recuerdos" bug).
+    Uses the same explicit native transport as skill synthesis. Responses stays
+    Responses; Qwen-only extensions never leak to another selected provider.
     """
     try:
-        from openai import AsyncOpenAI  # noqa: PLC0415
+        from hermes.providers.infrastructure.native_text_completion import (  # noqa: PLC0415
+            complete_native_text,
+        )
     except ImportError:
         return []
 
@@ -133,38 +132,20 @@ async def _call_extractor(
     assistant_content = _cap(assistant_reply, _MAX_PROMPT_CHARS // 2)
     user_prompt = f"User: {user_content}\n\nAssistant: {assistant_content}"
 
-    # Bare model name: strip any Hermes/litellm provider prefix (e.g.
-    # "openai_compatible/qwen…" → "qwen…"); the OpenAI SDK routes by base_url.
-    model = str(getattr(model_cfg, "model", "") or "")
-    if "/" in model:
-        model = model.split("/", 1)[1]
-    if not model:
-        return []
-
     try:
-        client = AsyncOpenAI(
-            api_key=(getattr(model_cfg, "api_key", None) or "x"),
-            base_url=(getattr(model_cfg, "base_url", None) or None),
-            timeout=_EXTRACTION_TIMEOUT,
-            max_retries=0,
-        )
-        response = await client.chat.completions.create(
-            model=model,
+        raw = await complete_native_text(
+            model_cfg,
             messages=[
                 {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=256,
             temperature=0.0,
-            # Suppress Qwen/vLLM chain-of-thought so the response is clean facts,
-            # not the model's reasoning trace (same knob the main chat path uses).
-            # Ignored by servers that don't support it; fail-soft covers any reject.
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            timeout=_EXTRACTION_TIMEOUT,
         )
-        raw = (response.choices[0].message.content or "") if response.choices else ""
         return _parse_facts(raw)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("hermes.memory.extractor.llm_failed: %s", exc)
+    except Exception:  # noqa: BLE001 — optional enrichment, safe diagnostic only
+        logger.warning("hermes.memory.extractor.llm_failed")
         return []
 
 
@@ -176,7 +157,7 @@ def _parse_facts(raw: str) -> list[str]:
     # Drop any line that looks like "NONE" or is suspiciously short / long
     facts = [
         ln for ln in lines
-        if ln.upper() != "NONE" and 5 < len(ln) <= 160
+        if ln.upper() != "NONE" and _MIN_FACT_LEN < len(ln) <= _MAX_FACT_LEN
     ]
     return facts[:3]  # cap at 3 regardless of model output
 

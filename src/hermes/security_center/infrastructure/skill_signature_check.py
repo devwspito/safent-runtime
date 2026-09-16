@@ -17,7 +17,7 @@ Two fatal flaws:
 
 This module now verifies the **same v2 signature the minter produces**
 (see shell_server.skills.skill_synthesis.register_skill_row /
- shell_server.training.persist.compile_and_persist):
+ capabilities.infrastructure.skill_store_adapter.SkillStoreAdapter):
 
     key       = SecretsVault.derive_subkey(label="skill-signing-v2")   # SECRET,
                 HKDF-SHA256 from master.key (0600 hermes:hermes, per-install,

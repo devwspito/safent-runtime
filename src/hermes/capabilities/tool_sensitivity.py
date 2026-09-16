@@ -29,6 +29,7 @@ from hermes.capabilities.domain.provenance_taint import (
     is_sensitive_path_read_under_taint,
 )
 from hermes.runtime.nous_tool_risk_map import NousRisk, classify_nous_tool
+from hermes.tailnet_ssh.tool_names import TAILNET_SSH_TOOL_NAMES
 
 
 class SensitivityCategory(StrEnum):
@@ -45,6 +46,7 @@ class SensitivityCategory(StrEnum):
     PII_READ = "pii_read"      # reads personally-identifiable data
     NEW_EGRESS = "new_egress"  # would reach a domain outside the owner's grant
     SPEND = "spend"            # moves/authorizes money on the owner's behalf
+    REMOTE_EXEC = "remote_exec"  # runs a command on / transfers a file to another host
 
 
 # Domain-bearing arg keys, checked in priority order — the first present,
@@ -81,8 +83,16 @@ _SAFENT_ADS_SLUG = "safent-ads"
 _SAFENT_ADS_WRITE_TOOLS: frozenset[str] = frozenset({
     "propose_budget_change",
     "propose_pause",
+    "propose_ad_child",
+    "propose_meta_image_upload",
     "propose_targeting_change",
     "propose_creative_publication",
+    "propose_resume",
+    "propose_bid_target",
+    "propose_negative_keywords",
+    "propose_creative_rotation",
+    "propose_delete",
+    "propose_native_write",
     "withdraw_proposal",
     "apply_defensive_action",
     # ToolClass.PROPOSAL fuera de `_WRITE_CATALOG` del companion: crean una
@@ -91,6 +101,8 @@ _SAFENT_ADS_WRITE_TOOLS: frozenset[str] = frozenset({
     # propose_*. La paridad la vigila el propio ads
     # (tests/unit/bundle/test_mcp_registry_matches_overlay_and_contract.py).
     "propose_campaign",
+    "propose_campaign_draft",
+    "propose_campaign_from_draft",
     "propose_experiment",
     "propose_reallocation_plan",
     "generate_creative_assets",
@@ -103,6 +115,10 @@ _SPEND_TOOLS: frozenset[str] = frozenset({
     "PAYPAL_CREATE_ORDER",
     "PAYPAL_CREATE_PAYOUT",
 }) | frozenset(f"mcp__{_SAFENT_ADS_SLUG}__{tool}" for tool in _SAFENT_ADS_WRITE_TOOLS)
+
+# spec 022 v2 — governed tailnet SSH. Single source: hermes.tailnet_ssh.tool_names
+# (never re-listed here — see that module's docstring on why it has zero deps).
+_REMOTE_EXEC_TOOLS: frozenset[str] = TAILNET_SSH_TOOL_NAMES
 
 
 def sensitivity(
@@ -125,6 +141,8 @@ def sensitivity(
             categories.add(SensitivityCategory.NEW_EGRESS)
         if tool_name in _SPEND_TOOLS:
             categories.add(SensitivityCategory.SPEND)
+        if tool_name in _REMOTE_EXEC_TOOLS:
+            categories.add(SensitivityCategory.REMOTE_EXEC)
         return frozenset(categories)
     except Exception:  # noqa: BLE001 — fail-soft: classification error => empty set
         return frozenset()

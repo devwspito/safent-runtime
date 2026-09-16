@@ -67,32 +67,6 @@ export interface UpdateTaskPayload {
   enabled?: boolean
 }
 
-// ── Roster ────────────────────────────────────────────────────────────────────
-
-export interface RosterAgent {
-  id: string
-  name: string
-  description: string
-  // The backend (roster_api) emits "factory" (team-provided), "custom" (user-made),
-  // or "directory" (a colleague's agent, surfaced read-only — Fase 3 department-
-  // scoped visibility; it belongs to another instance, never editable here).
-  source: 'factory' | 'custom' | 'directory'
-  department: string
-  is_default: boolean
-  color: string | null
-}
-
-export interface RosterDepartment {
-  id: string
-  name: string
-  kind: 'cerebro' | 'factory' | 'custom'
-  agents: RosterAgent[]
-}
-
-export interface AgentRoster {
-  departments: RosterDepartment[]
-}
-
 // ── Workspace files ───────────────────────────────────────────────────────────
 
 export interface WorkspaceFile {
@@ -128,7 +102,7 @@ export interface ConversationMessage {
   tool_call?: ToolCallDescriptor
   /** task_id of the backend task that produced this assistant turn; null for user messages */
   task_id?: string | null
-  /** 'streaming' = partial (turn in-flight, persisted incrementally) | 'complete' | null */
+  /** 'streaming' = partial; 'complete', 'failed', 'cancelled' = terminal mirror rows. */
   status?: string | null
 }
 
@@ -143,6 +117,8 @@ export interface ConversationSummary {
   title?: string
   created_at?: string
   updated_at?: string
+  /** Hidden from the default (non-archived) list; absent/false means active. */
+  archived?: boolean
 }
 
 export interface ToolCallDescriptor {
@@ -180,8 +156,6 @@ export interface Skill {
   state?: string
   version?: string
   surface_kinds?: string | string[]
-  /** "teaching_live" for skills minted via the live teaching flow. */
-  teaching_origin?: string
 }
 
 export interface HubSkillResult {
@@ -229,9 +203,24 @@ export interface ComposioApp {
   logo?: string
 }
 
+/** An account authorized with Composio, distinct from an available toolkit. */
+export interface ComposioConnectedAccount {
+  id: string
+  toolkit_slug: string
+  entity_id: string
+  status: string
+  auth_config_id: string
+}
+
 export interface WebSearchStatus {
   brave?: boolean
   ddgs_fallback?: boolean
+}
+
+export interface ImageGenerationStatus {
+  provider: string
+  has_key: boolean
+  model: string | null
 }
 
 // ── MCP ───────────────────────────────────────────────────────────────────────
@@ -284,6 +273,28 @@ export interface ManagedRemoteEndpointsResponse {
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────────────────
+
+/** Read-model contract; until the daemon supports it the UI reports unavailable. */
+export interface TaskDashboardItem {
+  admission_state?: 'unconfirmed'
+  task_id: string
+  label: string
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'pending_approval' | 'rejected' | 'cancelled'
+  source: 'local' | 'enterprise'
+  requested_by?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  conversation_id?: string | null
+  result?: string | null
+  approval_ids?: string[]
+  enterprise_sync?: { state: 'pending' } | { state: 'blocked'; reason: string }
+}
+
+export interface TaskDashboardResponse {
+  available: boolean
+  tasks: TaskDashboardItem[]
+  has_more: boolean
+}
 
 export interface ConfiguredTask {
   trigger_id?: string
@@ -373,6 +384,51 @@ export interface EgressModeResponse {
   blocklist_count?: number
 }
 
+// ── Governed tailnet (spec 022) ─────────────────────────────────────────────
+
+export interface TailnetPeer {
+  name: string
+  online: boolean
+}
+
+export interface TailnetLastAttempt {
+  at: string
+  ok: boolean
+  error_kind: string | null
+}
+
+export interface TailnetStatus {
+  // 025 hallazgo D: `configured` means LOGGED IN (== online) — see
+  // tailnet/api.py's _read_status. Use last_attempt to distinguish
+  // "never tried" from "pending" from "the key was rejected".
+  configured: boolean
+  online: boolean
+  node_name: string | null
+  magicdns_suffix: string | null
+  tailnet: string | null
+  peers: TailnetPeer[]
+  last_attempt: TailnetLastAttempt | null
+}
+
+// ── Governed SSH allow-list (spec 022 v2) ───────────────────────────────────
+
+export interface SshHostEntry {
+  host: string
+  approved_at: string | null
+}
+
+export interface SshHostsResponse {
+  hosts: SshHostEntry[]
+}
+
+/** Emergency brake — engaging is immediate; releasing requires owner confirmation. */
+export interface KillSwitchStatus {
+  engaged: boolean
+  reason: string | null
+  changed_by: string | null
+  changed_at: string | null
+}
+
 export interface PendingApproval {
   proposal_id: string
   kind?: string
@@ -383,10 +439,10 @@ export interface PendingApproval {
   technical_detail?: string
   /** task_id from the pre_tool_call hook; null for rows written before migration */
   conversation_id?: string | null
-  /** Always 'mfa' in the TOTP-only model */
+  /** Server-classified verification level; never inferred from a UI setting. */
   required_level?: string
-  /** Whether the owner has enrolled a TOTP secret */
-  mfa_enrolled?: boolean
+  /** Enterprise-routed requests cannot be approved locally. Denial is allowed. */
+  route?: 'local' | 'enterprise'
   /** ISO-8601 creation timestamp. Used client-side to discard stale ghost cards. */
   created_at?: string | null
 }
@@ -400,15 +456,12 @@ export interface PendingApproval {
  * secrets/signature reach the web surface).
  */
 export interface InboundDelegation {
+  admission_state?: 'unconfirmed' | 'unverified'
   message_id: string
   from_employee_id: string
   body: string
   issued_at: string
   created_at: string
-}
-
-export interface MfaStatus {
-  enrolled: boolean
 }
 
 export interface PolicyCatalogEntry {
@@ -424,7 +477,7 @@ export interface PolicyCatalogEntry {
 export interface PoliciesResponse {
   preset?: string
   tools?: Record<string, boolean>
-  mfa_on_dangers?: boolean
+  approval_on_dangers?: boolean
   catalog?: PolicyCatalogEntry[]
 }
 
@@ -436,7 +489,6 @@ export interface InstallDecisionPayload {
   score: number
   verdict: string
   risks_json: string
-  totp: string
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────
@@ -488,7 +540,17 @@ export interface SecurityDecisionPayload {
   score: number
   verdict: string
   risks_json: string
-  totp: string
+  mcp_approval?:
+    | { operation: 'add'; server_id: string; label?: string; argv: string[]; env: Record<string, string> }
+    | { operation: 'managed_remote'; slug: string; url: string }
+}
+
+export interface SecurityDecisionResponse {
+  ok?: boolean
+  error?: string
+  // One-use owner confirmation (≤120s), bound to this session/identifier/action.
+  // Issued only after a recorded decision. Community does not use MFA.
+  approval_grant?: string
 }
 
 // ── Skill details ──────────────────────────────────────────────────────────────
@@ -575,30 +637,6 @@ export interface ConversationUsage {
   cycles: ConversationUsageCycle[]
 }
 
-// ── Agent stats ───────────────────────────────────────────────────────────────
-
-export interface AgentStatToday {
-  tokens: number
-  cost_usd: number
-  tasks: number
-}
-
-export interface AgentStat {
-  agent_id: string
-  name: string
-  department: string
-  color: string | null
-  state: 'idle' | 'working'
-  active_task_count: number
-  today: AgentStatToday
-  health: string | null
-}
-
-export interface AgentStatsResponse {
-  available: boolean
-  agents: AgentStat[]
-}
-
 // ── Memory ────────────────────────────────────────────────────────────────────
 
 export interface MemoryItem {
@@ -620,6 +658,21 @@ export interface MemoryEntryDetail {
   entry_index: number
 }
 
+// ── Ads bridge (026, contracts/sso.md) ──────────────────────────────────────
+
+// Mirrors the coarse states `CompanionHealthChecker` (T004) derives from the
+// companion's real /mcp/health payload — never a fabricated "ready" (FR-009).
+export type AdsAvailabilityReason =
+  | 'not_installed'
+  | 'unreachable'
+  | 'unauthorized'
+  | 'no_accounts'
+
+export interface AdsBridgeSessionResponse {
+  status: 'ready' | 'unavailable'
+  reason: AdsAvailabilityReason | null
+}
+
 // Frames emitted by the WebSocket stream — discriminated by `kind`.
 // `seq` is a monotonically increasing integer per task_id, added to every frame
 // so the client can deduplicate replay on reconnect (discard seq <= lastSeq).
@@ -628,5 +681,78 @@ export type StreamFrame =
   | { kind: 'thinking_delta'; thinking?: string; delta?: string; text?: string; seq?: number }
   | { kind: 'tool_call';      tool_call?: ToolCallDescriptor; tool?: string; label?: string; target?: string; seq?: number }
   | { kind: 'status';         message?: string; status?: string; seq?: number }
-  | { kind: 'done';           seq?: number }
+  | { kind: 'done';           outcome?: string; seq?: number }
   | { kind: 'error';          message?: string; seq?: number }
+
+// ── Install requests (028/029, contracts/install-request.md) ───────────────────
+//
+// The sandbox never creates sibling containers: the UI leaves a request marker
+// under /var/lib/hermes/instance/ and the HOST agent (safent agent, or the app
+// itself when open) claims and fulfils it. Closed vocabulary by design — no
+// field carries a command, path, URL or argument (contract §1 invariant 1).
+
+export type HostVerb =
+  | 'install_companion'
+  | 'repair_companion'
+  | 'remove_companion'
+  | 'update_system'
+  | 'uninstall_system'
+
+export type InstallRequestState = 'pending' | 'claimed' | 'applied' | 'expired' | 'failed'
+
+export interface InstallRequestProgress {
+  done: number
+  total?: number
+  unit: 'bytes' | 'layers' | 'steps'
+}
+
+export interface InstallRequestFailure {
+  code: string
+  /** Owner-facing sentence, already in Spanish — the frontend renders it as-is. */
+  label: string
+  retryable: boolean
+}
+
+export interface InstallRequestStatus {
+  verb: HostVerb
+  state: InstallRequestState
+  /** Echoes the live engine stage (contracts/app-engine.md §3 StageId). */
+  stage?: string
+  progress?: InstallRequestProgress
+  expires_at: string
+  last_failure?: InstallRequestFailure
+}
+
+export interface InstallRequestResponse {
+  accepted: boolean
+  request?: InstallRequestStatus
+  code?: 'unknown_verb' | 'unknown_slug'
+}
+
+export interface InstallRequestsListResponse {
+  requests: InstallRequestStatus[]
+}
+
+// ── System update (028, contracts/update.md) ───────────────────────────────────
+
+export interface VersionSet {
+  app: string
+  engine: string
+  companion: string | null
+}
+
+export type UpdatePieceKind = 'app' | 'engine' | 'companion'
+
+export interface UpdatePiece {
+  kind: UpdatePieceKind
+  size_bytes?: number
+}
+
+/** The rich shape the Tauri host shell injects once it has checked for real (contract §3). */
+export interface SafentUpdateGlobal {
+  available: boolean
+  current: VersionSet
+  to?: VersionSet
+  pieces?: UpdatePiece[]
+  checked_at: string
+}

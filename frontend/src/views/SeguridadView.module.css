@@ -50,7 +50,7 @@
   line-height: var(--leading-normal);
 }
 
-/* ── Settings row (MFA on dangers, egress mode, etc.) ────────────────────── */
+/* ── Settings row (sensitive-action approval, egress mode, etc.) ────────── */
 
 .settingsRow {
   display: flex;
@@ -469,7 +469,6 @@
 
 .scanRow:hover {
   border-color: var(--color-border);
-  transform: translateY(-1px);
 }
 
 .scanRowLeft {

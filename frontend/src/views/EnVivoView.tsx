@@ -1,6 +1,6 @@
 /**
  * EnVivoView — "En vivo": watch the agents' browser work in real time (sharp, via
- * noVNC) and stop a task if something goes wrong. Teaching now lives in Habilidades.
+ * noVNC) and stop a task if something goes wrong. Read-only.
  * The live browser frame only shows when the jailed browser actually has a REAL
  * (non-blank) page open (runtime_status.browser_live), not merely because a tool
  * whose name starts with "browser" was called (which lies on a failed launch).

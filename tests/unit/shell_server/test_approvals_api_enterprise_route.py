@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from hermes.capabilities.infrastructure.sqlite_approval_gate import ApprovalGateError
 from hermes.shell_server.cowork.approvals_api import create_approvals_router
-from hermes.shell_server.security.mfa import MfaStore
+
 
 pytestmark = pytest.mark.unit
 
@@ -24,12 +24,13 @@ pytestmark = pytest.mark.unit
 def _make_client(control_plane) -> TestClient:
     app = FastAPI()
     app.state.control_plane = control_plane
-    app.include_router(create_approvals_router(mfa=MfaStore()))
+    app.include_router(create_approvals_router())
     return TestClient(app, raise_server_exceptions=True)
 
 
 class _FakeControlPlaneApproveRaises:
-    async def approve(self, *, channel, proposal_id, mfa_factors=None):
+    async def approve(self, *, channel, proposal_id):
+        del channel  # Interface inputs intentionally unused by this denial stub.
         raise ApprovalGateError(
             f"proposal_id={proposal_id} está enrutada a Enterprise.",
             reason="enterprise_route_requires_cloud_decision",
@@ -38,7 +39,7 @@ class _FakeControlPlaneApproveRaises:
 
 class _FakeControlPlaneRejectOk:
     async def reject(self, *, channel, proposal_id, reason):
-        return None
+        del channel, proposal_id, reason  # Interface-only inputs for the successful denial stub.
 
 
 class TestEnterpriseRouteApproveRejectedWith403:
@@ -47,7 +48,7 @@ class TestEnterpriseRouteApproveRejectedWith403:
         pid = str(uuid4())
 
         resp = client.post(
-            f"/api/v1/approvals/{pid}", json={"decision": "once", "totp": None}
+            f"/api/v1/approvals/{pid}", json={"decision": "once"}
         )
 
         assert resp.status_code == 403
@@ -64,7 +65,7 @@ class TestEnterpriseRouteDenyStillWorks:
         pid = str(uuid4())
 
         resp = client.post(
-            f"/api/v1/approvals/{pid}", json={"decision": "deny", "totp": None}
+            f"/api/v1/approvals/{pid}", json={"decision": "deny"}
         )
 
         assert resp.status_code == 200
@@ -72,6 +73,23 @@ class TestEnterpriseRouteDenyStillWorks:
 
 
 class TestPendingListSurfacesRoute:
+    def test_gate_does_not_advertise_unsupported_permanent_approval(self) -> None:
+        client = _make_client(_FakeControlPlaneApproveRaises())
+        response = client.post(
+            f"/api/v1/approvals/{uuid4()}", json={"decision": "always"}
+        )
+        assert response.status_code == 422
+
+    def test_unavailable_gate_is_not_reported_as_an_empty_queue(self) -> None:
+        class Unavailable:
+            async def list_hitl_pending(self):
+                raise RuntimeError("internal details must not reach the response")
+
+        response = _make_client(Unavailable()).get("/api/v1/approvals/pending")
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == "approvals_unavailable"
+        assert "internal details" not in response.text
+
     def test_to_frontend_surfaces_enterprise_route(self) -> None:
         from hermes.shell_server.cowork.approvals_api import _to_frontend
 
@@ -83,7 +101,7 @@ class TestPendingListSurfacesRoute:
             "parameters_redacted": {},
             "route": "enterprise",
         }
-        result = _to_frontend(row, MfaStore())
+        result = _to_frontend(row)
         assert result["route"] == "enterprise"
 
     def test_to_frontend_defaults_route_to_local(self) -> None:
@@ -96,5 +114,5 @@ class TestPendingListSurfacesRoute:
             "justification": "j",
             "parameters_redacted": {},
         }
-        result = _to_frontend(row, MfaStore())
+        result = _to_frontend(row)
         assert result["route"] == "local"

@@ -91,7 +91,7 @@ function writeLocalClipboard(text: string): Promise<void> {
 }
 
 /** Framed container around a VncView — used by Actividad and the chat inline live panel
- *  (16:9), and the full-screen teaching modal (fill = grow to fill the flex parent). */
+ *  (16:9). `fill` grows the frame to fill its flex parent instead of a fixed aspect ratio. */
 export function VncFrame({ viewOnly, fill }: { viewOnly?: boolean; fill?: boolean }) {
   return (
     <div

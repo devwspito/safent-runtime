@@ -1,5 +1,4 @@
-import { useEffect, useReducer, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useReducer, useCallback, useRef, useState } from 'react'
 import {
   AreaChart,
   Area,
@@ -24,7 +23,6 @@ import type {
 import { PageHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
 import { EmptyState } from '../components/ui/EmptyState'
-import { Stagger, StaggerItem, FadeIn } from '../components/ui/motion'
 import { useT, useLocale, type Locale } from '../lib/i18n'
 import styles from './UsageView.module.css'
 
@@ -55,8 +53,23 @@ function formatDay(day: string, locale: Locale): string {
 
 interface UsageData {
   summary: UsageSummary
-  byAgent: UsageByAgent
-  timeseries: UsageTimeseries
+  byAgent: UsageByAgent | null
+  timeseries: UsageTimeseries | null
+}
+
+const amount = (value:unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0
+function validSummary(value:UsageSummary):boolean {
+  return value?.available === true && value.currency === 'USD'
+    && [value.total_cost_usd,value.projected_cost_usd,value.total_tokens,value.cycles,value.failures,value.self_hosted_cycles].every(amount)
+    && Array.isArray(value.top_models) && value.top_models.every(m=>typeof m?.model === 'string' && amount(m.cost_usd) && amount(m.share))
+}
+function validAgents(value:UsageByAgent):boolean {
+  return value?.available === true && Array.isArray(value.agents)
+    && value.agents.every(a=>typeof a?.agent_id === 'string' && typeof a.name === 'string' && [a.cost_usd,a.cycles,a.share].every(amount))
+}
+function validSeries(value:UsageTimeseries):boolean {
+  return value?.available === true && Array.isArray(value.points)
+    && value.points.every(p=>typeof p?.day === 'string' && [p.cost_usd,p.tokens,p.cycles].every(amount))
 }
 
 type State =
@@ -81,9 +94,9 @@ function reducer(_state: State, action: Action): State {
 
 function LoadingSkeleton() {
   return (
-    <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
       {/* Hero stat row */}
-      <StaggerItem>
+      <div>
         <div className={styles.skeletonHeroGrid}>
           {[...Array(4)].map((_, i) => (
             <div
@@ -93,18 +106,18 @@ function LoadingSkeleton() {
             />
           ))}
         </div>
-      </StaggerItem>
+      </div>
 
       {/* Chart block */}
-      <StaggerItem>
+      <div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
           <div className={`skeleton skeleton--line-sm ${styles.skeletonLabel}`} />
           <div className={`skeleton ${styles.skeletonChartBlock}`} style={{ animationDelay: '80ms' }} />
         </div>
-      </StaggerItem>
+      </div>
 
       {/* Breakdown + governance */}
-      <StaggerItem>
+      <div>
         <div className={styles.skeletonBreakdownGrid}>
           {[0, 1].map(col => (
             <div key={col} className={styles.skeletonSection}>
@@ -119,9 +132,9 @@ function LoadingSkeleton() {
             </div>
           ))}
         </div>
-      </StaggerItem>
+      </div>
 
-      <StaggerItem>
+      <div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
           <div className={`skeleton skeleton--line-sm ${styles.skeletonLabel}`} />
           <div className={styles.govGrid}>
@@ -130,8 +143,8 @@ function LoadingSkeleton() {
             ))}
           </div>
         </div>
-      </StaggerItem>
-    </Stagger>
+      </div>
+    </div>
   )
 }
 
@@ -221,7 +234,6 @@ interface ChartTooltipProps {
 }
 
 function ChartTooltip({ active, payload, label, dimension }: ChartTooltipProps) {
-  const t = useT()
   const { locale } = useLocale()
   if (!active || !payload?.length) return null
   const value = payload[0]?.value ?? 0
@@ -229,7 +241,7 @@ function ChartTooltip({ active, payload, label, dimension }: ChartTooltipProps) 
     <div className={styles.tooltip}>
       <div className={styles.tooltipDate}>{label ? formatDay(label, locale) : ''}</div>
       <div className={styles.tooltipValue}>
-        {dimension === 'cost' ? formatUSD(value) : `${formatNumber(value)} ${t('cost.unit.actions')}`}
+        {dimension === 'cost' ? formatUSD(value) : `${formatNumber(value)} tokens`}
       </div>
     </div>
   )
@@ -239,10 +251,9 @@ function ChartTooltip({ active, payload, label, dimension }: ChartTooltipProps) 
 
 interface AgentRankingProps {
   byAgent: UsageByAgent
-  onRowClick: (agentId: string) => void
 }
 
-function AgentRanking({ byAgent, onRowClick }: AgentRankingProps) {
+function AgentRanking({ byAgent }: AgentRankingProps) {
   const t = useT()
   const agents = (byAgent.agents ?? []).slice().sort((a, b) => b.cost_usd - a.cost_usd)
 
@@ -262,15 +273,10 @@ function AgentRanking({ byAgent, onRowClick }: AgentRankingProps) {
   }
 
   return (
-    <ul className={`${styles.rankingList} stagger-list`} role="list">
+    <ul className={styles.rankingList} role="list">
       {agents.map(agent => (
         <li key={agent.agent_id}>
-          <button
-            type="button"
-            className={`${styles.rankRow} ${styles['rankRow--clickable']} usage-agent-row`}
-            onClick={() => onRowClick(agent.agent_id)}
-            aria-label={t('cost.agent.row.aria').replace('{name}', agent.name)}
-          >
+          <div className={styles.rankRow}>
             <div className={styles.rankRowInfo}>
               <div className={styles.rankRowName}>{agent.name}</div>
               <div className={styles.rankRowMeta}>
@@ -283,7 +289,7 @@ function AgentRanking({ byAgent, onRowClick }: AgentRankingProps) {
             <span className={`${styles.rankRowCost} num`}>
               {formatUSD(agent.cost_usd)}
             </span>
-          </button>
+          </div>
         </li>
       ))}
     </ul>
@@ -316,9 +322,8 @@ function ModelBreakdown({ summary }: ModelBreakdownProps) {
   }
 
   return (
-    <ul className={`${styles.rankingList} stagger-list`} role="list">
+    <ul className={styles.rankingList} role="list">
       {models.map(m => {
-        const isSelfHosted = m.cost_usd === 0
         return (
           <li key={m.model}>
             <div className={styles.rankRow}>
@@ -329,9 +334,9 @@ function ModelBreakdown({ summary }: ModelBreakdownProps) {
                   {t('cost.model.share_suffix')}
                 </div>
               </div>
-              <ShareBar share={m.share} success={isSelfHosted} />
-              <span className={`${styles.rankRowCost}${isSelfHosted ? ` ${styles['rankRowCost--selfhosted']}` : ''} num`}>
-                {isSelfHosted ? t('cost.model.selfhosted') : formatUSD(m.cost_usd)}
+              <ShareBar share={m.share} />
+              <span className={`${styles.rankRowCost} num`}>
+                {formatUSD(m.cost_usd)}
               </span>
             </div>
           </li>
@@ -391,39 +396,62 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   return <h2 className={styles.sectionLabel}>{children}</h2>
 }
 
+function Unavailable({ onRetry }: { onRetry: () => void }) {
+  const t = useT()
+  return <div className={styles.unavailable} role="alert">
+    <span>{t('cost.section.unavailable')}</span>
+    <Button size="sm" variant="secondary" onClick={onRetry}>{t('cost.retry')}</Button>
+  </div>
+}
+
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 export default function UsageView() {
-  const navigate = useNavigate()
   const t = useT()
   const { locale } = useLocale()
   const [state, dispatch] = useReducer(reducer, { status: 'loading' })
 
-  const currentPeriod: UsagePeriod = state.status === 'success' ? state.period : '30d'
-  const currentDimension: UsageDimension = state.status === 'success' ? state.dimension : 'cost'
+  const [currentPeriod, setPeriod] = useState<UsagePeriod>('30d')
+  const [currentDimension, setDimension] = useState<UsageDimension>('cost')
+  const generation = useRef(0)
 
   const load = useCallback((period: UsagePeriod, dimension: UsageDimension) => {
+    const request = ++generation.current
+    setPeriod(period)
+    setDimension(dimension)
     dispatch({ type: 'RELOAD' })
-    Promise.all([
+    Promise.allSettled([
       getUsageSummary(period),
       getUsageByAgent(period),
       getUsageTimeseries(period, dimension),
-    ]).then(([summary, byAgent, timeseries]) => {
+    ]).then(([summaryResult, agentResult, seriesResult]) => {
+      if (request !== generation.current) return
+      if (summaryResult.status !== 'fulfilled' || !validSummary(summaryResult.value)) {
+        dispatch({ type:'FAILED', message:t('cost.err.default') })
+        return
+      }
+      const summary = summaryResult.value
+      const byAgent = agentResult.status === 'fulfilled' && validAgents(agentResult.value) ? agentResult.value : null
+      const timeseries = seriesResult.status === 'fulfilled' && validSeries(seriesResult.value) ? seriesResult.value : null
       dispatch({
         type: 'LOADED',
         data: { summary, byAgent, timeseries },
         period,
         dimension,
       })
-    }).catch((err: unknown) => {
+    }).catch(() => {
+      if (request !== generation.current) return
       dispatch({
         type: 'FAILED',
-        message: err instanceof Error ? err.message : t('cost.err.default'),
+        message: t('cost.err.default'),
       })
     })
   }, [t])
 
-  useEffect(() => { load(currentPeriod, currentDimension) }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    load('30d', 'cost')
+    return () => { generation.current++ }
+  }, [load])
 
   function handlePeriodChange(period: UsagePeriod) {
     load(period, currentDimension)
@@ -436,15 +464,11 @@ export default function UsageView() {
     }
   }
 
-  function handleAgentRowClick(_agentId: string) {
-    navigate('/agentes')
-  }
-
   const isLoading = state.status === 'loading'
 
   return (
     <>
-      <PageHeader
+      <div className={styles.header}><PageHeader
         title={t('cost.title')}
         subtitle={t('cost.subtitle')}
         actions={
@@ -458,14 +482,14 @@ export default function UsageView() {
         }
       />
 
-      <div className="view-body cv-view-body page-enter">
+      </div><div className={`view-body ${styles.body}`} aria-busy={isLoading}>
 
         {/* ── Loading ── */}
         {state.status === 'loading' && <LoadingSkeleton />}
 
         {/* ── Error ── */}
         {state.status === 'error' && (
-          <FadeIn>
+          <div>
             <div className={styles.errorState} role="alert">
               <svg width="40" height="40" viewBox="0 0 40 40" fill="none" aria-hidden="true" style={{ color: 'var(--color-danger)', opacity: 0.7 }}>
                 <circle cx="20" cy="20" r="17" stroke="currentColor" strokeWidth="1.5" />
@@ -476,17 +500,17 @@ export default function UsageView() {
                 {t('cost.retry')}
               </Button>
             </div>
-          </FadeIn>
+          </div>
         )}
 
         {/* ── Success ── */}
         {state.status === 'success' && (() => {
           const { summary, byAgent, timeseries } = state.data
-          const noData = !summary.available || (summary.cycles === 0 && summary.total_cost_usd === 0)
-          const chartPoints = (timeseries.points ?? []).map(p => ({
+          const noData = byAgent && timeseries && summary.cycles === 0 && summary.total_cost_usd === 0 && summary.total_tokens === 0
+          const chartPoints = (timeseries?.points ?? []).map(p => ({
             ...p,
             day: p.day,
-            value: state.dimension === 'cost' ? p.cost_usd : p.cycles,
+            value: state.dimension === 'cost' ? p.cost_usd : p.tokens,
           }))
 
           if (noData) {
@@ -505,10 +529,10 @@ export default function UsageView() {
           }
 
           return (
-            <Stagger style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
 
               {/* ── 1. Hero row ── */}
-              <StaggerItem>
+              <div>
                 <div
                   className={styles.heroGrid}
                   role="list"
@@ -534,10 +558,10 @@ export default function UsageView() {
                     value={formatNumber(summary.failures)}
                   />
                 </div>
-              </StaggerItem>
+              </div>
 
               {/* ── 2. Time series chart ── */}
-              <StaggerItem>
+              <div>
                 <section aria-label={t('cost.chart.spend_over_time')}>
                   <div className={styles.sectionHeader}>
                     <SectionTitle>
@@ -557,7 +581,7 @@ export default function UsageView() {
                   </div>
 
                   <div className={styles.chartCard}>
-                    {chartPoints.length === 0 ? (
+                    {!timeseries ? <Unavailable onRetry={() => load(currentPeriod, currentDimension)} /> : chartPoints.length === 0 ? (
                       <div className={styles.chartEmpty}>
                         {t('cost.chart.empty')}
                       </div>
@@ -597,6 +621,7 @@ export default function UsageView() {
                             cursor={{ stroke: 'var(--color-border)', strokeWidth: 1 }}
                           />
                           <Area
+                            isAnimationActive={false}
                             type="monotone"
                             dataKey="value"
                             stroke="var(--color-accent)"
@@ -610,16 +635,16 @@ export default function UsageView() {
                     )}
                   </div>
                 </section>
-              </StaggerItem>
+              </div>
 
               {/* ── 3. Two-column: by agent + by model ── */}
-              <StaggerItem>
+              <div>
                 <div className={styles.breakdownGrid}>
                   <section aria-label={t('cost.section.by_employee.aria')}>
                     <div className={styles.sectionHeader}>
                       <SectionTitle>{t('cost.section.by_employee.title')}</SectionTitle>
                     </div>
-                    <AgentRanking byAgent={byAgent} onRowClick={handleAgentRowClick} />
+                    {byAgent ? <AgentRanking byAgent={byAgent} /> : <Unavailable onRetry={() => load(currentPeriod, currentDimension)} />}
                   </section>
 
                   <section aria-label={t('cost.section.by_model.aria')}>
@@ -629,19 +654,19 @@ export default function UsageView() {
                     <ModelBreakdown summary={summary} />
                   </section>
                 </div>
-              </StaggerItem>
+              </div>
 
               {/* ── 4. Governance row ── */}
-              <StaggerItem>
+              <div>
                 <section aria-label={t('cost.section.governance.aria')}>
                   <div className={styles.sectionHeader}>
                     <SectionTitle>{t('cost.section.governance.title')}</SectionTitle>
                   </div>
                   <GovernanceRow summary={summary} />
                 </section>
-              </StaggerItem>
+              </div>
 
-            </Stagger>
+            </div>
           )
         })()}
 

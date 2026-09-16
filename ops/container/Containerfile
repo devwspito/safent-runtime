@@ -32,13 +32,16 @@ ENV DEBIAN_FRONTEND=noninteractive PIP_BREAK_SYSTEM_PACKAGES=1
 # Base already provides: Node 20 + npm/npx, Chromium + all its shared libs +
 # fonts under /ms-playwright. We add: systemd (PID1 + the org.hermes.Runtime1
 # bus the daemon owns), python 3.12, the netns/nftables moat, uv, build deps for
-# the C-ext python wheels (dbus-fast, cryptography, pydantic-core).
+# the C-ext python wheels (dbus-fast, cryptography, pydantic-core), openssh-client
+# (022 v2 — tailnet_ssh's `ssh` ProxyCommand over the tailscaled SOCKS5 proxy;
+# no netcat needed, the ProxyCommand itself is pure Python).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       systemd systemd-sysv dbus dbus-user-session \
       python3 python3-dev python3-pip python3-venv python3-systemd \
       build-essential pkg-config libdbus-1-dev libssl-dev libseccomp-dev libseccomp2 \
       nftables iproute2 iptables cgroup-tools \
       git curl ca-certificates tini tzdata \
+      openssh-client socat x11vnc xclip \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
     # systemd-in-container hygiene: drop units that hang or are pointless headless
     && rm -f /lib/systemd/system/systemd-firstboot.service \
@@ -64,10 +67,14 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 # /opt tree died with EACCES on `import hermes_cli` (spec 023 boot smoke). /usr is
 # read-only under ProtectSystem=strict, so bytecode is precompiled here (no
 # __pycache__ writes at runtime). Pruned dirs are dev/research only.
-ARG HERMES_AGENT_COMMIT=2237be355906fbe6065ce1815711eee52b2d646e
+# SINGLE SOURCE OF TRUTH for the pinned commit: repo-root `ops/hermes-agent.lock`
+# (one line, the commit SHA). CI (.github/workflows/agents-os-edition.yml) reads
+# the same file — never hand-copy the SHA into a second place.
 ENV HERMES_AGENT_SRC=/usr/lib/hermes-agent
-RUN mkdir -p "${HERMES_AGENT_SRC}" \
-    && curl -fsSL "https://github.com/NousResearch/hermes-agent/archive/${HERMES_AGENT_COMMIT}.tar.gz" \
+COPY ops/hermes-agent.lock /tmp/hermes-agent.lock
+RUN HERMES_AGENT_COMMIT="$(tr -d ' \t\n\r' < /tmp/hermes-agent.lock)" \
+    && mkdir -p "${HERMES_AGENT_SRC}" \
+    && curl -fsSL --retry 5 --retry-delay 20 --retry-all-errors "https://github.com/NousResearch/hermes-agent/archive/${HERMES_AGENT_COMMIT}.tar.gz" \
        | tar -xz --strip-components=1 -C "${HERMES_AGENT_SRC}" \
     && rm -rf "${HERMES_AGENT_SRC}/tests" "${HERMES_AGENT_SRC}/website" "${HERMES_AGENT_SRC}/contributors" \
               "${HERMES_AGENT_SRC}/mcp-research-data" "${HERMES_AGENT_SRC}/evals" \
@@ -80,12 +87,10 @@ RUN mkdir -p "${HERMES_AGENT_SRC}" \
 # SELF-CONTAINED — the host's python is never used (an old macOS system python 3.9/pip
 # can't mis-name it as UNKNOWN-0.0.0). Then install --no-deps + ALL real deps EXPLICITLY
 # (core + the browser/shell/tui/mcp extras). No extras-syntax, one package per need.
-# APP_CACHEBUST: pass a unique value (build.sh sends $(date +%s)) to force the wheel
-# (COPY src) AND everything after — including the ops/ launcher COPY — to rebuild.
-# Without this, podman has served STALE `COPY src` / `COPY ops` layers even when the
-# content changed, baking old backend code / launcher into a "fresh" image.
-ARG APP_CACHEBUST=0
-RUN echo "app-cachebust ${APP_CACHEBUST}" > /tmp/.app_cachebust
+# COPY inputs are content-addressed by BuildKit/Podman. Do not inject timestamps
+# here: that invalidates the wheel and every later security/tooling layer even
+# when their inputs are identical. Operators can use the engine's explicit
+# `--no-cache` switch for a diagnostic clean rebuild.
 COPY pyproject.toml README.md VERSION /tmp/whlbuild/
 COPY src /tmp/whlbuild/src
 # Sync the wheel + runtime version from the repo-root VERSION file (single source of
@@ -104,6 +109,19 @@ RUN cd /tmp/whlbuild \
       mcp==2.0.0 fastapi 'uvicorn[standard]' python-multipart PyJWT websockets httpx croniter \
       # ^ MCP SDK pinned to the exact version hermes-agent 0.21.1 declares in its
       #   `mcp` extra (2.x stateless protocol). Unpinned it drifts to 2.2+.
+      anthropic==0.87.0 boto3==1.42.89 azure-identity==1.25.3 google-auth==2.55.1 \
+      # ^ Provider SDKs hermes-agent 0.21.1 declares as OPTIONAL extras
+      #   ([anthropic]/[bedrock]/[azure-identity]/[vertex] in its pyproject.toml,
+      #   lazy-installed at first use via tools/lazy_deps.py) but that first use
+      #   can never succeed HERE: /usr/lib/hermes-agent is read-only under
+      #   ProtectSystem=strict and the daemon has no route to pip at runtime.
+      #   Safent's UI offers ALL of anthropic/bedrock/azure-foundry/vertex as
+      #   native providers (hermes_cli.auth.PROVIDER_REGISTRY, mirrored verbatim
+      #   — see list_native_providers), so picking one and chatting hit
+      #   `ImportError: The 'anthropic' package is required` (spec 025 hallazgo
+      #   #2) instead of a working chat. Pins MUST equal hermes-agent's own
+      #   extras exactly (test_provider_sdk_imports.py enforces this + fails CI
+      #   if a future provider gains the same lazy-SDK gate without a pin here).
       rich textual \
       fastembed \
       ddgs \
@@ -125,10 +143,6 @@ RUN cd /tmp/whlbuild \
 COPY frontend/package.json frontend/package-lock.json /tmp/frontbuild/
 RUN cd /tmp/frontbuild && npm ci --ignore-scripts
 
-# FE_CACHEBUST: pass --build-arg FE_CACHEBUST=<unique> to force a clean rebuild of the
-# vite layer (the COPY-frontend layer can stale-cache across iterative rebuilds).
-ARG FE_CACHEBUST=0
-RUN echo "fe-cachebust ${FE_CACHEBUST}" > /tmp/.fe_cachebust
 COPY frontend/ /tmp/frontbuild/
 RUN cd /tmp/frontbuild && rm -rf dist && npm run build \
     && rm -rf /opt/safent-webapp && mkdir -p /opt/safent-webapp \
@@ -141,26 +155,34 @@ RUN cd /tmp/frontbuild && rm -rf dist && npm run build \
 # both at the base's bundled Chromium and symlink it to the unit-expected path
 # (Ubuntu apt chromium is a snap stub that won't run in a container).
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-ARG PLAYWRIGHT_MCP_VERSION=0.0.29
+ARG NPM_VERSION=11.19.1
+ARG PLAYWRIGHT_MCP_VERSION=0.0.80
 # PIN agent-browser (2026-07-05 audit): its `snapshot --json` schema is unpinned and
 # the adapter's _parse_snapshot_json is schema-sensitive — an unpinned install lets a
 # silent upstream bump change the accessibility-tree payload the LLM/driver consumes.
 # 0.31.1 is the version red-teamed + evaluated (see project_safent_agent_browser_go_nogo_fase4).
 # Bump this ARG deliberately (and re-verify the snapshot fixture) when moving versions.
 ARG AGENT_BROWSER_VERSION=0.31.1
-RUN npm install -g --ignore-scripts "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" "agent-browser@${AGENT_BROWSER_VERSION}" \
+RUN npm install -g --ignore-scripts "npm@${NPM_VERSION}" \
+    && npm install -g --ignore-scripts "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" "agent-browser@${AGENT_BROWSER_VERSION}" \
+    && [ "$(npm --version)" = "${NPM_VERSION}" ] \
+    && [ "$(node -p "require('/usr/lib/node_modules/@playwright/mcp/package.json').version")" = "${PLAYWRIGHT_MCP_VERSION}" ] \
     && chmod +x /usr/lib/node_modules/agent-browser/bin/agent-browser-* \
-    && npx --yes playwright install chromium \
-    && CHROME="$(find /ms-playwright -type f -name chrome -path '*chrome-linux*' | head -1)" \
+    && PLAYWRIGHT_CLI=/usr/lib/node_modules/@playwright/mcp/node_modules/playwright/cli.js \
+    && [ -f "${PLAYWRIGHT_CLI}" ] \
+    && node "${PLAYWRIGHT_CLI}" install chromium \
+    && CHROME="$(node -e "const {chromium}=require(require.resolve('playwright',{paths:['/usr/lib/node_modules/@playwright/mcp']}));process.stdout.write(chromium.executablePath())")" \
     && [ -n "$CHROME" ] && ln -sf "$CHROME" /usr/bin/chromium-browser \
-    && echo "chromium -> $CHROME"
+    && echo "chromium -> $CHROME" \
+    && npm cache clean --force \
+    && rm -rf /root/.npm
 
 # Builder-stage import smoke — fail the BUILD (not runtime) on a missing dep.
 RUN python3 -c "import hermes, fastapi, uvicorn, playwright, dbus_fast, composio, mcp, fastembed; \
       import hermes.runtime.__main__, hermes.shell_server.main, hermes.egress_proxy.__main__, \
              hermes.audit_tail_service.__main__, hermes.runtime.semantic_tool_index; \
       from run_agent import AIAgent; from hermes_cli.runtime_provider import resolve_runtime_provider; \
-      from tools.mcp_tool_config import _load_mcp_config; from tools.mcp_tool import get_mcp_status; \
+      from tools.mcp_tool_config import _load_mcp_config; from tools.mcp_tool_discovery import get_mcp_status; \
       print('IMPORT SMOKE OK')"
 
 # ── Service accounts — IDENTICAL uids to the OS build ─────────────────────────
@@ -173,6 +195,7 @@ RUN useradd --system --no-create-home --shell /usr/sbin/nologin --uid 880 hermes
     useradd --system --no-create-home --shell /usr/sbin/nologin --uid 882 hermes-whisper && \
     useradd --system --no-create-home --shell /usr/sbin/nologin --uid 883 hermes-cp && \
     useradd --system --no-create-home --shell /usr/sbin/nologin --uid 885 hermes-egress && \
+    useradd --system --no-create-home --shell /usr/sbin/nologin --uid 887 hermes-tailscale && \
     useradd --create-home --uid 1000 --groups hermes,systemd-journal hermes-user
 
 # hermes-sandbox (uid 886): the user the AGENT's sandboxed exec runs as — the
@@ -208,6 +231,7 @@ COPY ops/agents-os-edition/dbus/org.hermes.Runtime1.conf /usr/share/dbus-1/syste
 COPY ops/agents-os-edition/netns/          /etc/nftables/hermes/
 COPY ops/agents-os-edition/modules-load.d/ /etc/modules-load.d/
 COPY ops/agents-os-edition/seed/mcp-servers.json /usr/share/hermes/seed/
+COPY ops/agents-os-edition/seed/excel-mcp-overrides.txt /usr/share/hermes/seed/
 # Managed-scope overlay (administrator-pinned hermes_cli config keys). Holds the
 # runtime posture on every boot regardless of the persisted config.yaml — see the
 # file header (plugins.hook_callback_timeout: 0 keeps the HITL gate unbounded).
@@ -227,6 +251,12 @@ COPY ops/container/seccomp/safent.json /usr/share/hermes/seccomp/safent.json
 # raw.githubusercontent.com.
 COPY ops/container/companions/ads/ /usr/share/hermes/companions/ads/
 
+# runtime-manifest.json's trusted minisign public key (contracts/update.md
+# §2, T005/T006) — baked so the daemon verifies without a network fetch.
+# ops/keys/runtime-manifest.pub is a PLACEHOLDER until the agents-autonomy
+# publish pipeline (T023) commits the real one; see that file's own comment.
+COPY ops/keys/runtime-manifest.pub /usr/share/hermes/keys/runtime-manifest.pub
+
 # ── Egress blocklist (hagezi "light" — bundled at build time) ─────────────────
 # Proxy reads /usr/share/hermes/egress-blocklist.txt at boot and applies it as an
 # immutable system-level blocklist in OPEN_LOGGED (ALLOW) mode. The file is plain
@@ -235,7 +265,7 @@ COPY ops/container/companions/ads/ /usr/share/hermes/companions/ads/
 # TODO: add hermes-egress-blocklist-refresh.timer to re-download daily at runtime.
 RUN mkdir -p /usr/share/hermes && \
     ( curl -LsSf --max-time 60 \
-        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt" \
+        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light.txt" \
         -o /usr/share/hermes/egress-blocklist.txt \
       && wc -l /usr/share/hermes/egress-blocklist.txt \
       && echo "INFO: hagezi light blocklist bundled" ) \
@@ -267,6 +297,12 @@ COPY ops/agents-os-edition/scripts/hermes-mcp-proxy-accept /usr/libexec/hermes/h
 # Landlock ruleset (denies the daemon's keystore to the controller) before execing the
 # real node CLI. See project_safent_agent_browser_go_nogo_fase4.
 COPY ops/agents-os-edition/scripts/hermes-agent-browser-shim /usr/libexec/hermes/hermes-agent-browser-shim
+# Governed tailnet control (spec 022) — root oneshot triggered by hermes-tailscale-
+# control.path, connects/disconnects the owner's tailnet.
+COPY ops/agents-os-edition/scripts/hermes-tailscale-control /usr/libexec/hermes/hermes-tailscale-control
+# Governed tailnet status mirror (spec 022, contracts.md §2) — low-privilege sidecar
+# (User=hermes-tailscale) that writes status.json for the shell-server/egress-proxy lanes.
+COPY ops/agents-os-edition/scripts/hermes-tailscale-status-watcher /usr/libexec/hermes/hermes-tailscale-status-watcher
 # container-specific drop-ins (override ONLY the OS-coupling: bind host)
 COPY ops/container/dropins/ /usr/lib/systemd/system/
 RUN chmod 0755 /usr/libexec/hermes/* /usr/bin/hermes-landlock-assert && \
@@ -288,17 +324,9 @@ COPY ops/agent-cage/systemd/hermes-runtime.service.d/openshell.conf \
 RUN chmod 0755 /usr/libexec/hermes/openshell && \
     chown root:root /usr/libexec/hermes/openshell /usr/lib/hermes/openshell/libz3.so.4
 
-# socat: the browser-jail CDP relay (daemon ⇄ jailed Chromium) needs it. Without it
-# the daemon can't reach the browser's CDP port. (Late layer = cheap rebuild.)
-# x11vnc: the jailed browser runs HEADFUL on an Xvfb display (industry-standard
-# Kasm/neko live-view — sharp + fluid, unlike the CDP screencast). x11vnc streams
-# that real display; the shell-server proxies it to the web UI. (Xvfb ships with
-# the Playwright base image.)
-# xclip: the clipboard bridge (hermes-clipboard-server) uses it as a PROPER X selection
-# owner — it answers the TARGETS request Chromium sends before pasting (which x11vnc's own
-# owner does not → paste hangs) and serves UTF8_STRING, so accents/€/emoji/CJK paste right.
-RUN apt-get update && apt-get install -y --no-install-recommends socat x11vnc xclip \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# socat (CDP relay), x11vnc (live jailed browser) and xclip (clipboard bridge)
+# are installed with the stable base packages above. Keeping a second apt layer
+# after application/ops COPY made every source edit redownload apt metadata.
 
 # Trivy CVE scanner (Security Center CVE slot probes /usr/bin/trivy exactly).
 # Strategy:
@@ -314,7 +342,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends socat x11vnc xc
 # INVARIANT: this entire block is best-effort (`|| echo WARN`).  A failed trivy
 # install must never break the image bake — the Security Center's heuristic fallback
 # (HeuristicFallbackScanner) is the correct degraded path and is already tested.
-ARG TRIVY_VERSION=v0.71.2
+ARG TRIVY_VERSION=v0.74.0
 # CACHE DIR FUERA DEL VOLUMEN: run-safent.sh monta `-v safent-data:/var/lib/hermes`,
 # así que una DB horneada bajo /var/lib/hermes/* queda SOMBREADA por el volumen en
 # runtime → trivy no la encuentra → degrada a [] = teatro (este era el bug). En
@@ -339,6 +367,32 @@ RUN ARCH="$(uname -m)"; \
       && /usr/bin/trivy --version \
       && echo "INFO: trivy installed — Security Center will use engine=trivy" ) \
     || echo "WARN: trivy install failed — Security Center will use engine=heuristic (honest fallback)"
+
+# ── Tailscale (governed tailnet egress for the agent) — pinned static tarball ──
+# Baked but INERT: tailscaled runs ONLY in userspace-networking mode (no /dev/net/tun,
+# no NET_ADMIN, no seccomp change) as user hermes-tailscale, off by default. It exposes a
+# loopback HTTP-CONNECT proxy that ONLY the host-netns egress-proxy can reach (agent netns
+# drop 127.0.0.0/8 + Tailscale CGNAT 100.64.0.0/10), so agent tailnet access is forced
+# through the audited egress allowlist. See specs/022-tailnet-connectivity/plan.md.
+# Static binary = no deps = works offline under the cage. Pinned + no `latest`.
+ARG TAILSCALE_VERSION=1.102.4
+RUN ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+      x86_64)  TS_ARCH="amd64" ;; \
+      aarch64) TS_ARCH="arm64" ;; \
+      armv7l)  TS_ARCH="arm"   ;; \
+      *)       echo "WARN: tailscale — unknown arch $ARCH, skipping"; exit 0 ;; \
+    esac; \
+    TS_URL="https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_${TS_ARCH}.tgz"; \
+    echo "▸ tailscale install: arch=${TS_ARCH} ver=${TAILSCALE_VERSION}"; \
+    ( curl -LsSf "$TS_URL" -o /tmp/ts.tgz \
+      && tar -xzf /tmp/ts.tgz -C /tmp \
+      && install -m 0755 /tmp/tailscale_${TAILSCALE_VERSION}_${TS_ARCH}/tailscaled /usr/sbin/tailscaled \
+      && install -m 0755 /tmp/tailscale_${TAILSCALE_VERSION}_${TS_ARCH}/tailscale  /usr/bin/tailscale \
+      && rm -rf /tmp/ts.tgz /tmp/tailscale_${TAILSCALE_VERSION}_${TS_ARCH} \
+      && /usr/sbin/tailscaled --version \
+      && echo "INFO: tailscaled installed (userspace mode; off by default)" ) \
+    || echo "WARN: tailscale install failed — the tailnet capability will be unavailable"
 # Pre-warm the trivy vuln DB so `trivy fs` works OFFLINE under the cage (runtime
 # egress is denied). Without a baked DB trivy would fetch at scan time, fail, and
 # the cve slot would be unanalyzable. TRIVY_CACHE_DIR set above (ENV) so all trivy
@@ -423,6 +477,11 @@ RUN mkdir -p /var/lib/hermes/workspace /var/lib/hermes/browser-sessions && \
 ENV npm_config_cache=/var/lib/hermes/npm-cache
 ENV UV_CACHE_DIR=/var/lib/hermes/uv-cache
 ENV XDG_CACHE_HOME=/var/lib/hermes/xdg-cache
+# Parity with the runtime env (hermes-runtime.service, stdio_mcp_client.py):
+# copy instead of hardlink/rename when uv installs FROM its cache, so the
+# baked warm-up and the runtime path behave identically regardless of the
+# volume layout a given deploy ends up with.
+ENV UV_LINK_MODE=copy
 # Warm BOTH runner caches with the EXACT seed specs (ops/.../seed/mcp-servers.json) so the
 # curated MCPs connect OFFLINE on a fresh boot (the cage denies npm/uv at runtime). Today
 # mcp-servers.json only lists uvx MCPs (Excel / Word / PowerPoint, locales sin clave); the
@@ -451,7 +510,7 @@ RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache /var/lib/hermes/
     # pin AND that this warm spec stays token-identical to the seed's argv (uv caches the
     # environment by its exact requirements; the real boot spawns `--offline`, so any
     # difference between the two is a cache miss the seed can never recover from).
-    for spec in "--from excel-mcp-server --with mcp<2 excel-mcp-server stdio" \
+    for spec in "--from excel-mcp-server==0.1.8 --with mcp<2 --overrides /usr/share/hermes/seed/excel-mcp-overrides.txt excel-mcp-server stdio" \
                 "--from office-word-mcp-server --with mcp==2.2.0 word_mcp_server" \
                 "--from office-powerpoint-mcp-server --with mcp<2 ppt_mcp_server"; do \
       echo "▸ warming uvx $spec" ; \
@@ -459,6 +518,9 @@ RUN mkdir -p /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache /var/lib/hermes/
     done ; \
     echo "▸ warming npx mcp-remote" ; \
     HOME=/var/lib/hermes/mcp-home timeout 240 npx -y mcp-remote@0.8.6 --help </dev/null >/dev/null 2>&1 || true ; \
+    find /var/lib/hermes/uv-cache -type d -name 'excel_mcp_server-0.1.8.dist-info' -print -quit | grep -q . && \
+    find /var/lib/hermes/uv-cache -type d -name 'fastmcp-3.2.0.dist-info' -print -quit | grep -q . && \
+    ! find /var/lib/hermes/uv-cache -type d -name 'fastmcp-2.14.7.dist-info' -print -quit | grep -q . && \
     chown -R hermes:hermes-work /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache \
       /var/lib/hermes/xdg-cache /var/lib/hermes/mcp-home && \
     chmod -R g+rwX /var/lib/hermes/npm-cache /var/lib/hermes/uv-cache \
@@ -517,8 +579,10 @@ RUN mkdir -p /usr/share/hermes && echo "${SAFENT_EDITION}" > /usr/share/hermes/e
 # OCI label org.opencontainers.image.revision). CI passes GIT_SHA=${{ github.sha }};
 # local builds default to "dev". This ends the "which version am I running?" guesswork.
 ARG GIT_SHA=dev
+ARG SAFENT_VERSION=dev
 RUN echo "${GIT_SHA}" > /usr/share/hermes/build
 LABEL org.opencontainers.image.revision="${GIT_SHA}"
+LABEL org.opencontainers.image.version="${SAFENT_VERSION}"
 # Cloud config-sync: enable it UNCONDITIONALLY (both editions). The unit's
 # ConditionPathExists=/var/lib/hermes/instance/.enterprise keeps it inert in
 # community edition (no pairing marker). The companion hermes-config-sync.path
@@ -528,6 +592,12 @@ LABEL org.opencontainers.image.revision="${GIT_SHA}"
 # effect without a reboot. The CE image runs in associate mode, so gating on
 # build-time SAFENT_EDITION would (and did) leave paired CE instances without sync.
 RUN systemctl enable hermes-config-sync.service hermes-config-sync.path 2>&1 | tail -3 || true
+
+# Governed tailnet egress (spec 022): enable the .path watchers so opt-in takes effect live.
+# The .service units are ConditionPathExists-gated (off by default) — nothing runs until the
+# owner connects a tailnet from the UI. hermes-tailscaled.service also installs into
+# hermes-workspace.target (WantedBy) so it comes up on later boots once enabled.
+RUN systemctl enable hermes-tailscaled.path hermes-tailscale-control.path 2>&1 | tail -3 || true
 
 # podman-machine (macOS) compat: systemd's per-unit MemoryPressureWatch tries to bind the
 # unit's cgroup memory.pressure into its namespace; in the Mac podman VM's cgroup view this

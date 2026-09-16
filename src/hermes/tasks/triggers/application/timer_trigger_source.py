@@ -25,7 +25,7 @@ import contextlib
 import logging
 from typing import TYPE_CHECKING
 
-from hermes.tasks.cron_schedule import prev_fire
+from hermes.tasks.cron_schedule import next_fire, prev_fire
 from hermes.tasks.triggers.domain.authorized_trigger_ports import AuthorizedTriggerType
 
 if TYPE_CHECKING:
@@ -101,13 +101,55 @@ class SchedulerTimerSource:
             return
 
         now = datetime.now(tz=UTC)
-        for trigger, last_run_at, _last_status in rows:
+        for trigger, last_run_at, last_status in rows:
             if trigger.trigger_type is not AuthorizedTriggerType.TIMER:
                 continue
+            # Mirror this trigger's own last_run_at/last_status (native —
+            # agent_tasks, via list_triggers_with_last_run above) into the
+            # matching Neus cron/jobs.json row on every poll (spec 025
+            # hallazgo B). SchedulerTimerSource fires Safent-authorized
+            # triggers directly through the gate — it never touches
+            # cron.jobs — so nothing else ever updates jobs.json's
+            # last_run_at/last_status/next_run_at for these rows; they were
+            # born null and stayed null/frozen through every fire, success
+            # or failure. Re-syncing every tick (not just at fire time) is
+            # what actually captures "success or failure": the outcome of a
+            # fired run is only known asynchronously, once a worker resolves
+            # the work item — the NEXT tick's read of last_status picks it up.
+            self._sync_neus_bookkeeping(trigger, last_run_at, last_status, now)
             slot = self._due_slot(trigger, last_run_at, now)
             if slot is None:
                 continue
             await self._fire(trigger, slot)
+
+    def _sync_neus_bookkeeping(
+        self,
+        trigger: object,
+        last_run_at: str | None,
+        last_status: str | None,
+        now: datetime,
+    ) -> None:
+        """Push this trigger's native last_run_at/last_status/next_run_at
+        into its matching Neus cron/jobs.json entry, if any (jobs with no
+        `origin.trigger_instance_id` — agent-created via its own `cronjob`
+        tool — are left alone; those were never authorized through this
+        gate). A trigger that hasn't fired yet (last_run_at is None) has
+        nothing to mirror — honest-empty, same contract as
+        _neus_cron_recent_runs.
+        """
+        if not last_run_at:
+            return
+        cron_expr = (getattr(trigger, "scope_value", "") or "").strip()
+        next_run_at = ""
+        if cron_expr and cron_expr != "*":
+            next_dt = next_fire(cron_expr, after=now)
+            next_run_at = next_dt.isoformat() if next_dt else ""
+        _neus_cron_mark_run(
+            str(trigger.trigger_instance_id),  # type: ignore[attr-defined]
+            last_run_at=last_run_at,
+            last_status=last_status or "",
+            next_run_at=next_run_at,
+        )
 
     def _due_slot(
         self, trigger: object, last_run_at: str | None, now: datetime
@@ -256,6 +298,20 @@ def _parse_iso(iso: str) -> datetime:
     return _as_utc(datetime_cls.fromisoformat(iso))
 
 
+def _find_neus_job_id(trigger_id: str, list_jobs) -> str | None:  # noqa: ANN001
+    """Scan cron.jobs for the job whose origin.trigger_instance_id matches.
+
+    Shared by _neus_cron_remove_job_soft and _neus_cron_mark_run — both need
+    the SAME lookup (this module can't import dbus_runtime_service's own
+    _neus_cron_find_job_id_by_trigger without a circular import).
+    """
+    for job in list_jobs(include_disabled=True):
+        origin = job.get("origin") or {}
+        if isinstance(origin, dict) and origin.get("trigger_instance_id") == trigger_id:
+            return str(job["id"])
+    return None
+
+
 def _neus_cron_remove_job_soft(trigger_id: str) -> None:
     """Elimina la entrada del catálogo Neus (cron.jobs) de un one-shot tras disparar.
 
@@ -272,12 +328,7 @@ def _neus_cron_remove_job_soft(trigger_id: str) -> None:
         logger.warning("hermes.triggers.timer.one_shot_cron_remove: cron.jobs unavailable")
         return
     try:
-        job_id: str | None = None
-        for job in list_jobs(include_disabled=True):
-            origin = job.get("origin") or {}
-            if isinstance(origin, dict) and origin.get("trigger_instance_id") == trigger_id:
-                job_id = str(job["id"])
-                break
+        job_id = _find_neus_job_id(trigger_id, list_jobs)
         if job_id is None:
             return
         remove_job(job_id)
@@ -288,5 +339,39 @@ def _neus_cron_remove_job_soft(trigger_id: str) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "hermes.triggers.timer.one_shot_cron_remove_failed trigger=%s: %s",
+            trigger_id, exc,
+        )
+
+
+def _neus_cron_mark_run(
+    trigger_id: str, *, last_run_at: str, last_status: str, next_run_at: str,
+) -> None:
+    """Mirror a fired trigger's own last_run_at/last_status/next_run_at into
+    its matching Neus cron/jobs.json entry (spec 025 hallazgo B).
+
+    Lives here, not dbus_runtime_service.py, to avoid a circular import —
+    same reasoning as _neus_cron_remove_job_soft. Fail-soft: cron.jobs
+    absent, job not found, or any error is logged and swallowed — never
+    blocks the scheduling tick.
+    """
+    if not trigger_id:
+        return
+    try:
+        from cron.jobs import list_jobs, update_job  # noqa: PLC0415
+    except ImportError:
+        logger.warning("hermes.triggers.timer.cron_mark_run: cron.jobs unavailable")
+        return
+    try:
+        job_id = _find_neus_job_id(trigger_id, list_jobs)
+        if job_id is None:
+            return
+        update_job(job_id, {
+            "last_run_at": last_run_at,
+            "last_status": last_status,
+            "next_run_at": next_run_at,
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "hermes.triggers.timer.cron_mark_run_failed trigger=%s: %s",
             trigger_id, exc,
         )

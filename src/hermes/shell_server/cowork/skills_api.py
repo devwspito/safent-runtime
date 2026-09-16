@@ -21,6 +21,10 @@ Security:
     (scan→score→user-decide) BEFORE anything is written to disk or the skills
     view. A CRITICAL trojan pattern (dropper / reverse shell / obfuscated exec)
     is BLOCKED 422 — no SKILL.md, no row, nothing the agent can discover.
+  - install force=True (025 Top-4): a bearer-authenticated operator is NOT
+    the same as the OWNER — force overrides a FAIL antivirus verdict, so it
+    requires a single-use owner confirmation from POST /security/decisions.
+    Community does not use MFA; an internal daemon token cannot approve.
 """
 
 from __future__ import annotations
@@ -29,8 +33,9 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from hermes.shell_server.security.owner_confirmation import require_owner_approval
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
 logger = logging.getLogger("hermes.shell_server.cowork.skills_api")
@@ -42,8 +47,11 @@ logger = logging.getLogger("hermes.shell_server.cowork.skills_api")
 
 
 class InstallSkillRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     identifier: str = Field(min_length=1, description="Hub skill identifier (e.g. 'pdf-tools')")
-    force: bool = Field(default=False, description="Owner-sovereign override: install despite FAIL verdict")
+    force: bool = Field(
+        default=False, description="Owner-sovereign override: install despite FAIL verdict"
+    )
 
 
 class SynthesizeSkillRequest(BaseModel):
@@ -268,10 +276,13 @@ def create_skills_hub_router(db_path: Path) -> APIRouter:
     async def install_hub_skill(request: Request, body: InstallSkillRequest) -> dict:
         """Install a skill from the hub. Returns {op_id, status}.
 
-        When body.force=True the owner-sovereign override is forwarded to the
-        daemon.  The operator-token middleware already fronts this route so only
-        authenticated operators can set force.
+        Force requires the owner's authenticated UI session and a single-use
+        approval for this identifier, issued after a recorded security decision.
+        Consuming it before dispatch also prevents retry/replay after an unknown
+        daemon outcome. A failed attempt requires a new explicit confirmation.
         """
+        if body.force:
+            require_owner_approval(request, identifier=body.identifier, action="install_hub_skill")
         proxy = request.app.state.dbus_proxy
         try:
             return await proxy.call_mutator("install_hub_skill", body.identifier, body.force)

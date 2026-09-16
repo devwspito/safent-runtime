@@ -37,12 +37,20 @@ import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from hermes.shell_server.managed_remote_endpoints import load_managed_remote_endpoints
+from hermes.shell_server.security.mcp_approval import (
+    AddMcpApproval,
+    ManagedMcpApproval,
+    McpDraft,
+    mcp_approval_identifier,
+)
+from hermes.shell_server.security.owner_confirmation import require_owner_approval
 from hermes.tasks.control_plane.domain.ports import AgentUnavailable
 
 logger = logging.getLogger("hermes.shell_server.cowork.mcp_api")
+_MIN_SEARCH_LENGTH = 2
 
 # Friendly labels for known managed-remote slugs (add_mcp_server persists
 # whatever label we send). Falls back to a title-cased slug for one we don't
@@ -59,19 +67,8 @@ _MANAGED_REMOTE_LABELS: dict[str, str] = {
 # ------------------------------------------------------------------
 
 
-class AddMcpServerRequest(BaseModel):
-    # Mirrors the daemon's add_mcp_server draft 1:1 (server_id/label/argv/env/force) so
-    # the frontend → shell-server → daemon contract is a single shape. argv[0]
-    # must be an allowed runner (npx/uvx/node/python3); the daemon validates.
-    server_id: str = Field(min_length=1, max_length=120)
-    label: str | None = Field(default=None)
-    argv: list[str] = Field(default_factory=list)
-    env: dict[str, str] = Field(default_factory=dict, description="BYOK env vars")
-    # Owner sovereign override: set to True only AFTER the owner's MFA was verified
-    # by POST /api/v1/security/decisions (security_api.py → _require_owner_mfa).
-    # The daemon re-checks with its own inline override logic (allow_target + rescan).
-    # Without this field the frontend's force=true was silently dropped by Pydantic,
-    # so the daemon always saw force=False and the FAIL gate was never lifted.
+class AddMcpServerRequest(McpDraft):
+    # A force flag alone is never proof of owner approval.
     force: bool = Field(default=False)
 
 
@@ -80,6 +77,7 @@ class SetManagedRemoteEndpointRequest(BaseModel):
 
 
 class ConnectManagedRemoteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     url: str = Field(min_length=1, max_length=2048)
     # Same sovereign-override contract as AddMcpServerRequest.force — set True
     # only after the owner approved a FAIL/WARN scan via POST /security/decisions.
@@ -118,15 +116,18 @@ def create_mcp_router() -> APIRouter:  # noqa: PLR0915 — 6 REST routes, one fa
         block, prefetch/connect/persistence failure) never reports 201 — see
         _raise_if_failed().
         """
+        if body.force:
+            intent = AddMcpApproval(**body.model_dump(exclude={"force"}))
+            require_owner_approval(
+                request, identifier=mcp_approval_identifier(intent), action="install_mcp"
+            )
         proxy = request.app.state.dbus_proxy
         draft = {
             "server_id": body.server_id,
             "label": body.label or body.server_id,
             "argv": body.argv,
             "env": body.env,
-            # Propagate the sovereign override flag so the daemon's scan gate sees it.
-            # The MFA was already verified by the caller in POST /api/v1/security/decisions
-            # before this add is retried with force=True.
+            # The one-use owner grant was consumed before forwarding this flag.
             "force": body.force,
         }
         try:
@@ -152,7 +153,7 @@ def create_mcp_router() -> APIRouter:  # noqa: PLR0915 — 6 REST routes, one fa
         normalised to the add_mcp_server shape (server_id/label/argv/...). Parity
         with the native SO (McpApp.qml "registry" source). Fail-soft: [] on error.
         """
-        if not q or len(q.strip()) < 2:
+        if not q or len(q.strip()) < _MIN_SEARCH_LENGTH:
             return []
         proxy = request.app.state.dbus_proxy
         try:
@@ -206,6 +207,11 @@ def create_mcp_router() -> APIRouter:  # noqa: PLR0915 — 6 REST routes, one fa
         unless `force` carries an already-recorded owner override (see
         AddMcpServerRequest.force).
         """
+        if body.force:
+            intent = ManagedMcpApproval(slug=slug, url=body.url)
+            require_owner_approval(
+                request, identifier=mcp_approval_identifier(intent), action="install_mcp"
+            )
         proxy = request.app.state.dbus_proxy
         try:
             endpoint_result = await proxy.call_mutator(
