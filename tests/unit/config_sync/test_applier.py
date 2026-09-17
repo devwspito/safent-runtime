@@ -60,16 +60,31 @@ class FakeDbusProxy:
         self._existing_mcp: list[dict] = []
         self._existing_consents: list[dict] = []
         self._existing_egress: list[dict] = []
+        self._existing_ssh_hosts: list[dict] = []
         # Composio status returned by call_dict("get_composio_status")
         self._composio_status: dict = {"has_key": False}
         # verb → return failure
         self._fail_verbs: set[str] = set()
+        # allow_ssh_host simulation: raw host -> daemon verdict.
+        # Default (host absent from either map): resolves to itself, applied.
+        self._ssh_rejections: dict[str, str] = {}  # raw host -> error code
+        self._ssh_conflicts: set[str] = set()  # raw host -> local conflict
+        self._ssh_canonical: dict[str, str] = {}  # raw host -> canonical form
 
     def fail_verb(self, verb: str) -> None:
         self._fail_verbs.add(verb)
 
     def set_composio_status(self, status: dict) -> None:
         self._composio_status = status
+
+    def reject_ssh_host(self, host: str, *, error: str = "unknown_host") -> None:
+        self._ssh_rejections[host] = error
+
+    def conflict_ssh_host(self, host: str) -> None:
+        self._ssh_conflicts.add(host)
+
+    def canonicalize_ssh_host(self, host: str, canonical: str) -> None:
+        self._ssh_canonical[host] = canonical
 
     async def call_list(self, member: str, *args: Any) -> list[dict]:
         self.calls.append((member, args))
@@ -83,6 +98,8 @@ class FakeDbusProxy:
             return list(self._existing_consents)
         if member == "list_egress_grants":
             return list(self._existing_egress)
+        if member == "list_ssh_hosts":
+            return list(self._existing_ssh_hosts)
         return []
 
     async def call_dict(self, member: str, *args: Any) -> dict:
@@ -99,7 +116,30 @@ class FakeDbusProxy:
             import json  # noqa: PLC0415
             draft = json.loads(args[0]) if args else {}
             return {"ok": True, "agent_id": draft.get("agent_id", "new-id"), "id": draft.get("agent_id", "new-id")}
+        if member == "allow_ssh_host":
+            return self._simulate_allow_ssh_host(args[0])
+        if member == "revoke_ssh_host":
+            host = args[0]
+            self._existing_ssh_hosts = [
+                h for h in self._existing_ssh_hosts if h.get("host") != host
+            ]
+            return {"ok": True, "revoked": True}
         return {"ok": True}
+
+    def _simulate_allow_ssh_host(self, draft_json: str) -> dict:
+        import json  # noqa: PLC0415
+
+        host = json.loads(draft_json)["host"]
+        if host in self._ssh_rejections:
+            return {"ok": False, "error": self._ssh_rejections[host]}
+        canonical = self._ssh_canonical.get(host, host)
+        if host in self._ssh_conflicts:
+            return {"ok": True, "host": canonical, "conflict": True}
+        if not any(h.get("host") == canonical for h in self._existing_ssh_hosts):
+            self._existing_ssh_hosts.append(
+                {"host": canonical, "approved_at": "2026-01-01T00:00:00+00:00", "managed_by": "cloud"}
+            )
+        return {"ok": True, "host": canonical}
 
     async def call_bool(self, member: str, *args: Any) -> bool:
         self.calls.append((member, args))
@@ -1522,3 +1562,217 @@ class TestIsDiscretionaryWarnBlock:
         assert _is_discretionary_warn_block(None) is False
         assert _is_discretionary_warn_block(True) is False
         assert _is_discretionary_warn_block(False) is False
+
+
+# ---------------------------------------------------------------------------
+# Governed SSH (spec 002 US3, D-4)
+# ---------------------------------------------------------------------------
+
+
+def _ssh_payload(*hosts: dict) -> PolicyPayload:
+    return _empty_payload(ssh={"hosts": list(hosts)} if hosts else None)
+
+
+def _host(host: str, *, identity: str = "agent", capabilities: list[str] | None = None) -> dict:
+    return {"host": host, "identity": identity, "capabilities": capabilities or ["exec"]}
+
+
+class TestApplySshSectionOrder:
+    @pytest.mark.asyncio
+    async def test_allow_ssh_host_runs_after_integrations_before_agents(self) -> None:
+        proxy = FakeDbusProxy()
+        payload = _empty_payload(
+            integrations=[{"kind": "composio", "api_key": "key123"}],
+            ssh={"hosts": [_host("db1")]},
+            agents=[{"agent_id": "a1", "name": "Support"}],
+        )
+
+        await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        verbs = proxy.called_verbs()
+        assert verbs.index("set_composio_api_key") < verbs.index("allow_ssh_host")
+        assert verbs.index("allow_ssh_host") < verbs.index("create_agent")
+
+
+class TestApplySshSectionAbsent:
+    @pytest.mark.asyncio
+    async def test_absent_ssh_section_calls_no_allow_verb(self) -> None:
+        proxy = FakeDbusProxy()
+        payload = _empty_payload()
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert "allow_ssh_host" not in proxy.called_verbs()
+        assert result.ok
+
+    @pytest.mark.asyncio
+    async def test_absent_ssh_section_still_revokes_stale_cloud_hosts(self) -> None:
+        """Removing the last grant (ssh becomes absent from the NEXT bundle)
+        must still revoke a previously cloud-granted host."""
+        proxy = FakeDbusProxy()
+        proxy._existing_ssh_hosts = [
+            {"host": "db1.tailxxxx.ts.net", "approved_at": "t", "managed_by": "cloud"}
+        ]
+        payload = _empty_payload()
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert "revoke_ssh_host" in proxy.called_verbs()
+        assert result.ok
+
+
+class TestApplySshSectionHappyPath:
+    @pytest.mark.asyncio
+    async def test_new_host_is_applied(self) -> None:
+        proxy = FakeDbusProxy()
+        payload = _ssh_payload(_host("db1"))
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert "allow_ssh_host" in proxy.called_verbs()
+        assert not result.failed
+        assert not result.rejected
+
+    @pytest.mark.asyncio
+    async def test_allow_ssh_host_draft_carries_identity_and_capabilities(self) -> None:
+        import json  # noqa: PLC0415
+
+        proxy = FakeDbusProxy()
+        payload = _ssh_payload(_host("db1", identity="deploy", capabilities=["exec", "file_read"]))
+
+        await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        calls = [(v, a) for v, a in proxy.calls if v == "allow_ssh_host"]
+        assert len(calls) == 1
+        draft = json.loads(calls[0][1][0])
+        assert draft == {"host": "db1", "identity": "deploy", "capabilities": ["exec", "file_read"]}
+
+
+class TestApplySshSectionRejection:
+    """REQ-20 (T071a) — a host that does not resolve inside the tailnet is a
+    PERMANENT rejection: never `applied`, never retried as transitory."""
+
+    @pytest.mark.asyncio
+    async def test_non_tailnet_host_is_rejected_not_failed(self) -> None:
+        proxy = FakeDbusProxy()
+        proxy.reject_ssh_host("evil.example.com", error="unknown_host")
+        payload = _ssh_payload(_host("evil.example.com"))
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert any("evil.example.com" in r and "unknown_host" in r for r in result.rejected)
+        assert not result.failed
+        assert result.ok  # a permanent rejection never blocks version advancement
+
+    @pytest.mark.asyncio
+    async def test_invalid_host_is_rejected_not_failed(self) -> None:
+        proxy = FakeDbusProxy()
+        proxy.reject_ssh_host("100.64.1.2", error="invalid_host")
+        payload = _ssh_payload(_host("100.64.1.2"))
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert any("invalid_host" in r for r in result.rejected)
+        assert result.ok
+
+    @pytest.mark.asyncio
+    async def test_transitory_directory_unavailable_is_a_failure(self) -> None:
+        """Distinct from a permanent rejection: retried on the next tick,
+        blocks version advancement."""
+        proxy = FakeDbusProxy()
+        proxy.reject_ssh_host("db1", error="directory_unavailable")
+        payload = _ssh_payload(_host("db1"))
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert any("db1" in f for f in result.failed)
+        assert not result.ok
+
+    @pytest.mark.asyncio
+    async def test_one_rejected_host_does_not_block_another_hosts_stale_revoke(self) -> None:
+        """A permanent rejection must never gate the stale-revoke safety net
+        — only a TRANSITORY failure does."""
+        proxy = FakeDbusProxy()
+        proxy._existing_ssh_hosts = [
+            {"host": "stale.tailxxxx.ts.net", "approved_at": "t", "managed_by": "cloud"}
+        ]
+        proxy.reject_ssh_host("evil.example.com", error="unknown_host")
+        payload = _ssh_payload(_host("evil.example.com"))
+
+        await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        revoke_calls = [(v, a) for v, a in proxy.calls if v == "revoke_ssh_host"]
+        assert revoke_calls == [("revoke_ssh_host", ("stale.tailxxxx.ts.net",))]
+
+
+class TestApplySshSectionLocalConflict:
+    """FR-014 — a pre-existing LOCAL host is never deleted or overwritten;
+    reported as a conflict, never as applied nor as a transitory failure."""
+
+    @pytest.mark.asyncio
+    async def test_local_conflict_is_rejected_not_applied(self) -> None:
+        proxy = FakeDbusProxy()
+        proxy.conflict_ssh_host("build-box")
+        payload = _ssh_payload(_host("build-box"))
+
+        result = await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert any("build-box" in r and "local_conflict" in r for r in result.rejected)
+        assert not result.failed
+        assert result.ok
+
+
+class TestApplySshSectionStaleRevoke:
+    """Removing a grant from the published bundle must revoke only hosts
+    marked managed_by Enterprise — upserts-before-deletes (P1-4 pattern)."""
+
+    @pytest.mark.asyncio
+    async def test_stale_cloud_host_absent_from_bundle_is_revoked(self) -> None:
+        proxy = FakeDbusProxy()
+        proxy._existing_ssh_hosts = [
+            {"host": "stale.tailxxxx.ts.net", "approved_at": "t", "managed_by": "cloud"}
+        ]
+        payload = _ssh_payload(_host("db1"))
+
+        await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert "revoke_ssh_host" in proxy.called_verbs()
+
+    @pytest.mark.asyncio
+    async def test_host_still_present_in_bundle_is_not_revoked(self) -> None:
+        proxy = FakeDbusProxy()
+        proxy._existing_ssh_hosts = [
+            {"host": "db1.tailxxxx.ts.net", "approved_at": "t", "managed_by": "cloud"}
+        ]
+        payload = _ssh_payload(_host("db1.tailxxxx.ts.net"))
+
+        await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert "revoke_ssh_host" not in proxy.called_verbs()
+
+    @pytest.mark.asyncio
+    async def test_local_host_is_never_revoked_as_stale(self) -> None:
+        proxy = FakeDbusProxy()
+        proxy._existing_ssh_hosts = [
+            {"host": "mine.tailxxxx.ts.net", "approved_at": "t", "managed_by": None}
+        ]
+        payload = _ssh_payload()
+
+        await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert "revoke_ssh_host" not in proxy.called_verbs()
+
+    @pytest.mark.asyncio
+    async def test_transitory_allow_failure_blocks_stale_revoke_for_this_bundle(self) -> None:
+        """If a host in THIS bundle failed transitorily, do not revoke
+        anything yet — it might still be wanted once the retry succeeds."""
+        proxy = FakeDbusProxy()
+        proxy._existing_ssh_hosts = [
+            {"host": "stale.tailxxxx.ts.net", "approved_at": "t", "managed_by": "cloud"}
+        ]
+        proxy.reject_ssh_host("db1", error="directory_unavailable")
+        payload = _ssh_payload(_host("db1"))
+
+        await PolicyApplier(proxy).apply(payload, current_agents=[])
+
+        assert "revoke_ssh_host" not in proxy.called_verbs()

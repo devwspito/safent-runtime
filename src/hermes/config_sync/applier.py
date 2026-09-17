@@ -7,16 +7,34 @@ remains the single writer of all state.
 Application order (dependency graph):
   1. providers     — agents reference provider_alias
   2. integrations  — (composio key; stateless, no deps)
-  3. mcp           — skills and agents can reference MCP servers
-  4. skills        — agents can bind skills as capabilities
-  5. agents        — upserts only (no deletes yet — P1-4)
-  6. consents      — capability grants (HIGH consents require human approval)
-  7. egress        — only ADDS to allow-list; never removes owner grants
-  8. license       — persisted in association_store
-  9. directory     — Fase 3 department-scoped visibility; persisted in
+  3. ssh           — governed tailnet SSH allow-list (US3, D-4); after
+                      integrations, before agents (contracts/policy-bundle-
+                      v2.schema.json x-applier-requirements.order)
+  4. mcp           — skills and agents can reference MCP servers
+  5. skills        — agents can bind skills as capabilities
+  6. agents        — upserts only (no deletes yet — P1-4)
+  7. consents      — capability grants (HIGH consents require human approval)
+  8. egress        — only ADDS to allow-list; never removes owner grants
+  9. license       — persisted in association_store
+  10. directory    — Fase 3 department-scoped visibility; persisted in
                       association_store (no D-Bus verb — read-only
                       presentation data, see _apply_directory)
-  10. DELETE stale cloud-managed agents (P1-4: AFTER all upserts succeed)
+  11. DELETE stale cloud-managed agents (P1-4: AFTER all upserts succeed)
+
+P0-5 — governed SSH (US3, D-4):
+  REQ-20: `host` membership in the owner's tailnet is resolved by the daemon
+  (allow_ssh_host), against the LIVE directory ONLY (node identity) — never
+  DNS, never /etc/hosts. A host that does not resolve is a PERMANENT
+  rejection (never `applied`, never retried as if it might someday resolve
+  on its own): recorded in `result.rejected`.
+  FR-014: a pre-existing LOCAL (non-cloud) grant for the SAME host is NEVER
+  deleted or overwritten — the daemon reports `conflict: True` and the
+  applier records it in `result.rejected`, never in `result.failed` (an
+  administrative conflict is not something retrying fixes).
+  Stale cloud-managed hosts (granted by a previous bundle, absent from this
+  one) are revoked — but ONLY when every host in THIS bundle applied without
+  a TRANSITORY failure (same upserts-before-deletes safety net as P1-4,
+  scoped to this section — see _apply_ssh).
 
   NOTE — features/views:
   Feature-view entitlements travel in license.views (LicenseSpec) which is
@@ -132,6 +150,8 @@ from hermes.config_sync.policy_document import (
     McpSpec,
     PolicyPayload,
     SkillSpec,
+    SshHostSpec,
+    SshPolicySpec,
 )
 
 logger = logging.getLogger("hermes.config_sync.applier")
@@ -157,6 +177,10 @@ _ALLOWED_VERBS: frozenset[str] = frozenset(
         # Composio integration
         "set_composio_api_key",
         "get_composio_status",
+        # Governed tailnet SSH allow-list (US3, D-4)
+        "list_ssh_hosts",
+        "allow_ssh_host",
+        "revoke_ssh_host",
         # MCP server management
         "add_mcp_server",
         # Hub skills
@@ -377,6 +401,7 @@ class PolicyApplier:
             # Never send upstream API keys through the legacy cloud path.
             result.failed.append('providers:instance_gateway_required')
         await self._apply_integrations(payload.integrations, result)
+        await self._apply_ssh(payload.ssh, result)
         await self._apply_mcp(payload.mcp, result)
         await self._apply_skills(payload.skills, result)
 
@@ -455,6 +480,92 @@ class PolicyApplier:
                 result.applied += 1
             else:
                 result.failed.append(f"integration:{spec.kind}")
+
+    async def _apply_ssh(
+        self, ssh: SshPolicySpec | None, result: ApplyResult
+    ) -> None:
+        """Reconcile the governed-SSH allow-list (US3, D-4).
+
+        `ssh is None` still runs the reconcile: a previous bundle's cloud
+        grants must be revoked when the org's policy no longer governs SSH
+        for this instance (or no longer wants this particular host) — the
+        `ssh` key being absent from the WIRE bundle is purely a signing
+        byte-identity concern (PolicyPayload._serialize_payload), never a
+        signal to skip reconciliation.
+
+        Upserts-before-deletes (mirrors P1-4, scoped to this section only):
+        stale cloud-managed hosts are revoked ONLY when every host in this
+        bundle applied without a TRANSITORY failure — a single permanently-
+        rejected host (bad format, non-tailnet) must never block cleanup of
+        unrelated stale hosts.
+        """
+        wanted = ssh.hosts if ssh is not None else []
+        failed_before = len(result.failed)
+        applied_hosts: set[str] = set()
+
+        for spec in wanted:
+            canonical = await self._allow_one_ssh_host(spec, result)
+            if canonical is not None:
+                applied_hosts.add(canonical)
+
+        if len(result.failed) == failed_before:
+            await self._revoke_stale_ssh_hosts(applied_hosts, result)
+
+    async def _allow_one_ssh_host(
+        self, spec: SshHostSpec, result: ApplyResult
+    ) -> str | None:
+        """Grant one host, classifying the daemon's verdict.
+
+        Returns the CANONICAL host string on success (so the caller can
+        build the "wanted this round" set for stale-revoke reconciliation),
+        or None on any non-applied outcome (rejected, conflicted, or
+        transitorily failed).
+        """
+        draft = {"host": spec.host, "identity": spec.identity, "capabilities": spec.capabilities}
+        resp = await self._call_mutator("allow_ssh_host", json.dumps(draft))
+
+        if not _is_ok_strict(resp):
+            error = resp.get("error") if isinstance(resp, dict) else None
+            if error in {"unknown_host", "invalid_host"}:
+                logger.warning(
+                    "hermes.config_sync.applier.ssh_host_rejected",
+                    extra={"host": spec.host[:64], "reason": error},
+                )
+                result.rejected.append(f"ssh:{spec.host[:64]}:{error}")
+            else:
+                result.failed.append(f"ssh:{spec.host[:64]}")
+            return None
+
+        if resp.get("conflict"):
+            logger.info(
+                "hermes.config_sync.applier.ssh_host_local_conflict",
+                extra={"host": spec.host[:64]},
+            )
+            result.rejected.append(f"ssh:{spec.host[:64]}:local_conflict")
+            return None
+
+        result.applied += 1
+        canonical = resp.get("host")
+        return canonical if isinstance(canonical, str) and canonical else None
+
+    async def _revoke_stale_ssh_hosts(
+        self, applied_hosts: set[str], result: ApplyResult
+    ) -> None:
+        """Revoke cloud-managed hosts absent from THIS bundle.
+
+        Only ever touches entries the daemon reports as `managed_by: cloud`
+        — a human's own local grant is never in scope for this reconcile.
+        """
+        existing = await self._proxy.call_list("list_ssh_hosts")
+        for entry in existing:
+            host = entry.get("host", "")
+            if not host or host in applied_hosts or entry.get("managed_by") != _CLOUD_MANAGED:
+                continue
+            resp = await self._call_mutator("revoke_ssh_host", host)
+            if _is_ok_strict(resp):
+                result.applied += 1
+            else:
+                result.failed.append(f"ssh:revoke:{host[:64]}")
 
     async def _apply_mcp(
         self, servers: list[McpSpec], result: ApplyResult
