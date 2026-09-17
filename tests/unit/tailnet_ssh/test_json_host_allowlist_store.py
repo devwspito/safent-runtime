@@ -117,3 +117,65 @@ class TestListWithMetadata:
         assert len(entries) == 1
         assert entries[0].host == "db1.tailxxxx.ts.net"
         assert entries[0].approved_at is None
+        assert entries[0].managed_by is None
+
+
+class TestManagedBy:
+    """spec 002 US3 (D-4): `managed_by` distinguishes an owner-granted local
+    host from one Enterprise's governed-SSH policy granted via config-sync."""
+
+    def test_local_grant_has_no_managed_by(self, tmp_path: Path) -> None:
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        store.allow("db1.tailxxxx.ts.net")
+
+        assert store.list_with_metadata()[0].managed_by is None
+
+    def test_cloud_grant_records_managed_by(self, tmp_path: Path) -> None:
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        store.allow("db1.tailxxxx.ts.net", managed_by="cloud")
+
+        assert store.list_with_metadata()[0].managed_by == "cloud"
+
+    def test_allow_never_overwrites_a_pre_existing_local_grant(self, tmp_path: Path) -> None:
+        """FR-014: a local grant is never silently replaced by a later cloud
+        `allow()` for the SAME host — the entry (and its origin) is
+        untouched."""
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        store.allow("db1.tailxxxx.ts.net")
+        first_approved_at = store.list_with_metadata()[0].approved_at
+
+        store.allow("db1.tailxxxx.ts.net", managed_by="cloud")
+
+        entry = store.list_with_metadata()[0]
+        assert entry.managed_by is None
+        assert entry.approved_at == first_approved_at
+
+    def test_allow_is_idempotent_for_an_existing_cloud_grant(self, tmp_path: Path) -> None:
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        store.allow("db1.tailxxxx.ts.net", managed_by="cloud")
+        store.allow("db1.tailxxxx.ts.net", managed_by="cloud")
+
+        entries = store.list_with_metadata()
+        assert len(entries) == 1
+        assert entries[0].managed_by == "cloud"
+
+    def test_persisted_shape_carries_managed_by(self, tmp_path: Path) -> None:
+        path = tmp_path / "allowlist.json"
+        JsonHostAllowlistStore(path).allow("db1.tailxxxx.ts.net", managed_by="cloud")
+
+        raw = json.loads(path.read_text(encoding="utf-8"))
+
+        assert raw["hosts"]["db1.tailxxxx.ts.net"]["managed_by"] == "cloud"
+
+    def test_older_persisted_shape_without_managed_by_defaults_to_none(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "allowlist.json"
+        path.write_text(
+            json.dumps({"hosts": {"db1.tailxxxx.ts.net": {"approved_at": "2026-01-01T00:00:00+00:00"}}}),
+            encoding="utf-8",
+        )
+
+        store = JsonHostAllowlistStore(path)
+
+        assert store.list_with_metadata()[0].managed_by is None
