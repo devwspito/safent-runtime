@@ -4,6 +4,9 @@ a fresh store instance over the SAME path must see prior grants)."""
 from __future__ import annotations
 
 import json
+import os
+import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -62,12 +65,28 @@ class TestJsonHostAllowlistStore:
         store = JsonHostAllowlistStore(tmp_path / "missing.json")
         assert store.list_allowed() == frozenset()
 
-    def test_corrupt_file_reads_as_empty_fail_closed(self, tmp_path: Path) -> None:
+    def test_corrupt_file_is_allowed_fails_closed(self, tmp_path: Path) -> None:
+        """B1 (security review): is_allowed is the ONE reader that catches
+        AllowlistStoreUnavailableError — "not yet allowed" is itself the
+        safe answer (forces re-approval, never grants)."""
         path = tmp_path / "allowlist.json"
         path.write_text("not json", encoding="utf-8")
         store = JsonHostAllowlistStore(path)
-        assert store.list_allowed() == frozenset()
         assert store.is_allowed("db1.tailxxxx.ts.net") is False
+
+    def test_corrupt_file_list_allowed_raises_not_silently_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """B1: a corrupt file must be DISTINGUISHABLE from a genuinely empty
+        store — silently returning frozenset() would be indistinguishable
+        from "no hosts ever granted", hiding real data loss/corruption."""
+        from hermes.tailnet_ssh.domain.errors import AllowlistStoreUnavailableError
+
+        path = tmp_path / "allowlist.json"
+        path.write_text("not json", encoding="utf-8")
+        store = JsonHostAllowlistStore(path)
+        with pytest.raises(AllowlistStoreUnavailableError):
+            store.list_allowed()
 
 
 class TestListWithMetadata:
@@ -283,3 +302,210 @@ class TestGrantFor:
         store.allow_governed("db1.tailxxxx.ts.net", identity="deploy", capabilities=("exec",))
 
         assert store.grant_for("DB1.tailxxxx.ts.net") is not None
+
+
+class TestB1CeilingFailsClosedOnCorruption:
+    """Security review 2026-09, B1 (CWE-636) — the capability ceiling must
+    NEVER fail open when the store cannot be read. Before this fix,
+    `_load()` swallowed ANY read/parse error to `{}`, so `grant_for` on a
+    corrupted file returned None indistinguishably from "genuinely no
+    grant" — capability_ceiling.resolve_execution_identity then treated
+    that as "no ceiling" and let a cloud-managed host execute unrestricted
+    with the default remote user."""
+
+    def test_grant_for_raises_on_corrupt_file_never_returns_none(
+        self, tmp_path: Path
+    ) -> None:
+        from hermes.tailnet_ssh.domain.errors import AllowlistStoreUnavailableError
+
+        path = tmp_path / "allowlist.json"
+        store = JsonHostAllowlistStore(path)
+        store.allow_governed(
+            "db1.tailxxxx.ts.net", identity="deploy", capabilities=("file_read",)
+        )
+
+        # Simulate a crash mid os.replace / a torn read: the file on disk is
+        # truncated JSON.
+        path.write_text(
+            '{"hosts": {"db1.tailxxxx.ts.net": {"approved_at": "x", "managed_by": "clo',
+            encoding="utf-8",
+        )
+
+        with pytest.raises(AllowlistStoreUnavailableError):
+            store.grant_for("db1.tailxxxx.ts.net")
+
+    def test_is_allowed_still_fails_closed_on_the_same_corruption(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "allowlist.json"
+        store = JsonHostAllowlistStore(path)
+        store.allow_governed(
+            "db1.tailxxxx.ts.net", identity="deploy", capabilities=("file_read",)
+        )
+        path.write_text("not json", encoding="utf-8")
+
+        assert store.is_allowed("db1.tailxxxx.ts.net") is False
+
+
+class TestB1WriteNeverClobbersOnCorruption:
+    """Security review 2026-09, B1 — a read-modify-write method must NEVER
+    treat "file unreadable" as "file empty" and rewrite it: that silently
+    discards every surviving entry (e.g. a crash mid-write followed by a
+    local `allow()` used to wipe out every cloud-managed grant)."""
+
+    def test_allow_refuses_to_write_over_a_corrupt_file(self, tmp_path: Path) -> None:
+        from hermes.tailnet_ssh.domain.errors import AllowlistStoreUnavailableError
+
+        path = tmp_path / "allowlist.json"
+        corrupt_bytes = "not json at all"
+        path.write_text(corrupt_bytes, encoding="utf-8")
+        store = JsonHostAllowlistStore(path)
+
+        with pytest.raises(AllowlistStoreUnavailableError):
+            store.allow("build-box.tailxxxx.ts.net")
+
+        # The file is untouched — no data was silently discarded.
+        assert path.read_text(encoding="utf-8") == corrupt_bytes
+
+    def test_allow_governed_refuses_to_write_over_a_corrupt_file(
+        self, tmp_path: Path
+    ) -> None:
+        from hermes.tailnet_ssh.domain.errors import AllowlistStoreUnavailableError
+
+        path = tmp_path / "allowlist.json"
+        corrupt_bytes = "not json at all"
+        path.write_text(corrupt_bytes, encoding="utf-8")
+        store = JsonHostAllowlistStore(path)
+
+        with pytest.raises(AllowlistStoreUnavailableError):
+            store.allow_governed("db1.tailxxxx.ts.net", identity="deploy", capabilities=("exec",))
+
+        assert path.read_text(encoding="utf-8") == corrupt_bytes
+
+    def test_revoke_refuses_to_write_over_a_corrupt_file(self, tmp_path: Path) -> None:
+        from hermes.tailnet_ssh.domain.errors import AllowlistStoreUnavailableError
+
+        path = tmp_path / "allowlist.json"
+        corrupt_bytes = "not json at all"
+        path.write_text(corrupt_bytes, encoding="utf-8")
+        store = JsonHostAllowlistStore(path)
+
+        with pytest.raises(AllowlistStoreUnavailableError):
+            store.revoke("db1.tailxxxx.ts.net")
+
+        assert path.read_text(encoding="utf-8") == corrupt_bytes
+
+
+class TestB1AtomicWrite:
+    def test_save_leaves_no_leftover_tmp_files(self, tmp_path: Path) -> None:
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        store.allow("db1.tailxxxx.ts.net")
+
+        leftovers = [p for p in tmp_path.iterdir() if ".tmp-" in p.name]
+        assert leftovers == []
+
+    def test_failed_write_leaves_original_file_untouched_and_no_tmp_leftover(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "allowlist.json"
+        store = JsonHostAllowlistStore(path)
+        store.allow("db1.tailxxxx.ts.net")
+        original_bytes = path.read_bytes()
+
+        def _boom(_fd: int) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "fsync", _boom)
+
+        with pytest.raises(OSError, match="disk full"):
+            store.allow("build-box.tailxxxx.ts.net")
+
+        assert path.read_bytes() == original_bytes
+        leftovers = [p for p in tmp_path.iterdir() if ".tmp-" in p.name]
+        assert leftovers == []
+
+    def test_file_mode_is_0600(self, tmp_path: Path) -> None:
+        path = tmp_path / "allowlist.json"
+        JsonHostAllowlistStore(path).allow("db1.tailxxxx.ts.net")
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_parent_dir_mode_is_0700(self, tmp_path: Path) -> None:
+        nested = tmp_path / "nested" / "allowlist.json"
+        JsonHostAllowlistStore(nested).allow("db1.tailxxxx.ts.net")
+        assert stat.S_IMODE(nested.parent.stat().st_mode) == 0o700
+
+    def test_lock_file_is_created_alongside(self, tmp_path: Path) -> None:
+        path = tmp_path / "allowlist.json"
+        JsonHostAllowlistStore(path).allow("db1.tailxxxx.ts.net")
+        assert (tmp_path / "allowlist.json.lock").exists()
+
+
+class TestB1ConcurrentReadModifyWriteSerialized:
+    """Security review 2026-09, B1 — two interleaved read-modify-write
+    cycles must never lose an update (the reported repro: two racing
+    cycles resurrected a revoked cloud grant). The flock around the WHOLE
+    read+write critical section serializes them."""
+
+    def test_concurrent_allow_governed_calls_never_lose_a_host(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "allowlist.json"
+        hosts = [f"host{i}.tailxxxx.ts.net" for i in range(40)]
+        barrier = threading.Barrier(2)
+
+        def _grant_half(subset: list[str]) -> None:
+            store = JsonHostAllowlistStore(path)
+            barrier.wait()
+            for host in subset:
+                store.allow_governed(host, identity="deploy", capabilities=("exec",))
+
+        t1 = threading.Thread(target=_grant_half, args=(hosts[:20],))
+        t2 = threading.Thread(target=_grant_half, args=(hosts[20:],))
+        t1.start()
+        t2.start()
+        t1.join(timeout=30)
+        t2.join(timeout=30)
+
+        final = JsonHostAllowlistStore(path).list_allowed()
+        assert final == frozenset(hosts)
+
+    def test_revoke_racing_allow_governed_never_resurrects_after_revoke_wins_last(
+        self, tmp_path: Path
+    ) -> None:
+        """A tighter race on the SAME host: N alternating
+        allow_governed/revoke cycles from two threads must never crash and
+        must always leave the store in a state consistent with SOME
+        serialized ordering (never a torn read, never a lost write)."""
+        path = tmp_path / "allowlist.json"
+        store = JsonHostAllowlistStore(path)
+        host = "db1.tailxxxx.ts.net"
+        iterations = 60
+        errors: list[BaseException] = []
+
+        def _allow_loop() -> None:
+            try:
+                for _ in range(iterations):
+                    store.allow_governed(host, identity="deploy", capabilities=("exec",))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via `errors`
+                errors.append(exc)
+
+        def _revoke_loop() -> None:
+            try:
+                for _ in range(iterations):
+                    store.revoke(host)
+            except BaseException as exc:  # noqa: BLE001 — surfaced via `errors`
+                errors.append(exc)
+
+        t1 = threading.Thread(target=_allow_loop)
+        t2 = threading.Thread(target=_revoke_loop)
+        t1.start()
+        t2.start()
+        t1.join(timeout=30)
+        t2.join(timeout=30)
+
+        assert errors == []
+        # No assertion on the FINAL allowed/revoked state (racing on purpose,
+        # either final state is a valid serialization) — the guarantee under
+        # test is that every read the store returns is well-formed JSON,
+        # never a torn/interleaved write.
+        JsonHostAllowlistStore(path).list_allowed()  # must not raise

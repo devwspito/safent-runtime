@@ -36,6 +36,17 @@ class SshExecutionError(TailnetSshError):
     """The `ssh` binary is missing, unspawnable, or exited abnormally before running."""
 
 
+class AllowlistStoreUnavailableError(TailnetSshError):
+    """`/var/lib/hermes/tailscale/ssh-allowlist.json` exists but is
+    unreadable or corrupt (as opposed to simply absent, which is a
+    legitimate empty state). CWE-636 fix: a read-modify-write method (allow/
+    allow_governed/revoke) NEVER treats this as "empty" and rewrites the
+    file — that would silently discard every entry that survived the
+    corruption. grant_for NEVER treats this as "no ceiling" either — a
+    capability-ceiling decision that cannot read its own data source fails
+    CLOSED (deny), never open."""
+
+
 class InvalidRemoteIdentityError(TailnetSshError):
     """A CLOUD-managed host's declared remote identity is malformed —
     fail-closed: the call is refused rather than passed to `ssh` verbatim."""
