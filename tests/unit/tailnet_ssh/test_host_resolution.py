@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from hermes.tailnet_ssh.application.host_resolution import resolve_host
+from hermes.tailnet_ssh.application.host_resolution import resolve_governed_host, resolve_host
 from hermes.tailnet_ssh.application.ports import TailnetPeer, TailnetStatus
 from hermes.tailnet_ssh.domain.errors import InvalidTailnetHostError, UnknownTailnetHostError
 
@@ -69,3 +69,63 @@ class TestResolveHostRejectsOutsideTailnet:
         on the bare suffix — only a `.`-delimited subdomain counts."""
         with pytest.raises(UnknownTailnetHostError):
             resolve_host("eviltailxxxx.ts.net", _STATUS)
+
+
+class TestResolveGovernedHostStrictness:
+    """Security review 2026-09, I1/REQ-20 — the GOVERNED path (cloud grants)
+    uses a STRICTER resolver than the interactive/local paths: it never
+    trusts a name merely for being under the tailnet's own suffix."""
+
+    def test_listed_peer_bare_name_resolves(self) -> None:
+        assert resolve_governed_host("db1", _STATUS).value == "db1.tailxxxx.ts.net"
+
+    def test_listed_peer_fqdn_resolves(self) -> None:
+        assert (
+            resolve_governed_host("db1.tailxxxx.ts.net", _STATUS).value
+            == "db1.tailxxxx.ts.net"
+        )
+
+    def test_listed_peer_case_insensitive(self) -> None:
+        assert resolve_governed_host("DB1", _STATUS).value == "db1.tailxxxx.ts.net"
+
+    def test_unlisted_name_under_the_suffix_is_rejected(self) -> None:
+        """Bug reproduced pre-fix: resolve_host accepted `ghost.<suffix>`
+        with NO check against `peers` at all — the suffix alone was treated
+        as sufficient proof of membership."""
+        with pytest.raises(UnknownTailnetHostError):
+            resolve_governed_host("ghost.tailxxxx.ts.net", _STATUS)
+
+    def test_multi_label_name_under_the_suffix_is_rejected(self) -> None:
+        """Bug reproduced pre-fix: resolve_host accepted `a.b.<suffix>` via
+        a bare `.endswith(suffix)` check — more than one label before the
+        suffix must never be treated as a single peer name."""
+        with pytest.raises(UnknownTailnetHostError):
+            resolve_governed_host("a.b.tailxxxx.ts.net", _STATUS)
+
+    def test_unlisted_bare_name_rejected(self) -> None:
+        with pytest.raises(UnknownTailnetHostError):
+            resolve_governed_host("not-a-peer", _STATUS)
+
+    def test_offline_peer_still_resolves(self) -> None:
+        """online=False only informs UX — membership in `peers` is what
+        REQ-20 actually requires, not liveness."""
+        assert (
+            resolve_governed_host("build-box", _STATUS).value
+            == "build-box.tailxxxx.ts.net"
+        )
+
+    def test_bare_suffix_rejected(self) -> None:
+        with pytest.raises(UnknownTailnetHostError):
+            resolve_governed_host("tailxxxx.ts.net", _STATUS)
+
+    def test_ip_literal_rejected_before_membership_check(self) -> None:
+        with pytest.raises(InvalidTailnetHostError):
+            resolve_governed_host("100.64.1.2", _STATUS)
+
+    def test_unrelated_domain_rejected(self) -> None:
+        with pytest.raises(UnknownTailnetHostError):
+            resolve_governed_host("evil.com", _STATUS)
+
+    def test_suffix_substring_but_not_dot_boundary_rejected(self) -> None:
+        with pytest.raises(UnknownTailnetHostError):
+            resolve_governed_host("eviltailxxxx.ts.net", _STATUS)

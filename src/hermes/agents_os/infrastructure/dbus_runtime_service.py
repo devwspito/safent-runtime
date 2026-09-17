@@ -1303,8 +1303,11 @@ class DbusRuntimeServiceWiring:
     #
     # list_ssh_hosts: read-only, no authZ (mirrors list_egress_grants).
     # allow_ssh_host: mutator, authZ via sender_uid del bus (CWE-862).
-    #   REQ-20 — host es resuelto SOLO contra la tailnet en vivo
-    #   (StatusJsonTailnetDirectory + resolve_host), NUNCA por DNS ni /etc/hosts.
+    #   REQ-20 (I1, security review 2026-09) — host es resuelto SOLO contra
+    #   la tailnet en vivo con el resolutor ESTRICTO (StatusJsonTailnetDirectory
+    #   + resolve_governed_host: exactamente una etiqueta antes del sufijo Y
+    #   pertenencia a peers), NUNCA por DNS, /etc/hosts, ni por el resolutor
+    #   laxo (resolve_host) que confía en cualquier nombre bajo el sufijo.
     #   Un host que no resuelve es un rechazo PERMANENTE:
     #   {"ok": False, "error": "unknown_host"|"invalid_host"} — nunca se
     #   persiste, nunca se reintenta como si fuera transitorio.
@@ -1354,7 +1357,7 @@ class DbusRuntimeServiceWiring:
             return {"ok": False, "error": "invalid_draft"}
 
         from hermes.tailnet_ssh.application.host_resolution import (  # noqa: PLC0415
-            resolve_host,
+            resolve_governed_host,
         )
         from hermes.tailnet_ssh.domain.errors import (  # noqa: PLC0415
             InvalidTailnetHostError,
@@ -1369,7 +1372,12 @@ class DbusRuntimeServiceWiring:
         )
 
         try:
-            resolved = resolve_host(host, StatusJsonTailnetDirectory().read())
+            # I1/REQ-20 (security review 2026-09): the GOVERNED path uses the
+            # STRICT resolver — exactly one label before the suffix AND
+            # membership in the live peers list. Never the loose
+            # any-name-under-the-suffix `resolve_host` used by the
+            # interactive/local paths.
+            resolved = resolve_governed_host(host, StatusJsonTailnetDirectory().read())
         except InvalidTailnetHostError:
             return {"ok": False, "error": "invalid_host"}
         except UnknownTailnetHostError:

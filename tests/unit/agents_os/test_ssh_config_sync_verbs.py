@@ -178,6 +178,36 @@ class TestAllowSshHostResolution:
         assert resp == {"ok": False, "error": "unknown_host"}
         assert wiring.list_ssh_hosts() == []
 
+    def test_unlisted_name_under_the_suffix_is_rejected(
+        self, ssh_paths: tuple[Path, Path]
+    ) -> None:
+        """I1/REQ-20 (security review 2026-09) — the governed path never
+        trusts a name merely for being under the tailnet's own suffix; it
+        must ALSO be a currently-listed peer."""
+        _, status_path = ssh_paths
+        _write_status(status_path)
+        wiring = _make_wiring()
+
+        resp = wiring.allow_ssh_host(
+            draft_json=_draft("ghost.tailxxxx.ts.net"), sender_uid=_OPERATOR_UID
+        )
+
+        assert resp == {"ok": False, "error": "unknown_host"}
+        assert wiring.list_ssh_hosts() == []
+
+    def test_multi_label_name_under_the_suffix_is_rejected(
+        self, ssh_paths: tuple[Path, Path]
+    ) -> None:
+        _, status_path = ssh_paths
+        _write_status(status_path)
+        wiring = _make_wiring()
+
+        resp = wiring.allow_ssh_host(
+            draft_json=_draft("a.b.tailxxxx.ts.net"), sender_uid=_OPERATOR_UID
+        )
+
+        assert resp == {"ok": False, "error": "unknown_host"}
+
     def test_ip_literal_host_is_rejected_as_invalid(
         self, ssh_paths: tuple[Path, Path]
     ) -> None:
