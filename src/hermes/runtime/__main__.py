@@ -1052,6 +1052,9 @@ def _build_tailnet_ssh_surface_adapter(*, signer, audit_repo):
     )
     from hermes.tailnet_ssh.application.tailnet_ssh_use_case import TailnetSshUseCase  # noqa: PLC0415
     from hermes.tailnet_ssh.infrastructure.hash_chain_audit_port import HashChainAuditPort  # noqa: PLC0415
+    from hermes.tailnet_ssh.infrastructure.json_host_allowlist_store import (  # noqa: PLC0415
+        JsonHostAllowlistStore,
+    )
     from hermes.tailnet_ssh.infrastructure.ssh_subprocess_executor import (  # noqa: PLC0415
         SubprocessSshExecutor,
     )
@@ -1065,13 +1068,19 @@ def _build_tailnet_ssh_surface_adapter(*, signer, audit_repo):
     directory = StatusJsonTailnetDirectory()
     executor = SubprocessSshExecutor()
     audit = HashChainAuditPort(signer=signer, audit_repo=audit_repo)
+    # spec 002 US3, D-4: the SAME allow-list store gates identity/capability
+    # ceilings for cloud-managed hosts (security_hook already uses this
+    # store's is_allowed()/allow() for the plain per-host gate).
+    host_grants = JsonHostAllowlistStore()
     adapter = TailnetSshSurfaceAdapter(
-        ssh_use_case=TailnetSshUseCase(directory=directory, executor=executor, audit=audit),
+        ssh_use_case=TailnetSshUseCase(
+            directory=directory, executor=executor, audit=audit, host_grants=host_grants
+        ),
         file_get_use_case=TailnetFileGetUseCase(
-            directory=directory, executor=executor, audit=audit
+            directory=directory, executor=executor, audit=audit, host_grants=host_grants
         ),
         file_put_use_case=TailnetFilePutUseCase(
-            directory=directory, executor=executor, audit=audit
+            directory=directory, executor=executor, audit=audit, host_grants=host_grants
         ),
     )
     logger.info("hermes.runtime.tailnet_ssh_surface_adapter.ready")

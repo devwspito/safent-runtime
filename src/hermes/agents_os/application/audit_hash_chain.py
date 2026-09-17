@@ -76,6 +76,8 @@ class AuditKind(StrEnum):
     EGRESS_DENIED = "egress_denied"
     # --- spec 022 v2: governed tailnet SSH (append-only) ---
     TAILNET_SSH_EXECUTED = "tailnet_ssh_executed"
+    # --- spec 002 US3, D-4: governed-SSH capability ceiling (append-only) ---
+    TAILNET_SSH_DENIED = "tailnet_ssh_denied"
 
 
 class AuditChainCorrupted(RuntimeError):

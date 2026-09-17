@@ -56,6 +56,7 @@ class SubprocessSshExecutor:
         timeout_s: int,
         stdin: str | None = None,
         max_output_bytes: int | None = None,
+        user: str | None = None,
     ) -> SshExecutionResult:
         ssh_binary = self._ssh_binary_override or shutil.which("ssh")
         if not ssh_binary:
@@ -63,7 +64,7 @@ class SubprocessSshExecutor:
         self._ensure_known_hosts()
 
         cap = max_output_bytes if max_output_bytes is not None else MAX_OUTPUT_BYTES
-        argv = self._build_argv(ssh_binary, host, command, timeout_s)
+        argv = self._build_argv(ssh_binary, host, command, timeout_s, user=user)
         env = {**os.environ, "HERMES_TAILSCALE_SOCKS5_ADDR": self._socks5_addr}
 
         started = time.monotonic()
@@ -108,23 +109,40 @@ class SubprocessSshExecutor:
         )
 
     def _build_argv(
-        self, ssh_binary: str, host: str, command: str, timeout_s: int
+        self,
+        ssh_binary: str,
+        host: str,
+        command: str,
+        timeout_s: int,
+        *,
+        user: str | None = None,
     ) -> list[str]:
         proxy_command = (
             f"{self._python_executable} -m {self._proxy_command_module} %h %p"
         )
         connect_timeout = max(1, min(timeout_s, _MAX_CONNECT_TIMEOUT_S))
-        return [
+        argv = [
             ssh_binary,
             "-o", "BatchMode=yes",
             "-o", "StrictHostKeyChecking=accept-new",
             "-o", f"UserKnownHostsFile={self._known_hosts_path}",
             "-o", f"ConnectTimeout={connect_timeout}",
             "-o", f"ProxyCommand={proxy_command}",
-            "--",
-            host,
-            command,
         ]
+        # spec 002 US3, D-4: force the remote login identity for a CLOUD-
+        # managed host's governed-SSH grant. None (the default, every local/
+        # unmanaged host) omits `-l` entirely — today's behaviour, byte-for-
+        # byte unchanged (the ambient/default remote user, exactly as
+        # before this feature). `-l` takes the ENTIRE next argv token
+        # literally as the login name (ssh's own getopt-style parsing) — a
+        # value starting with `-` can never be reinterpreted as another
+        # flag, so this is safe even though `user` is never shell-quoted
+        # (mirrors `command`/`host` below: separate argv elements, never
+        # shell-interpolated).
+        if user is not None:
+            argv += ["-l", user]
+        argv += ["--", host, command]
+        return argv
 
     def _ensure_known_hosts(self) -> None:
         self._known_hosts_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

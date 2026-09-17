@@ -266,6 +266,87 @@ class TestAllowSshHostIdempotent:
         assert len(wiring.list_ssh_hosts()) == 1
 
 
+class TestAllowSshHostNarrowing:
+    """Re-applying a bundle that narrows capabilities or changes identity
+    updates the stored ceiling (spec 002 US3, D-4)."""
+
+    def test_re_applying_with_narrower_capabilities_updates_the_ceiling(
+        self, ssh_paths: tuple[Path, Path]
+    ) -> None:
+        allow_path, status_path = ssh_paths
+        _write_status(status_path)
+        wiring = _make_wiring()
+        wiring.allow_ssh_host(
+            draft_json=_draft("db1", capabilities=["exec", "file_read"]),
+            sender_uid=_OPERATOR_UID,
+        )
+
+        wiring.allow_ssh_host(
+            draft_json=_draft("db1", capabilities=["file_read"]), sender_uid=_OPERATOR_UID
+        )
+
+        grant = JsonHostAllowlistStore(allow_path).grant_for("db1.tailxxxx.ts.net")
+        assert grant is not None
+        assert grant.capabilities == frozenset({"file_read"})
+
+    def test_re_applying_with_a_different_identity_updates_the_ceiling(
+        self, ssh_paths: tuple[Path, Path]
+    ) -> None:
+        allow_path, status_path = ssh_paths
+        _write_status(status_path)
+        wiring = _make_wiring()
+        wiring.allow_ssh_host(
+            draft_json=_draft("db1", identity="deploy"), sender_uid=_OPERATOR_UID
+        )
+
+        wiring.allow_ssh_host(
+            draft_json=_draft("db1", identity="auditor"), sender_uid=_OPERATOR_UID
+        )
+
+        grant = JsonHostAllowlistStore(allow_path).grant_for("db1.tailxxxx.ts.net")
+        assert grant is not None
+        assert grant.identity == "auditor"
+
+    def test_narrowing_never_touches_a_local_conflict(self, ssh_paths: tuple[Path, Path]) -> None:
+        allow_path, status_path = ssh_paths
+        _write_status(status_path)
+        JsonHostAllowlistStore(allow_path).allow("build-box.tailxxxx.ts.net")
+        wiring = _make_wiring()
+
+        wiring.allow_ssh_host(draft_json=_draft("build-box"), sender_uid=_OPERATOR_UID)
+
+        grant = JsonHostAllowlistStore(allow_path).grant_for("build-box.tailxxxx.ts.net")
+        assert grant is not None
+        assert grant.managed_by is None
+        assert grant.identity is None
+
+
+class TestAllowSshHostInvalidGrantShape:
+    def test_missing_identity_is_rejected(self, ssh_paths: tuple[Path, Path]) -> None:
+        _, status_path = ssh_paths
+        _write_status(status_path)
+        wiring = _make_wiring()
+
+        resp = wiring.allow_ssh_host(
+            draft_json=json.dumps({"host": "db1", "capabilities": ["exec"]}),
+            sender_uid=_OPERATOR_UID,
+        )
+
+        assert resp == {"ok": False, "error": "invalid_draft"}
+
+    def test_empty_capabilities_is_rejected(self, ssh_paths: tuple[Path, Path]) -> None:
+        _, status_path = ssh_paths
+        _write_status(status_path)
+        wiring = _make_wiring()
+
+        resp = wiring.allow_ssh_host(
+            draft_json=json.dumps({"host": "db1", "identity": "deploy", "capabilities": []}),
+            sender_uid=_OPERATOR_UID,
+        )
+
+        assert resp == {"ok": False, "error": "invalid_draft"}
+
+
 @pytest.mark.usefixtures("ssh_paths")
 class TestRevokeSshHost:
     def test_unauthorized_sender_raises(self) -> None:

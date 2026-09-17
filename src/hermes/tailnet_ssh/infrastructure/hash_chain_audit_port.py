@@ -71,3 +71,37 @@ class HashChainAuditPort:
                 "hermes.tailnet_ssh.audit_write_failed host=%s exit_code=%s",
                 host, exit_code, exc_info=True,
             )
+
+    def record_ssh_denied(
+        self,
+        *,
+        host: str,
+        capability: str,
+        identity: str,
+        reason: str,
+    ) -> None:
+        """spec 002 US3, D-4: a governed-SSH capability-ceiling denial — the
+        ssh subprocess was NEVER spawned. Same WORM chain, its own
+        AuditKind so a denial is never mistaken for an executed call."""
+        try:
+            self._run_coroutine(
+                self._signer.append_and_persist(
+                    audit_kind=AuditKind.TAILNET_SSH_DENIED,
+                    actor="agent",
+                    description=f"tailnet_ssh → {host} denegado ({capability})",
+                    payload={
+                        "host": host,
+                        "capability": capability,
+                        "identity": identity,
+                        "reason": reason,
+                    },
+                    audit_repo=self._audit_repo,
+                    tenant_id=self._tenant_id,
+                    category="tailnet_ssh",
+                )
+            )
+        except Exception:  # noqa: BLE001 — audit is fail-soft, never blocks the call
+            logger.warning(
+                "hermes.tailnet_ssh.audit_write_failed host=%s capability=%s denied=true",
+                host, capability, exc_info=True,
+            )

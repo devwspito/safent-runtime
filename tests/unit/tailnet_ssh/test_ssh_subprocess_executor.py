@@ -95,6 +95,54 @@ class TestArgvConstruction:
 
         assert known_hosts.exists()
 
+    def test_no_user_omits_dash_l_flag(self, tmp_path: Path, monkeypatch) -> None:
+        """Today's behaviour, unchanged: a local/unmanaged host never forces
+        a remote login identity."""
+        record_path = tmp_path / "record.json"
+        monkeypatch.setenv("FAKE_SSH_RECORD_PATH", str(record_path))
+        executor = _executor(tmp_path)
+
+        executor.run(host="db1.tailxxxx.ts.net", command="uptime", timeout_s=5)
+
+        argv = json.loads(record_path.read_text())["argv"]
+        assert "-l" not in argv
+
+    def test_user_is_passed_via_dash_l_as_a_separate_argv_element(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """spec 002 US3, D-4: a cloud-managed host's forced remote identity.
+        `-l` is followed by the user as its OWN argv token — never
+        concatenated into `user@host` or shell-interpolated."""
+        record_path = tmp_path / "record.json"
+        monkeypatch.setenv("FAKE_SSH_RECORD_PATH", str(record_path))
+        executor = _executor(tmp_path)
+
+        executor.run(host="db1.tailxxxx.ts.net", command="uptime", timeout_s=5, user="deploy")
+
+        argv = json.loads(record_path.read_text())["argv"]
+        assert "-l" in argv
+        assert argv[argv.index("-l") + 1] == "deploy"
+        assert argv[-2] == "db1.tailxxxx.ts.net"  # host untouched, no user@ prefix
+
+    def test_user_value_starting_with_dash_travels_as_one_opaque_token(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A flag-shaped identity string is passed UNMODIFIED as `-l`'s own
+        argv element — never concatenated, escaped, or split. Real `ssh`'s
+        own `-l` option parsing then takes the whole next token literally
+        (getopt-style), so this can never smuggle a second ssh option."""
+        record_path = tmp_path / "record.json"
+        monkeypatch.setenv("FAKE_SSH_RECORD_PATH", str(record_path))
+        executor = _executor(tmp_path)
+
+        executor.run(
+            host="db1.tailxxxx.ts.net", command="uptime", timeout_s=5,
+            user="-oProxyCommand=evil",
+        )
+
+        argv = json.loads(record_path.read_text())["argv"]
+        assert argv[argv.index("-l") + 1] == "-oProxyCommand=evil"
+
 
 class TestNonInteractive:
     def test_no_stdin_means_devnull_never_hangs(self, tmp_path: Path) -> None:

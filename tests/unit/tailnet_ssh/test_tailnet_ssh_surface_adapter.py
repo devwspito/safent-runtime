@@ -61,10 +61,10 @@ class _FakeExecutor:
     raise_error: Exception | None = None
     calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def run(self, *, host, command, timeout_s, stdin=None, max_output_bytes=None):
+    def run(self, *, host, command, timeout_s, stdin=None, max_output_bytes=None, user=None):
         self.calls.append({
             "host": host, "command": command, "timeout_s": timeout_s,
-            "stdin": stdin, "max_output_bytes": max_output_bytes,
+            "stdin": stdin, "max_output_bytes": max_output_bytes, "user": user,
         })
         if self.raise_error is not None:
             raise self.raise_error

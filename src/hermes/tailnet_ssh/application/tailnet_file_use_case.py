@@ -6,6 +6,10 @@ the path, so no new binary or ProxyCommand wiring is needed).
 Same trust boundary as TailnetSshUseCase: the per-host HITL decision is
 already resolved by security_hook's pre-tool-call hook before `execute()`
 runs.
+
+Capability ceiling (spec 002 US3, D-4): Get checks "file_read", Put checks
+"file_write" — see TailnetSshUseCase's module docstring and
+`capability_ceiling.resolve_execution_identity` for the shared design.
 """
 
 from __future__ import annotations
@@ -13,17 +17,21 @@ from __future__ import annotations
 import shlex
 from dataclasses import dataclass
 
+from hermes.tailnet_ssh.application.capability_ceiling import resolve_execution_identity
 from hermes.tailnet_ssh.application.host_resolution import resolve_host
 from hermes.tailnet_ssh.application.ports import (
     AuditPort,
+    HostGrantPort,
     SshExecutorPort,
     TailnetDirectoryPort,
 )
-from hermes.tailnet_ssh.domain.errors import RemoteCommandRejectedError
+from hermes.tailnet_ssh.domain.errors import RemoteCommandRejectedError, SshCapabilityDeniedError
 from hermes.tailnet_ssh.domain.limits import MAX_FILE_BYTES, MAX_TIMEOUT_S
 from hermes.tailnet_ssh.domain.remote_path import RemotePath
 
 _FILE_TRANSFER_TIMEOUT_S = min(60, MAX_TIMEOUT_S)
+_CAPABILITY_FILE_READ = "file_read"
+_CAPABILITY_FILE_WRITE = "file_write"
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,21 +56,38 @@ class TailnetFileGetUseCase:
         directory: TailnetDirectoryPort,
         executor: SshExecutorPort,
         audit: AuditPort,
+        host_grants: HostGrantPort | None = None,
     ) -> None:
         self._directory = directory
         self._executor = executor
         self._audit = audit
+        self._host_grants = host_grants
 
     def execute(self, request: TailnetFileGetRequest) -> TailnetFileGetResult:
         remote_path = RemotePath.parse(request.path)
         host = resolve_host(request.host, self._directory.read())
         command = f"cat -- {shlex.quote(remote_path.value)}"
 
+        grant = self._host_grants.grant_for(host.value) if self._host_grants else None
+        try:
+            identity = resolve_execution_identity(
+                grant, host=host.value, capability=_CAPABILITY_FILE_READ
+            )
+        except SshCapabilityDeniedError:
+            self._audit.record_ssh_denied(
+                host=host.value,
+                capability=_CAPABILITY_FILE_READ,
+                identity=(grant.identity if grant else None) or "",
+                reason="capability_denied",
+            )
+            raise
+
         outcome = self._executor.run(
             host=host.value,
             command=command,
             timeout_s=_FILE_TRANSFER_TIMEOUT_S,
             max_output_bytes=MAX_FILE_BYTES,
+            user=identity,
         )
         if outcome.exit_code != 0:
             raise RemoteCommandRejectedError(
@@ -108,10 +133,12 @@ class TailnetFilePutUseCase:
         directory: TailnetDirectoryPort,
         executor: SshExecutorPort,
         audit: AuditPort,
+        host_grants: HostGrantPort | None = None,
     ) -> None:
         self._directory = directory
         self._executor = executor
         self._audit = audit
+        self._host_grants = host_grants
 
     def execute(self, request: TailnetFilePutRequest) -> TailnetFilePutResult:
         remote_path = RemotePath.parse(request.path)
@@ -119,12 +146,27 @@ class TailnetFilePutUseCase:
         host = resolve_host(request.host, self._directory.read())
         command = f"cat > {shlex.quote(remote_path.value)}"
 
+        grant = self._host_grants.grant_for(host.value) if self._host_grants else None
+        try:
+            identity = resolve_execution_identity(
+                grant, host=host.value, capability=_CAPABILITY_FILE_WRITE
+            )
+        except SshCapabilityDeniedError:
+            self._audit.record_ssh_denied(
+                host=host.value,
+                capability=_CAPABILITY_FILE_WRITE,
+                identity=(grant.identity if grant else None) or "",
+                reason="capability_denied",
+            )
+            raise
+
         outcome = self._executor.run(
             host=host.value,
             command=command,
             timeout_s=_FILE_TRANSFER_TIMEOUT_S,
             stdin=request.content,
             max_output_bytes=MAX_FILE_BYTES,
+            user=identity,
         )
         if outcome.exit_code != 0:
             raise RemoteCommandRejectedError(

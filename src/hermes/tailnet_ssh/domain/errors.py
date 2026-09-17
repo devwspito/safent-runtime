@@ -34,3 +34,17 @@ class RemoteCommandTimeoutError(TailnetSshError):
 
 class SshExecutionError(TailnetSshError):
     """The `ssh` binary is missing, unspawnable, or exited abnormally before running."""
+
+
+class InvalidRemoteIdentityError(TailnetSshError):
+    """A CLOUD-managed host's declared remote identity is malformed —
+    fail-closed: the call is refused rather than passed to `ssh` verbatim."""
+
+
+class SshCapabilityDeniedError(TailnetSshError):
+    """A CLOUD-managed host's governed-SSH grant (spec 002 US3) does not
+    include the capability the use case is about to perform (exec /
+    file_read / file_write). The grant's `capabilities` set is a CEILING —
+    the use case never widens it, and raises this BEFORE the ssh subprocess
+    is ever spawned. Never raised for a local/unmanaged host — those keep
+    today's unrestricted behaviour (no ceiling exists to deny against)."""

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from hermes.tailnet_ssh.application.ports import (
+    HostGrant,
     SshExecutionResult,
     TailnetPeer,
     TailnetStatus,
@@ -21,6 +22,7 @@ from hermes.tailnet_ssh.domain.errors import (
     InvalidTailnetHostError,
     RemoteCommandRejectedError,
     RemoteCommandTimeoutError,
+    SshCapabilityDeniedError,
     UnknownTailnetHostError,
 )
 
@@ -48,10 +50,10 @@ class FakeExecutor:
     calls: list[dict[str, Any]] = field(default_factory=list)
     raise_error: Exception | None = None
 
-    def run(self, *, host, command, timeout_s, stdin=None, max_output_bytes=None):
+    def run(self, *, host, command, timeout_s, stdin=None, max_output_bytes=None, user=None):
         self.calls.append({
             "host": host, "command": command, "timeout_s": timeout_s,
-            "stdin": stdin, "max_output_bytes": max_output_bytes,
+            "stdin": stdin, "max_output_bytes": max_output_bytes, "user": user,
         })
         if self.raise_error is not None:
             raise self.raise_error
@@ -61,12 +63,26 @@ class FakeExecutor:
 @dataclass
 class FakeAudit:
     calls: list[dict[str, Any]] = field(default_factory=list)
+    denied_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def record_ssh_call(self, *, host, command, exit_code, duration_ms, truncated):
         self.calls.append({
             "host": host, "command": command, "exit_code": exit_code,
             "duration_ms": duration_ms, "truncated": truncated,
         })
+
+    def record_ssh_denied(self, *, host, capability, identity, reason):
+        self.denied_calls.append({
+            "host": host, "capability": capability, "identity": identity, "reason": reason,
+        })
+
+
+@dataclass
+class FakeHostGrants:
+    grants: dict[str, HostGrant] = field(default_factory=dict)
+
+    def grant_for(self, host: str) -> HostGrant | None:
+        return self.grants.get(host)
 
 
 def _ok_result(**overrides: Any) -> SshExecutionResult:
@@ -206,3 +222,102 @@ class TestTailnetSshUseCasePropagatesExecutorErrors:
         with pytest.raises(RemoteCommandTimeoutError):
             use_case.execute(TailnetSshRequest(host="db1", command="sleep 999", timeout_s=1))
         assert audit.calls == []
+
+
+class TestTailnetSshUseCaseCapabilityCeiling:
+    """spec 002 US3, D-4 — governed-SSH capability ceiling for CLOUD-managed
+    hosts; local/unmanaged hosts are entirely unaffected."""
+
+    def test_cloud_host_with_exec_capability_forces_declared_identity(self) -> None:
+        directory = FakeDirectory()
+        executor = FakeExecutor(result=_ok_result())
+        host_grants = FakeHostGrants(grants={
+            "db1.tailxxxx.ts.net": HostGrant(
+                managed_by="cloud", identity="deploy", capabilities=frozenset({"exec"})
+            )
+        })
+        use_case = TailnetSshUseCase(
+            directory=directory, executor=executor, audit=FakeAudit(), host_grants=host_grants
+        )
+
+        use_case.execute(TailnetSshRequest(host="db1", command="uptime", timeout_s=5))
+
+        assert executor.calls[0]["user"] == "deploy"
+
+    def test_cloud_host_without_exec_capability_denies_before_executor(self) -> None:
+        directory = FakeDirectory()
+        executor = FakeExecutor(result=_ok_result())
+        audit = FakeAudit()
+        host_grants = FakeHostGrants(grants={
+            "db1.tailxxxx.ts.net": HostGrant(
+                managed_by="cloud", identity="auditor", capabilities=frozenset({"file_read"})
+            )
+        })
+        use_case = TailnetSshUseCase(
+            directory=directory, executor=executor, audit=audit, host_grants=host_grants
+        )
+
+        with pytest.raises(SshCapabilityDeniedError):
+            use_case.execute(TailnetSshRequest(host="db1", command="uptime", timeout_s=5))
+
+        assert executor.calls == []
+
+    def test_denial_is_audited_with_capability_and_identity(self) -> None:
+        directory = FakeDirectory()
+        executor = FakeExecutor(result=_ok_result())
+        audit = FakeAudit()
+        host_grants = FakeHostGrants(grants={
+            "db1.tailxxxx.ts.net": HostGrant(
+                managed_by="cloud", identity="auditor", capabilities=frozenset({"file_read"})
+            )
+        })
+        use_case = TailnetSshUseCase(
+            directory=directory, executor=executor, audit=audit, host_grants=host_grants
+        )
+
+        with pytest.raises(SshCapabilityDeniedError):
+            use_case.execute(TailnetSshRequest(host="db1", command="uptime", timeout_s=5))
+
+        assert audit.denied_calls == [{
+            "host": "db1.tailxxxx.ts.net", "capability": "exec",
+            "identity": "auditor", "reason": "capability_denied",
+        }]
+        assert audit.calls == []  # no executed-call entry for a denial
+
+    def test_local_host_with_no_host_grants_injected_is_unaffected(self) -> None:
+        """The default (host_grants=None) — today's behaviour byte-for-byte."""
+        directory = FakeDirectory()
+        executor = FakeExecutor(result=_ok_result())
+        use_case = TailnetSshUseCase(directory=directory, executor=executor, audit=FakeAudit())
+
+        use_case.execute(TailnetSshRequest(host="db1", command="uptime", timeout_s=5))
+
+        assert executor.calls[0]["user"] is None
+
+    def test_local_host_present_in_the_store_has_no_ceiling(self) -> None:
+        """A host present on the allow-list but NOT cloud-managed keeps
+        today's semantics: unrestricted, no forced identity."""
+        directory = FakeDirectory()
+        executor = FakeExecutor(result=_ok_result())
+        host_grants = FakeHostGrants(grants={
+            "db1.tailxxxx.ts.net": HostGrant(managed_by=None, identity=None, capabilities=None)
+        })
+        use_case = TailnetSshUseCase(
+            directory=directory, executor=executor, audit=FakeAudit(), host_grants=host_grants
+        )
+
+        use_case.execute(TailnetSshRequest(host="db1", command="uptime", timeout_s=5))
+
+        assert executor.calls[0]["user"] is None
+
+    def test_unknown_host_in_the_store_has_no_ceiling(self) -> None:
+        directory = FakeDirectory()
+        executor = FakeExecutor(result=_ok_result())
+        host_grants = FakeHostGrants(grants={})
+        use_case = TailnetSshUseCase(
+            directory=directory, executor=executor, audit=FakeAudit(), host_grants=host_grants
+        )
+
+        use_case.execute(TailnetSshRequest(host="db1", command="uptime", timeout_s=5))
+
+        assert executor.calls[0]["user"] is None

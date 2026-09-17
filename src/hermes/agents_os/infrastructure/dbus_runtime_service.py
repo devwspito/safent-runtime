@@ -1329,12 +1329,22 @@ class DbusRuntimeServiceWiring:
         ]
 
     def allow_ssh_host(self, *, draft_json: str, sender_uid: int) -> dict:
-        """Concede SSH gobernado a un equipo (US3, D-4). draft: {host,
-        identity, capabilities}. Devuelve JSON {ok, host?, conflict?, error?}."""
+        """Concede SSH gobernado a un equipo, con techo de capacidades e
+        identidad forzada (US3, D-4). draft: {host, identity, capabilities}.
+        Devuelve JSON {ok, host?, conflict?, error?}.
+
+        Reaplicar un draft con capabilities más estrechas o una identity
+        distinta ACTUALIZA el techo guardado (allow_governed es idempotente
+        y de actualización — ver JsonHostAllowlistStore)."""
         self._authorize_and_resolve(sender_uid, operation="allow_ssh_host")
         try:
             draft = json.loads(draft_json)
             host = str(draft["host"])
+            identity = str(draft["identity"])
+            capabilities_raw = draft["capabilities"]
+            if not identity or not isinstance(capabilities_raw, list) or not capabilities_raw:
+                raise ValueError("identity/capabilities inválidos")
+            capabilities = tuple(str(c) for c in capabilities_raw)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             return {"ok": False, "error": "invalid_draft"}
 
@@ -1364,23 +1374,21 @@ class DbusRuntimeServiceWiring:
 
         canonical = resolved.value
         store = JsonHostAllowlistStore()
-        current = {h.host: h.managed_by for h in store.list_with_metadata()}
-        if canonical in current:
-            if current[canonical] != self._SSH_CLOUD_MANAGED:
-                logger.info(
-                    "hermes.dbus.ssh_host_local_conflict",
-                    extra={"host": canonical, "by_uid": sender_uid},
-                )
-                return {"ok": True, "host": canonical, "conflict": True}
-            return {"ok": True, "host": canonical}
+        existing = store.grant_for(canonical)
+        if existing is not None and existing.managed_by != self._SSH_CLOUD_MANAGED:
+            logger.info(
+                "hermes.dbus.ssh_host_local_conflict",
+                extra={"host": canonical, "by_uid": sender_uid},
+            )
+            return {"ok": True, "host": canonical, "conflict": True}
 
-        store.allow(canonical, managed_by=self._SSH_CLOUD_MANAGED)
+        store.allow_governed(canonical, identity=identity, capabilities=capabilities)
         logger.info(
             "hermes.dbus.ssh_host_allowed",
             extra={
                 "host": canonical,
-                "identity": draft.get("identity", ""),
-                "capabilities": draft.get("capabilities", []),
+                "identity": identity,
+                "capabilities": capabilities,
                 "by_uid": sender_uid,
             },
         )
@@ -1395,8 +1403,8 @@ class DbusRuntimeServiceWiring:
 
         store = JsonHostAllowlistStore()
         normalized = host.strip().lower()
-        current = {h.host: h.managed_by for h in store.list_with_metadata()}
-        if current.get(normalized) != self._SSH_CLOUD_MANAGED:
+        existing = store.grant_for(normalized)
+        if existing is None or existing.managed_by != self._SSH_CLOUD_MANAGED:
             return {"ok": True, "revoked": False}
 
         store.revoke(normalized)
