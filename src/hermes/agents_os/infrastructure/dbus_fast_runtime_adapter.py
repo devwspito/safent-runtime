@@ -758,6 +758,36 @@ class Runtime1ServiceInterface(ServiceInterface):
             self._wiring.add_egress_domain(domain=domain, sender_uid=sender_uid)
         )
 
+    # ------------------------------------------------------------------
+    # Governed tailnet SSH allow-list (config-sync path, spec 002 US3, D-4).
+    # ListSshHosts: read-only, no authZ. AllowSshHost/RevokeSshHost: authZ
+    # via sender_uid del bus (CWE-862). See DbusRuntimeServiceWiring's SSH
+    # methods for the sovereignty contract (REQ-20 host resolution, FR-014
+    # local-conflict guard).
+    # ------------------------------------------------------------------
+
+    @method()
+    async def ListSshHosts(self) -> "s":  # noqa: N802,F821,UP037
+        """Lista los equipos SSH aprobados, con origen (read-only). JSON list."""
+        return json.dumps(self._wiring.list_ssh_hosts())
+
+    @method()
+    async def AllowSshHost(self, draft_json: "s") -> "s":  # noqa: N802,F821,UP037
+        """Concede SSH gobernado. draft: {host, identity, capabilities}.
+        Devuelve JSON {ok, host?, conflict?, error?}."""
+        sender_uid = await self._resolve_current_sender_uid()
+        return json.dumps(
+            self._wiring.allow_ssh_host(draft_json=draft_json, sender_uid=sender_uid)
+        )
+
+    @method()
+    async def RevokeSshHost(self, host: "s") -> "s":  # noqa: N802,F821,UP037
+        """Revoca SSH gobernado de un equipo managed_by 'cloud'. JSON {ok, revoked}."""
+        sender_uid = await self._resolve_current_sender_uid()
+        return json.dumps(
+            self._wiring.revoke_ssh_host(host=host, sender_uid=sender_uid)
+        )
+
     @method()
     async def SetActiveProvider(self, provider_id: "s") -> "s":  # noqa: N802,F821,UP037
         sender_uid = await self._resolve_current_sender_uid()

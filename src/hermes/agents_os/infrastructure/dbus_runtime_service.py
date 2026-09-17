@@ -1299,6 +1299,114 @@ class DbusRuntimeServiceWiring:
         return {"ok": True, "domain": normalised}
 
     # ------------------------------------------------------------------
+    # Governed tailnet SSH allow-list (config-sync path, spec 002 US3, D-4).
+    #
+    # list_ssh_hosts: read-only, no authZ (mirrors list_egress_grants).
+    # allow_ssh_host: mutator, authZ via sender_uid del bus (CWE-862).
+    #   REQ-20 — host es resuelto SOLO contra la tailnet en vivo
+    #   (StatusJsonTailnetDirectory + resolve_host), NUNCA por DNS ni /etc/hosts.
+    #   Un host que no resuelve es un rechazo PERMANENTE:
+    #   {"ok": False, "error": "unknown_host"|"invalid_host"} — nunca se
+    #   persiste, nunca se reintenta como si fuera transitorio.
+    #   FR-014 — un equipo local previo (managed_by != "cloud") NUNCA se
+    #   borra ni se sobrescribe: se informa {"ok": True, "conflict": True}
+    #   sin tocar el store.
+    # revoke_ssh_host: SOLO revoca equipos managed_by "cloud" — un grant
+    #   local del dueño nunca lo toca este verbo dirigido por la nube.
+    # ------------------------------------------------------------------
+
+    _SSH_CLOUD_MANAGED = "cloud"
+
+    def list_ssh_hosts(self) -> list[dict]:
+        """Lista los equipos SSH aprobados, con origen (read-only, sin authZ)."""
+        from hermes.tailnet_ssh.infrastructure.json_host_allowlist_store import (  # noqa: PLC0415
+            JsonHostAllowlistStore,
+        )
+
+        return [
+            {"host": h.host, "approved_at": h.approved_at, "managed_by": h.managed_by}
+            for h in JsonHostAllowlistStore().list_with_metadata()
+        ]
+
+    def allow_ssh_host(self, *, draft_json: str, sender_uid: int) -> dict:
+        """Concede SSH gobernado a un equipo (US3, D-4). draft: {host,
+        identity, capabilities}. Devuelve JSON {ok, host?, conflict?, error?}."""
+        self._authorize_and_resolve(sender_uid, operation="allow_ssh_host")
+        try:
+            draft = json.loads(draft_json)
+            host = str(draft["host"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return {"ok": False, "error": "invalid_draft"}
+
+        from hermes.tailnet_ssh.application.host_resolution import (  # noqa: PLC0415
+            resolve_host,
+        )
+        from hermes.tailnet_ssh.domain.errors import (  # noqa: PLC0415
+            InvalidTailnetHostError,
+            TailnetDirectoryUnavailableError,
+            UnknownTailnetHostError,
+        )
+        from hermes.tailnet_ssh.infrastructure.json_host_allowlist_store import (  # noqa: PLC0415
+            JsonHostAllowlistStore,
+        )
+        from hermes.tailnet_ssh.infrastructure.status_json_directory import (  # noqa: PLC0415
+            StatusJsonTailnetDirectory,
+        )
+
+        try:
+            resolved = resolve_host(host, StatusJsonTailnetDirectory().read())
+        except InvalidTailnetHostError:
+            return {"ok": False, "error": "invalid_host"}
+        except UnknownTailnetHostError:
+            return {"ok": False, "error": "unknown_host"}
+        except TailnetDirectoryUnavailableError:
+            return {"ok": False, "error": "directory_unavailable"}
+
+        canonical = resolved.value
+        store = JsonHostAllowlistStore()
+        current = {h.host: h.managed_by for h in store.list_with_metadata()}
+        if canonical in current:
+            if current[canonical] != self._SSH_CLOUD_MANAGED:
+                logger.info(
+                    "hermes.dbus.ssh_host_local_conflict",
+                    extra={"host": canonical, "by_uid": sender_uid},
+                )
+                return {"ok": True, "host": canonical, "conflict": True}
+            return {"ok": True, "host": canonical}
+
+        store.allow(canonical, managed_by=self._SSH_CLOUD_MANAGED)
+        logger.info(
+            "hermes.dbus.ssh_host_allowed",
+            extra={
+                "host": canonical,
+                "identity": draft.get("identity", ""),
+                "capabilities": draft.get("capabilities", []),
+                "by_uid": sender_uid,
+            },
+        )
+        return {"ok": True, "host": canonical}
+
+    def revoke_ssh_host(self, *, host: str, sender_uid: int) -> dict:
+        """Revoca SSH gobernado — SOLO si el equipo está managed_by "cloud"."""
+        self._authorize_and_resolve(sender_uid, operation="revoke_ssh_host")
+        from hermes.tailnet_ssh.infrastructure.json_host_allowlist_store import (  # noqa: PLC0415
+            JsonHostAllowlistStore,
+        )
+
+        store = JsonHostAllowlistStore()
+        normalized = host.strip().lower()
+        current = {h.host: h.managed_by for h in store.list_with_metadata()}
+        if current.get(normalized) != self._SSH_CLOUD_MANAGED:
+            return {"ok": True, "revoked": False}
+
+        store.revoke(normalized)
+        logger.info(
+            "hermes.dbus.ssh_host_revoked",
+            extra={"host": normalized, "by_uid": sender_uid},
+        )
+        return {"ok": True, "revoked": True}
+
+    # ------------------------------------------------------------------
     # GATE 0 / M2 — Conversaciones (chat) OS-nativas por D-Bus.
     # Lecturas (list/get): supervisión read-only, sin authZ. Delete: muta →
     # authZ por sender_uid (CWE-862). El daemon ES dueño del store; el stream
