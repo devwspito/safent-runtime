@@ -842,3 +842,230 @@ class TestDirectorySpecBackCompat:
         )
         parsed_payload = json.loads(b)["payload"]
         assert "directory" not in parsed_payload
+
+
+# ---------------------------------------------------------------------------
+# SshHostSpec / SshPolicySpec (spec 002 US3, D-4 — governed tailnet SSH)
+# ---------------------------------------------------------------------------
+
+
+class TestSshHostSpecParsing:
+    def test_minimal_host_parses(self) -> None:
+        from hermes.config_sync.policy_document import SshHostSpec
+
+        spec = SshHostSpec(host="db1.tailxxxx.ts.net", identity="agent", capabilities=["exec"])
+        assert spec.host == "db1.tailxxxx.ts.net"
+        assert spec.capabilities == ["exec"]
+
+    def test_bare_peer_name_parses(self) -> None:
+        """Wire-contract parsing only checks FORMAT, not tailnet membership —
+        that is resolved one layer up (REQ-20, see TestApplySshSection)."""
+        from hermes.config_sync.policy_document import SshHostSpec
+
+        spec = SshHostSpec(host="db1", identity="agent", capabilities=["exec"])
+        assert spec.host == "db1"
+
+    def test_capabilities_canonicalised_sorted(self) -> None:
+        from hermes.config_sync.policy_document import SshHostSpec
+
+        spec = SshHostSpec(
+            host="db1", identity="agent", capabilities=["file_write", "exec", "file_read"]
+        )
+        assert spec.capabilities == ["exec", "file_read", "file_write"]
+
+    def test_duplicate_capabilities_rejected(self) -> None:
+        from hermes.config_sync.policy_document import SshHostSpec
+
+        with pytest.raises(ValidationError):
+            SshHostSpec(host="db1", identity="agent", capabilities=["exec", "exec"])
+
+    def test_empty_capabilities_rejected(self) -> None:
+        from hermes.config_sync.policy_document import SshHostSpec
+
+        with pytest.raises(ValidationError):
+            SshHostSpec(host="db1", identity="agent", capabilities=[])
+
+    def test_more_than_three_capabilities_rejected(self) -> None:
+        from hermes.config_sync.policy_document import SshHostSpec
+
+        with pytest.raises(ValidationError):
+            SshHostSpec(
+                host="db1",
+                identity="agent",
+                capabilities=["exec", "file_read", "file_write", "exec"],
+            )
+
+    def test_unknown_capability_rejected(self) -> None:
+        from hermes.config_sync.policy_document import SshHostSpec
+
+        with pytest.raises(ValidationError):
+            SshHostSpec(host="db1", identity="agent", capabilities=["sudo"])
+
+    def test_host_with_leading_hyphen_rejected(self) -> None:
+        from hermes.config_sync.policy_document import SshHostSpec
+
+        with pytest.raises(ValidationError):
+            SshHostSpec(host="-db1", identity="agent", capabilities=["exec"])
+
+    def test_host_uppercase_rejected(self) -> None:
+        """Enterprise's publisher already lowercases before signing — the
+        wire pattern only accepts lowercase, it never normalises case."""
+        from hermes.config_sync.policy_document import SshHostSpec
+
+        with pytest.raises(ValidationError):
+            SshHostSpec(host="DB1.tailxxxx.ts.net", identity="agent", capabilities=["exec"])
+
+    def test_host_shaped_like_an_ip_parses_at_the_wire_layer(self) -> None:
+        """The wire-contract pattern (mirrors the JSON schema exactly) is
+        FORMAT-only and does not special-case IP literals — an IP-shaped
+        string matches [a-z0-9-] + dots just like a hostname would. The
+        REAL IP-literal rejection is the domain layer's job
+        (hermes.tailnet_ssh.domain.host.TailnetHost.parse), applied one
+        layer up at apply time (REQ-20)."""
+        from hermes.config_sync.policy_document import SshHostSpec
+
+        spec = SshHostSpec(host="192.168.1.1", identity="agent", capabilities=["exec"])
+        assert spec.host == "192.168.1.1"
+
+    def test_identity_with_uppercase_rejected(self) -> None:
+        from hermes.config_sync.policy_document import SshHostSpec
+
+        with pytest.raises(ValidationError):
+            SshHostSpec(host="db1", identity="Agent", capabilities=["exec"])
+
+    def test_identity_starting_with_digit_rejected(self) -> None:
+        from hermes.config_sync.policy_document import SshHostSpec
+
+        with pytest.raises(ValidationError):
+            SshHostSpec(host="db1", identity="1agent", capabilities=["exec"])
+
+    def test_unknown_field_rejected(self) -> None:
+        from hermes.config_sync.policy_document import SshHostSpec
+
+        with pytest.raises(ValidationError):
+            SshHostSpec.model_validate(
+                {"host": "db1", "identity": "agent", "capabilities": ["exec"], "extra": "x"}
+            )
+
+
+class TestSshPolicySpecParsing:
+    def test_hosts_required(self) -> None:
+        from hermes.config_sync.policy_document import SshPolicySpec
+
+        with pytest.raises(ValidationError):
+            SshPolicySpec.model_validate({})
+
+    def test_over_200_hosts_rejected(self) -> None:
+        from hermes.config_sync.policy_document import SshHostSpec, SshPolicySpec
+
+        hosts = [
+            SshHostSpec(host=f"h{i}", identity="agent", capabilities=["exec"])
+            for i in range(201)
+        ]
+        with pytest.raises(ValidationError):
+            SshPolicySpec(hosts=hosts)
+
+    def test_unknown_field_rejected(self) -> None:
+        from hermes.config_sync.policy_document import SshPolicySpec
+
+        with pytest.raises(ValidationError):
+            SshPolicySpec.model_validate({"hosts": [], "extra": "x"})
+
+
+class TestPolicyPayloadSshBackCompat:
+    """A payload without `ssh` (the default None) must parse + sign BYTE-
+    IDENTICALLY to before this field existed (x-byte-identity-rules)."""
+
+    def test_default_is_none(self) -> None:
+        assert PolicyPayload().ssh is None
+
+    def test_key_absent_from_dump_when_none(self) -> None:
+        payload = PolicyPayload()
+        b = signing_bytes(version=1, tenant_id="t", issued_at="2026-06-26T10:00:00Z", payload=payload)
+        parsed_payload = json.loads(b)["payload"]
+        assert "ssh" not in parsed_payload
+
+    def test_signing_bytes_unaffected_by_the_new_field_existing(self) -> None:
+        """The committed TestSigningBytes vectors (built before `ssh`
+        existed) must sign to the exact same bytes now that the field
+        exists on PolicyPayload."""
+        payload = PolicyPayload.model_validate(_minimal_payload_dict())
+        b = signing_bytes(
+            version=1, tenant_id="tenant-abc", issued_at="2026-06-26T10:00:00Z", payload=payload,
+        )
+        parsed_payload = json.loads(b)["payload"]
+        assert "ssh" not in parsed_payload
+
+
+# ---------------------------------------------------------------------------
+# Committed test vector — SshPolicySpec signing bytes (spec 002 US3, D-4)
+# ---------------------------------------------------------------------------
+#
+# This vector pins the exact SshHostSpec/SshPolicySpec wire shape so the
+# Enterprise publisher and the associate verifier cannot drift independently.
+#
+# To regenerate:
+#   PYTHONPATH=src python3 -c "
+#   from hermes.config_sync.policy_document import (
+#       PolicyPayload, SshHostSpec, SshPolicySpec, signing_bytes)
+#   host = SshHostSpec(host='db1.tailxxxx.ts.net', identity='agent',
+#                       capabilities=['file_read', 'exec'])
+#   payload = PolicyPayload(ssh=SshPolicySpec(hosts=[host]))
+#   b = signing_bytes(version=1, tenant_id='test-tenant',
+#                      issued_at='2026-06-26T10:00:00Z', payload=payload)
+#   print(b.decode())
+#   "
+
+
+class TestSshPolicySigningVector:
+    _VECTOR_VERSION = 1
+    _VECTOR_TENANT = "test-tenant"
+    _VECTOR_ISSUED_AT = "2026-06-26T10:00:00Z"
+
+    def _vector_payload(self) -> PolicyPayload:
+        from hermes.config_sync.policy_document import SshHostSpec, SshPolicySpec
+
+        host = SshHostSpec(
+            host="db1.tailxxxx.ts.net", identity="agent", capabilities=["file_read", "exec"]
+        )
+        return PolicyPayload(ssh=SshPolicySpec(hosts=[host]))
+
+    def _vector_bytes(self) -> bytes:
+        return signing_bytes(
+            version=self._VECTOR_VERSION,
+            tenant_id=self._VECTOR_TENANT,
+            issued_at=self._VECTOR_ISSUED_AT,
+            payload=self._vector_payload(),
+        )
+
+    def test_vector_is_deterministic(self) -> None:
+        assert self._vector_bytes() == self._vector_bytes()
+
+    def test_vector_expected_ssh_shape(self) -> None:
+        parsed = json.loads(self._vector_bytes())
+        payload = parsed["payload"]
+
+        assert list(payload["ssh"].keys()) == ["hosts"]
+        assert payload["ssh"] == {
+            "hosts": [
+                {
+                    "host": "db1.tailxxxx.ts.net",
+                    "identity": "agent",
+                    # canonicalised: sorted, deduped (x-byte-identity-rules)
+                    "capabilities": ["exec", "file_read"],
+                }
+            ]
+        }
+
+    def test_vector_without_ssh_matches_pre_feature_bytes(self) -> None:
+        """A sibling payload with the SAME other fields but ssh=None must
+        never carry the key at all — the byte-identity guarantee for orgs
+        without governed SSH."""
+        payload = PolicyPayload()
+        b = signing_bytes(
+            version=self._VECTOR_VERSION,
+            tenant_id=self._VECTOR_TENANT,
+            issued_at=self._VECTOR_ISSUED_AT,
+            payload=payload,
+        )
+        assert "ssh" not in json.loads(b)["payload"]

@@ -30,7 +30,8 @@ CARDINALIY CAPS (P1-3, enforced at Pydantic parse time):
   agents ≤ 200, providers ≤ 50, mcp ≤ 100, skills ≤ 200, consents ≤ 200,
   egress.allow_domains ≤ 500, mcp.env ≤ 100 keys, access_scope.native_tools/
   views/integration_toolkits ≤ 256 each, access_scope.policy_overlay ≤ 256
-  keys, directory.entries ≤ 200 (Fase 3).
+  keys, directory.entries ≤ 200 (Fase 3), ssh.hosts ≤ 200 / host.capabilities
+  ≤ 3 (US3, D-4).
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ from __future__ import annotations
 import json
 from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 
 from hermes.config_sync.ads_policy_contract import AdsPolicySpec
 
@@ -261,6 +262,78 @@ class IntegrationSpec(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# SSH spec (Enterprise US3 — governed tailnet SSH, spec 002 D-4)
+# ---------------------------------------------------------------------------
+
+# Equivalent to contracts/policy-bundle-v2.schema.json#/$defs/SshHostSpec.host
+# `^(?!-)[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})*$` — rewritten without a leading
+# look-ahead because pydantic-core's Rust regex engine does not support it;
+# splitting the first label into "first char [a-z0-9], then up to 62 more
+# [a-z0-9-] chars" forbids exactly the same thing (a leading hyphen) with
+# identical accepted-string semantics. (Enterprise's publisher already
+# lowercases before signing — this pattern only accepts lowercase input, it
+# never normalises case itself.)
+_SSH_HOST_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}(\.[a-z0-9-]{1,63})*$"
+# Mirrors .../$defs/SshHostSpec.identity exactly.
+_SSH_IDENTITY_PATTERN = r"^[a-z_][a-z0-9_-]{0,31}$"
+
+
+class SshHostSpec(BaseModel):
+    """One tailnet host the organization authorizes for governed SSH.
+
+    Wire shape is PINNED to contracts/policy-bundle-v2.schema.json#/$defs/
+    SshHostSpec — MUST match the Enterprise mirror
+    (safent_control.domain.policy_document.SshHostSpec) exactly, field for
+    field, or the Ed25519 signature stops verifying.
+
+    `host` is a NAME, never validated here as tailnet membership — this model
+    is wire-contract parsing only (format + cardinality). Whether `host`
+    actually belongs to THIS instance's tailnet requires the live directory
+    and is resolved one layer up, at apply time, by
+    hermes.tailnet_ssh.application.host_resolution.resolve_host (REQ-20) —
+    never by DNS, never by /etc/hosts. Accepting a syntactically-valid
+    non-tailnet name at parse time is safe: it is rejected before ever being
+    persisted to the allow-list (see PolicyApplier._apply_ssh).
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    host: str = Field(max_length=253, pattern=_SSH_HOST_PATTERN)
+    identity: str = Field(max_length=32, pattern=_SSH_IDENTITY_PATTERN)
+    capabilities: list[Literal["exec", "file_read", "file_write"]] = Field(
+        min_length=1, max_length=3
+    )
+
+    @field_validator("capabilities")
+    @classmethod
+    def _canonical_capabilities(cls, v: list[str]) -> list[str]:
+        """Canonicalise to a sorted set — MUST match the cloud mirror's
+        equivalent so signing_bytes are byte-identical regardless of
+        authoring order (x-byte-identity-rules: "capabilities viaja
+        ordenado y sin duplicados"). A duplicate is a malformed wire shape
+        (the JSON schema declares uniqueItems: true) — rejected outright,
+        never silently coerced, since this is a capability CEILING."""
+        if len(set(v)) != len(v):
+            raise ValueError("capabilities must not contain duplicates")
+        return sorted(v)
+
+
+class SshPolicySpec(BaseModel):
+    """Closed set of tailnet hosts governed for THIS instance (US3, D-4).
+
+    Wire shape is PINNED — mirrors contracts/policy-bundle-v2.schema.json#/
+    $defs/SshPolicySpec. Omitted entirely from PolicyPayload (never an empty
+    `{"hosts": []}`) when the organization has no SSH governed for this
+    instance — see PolicyPayload._serialize_payload and the schema's
+    `ssh_empty` publisher requirement.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    hosts: list[SshHostSpec] = Field(max_length=200)
+
+
+# ---------------------------------------------------------------------------
 # MCP spec
 # ---------------------------------------------------------------------------
 
@@ -424,6 +497,11 @@ class PolicyPayload(BaseModel):
     integrations: list[IntegrationSpec] = Field(default_factory=list, max_length=50)
     mcp: list[McpSpec] = Field(default_factory=list, max_length=100)
     skills: list[SkillSpec] = Field(default_factory=list, max_length=200)
+    # US3 (D-4): governed tailnet SSH. None (default) -> byte-identical to a
+    # pre-US3 bundle (the associate's local SSH allow-list is left untouched,
+    # zero regression). See SshPolicySpec's docstring for the omit-when-empty
+    # publisher rule.
+    ssh: SshPolicySpec | None = None
     egress: EgressSpec = Field(default_factory=EgressSpec)
     consents: list[ConsentSpec] = Field(default_factory=list, max_length=200)
     features: FeaturesSpec = Field(default_factory=FeaturesSpec)
@@ -448,6 +526,8 @@ class PolicyPayload(BaseModel):
             data.pop('llm_instance_id', None)
         if self.ads is None:
             data.pop('ads', None)
+        if self.ssh is None:
+            data.pop('ssh', None)
         return data
 
 
