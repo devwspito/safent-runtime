@@ -155,23 +155,47 @@ class TestManagedBy:
 
         assert store.list_with_metadata()[0].managed_by == "cloud"
 
-    def test_allow_governed_never_overwrites_a_pre_existing_local_grant(
+    def test_allow_governed_shadows_a_pre_existing_local_grant(
         self, tmp_path: Path
     ) -> None:
-        """FR-014: a local grant is never silently replaced by a later cloud
-        `allow_governed()` for the SAME host — the entry (and its origin)
-        is untouched. The store enforces this itself (not just the D-Bus
-        wiring's own conflict check)."""
+        """Security review 2026-09, B2 — FR-014 ("lo heredado manda"): a
+        cloud grant SHADOWS a pre-existing local entry for the same host —
+        the cloud ceiling becomes authoritative, the local approval is
+        preserved as an inert `superseded_local_approved_at` marker rather
+        than destroyed."""
         store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
         store.allow("db1.tailxxxx.ts.net")
         first_approved_at = store.list_with_metadata()[0].approved_at
 
-        store.allow_governed("db1.tailxxxx.ts.net", identity="deploy", capabilities=("exec",))
+        shadowed = store.allow_governed(
+            "db1.tailxxxx.ts.net", identity="deploy", capabilities=("exec",)
+        )
 
+        assert shadowed is True
         entry = store.list_with_metadata()[0]
-        assert entry.managed_by is None
-        assert entry.identity is None
-        assert entry.approved_at == first_approved_at
+        assert entry.managed_by == "cloud"
+        assert entry.identity == "deploy"
+        assert entry.capabilities == ("exec",)
+        assert entry.superseded_local_approved_at == first_approved_at
+
+    def test_allow_governed_reports_no_shadow_for_a_fresh_host(
+        self, tmp_path: Path
+    ) -> None:
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        shadowed = store.allow_governed(
+            "db1.tailxxxx.ts.net", identity="deploy", capabilities=("exec",)
+        )
+        assert shadowed is False
+
+    def test_allow_governed_reports_no_shadow_when_updating_an_existing_cloud_grant(
+        self, tmp_path: Path
+    ) -> None:
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        store.allow_governed("db1.tailxxxx.ts.net", identity="deploy", capabilities=("exec",))
+        shadowed = store.allow_governed(
+            "db1.tailxxxx.ts.net", identity="deploy", capabilities=("file_read",)
+        )
+        assert shadowed is False
 
     def test_allow_governed_is_idempotent_for_an_unchanged_cloud_grant(
         self, tmp_path: Path
@@ -509,3 +533,84 @@ class TestB1ConcurrentReadModifyWriteSerialized:
         # test is that every read the store returns is well-formed JSON,
         # never a torn/interleaved write.
         JsonHostAllowlistStore(path).list_allowed()  # must not raise
+
+
+class TestB2CloudRevokeRestoresShadowedLocal:
+    """Security review 2026-09, B2 — the local approval a cloud grant
+    shadowed was never destroyed; revoking the cloud grant restores it."""
+
+    def test_revoke_restores_the_shadowed_local_entry(self, tmp_path: Path) -> None:
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        store.allow("db1.tailxxxx.ts.net")
+        local_approved_at = store.list_with_metadata()[0].approved_at
+        store.allow_governed("db1.tailxxxx.ts.net", identity="deploy", capabilities=("exec",))
+
+        restored = store.revoke("db1.tailxxxx.ts.net")
+
+        assert restored is True
+        entry = store.list_with_metadata()[0]
+        assert entry.managed_by is None
+        assert entry.identity is None
+        assert entry.approved_at == local_approved_at
+
+    def test_revoke_of_a_fresh_cloud_grant_does_not_restore_anything(
+        self, tmp_path: Path
+    ) -> None:
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        store.allow_governed("db1.tailxxxx.ts.net", identity="deploy", capabilities=("exec",))
+
+        restored = store.revoke("db1.tailxxxx.ts.net")
+
+        assert restored is False
+        assert store.list_with_metadata() == []
+
+    def test_revoke_of_a_plain_local_entry_reports_no_restoration(
+        self, tmp_path: Path
+    ) -> None:
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        store.allow("db1.tailxxxx.ts.net")
+
+        restored = store.revoke("db1.tailxxxx.ts.net")
+
+        assert restored is False
+
+
+class TestB2GovernedFlag:
+    """Security review 2026-09, B2c — an instance becomes permanently
+    `governed` the first time it receives a real cloud grant."""
+
+    def test_never_governed_by_default(self, tmp_path: Path) -> None:
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        assert store.is_governed() is False
+
+    def test_local_allow_alone_never_governs(self, tmp_path: Path) -> None:
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        store.allow("db1.tailxxxx.ts.net")
+        assert store.is_governed() is False
+
+    def test_allow_governed_marks_the_instance_governed(self, tmp_path: Path) -> None:
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        store.allow_governed("db1.tailxxxx.ts.net", identity="deploy", capabilities=("exec",))
+        assert store.is_governed() is True
+
+    def test_governed_stays_true_after_the_only_cloud_grant_is_revoked(
+        self, tmp_path: Path
+    ) -> None:
+        """Once governed, always governed — an org that stops publishing an
+        `ssh` section does not silently reopen local HITL approval for
+        brand-new hosts (default-deny stays the safer posture)."""
+        store = JsonHostAllowlistStore(tmp_path / "allowlist.json")
+        store.allow_governed("db1.tailxxxx.ts.net", identity="deploy", capabilities=("exec",))
+        store.revoke("db1.tailxxxx.ts.net")
+
+        assert store.is_governed() is True
+
+    def test_is_governed_fails_closed_to_true_on_corruption(self, tmp_path: Path) -> None:
+        """Uncertain -> assume governed -> keep local approval CLOSED. The
+        unsafe direction here is "openly approve a brand new local host",
+        so corruption must not default to "not governed"."""
+        path = tmp_path / "allowlist.json"
+        path.write_text("not json", encoding="utf-8")
+        store = JsonHostAllowlistStore(path)
+
+        assert store.is_governed() is True

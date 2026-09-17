@@ -265,6 +265,29 @@ def _client_key(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _require_locally_revocable(path: Path, host: str) -> JsonHostAllowlistStore:
+    """Security review 2026-09 (B2b): a `managed_by="cloud"` entry cannot be
+    deleted from the local owner screen — it is governed by the
+    organization's policy, not by this instance's owner. Revoking it can
+    only happen the same way it was granted: the organization retiring it
+    from the next published bundle (config-sync's `revoke_ssh_host` D-Bus
+    verb)."""
+    store = JsonHostAllowlistStore(path)
+    existing = store.grant_for(host)
+    if existing is not None and existing.managed_by == "cloud":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "cloud_managed",
+                "message": (
+                    "Este equipo lo gobierna tu organización — no se puede "
+                    "quitar desde aquí."
+                ),
+            },
+        )
+    return store
+
+
 # ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
@@ -430,9 +453,11 @@ def create_tailnet_router(
 
     @router.delete("/ssh-hosts/{host}", response_model=SshHostsResponse)
     async def revoke_ssh_host(request: Request, host: str) -> SshHostsResponse:
-        """Only the UI owner may revoke governed-SSH approval; no MFA in Community."""
+        """Only the UI owner may revoke governed-SSH approval; no MFA in
+        Community. See `_require_locally_revocable` for the org-governed
+        409 case (B2b)."""
         require_owner_session(request)
-        store = JsonHostAllowlistStore(effective_ssh_allowlist_path)
+        store = _require_locally_revocable(effective_ssh_allowlist_path, host)
         store.revoke(host)
         logger.info("hermes.tailnet.ssh_host_revoked host=%s", host)
 

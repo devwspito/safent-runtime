@@ -68,7 +68,7 @@ class FakeDbusProxy:
         # allow_ssh_host simulation: raw host -> daemon verdict.
         # Default (host absent from either map): resolves to itself, applied.
         self._ssh_rejections: dict[str, str] = {}  # raw host -> error code
-        self._ssh_conflicts: set[str] = set()  # raw host -> local conflict
+        self._ssh_shadowed_local: set[str] = set()  # raw host -> shadowed a local entry
         self._ssh_canonical: dict[str, str] = {}  # raw host -> canonical form
 
     def fail_verb(self, verb: str) -> None:
@@ -80,8 +80,8 @@ class FakeDbusProxy:
     def reject_ssh_host(self, host: str, *, error: str = "unknown_host") -> None:
         self._ssh_rejections[host] = error
 
-    def conflict_ssh_host(self, host: str) -> None:
-        self._ssh_conflicts.add(host)
+    def shadow_local_ssh_host(self, host: str) -> None:
+        self._ssh_shadowed_local.add(host)
 
     def canonicalize_ssh_host(self, host: str, canonical: str) -> None:
         self._ssh_canonical[host] = canonical
@@ -133,12 +133,12 @@ class FakeDbusProxy:
         if host in self._ssh_rejections:
             return {"ok": False, "error": self._ssh_rejections[host]}
         canonical = self._ssh_canonical.get(host, host)
-        if host in self._ssh_conflicts:
-            return {"ok": True, "host": canonical, "conflict": True}
         if not any(h.get("host") == canonical for h in self._existing_ssh_hosts):
             self._existing_ssh_hosts.append(
                 {"host": canonical, "approved_at": "2026-01-01T00:00:00+00:00", "managed_by": "cloud"}
             )
+        if host in self._ssh_shadowed_local:
+            return {"ok": True, "host": canonical, "shadowed_local": True}
         return {"ok": True, "host": canonical}
 
     async def call_bool(self, member: str, *args: Any) -> bool:
@@ -1705,19 +1705,22 @@ class TestApplySshSectionRejection:
         assert revoke_calls == [("revoke_ssh_host", ("stale.tailxxxx.ts.net",))]
 
 
-class TestApplySshSectionLocalConflict:
-    """FR-014 — a pre-existing LOCAL host is never deleted or overwritten;
-    reported as a conflict, never as applied nor as a transitory failure."""
+class TestApplySshSectionShadowsLocal:
+    """Security review 2026-09, B2 — FR-014 ("lo heredado manda"): a cloud
+    grant SHADOWS a pre-existing LOCAL host. It counts as applied (the
+    ceiling WAS applied) — the shadow is informational, never a rejection
+    nor a transitory failure."""
 
     @pytest.mark.asyncio
-    async def test_local_conflict_is_rejected_not_applied(self) -> None:
+    async def test_shadowing_a_local_host_counts_as_applied(self) -> None:
         proxy = FakeDbusProxy()
-        proxy.conflict_ssh_host("build-box")
+        proxy.shadow_local_ssh_host("build-box")
         payload = _ssh_payload(_host("build-box"))
 
         result = await PolicyApplier(proxy).apply(payload, current_agents=[])
 
-        assert any("build-box" in r and "local_conflict" in r for r in result.rejected)
+        assert result.applied >= 1
+        assert not result.rejected
         assert not result.failed
         assert result.ok
 

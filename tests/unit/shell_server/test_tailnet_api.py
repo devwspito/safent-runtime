@@ -623,3 +623,49 @@ class TestRevokeSshHost:
 
         assert r.status_code == 200
         assert r.json() == {"hosts": []}
+
+    def test_cloud_managed_host_returns_409_not_deleted(
+        self, status_path, control_dir, vault_path, fake_vault, fresh_limiter,
+        ssh_allowlist_path, owner_token,
+    ) -> None:
+        """Security review 2026-09, B2b — a `managed_by="cloud"` entry is
+        governed by the organization's policy; the local owner cannot
+        delete it from this screen."""
+        store = JsonHostAllowlistStore(ssh_allowlist_path)
+        store.allow_governed("db1.tailxxxx.ts.net", identity="deploy", capabilities=("exec",))
+        client = _ssh_client(
+            status_path=status_path, control_dir=control_dir, vault_path=vault_path,
+            fake_vault=fake_vault, fresh_limiter=fresh_limiter,
+            ssh_allowlist_path=ssh_allowlist_path, owner_token=owner_token,
+        )
+
+        r = client.request(
+            "DELETE", "/api/v1/tailnet/ssh-hosts/db1.tailxxxx.ts.net",
+        )
+
+        assert r.status_code == 409
+        assert r.json()["detail"]["code"] == "cloud_managed"
+        assert store.is_allowed("db1.tailxxxx.ts.net") is True
+        assert store.grant_for("db1.tailxxxx.ts.net").managed_by == "cloud"
+
+    def test_local_host_shadowed_by_cloud_also_returns_409(
+        self, status_path, control_dir, vault_path, fake_vault, fresh_limiter,
+        ssh_allowlist_path, owner_token,
+    ) -> None:
+        """The owner cannot bypass the 409 by targeting a host that STARTED
+        local but is now shadowed by a cloud grant — it reads back as
+        managed_by="cloud" like any other governed host."""
+        store = JsonHostAllowlistStore(ssh_allowlist_path)
+        store.allow("db1.tailxxxx.ts.net")
+        store.allow_governed("db1.tailxxxx.ts.net", identity="deploy", capabilities=("exec",))
+        client = _ssh_client(
+            status_path=status_path, control_dir=control_dir, vault_path=vault_path,
+            fake_vault=fake_vault, fresh_limiter=fresh_limiter,
+            ssh_allowlist_path=ssh_allowlist_path, owner_token=owner_token,
+        )
+
+        r = client.request(
+            "DELETE", "/api/v1/tailnet/ssh-hosts/db1.tailxxxx.ts.net",
+        )
+
+        assert r.status_code == 409

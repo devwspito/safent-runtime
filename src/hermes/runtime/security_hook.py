@@ -2006,6 +2006,17 @@ def _resolve_tailnet_ssh_consent(
     has none — the per-host HITL card IS the floor, so an unattended cycle
     can never be the first to reach a brand-new host. An already-approved
     host still flows autonomously (the owner already vetted it).
+
+    GOVERNED instances (security review 2026-09, B2c; US3 criterion 3,
+    "todo equipo no declarado queda denegado"): once this instance has EVER
+    received a real governed-SSH grant from config-sync
+    (`JsonHostAllowlistStore.is_governed()`), the local HITL-card path for
+    an UNDECLARED host (not already on the allow-list, local or cloud) is
+    CLOSED — denied outright, no card, no autonomous-vs-chat distinction.
+    Otherwise the org's declared ceiling would be trivially bypassed by
+    just asking the agent to SSH somewhere new and clicking approve. An
+    instance that has never been governed keeps today's HITL-card flow
+    unchanged.
     """
     from hermes.runtime.conversation_task_registry import (  # noqa: PLC0415
         get_conversation_for_task,
@@ -2034,7 +2045,17 @@ def _resolve_tailnet_ssh_consent(
 
     allowlist = JsonHostAllowlistStore()
     if allowlist.is_allowed(host.value):
-        return None  # host ya aprobado por el dueño — fluye sin tarjeta
+        return None  # host ya aprobado (local o cloud) — fluye sin tarjeta
+
+    if allowlist.is_governed():
+        logger.info(
+            "hermes.security_hook.pre.tailnet_ssh_denied_governed host=%s", host.value
+        )
+        return (
+            f"Este equipo («{host.value}») no está autorizado por tu organización. "
+            "SSH gobernado está activo para esta instancia: solo se permiten los "
+            "equipos que tu organización declara."
+        )
 
     conv_id = get_conversation_for_task(task_id) or ""
     if not conv_id:

@@ -33,9 +33,10 @@ class _FakeDirectory:
 
 
 class _FakeAllowlist:
-    def __init__(self) -> None:
+    def __init__(self, *, governed: bool = False) -> None:
         self.allowed: set[str] = set()
         self.allow_calls: list[str] = []
+        self.governed = governed
 
     def is_allowed(self, host: str) -> bool:
         return host in self.allowed
@@ -43,6 +44,9 @@ class _FakeAllowlist:
     def allow(self, host: str) -> None:
         self.allow_calls.append(host)
         self.allowed.add(host)
+
+    def is_governed(self) -> bool:
+        return self.governed
 
 
 def _status():
@@ -138,6 +142,93 @@ class TestResolveTailnetSshConsentAlreadyAllowed:
 
         assert out is None
         resolver.assert_not_called()
+
+
+class TestResolveTailnetSshConsentGoverned:
+    """Security review 2026-09, B2c — while the instance is GOVERNED, the
+    local HITL card for an UNDECLARED host is closed outright."""
+
+    def test_undeclared_host_is_denied_without_a_card_when_governed(
+        self, monkeypatch
+    ) -> None:
+        from hermes.runtime import security_hook as sh
+
+        allowlist = _FakeAllowlist(governed=True)
+        _patch_infra(monkeypatch, allowlist=allowlist)
+        resolver = MagicMock()
+        monkeypatch.setattr(sh, "_resolve_native_danger_approval", resolver)
+
+        out = sh._resolve_tailnet_ssh_consent(
+            "tailnet_ssh", {"host": "db1", "command": "uptime"}, "task-1",
+            MagicMock(), MagicMock(), None, "tenant",
+        )
+
+        assert out is not None
+        assert "no está autorizado" in out.lower()
+        resolver.assert_not_called()
+        assert allowlist.allow_calls == []
+
+    def test_denial_happens_even_with_an_active_conversation(self, monkeypatch) -> None:
+        """Governed denial is NOT the "no conversation to show a card"
+        fallback — it applies even when a card COULD have been shown."""
+        from hermes.runtime import security_hook as sh
+
+        allowlist = _FakeAllowlist(governed=True)
+        _patch_infra(monkeypatch, allowlist=allowlist)
+        _patch_conversation(monkeypatch, "conv-1")
+        resolver = MagicMock()
+        monkeypatch.setattr(sh, "_resolve_native_danger_approval", resolver)
+
+        out = sh._resolve_tailnet_ssh_consent(
+            "tailnet_ssh", {"host": "db1", "command": "uptime"}, "task-1",
+            MagicMock(), MagicMock(), None, "tenant",
+        )
+
+        assert out is not None
+        resolver.assert_not_called()
+
+    def test_already_allowed_host_still_flows_when_governed(self, monkeypatch) -> None:
+        """A host already on the allow-list (local or cloud) is unaffected
+        by the governed gate — that gate only closes UNDECLARED hosts."""
+        from hermes.runtime import security_hook as sh
+
+        allowlist = _FakeAllowlist(governed=True)
+        allowlist.allow("db1.tailxxxx.ts.net")
+        _patch_infra(monkeypatch, allowlist=allowlist)
+        resolver = MagicMock()
+        monkeypatch.setattr(sh, "_resolve_native_danger_approval", resolver)
+
+        out = sh._resolve_tailnet_ssh_consent(
+            "tailnet_ssh", {"host": "db1", "command": "uptime"}, "task-1",
+            MagicMock(), MagicMock(), None, "tenant",
+        )
+
+        assert out is None
+        resolver.assert_not_called()
+
+    def test_ungoverned_instance_keeps_todays_hitl_flow(self, monkeypatch) -> None:
+        """governed=False (default, never-governed instance) — the existing
+        card-based approval flow is completely unaffected."""
+        from hermes.runtime import security_hook as sh
+
+        allowlist = _patch_infra(monkeypatch, allowlist=_FakeAllowlist(governed=False))
+        _patch_conversation(monkeypatch, "conv-1")
+        monkeypatch.setattr(sh, "_compute_danger_route", lambda *_a, **_k: (None, frozenset()))
+        captured = {}
+
+        def _fake_resolver(*_a, **kw):
+            captured.update(kw)
+
+        monkeypatch.setattr(sh, "_resolve_native_danger_approval", _fake_resolver)
+
+        out = sh._resolve_tailnet_ssh_consent(
+            "tailnet_ssh", {"host": "db1", "command": "uptime"}, "task-1",
+            MagicMock(), MagicMock(), None, "tenant",
+        )
+
+        assert out is None
+        assert allowlist.allow_calls == ["db1.tailxxxx.ts.net"]
+        assert captured  # the danger-approval resolver WAS reached
 
 
 class TestResolveTailnetSshConsentFirstUse:

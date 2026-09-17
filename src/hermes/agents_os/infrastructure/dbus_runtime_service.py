@@ -1308,11 +1308,16 @@ class DbusRuntimeServiceWiring:
     #   Un host que no resuelve es un rechazo PERMANENTE:
     #   {"ok": False, "error": "unknown_host"|"invalid_host"} — nunca se
     #   persiste, nunca se reintenta como si fuera transitorio.
-    #   FR-014 — un equipo local previo (managed_by != "cloud") NUNCA se
-    #   borra ni se sobrescribe: se informa {"ok": True, "conflict": True}
-    #   sin tocar el store.
+    #   FR-014 (security review 2026-09, B2 — "lo heredado manda") — un
+    #   grant cloud SUSTITUYE a un equipo local previo para el mismo host:
+    #   el techo de la nube pasa a aplicarse de inmediato. Se informa
+    #   {"ok": True, "host": ..., "shadowed_local": True} — informativo, el
+    #   grant SÍ se aplicó (JsonHostAllowlistStore.allow_governed conserva
+    #   la aprobación local como marca inerte, nunca la borra).
     # revoke_ssh_host: SOLO revoca equipos managed_by "cloud" — un grant
-    #   local del dueño nunca lo toca este verbo dirigido por la nube.
+    #   local del dueño nunca lo toca este verbo dirigido por la nube. Si el
+    #   grant revocado había sustituido una aprobación local, esa aprobación
+    #   se restaura (JsonHostAllowlistStore.revoke).
     # ------------------------------------------------------------------
 
     _SSH_CLOUD_MANAGED = "cloud"
@@ -1331,7 +1336,7 @@ class DbusRuntimeServiceWiring:
     def allow_ssh_host(self, *, draft_json: str, sender_uid: int) -> dict:
         """Concede SSH gobernado a un equipo, con techo de capacidades e
         identidad forzada (US3, D-4). draft: {host, identity, capabilities}.
-        Devuelve JSON {ok, host?, conflict?, error?}.
+        Devuelve JSON {ok, host?, shadowed_local?, error?}.
 
         Reaplicar un draft con capabilities más estrechas o una identity
         distinta ACTUALIZA el techo guardado (allow_governed es idempotente
@@ -1374,15 +1379,15 @@ class DbusRuntimeServiceWiring:
 
         canonical = resolved.value
         store = JsonHostAllowlistStore()
-        existing = store.grant_for(canonical)
-        if existing is not None and existing.managed_by != self._SSH_CLOUD_MANAGED:
+        shadowed_local = store.allow_governed(
+            canonical, identity=identity, capabilities=capabilities
+        )
+        if shadowed_local:
             logger.info(
-                "hermes.dbus.ssh_host_local_conflict",
+                "hermes.dbus.ssh_host_shadowed_local",
                 extra={"host": canonical, "by_uid": sender_uid},
             )
-            return {"ok": True, "host": canonical, "conflict": True}
-
-        store.allow_governed(canonical, identity=identity, capabilities=capabilities)
+            return {"ok": True, "host": canonical, "shadowed_local": True}
         logger.info(
             "hermes.dbus.ssh_host_allowed",
             extra={
@@ -1407,12 +1412,16 @@ class DbusRuntimeServiceWiring:
         if existing is None or existing.managed_by != self._SSH_CLOUD_MANAGED:
             return {"ok": True, "revoked": False}
 
-        store.revoke(normalized)
+        restored_local = store.revoke(normalized)
         logger.info(
             "hermes.dbus.ssh_host_revoked",
-            extra={"host": normalized, "by_uid": sender_uid},
+            extra={
+                "host": normalized,
+                "by_uid": sender_uid,
+                "restored_local": restored_local,
+            },
         )
-        return {"ok": True, "revoked": True}
+        return {"ok": True, "revoked": True, "restored_local": restored_local}
 
     # ------------------------------------------------------------------
     # GATE 0 / M2 — Conversaciones (chat) OS-nativas por D-Bus.

@@ -27,10 +27,13 @@ P0-5 — governed SSH (US3, D-4):
   DNS, never /etc/hosts. A host that does not resolve is a PERMANENT
   rejection (never `applied`, never retried as if it might someday resolve
   on its own): recorded in `result.rejected`.
-  FR-014: a pre-existing LOCAL (non-cloud) grant for the SAME host is NEVER
-  deleted or overwritten — the daemon reports `conflict: True` and the
-  applier records it in `result.rejected`, never in `result.failed` (an
-  administrative conflict is not something retrying fixes).
+  FR-014 (security review 2026-09, B2 — "lo heredado manda"): a cloud grant
+  SHADOWS a pre-existing LOCAL grant for the SAME host — the cloud ceiling
+  becomes authoritative immediately, the local approval is preserved as an
+  inert marker (never destroyed) by JsonHostAllowlistStore. The daemon
+  reports `shadowed_local: True` when this happens; the applier still
+  counts it in `result.applied` (the grant WAS applied) — this is
+  informational, not a rejection.
   Stale cloud-managed hosts (granted by a previous bundle, absent from this
   one) are revoked — but ONLY when every host in THIS bundle applied without
   a TRANSITORY failure (same upserts-before-deletes safety net as P1-4,
@@ -518,7 +521,7 @@ class PolicyApplier:
 
         Returns the CANONICAL host string on success (so the caller can
         build the "wanted this round" set for stale-revoke reconciliation),
-        or None on any non-applied outcome (rejected, conflicted, or
+        or None on any non-applied outcome (permanently rejected, or
         transitorily failed).
         """
         draft = {"host": spec.host, "identity": spec.identity, "capabilities": spec.capabilities}
@@ -536,13 +539,14 @@ class PolicyApplier:
                 result.failed.append(f"ssh:{spec.host[:64]}")
             return None
 
-        if resp.get("conflict"):
+        if resp.get("shadowed_local"):
+            # FR-014 (B2): the cloud grant WAS applied — it shadowed a
+            # pre-existing local approval, which is informational, not a
+            # rejection.
             logger.info(
-                "hermes.config_sync.applier.ssh_host_local_conflict",
+                "hermes.config_sync.applier.ssh_host_shadowed_local",
                 extra={"host": spec.host[:64]},
             )
-            result.rejected.append(f"ssh:{spec.host[:64]}:local_conflict")
-            return None
 
         result.applied += 1
         canonical = resp.get("host")

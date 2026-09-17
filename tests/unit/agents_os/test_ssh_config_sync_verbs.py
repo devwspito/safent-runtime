@@ -214,11 +214,13 @@ class TestAllowSshHostResolution:
         assert resp == {"ok": False, "error": "invalid_draft"}
 
 
-class TestAllowSshHostLocalConflict:
-    """FR-014 — a pre-existing LOCAL (non-cloud) grant is never deleted or
-    overwritten; it is reported as a conflict instead."""
+class TestAllowSshHostShadowsLocal:
+    """Security review 2026-09, B2 — FR-014 ("lo heredado manda"): a cloud
+    grant SHADOWS a pre-existing LOCAL (non-cloud) entry — the cloud
+    ceiling applies immediately; the local approval is preserved as an
+    inert marker, never destroyed."""
 
-    def test_pre_existing_local_host_is_not_overwritten(
+    def test_pre_existing_local_host_is_shadowed_by_the_cloud_grant(
         self, ssh_paths: tuple[Path, Path]
     ) -> None:
         allow_path, status_path = ssh_paths
@@ -228,27 +230,47 @@ class TestAllowSshHostLocalConflict:
 
         resp = wiring.allow_ssh_host(draft_json=_draft("build-box"), sender_uid=_OPERATOR_UID)
 
-        assert resp == {"ok": True, "host": "build-box.tailxxxx.ts.net", "conflict": True}
+        assert resp == {"ok": True, "host": "build-box.tailxxxx.ts.net", "shadowed_local": True}
         entries = wiring.list_ssh_hosts()
         assert entries == [
             {
                 "host": "build-box.tailxxxx.ts.net",
                 "approved_at": entries[0]["approved_at"],
-                "managed_by": None,
+                "managed_by": "cloud",
             }
         ]
 
-    def test_conflict_does_not_change_approved_at(self, ssh_paths: tuple[Path, Path]) -> None:
+    def test_shadowing_preserves_the_local_approval_as_an_inert_marker(
+        self, ssh_paths: tuple[Path, Path]
+    ) -> None:
         allow_path, status_path = ssh_paths
         _write_status(status_path)
         JsonHostAllowlistStore(allow_path).allow("build-box.tailxxxx.ts.net")
-        original = JsonHostAllowlistStore(allow_path).list_with_metadata()[0].approved_at
+        local_approved_at = (
+            JsonHostAllowlistStore(allow_path).list_with_metadata()[0].approved_at
+        )
         wiring = _make_wiring()
 
         wiring.allow_ssh_host(draft_json=_draft("build-box"), sender_uid=_OPERATOR_UID)
 
-        after = JsonHostAllowlistStore(allow_path).list_with_metadata()[0].approved_at
-        assert after == original
+        entry = JsonHostAllowlistStore(allow_path).list_with_metadata()[0]
+        assert entry.superseded_local_approved_at == local_approved_at
+
+    def test_shadowing_enforces_the_cloud_ceiling(self, ssh_paths: tuple[Path, Path]) -> None:
+        allow_path, status_path = ssh_paths
+        _write_status(status_path)
+        JsonHostAllowlistStore(allow_path).allow("build-box.tailxxxx.ts.net")
+        wiring = _make_wiring()
+
+        wiring.allow_ssh_host(
+            draft_json=_draft("build-box", capabilities=["file_read"]),
+            sender_uid=_OPERATOR_UID,
+        )
+
+        grant = JsonHostAllowlistStore(allow_path).grant_for("build-box.tailxxxx.ts.net")
+        assert grant is not None
+        assert grant.managed_by == "cloud"
+        assert grant.capabilities == frozenset({"file_read"})
 
 
 class TestAllowSshHostIdempotent:
@@ -307,19 +329,6 @@ class TestAllowSshHostNarrowing:
         assert grant is not None
         assert grant.identity == "auditor"
 
-    def test_narrowing_never_touches_a_local_conflict(self, ssh_paths: tuple[Path, Path]) -> None:
-        allow_path, status_path = ssh_paths
-        _write_status(status_path)
-        JsonHostAllowlistStore(allow_path).allow("build-box.tailxxxx.ts.net")
-        wiring = _make_wiring()
-
-        wiring.allow_ssh_host(draft_json=_draft("build-box"), sender_uid=_OPERATOR_UID)
-
-        grant = JsonHostAllowlistStore(allow_path).grant_for("build-box.tailxxxx.ts.net")
-        assert grant is not None
-        assert grant.managed_by is None
-        assert grant.identity is None
-
 
 class TestAllowSshHostInvalidGrantShape:
     def test_missing_identity_is_rejected(self, ssh_paths: tuple[Path, Path]) -> None:
@@ -362,8 +371,33 @@ class TestRevokeSshHost:
 
         resp = wiring.revoke_ssh_host(host="db1.tailxxxx.ts.net", sender_uid=_OPERATOR_UID)
 
-        assert resp == {"ok": True, "revoked": True}
+        assert resp == {"ok": True, "revoked": True, "restored_local": False}
         assert wiring.list_ssh_hosts() == []
+
+    def test_revoking_a_cloud_grant_that_shadowed_a_local_one_restores_it(
+        self, ssh_paths: tuple[Path, Path]
+    ) -> None:
+        """Security review 2026-09, B2 — the local approval was dormant,
+        not deleted; revoking the cloud grant restores it."""
+        allow_path, status_path = ssh_paths
+        _write_status(status_path)
+        JsonHostAllowlistStore(allow_path).allow("build-box.tailxxxx.ts.net")
+        wiring = _make_wiring()
+        wiring.allow_ssh_host(draft_json=_draft("build-box"), sender_uid=_OPERATOR_UID)
+
+        resp = wiring.revoke_ssh_host(
+            host="build-box.tailxxxx.ts.net", sender_uid=_OPERATOR_UID
+        )
+
+        assert resp == {"ok": True, "revoked": True, "restored_local": True}
+        entries = wiring.list_ssh_hosts()
+        assert entries == [
+            {
+                "host": "build-box.tailxxxx.ts.net",
+                "approved_at": entries[0]["approved_at"],
+                "managed_by": None,
+            }
+        ]
 
     def test_never_revokes_a_local_grant(self, ssh_paths: tuple[Path, Path]) -> None:
         """Removing a grant from the published bundle must revoke only hosts
